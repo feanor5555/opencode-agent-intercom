@@ -58,8 +58,16 @@ export function createPermissionGuard(client) {
 
 // `permission.task` is either a bare decision string or a per-agent map with an
 // optional "*" wildcard. Resolves the effective decision for one target agent.
+//
+// We deliberately ignore the bare-string form: opencode interprets
+// `permission.task = "deny"` as "this agent cannot use the built-in `task`
+// tool" (it gets stripped from the LLM schema by Permission.disabled). Our
+// `spawn` is a separate, non-blocking tool — denying it via the same key would
+// make the agents.js orchestrator config unable to spawn anything, since we
+// already set `permission.task = "deny"` to hide opencode's blocking task tool
+// from the orchestrator. Only the per-agent object form is the spawn-allowlist
+// we honor.
 function resolveTaskDecision(taskPerm, targetAgent) {
-  if (typeof taskPerm === "string") return taskPerm
   if (taskPerm && typeof taskPerm === "object") return taskPerm[targetAgent] ?? taskPerm["*"]
   return undefined
 }

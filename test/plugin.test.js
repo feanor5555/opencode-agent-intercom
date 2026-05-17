@@ -324,7 +324,7 @@ test("transform hook injects subagent working rules into a subagent session", as
   const out = { system: ["base prompt"] }
   await hooks["experimental.chat.system.transform"]({ sessionID: created[0] }, out)
   assert.match(out.system.join(""), /working rules for this subagent/i)
-  assert.match(out.system.join(""), /READ it first/)
+  assert.match(out.system.join(""), /[Rr]ead.*before editing/)
 })
 
 test("spawn enforces the concurrent-subagent cap and a finished subagent frees a slot", async () => {

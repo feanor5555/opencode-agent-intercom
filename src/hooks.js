@@ -12,7 +12,7 @@ import {
 } from "./registry.js"
 import { fetchSnapshot, postNotice, showToast, deleteSession, forgetSessionDirectory, getSessionDirectory } from "./client.js"
 import { getSettings } from "./settings.js"
-import { markDone, markBlocked, todoFilePath } from "./todofile.js"
+import { removeTask, todoFilePath } from "./todofile.js"
 import { projectMdBlock } from "./project.js"
 import { existsSync } from "node:fs"
 import { log, errMsg } from "./log.js"
@@ -35,13 +35,16 @@ const PRIMARY_TOOLS = new Set([
   "list",
 ])
 
-// Status-mutating TODO.md tools. Single-writer: only the planner agent (or
-// the wake-hook on its behalf) flips checkboxes. Other subagents may READ
-// TODO.md via `todos_open` but cannot mutate it. Keeping the writer in one
-// agent prevents a confused coder/debugger/reviewer from ticking the wrong
-// task.
-const TODO_WRITE_TOOLS = new Set(["todo_done", "todo_block"])
-const TODO_WRITE_AGENTS = new Set(["planner"])
+// TODO.md is the domain of the six agents that produce concrete deliverables:
+// planner (plans), coder (code), debugger (diagnoses), reviewer (reviews),
+// documenter (docs), designer (images). Each one can read AND write TODO.md
+// — list, add new tasks, edit existing ones, remove completed ones.
+// The other two subagents (researcher, gitter) get no TODO tools at all: they
+// hand off whatever they find to the others, who manage the list.
+const TODO_TOOLS = new Set(["todos_open", "todo_done", "todo_add", "todo_edit"])
+const TODO_AGENTS = new Set([
+  "planner", "coder", "debugger", "reviewer", "documenter", "designer",
+])
 
 // Subagents whose tool gating disables `outline` — they neither read source
 // code nor have the outline tool to call. Skip the outline-discipline block
@@ -453,8 +456,8 @@ async function onSessionIdle({ sessionID }, client) {
   const directory = entry.directory
   try {
     const snapshot = await fetchSnapshot(client, sessionID)
-    // Auto-tick TODO.md based on the subagent's `DONE: T<n>` / `BLOCKED: T<n>`
-    // marker, if it's present and matches the spawn-assigned task id. Done BEFORE
+    // Auto-tick TODO.md based on the subagent's `DONE: T<n>` marker, if it's
+    // present and matches the spawn-assigned task id. Done BEFORE
     // removeEntry/postNotice so the completion notice can report the outcome.
     const taskOutcome = autoMarkTask(directory, taskId, snapshot.result)
     // Drop the entry BEFORE rendering the slot notice so the freed slot is
@@ -489,35 +492,30 @@ async function onSessionIdle({ sessionID }, client) {
 }
 
 // Marker the subagent is taught to put on the FIRST non-empty line of its
-// final reply. Capturing groups: 1=verb (DONE/BLOCKED), 2=id (T5/R2), 3=reason
-// (optional, only meaningful for BLOCKED). Tolerant about the separator:
-// `BLOCKED: T5 — needs key`, `BLOCKED: T5 - needs key`, plain `BLOCKED: T5`.
-const MARKER_RE = /^\s*(DONE|BLOCKED):\s*([TR]\d+)\s*(?:[—\-:]\s*(.*))?$/i
+// final reply. `DONE: T<n>` — the wake-hook removes the matching task from
+// TODO.md. No blocked state; if the work cannot finish, the subagent just
+// reports plainly and TODO.md stays unchanged.
+const MARKER_RE = /^\s*DONE:\s*(T\d+)\s*$/i
 
-// Parses the marker out of the subagent's final reply and applies it to
-// TODO.md if it matches the spawn-assigned task id. Returns one of:
-//   { kind: "no-task" }     — subagent wasn't spawned with a task id
-//   { kind: "no-marker" }   — task id given but reply has no DONE/BLOCKED line
-//   { kind: "mismatch" }    — marker present but for a different id (ignored)
-//   { kind: "no-todo" }     — TODO.md doesn't exist (greenfield)
-//   { kind: "done"|"blocked", id, reason?, alreadyDone? } — successfully applied
+// Parses the marker out of the subagent's final reply and removes the task
+// from TODO.md if it matches the spawn-assigned task id. Returns one of:
+//   { kind: "no-task" }   — subagent wasn't spawned with a task id
+//   { kind: "no-marker" } — task id given but reply has no DONE line
+//   { kind: "mismatch" }  — marker present but for a different id (ignored)
+//   { kind: "no-todo" }   — TODO.md doesn't exist (greenfield)
+//   { kind: "done", id }  — successfully removed
 //   { kind: "error", message } — TODO.md operation threw (id not found etc.)
 function autoMarkTask(directory, taskId, finalReply) {
   if (!taskId) return { kind: "no-task" }
   const firstLine = firstNonEmptyLine(finalReply)
   const m = firstLine ? MARKER_RE.exec(firstLine) : null
   if (!m) return { kind: "no-marker" }
-  const [, verb, markerId, rest] = m
+  const markerId = m[1]
   if (markerId !== taskId) return { kind: "mismatch", expected: taskId, got: markerId }
   if (!directory || !existsSync(todoFilePath(directory))) return { kind: "no-todo" }
   try {
-    if (verb.toUpperCase() === "BLOCKED") {
-      const reason = (rest || "no reason given").trim()
-      const res = markBlocked(directory, taskId, reason)
-      return { kind: "blocked", id: taskId, reason, alreadyBlocked: !res.changed }
-    }
-    const res = markDone(directory, taskId)
-    return { kind: "done", id: taskId, alreadyDone: res.alreadyDone }
+    removeTask(directory, taskId)
+    return { kind: "done", id: taskId }
   } catch (err) {
     return { kind: "error", message: errMsg(err) }
   }
@@ -535,26 +533,22 @@ function taskOutcomeLine(outcome) {
   if (!outcome || outcome.kind === "no-task") return ""
   switch (outcome.kind) {
     case "done":
-      return outcome.alreadyDone
-        ? `\n📋 TODO.md: ${outcome.id} was already [x] — no change.`
-        : `\n📋 TODO.md: ${outcome.id} marked done.`
-    case "blocked":
-      return `\n📋 TODO.md: ${outcome.id} marked blocked (${outcome.reason}).`
+      return `\n📋 TODO.md: ${outcome.id} removed.`
     case "no-marker":
       return (
         "\n⚠️ TODO.md: this subagent had a task id but its reply did NOT start with " +
-        "`DONE: <id>` or `BLOCKED: <id>`. The task was NOT auto-ticked. Verify the work " +
-        "and call `todo_done(id)` or `todo_block(id, reason)` yourself if appropriate."
+        "`DONE: <id>`. The task was NOT auto-removed. Verify the work and call " +
+        "`todo_done(id)` yourself if appropriate."
       )
     case "mismatch":
       return (
         `\n⚠️ TODO.md: subagent reported \`${outcome.got}\` but was spawned for \`${outcome.expected}\`. ` +
-        `Marker IGNORED (possible hallucination). Verify and tick manually if needed.`
+        `Marker IGNORED (possible hallucination). Verify and remove manually if needed.`
       )
     case "no-todo":
       return "\n⚠️ TODO.md not present — marker ignored."
     case "error":
-      return `\n⚠️ TODO.md: auto-tick failed: ${outcome.message}`
+      return `\n⚠️ TODO.md: auto-remove failed: ${outcome.message}`
     default:
       return ""
   }
@@ -637,17 +631,17 @@ export function createGuardToolExecute(client) {
     // text and return control. entry.ctxTokens is kept fresh by the transform
     // hook, which runs before each LLM call.
     if (entry) {
-      if (TODO_WRITE_TOOLS.has(input.tool) && !TODO_WRITE_AGENTS.has(entry.agent)) {
-        log("denied todo-write tool from non-planner subagent", {
+      if (TODO_TOOLS.has(input.tool) && !TODO_AGENTS.has(entry.agent)) {
+        log("denied todo tool from non-todo subagent", {
           sessionID,
           agent: entry.agent,
           tool: input.tool,
         })
         throw new Error(
-          `agent-intercom: \`${input.tool}\` is planner-only. Other subagents may READ TODO.md ` +
-            "via `todos_open` but only the planner (or the wake-hook on its behalf) flips " +
-            "checkboxes. End your reply with `DONE: T<n>` or `BLOCKED: T<n> — <reason>` on the " +
-            "FIRST line of your final message; the wake-hook will tick the task automatically.",
+          `agent-intercom: \`${input.tool}\` is restricted to planner / coder / debugger / ` +
+            "reviewer / documenter / designer. The researcher and gitter agents do not touch " +
+            "TODO.md. End your reply with `DONE: T<n>` on the FIRST line of your final message " +
+            "if your spawn was task-tracked and you finished the work.",
         )
       }
       const maxContext = getSettings().maxContext
@@ -711,28 +705,6 @@ export function createGuardToolExecute(client) {
       log("denied back-to-back list from primary", { sessionID })
       throw new Error(
         "agent-intercom: don't call `list` twice in a row. End your turn — you will be woken.",
-      )
-    }
-    // Post-spawn status-poll guard: while a subagent is in flight, reading
-    // TODO.md (todos_open) or flipping it (todo_done / todo_block) is racy —
-    // the subagent has not produced anything yet, and a hard-error on missing
-    // TODO.md sends small LLMs into a verify-loop they cannot escape. The wake
-    // notice will deliver the new state. Spawn, abort, glob, grep stay
-    // allowed: parallel spawns and exploratory reads are still legitimate.
-    // Gated on `countActiveSubagents` so post-wake checks (subagent already
-    // finished and gone from the registry) work normally.
-    if (
-      (input.tool === "todos_open" ||
-        input.tool === "todo_done" ||
-        input.tool === "todo_block") &&
-      countActiveSubagents(sessionID) > 0
-    ) {
-      log("denied todos_* while subagents are active", { sessionID, tool: input.tool })
-      throw new Error(
-        "agent-intercom: a subagent is still running — do NOT call `" +
-          input.tool +
-          "` while it works. The subagent has not produced anything yet; the wake-hook will surface " +
-          "the updated state in its completion notice. End your turn now.",
       )
     }
     lastPrimaryTool.set(sessionID, input.tool)

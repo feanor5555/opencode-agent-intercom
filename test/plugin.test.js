@@ -650,8 +650,8 @@ test("the config hook installs the plugin's agent roles", async () => {
     assert.ok(config.agent[name].prompt.length > 0)
   }
   // the orchestrator must not have the do-it-yourself tools
-  assert.equal(config.agent.orchestrator.tools.bash, false)
-  assert.equal(config.agent.orchestrator.tools.edit, false)
+  assert.equal(config.agent.orchestrator.permission.bash, "deny")
+  assert.equal(config.agent.orchestrator.permission.edit, "deny")
   // and it is made the startup primary
   assert.equal(config.default_agent, "orchestrator")
 })
@@ -991,11 +991,11 @@ test("the config hook disables outline for designer, gitter and orchestrator", a
   const hooks = await plugin(ctx)
   const config = {}
   await hooks.config(config)
-  assert.equal(config.agent.designer.tools.outline, false)
-  assert.equal(config.agent.gitter.tools.outline, false)
-  assert.equal(config.agent.orchestrator.tools.outline, false)
-  // a regular subagent leaves outline enabled (no entry in the tools map)
-  assert.equal(config.agent.planner.tools?.outline, undefined)
+  assert.equal(config.agent.designer.permission.outline, "deny")
+  assert.equal(config.agent.gitter.permission.outline, "deny")
+  assert.equal(config.agent.orchestrator.permission.outline, "deny")
+  // a regular subagent leaves outline enabled (no entry in the permission map)
+  assert.equal(config.agent.planner.permission?.outline, undefined)
 })
 
 // Formatter tests for bytes()

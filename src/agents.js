@@ -59,6 +59,8 @@ Before writing a concept that depends on library or framework choices, search cu
 
 Plan features as thin vertical slices — each slice runs and is testable on its own, cutting through every layer (UI, logic, persistence). Several small slices beat one wide half-finished layer.
 
+Document format: decisions, not implementation. Each change is a heading plus 1–3 sentences naming the decision, the rationale, and the affected files as \`path:line\`. Inline code only when the signature IS the decision (a new endpoint contract, a public type shape) — max 5 lines per snippet, max 30 lines combined per document. Method bodies, constructor wiring, full class definitions belong to \`coder\` and to the source files, not to your document. If a snippet would exceed 5 lines, the slice is too coarse: shrink the scope or hand it back to the orchestrator.
+
 For brownfield exploration follow the reading discipline injected below. Start with glob for the directory layout. Use grep to locate concepts, then read a small window around the hit. For an architecture doc, outlines plus a few targeted windows from ~10 files is enough. Stay under half your context budget on reading.
 
 When the deliverable is ARCHITECTURE.md, the document explains decisions and consequences — an inventory is the starting point, not the whole document. Required sections:
@@ -313,7 +315,7 @@ export const AGENTS = {
       "Main agent. Orchestrates only, performs no file or shell operations itself. Delegates to subagents.",
     mode: "primary",
     temperature: 0.3,
-    tools: { read: false, edit: false, write: false, bash: false, webfetch: false, websearch: false, web_search: false, outline: false, task: false },
+    permission: { read: "deny", edit: "deny", bash: "deny", webfetch: "deny", websearch: "deny", web_search: "deny", outline: "deny", task: "deny" },
     prompt: ORCHESTRATOR_PROMPT,
   },
   planner: {
@@ -321,7 +323,7 @@ export const AGENTS = {
       "Writes concept/design documents. Plans but does not implement. Researches current versions before every concept.",
     mode: "subagent",
     temperature: 0.3,
-    tools: { bash: false },
+    permission: { bash: "deny" },
     prompt: PLANNER_PROMPT,
   },
   coder: {
@@ -336,7 +338,7 @@ export const AGENTS = {
       "Diagnoses build/test/runtime errors. Finds the root cause but does not fix it itself.",
     mode: "subagent",
     temperature: 0.2,
-    tools: { edit: false, write: false },
+    permission: { edit: "deny" },
     prompt: DEBUGGER_PROMPT,
   },
   reviewer: {
@@ -344,7 +346,7 @@ export const AGENTS = {
       "Critical developer. Reviews code against best practices, clean code, performance. Writes a review document in reviews/, changes no source code.",
     mode: "subagent",
     temperature: 0.2,
-    tools: { bash: false },
+    permission: { bash: "deny" },
     prompt: REVIEWER_PROMPT,
   },
   documenter: {
@@ -352,7 +354,7 @@ export const AGENTS = {
       "Writes user/API documentation (README, usage, changelog). Reads the actual code, invents nothing.",
     mode: "subagent",
     temperature: 0.3,
-    tools: { bash: false },
+    permission: { bash: "deny" },
     prompt: DOCUMENTER_PROMPT,
   },
   researcher: {
@@ -360,7 +362,7 @@ export const AGENTS = {
       "Web research. Searches via the custom `web_search` tool (Exa AI backend, wired by this plugin), never curl/wget. Never recalls URLs from memory.",
     mode: "subagent",
     temperature: 0.3,
-    tools: { edit: false, write: false, bash: false },
+    permission: { edit: "deny", bash: "deny" },
     prompt: RESEARCHER_PROMPT,
   },
   designer: {
@@ -368,7 +370,7 @@ export const AGENTS = {
       "Generates images (UI mockups, screen designs, icons, illustrations, hero graphics) from a written brief. Saves files to disk; does not write source code. Can research visual references on the web.",
     mode: "subagent",
     temperature: 0.4,
-    tools: { websearch: false, outline: false },
+    permission: { websearch: "deny", outline: "deny" },
     prompt: DESIGNER_PROMPT,
   },
   gitter: {
@@ -376,7 +378,7 @@ export const AGENTS = {
       "Handles repository operations (commits, branches, rebases, tags, PR descriptions) matching the project's existing git style. Does not edit source code.",
     mode: "subagent",
     temperature: 0.2,
-    tools: { edit: false, write: false, webfetch: false, websearch: false, web_search: false, outline: false },
+    permission: { edit: "deny", webfetch: "deny", websearch: "deny", web_search: "deny", outline: "deny" },
     prompt: GITTER_PROMPT,
   },
 }
@@ -392,10 +394,11 @@ export function installAgents(config) {
   if (!config.agent || typeof config.agent !== "object") config.agent = {}
   for (const [name, def] of Object.entries(AGENTS)) {
     if (!config.agent[name]) {
-      // Shallow-clone def AND its tools sub-object — without the nested clone
-      // every session-instance of the plugin would share the same tools map
-      // and a future per-session tweak would leak across sessions.
-      config.agent[name] = { ...def, tools: def.tools ? { ...def.tools } : undefined }
+      // Shallow-clone def AND its permission sub-object — without the nested
+      // clone every session-instance of the plugin would share the same
+      // permission map and a future per-session tweak would leak across
+      // sessions.
+      config.agent[name] = { ...def, permission: def.permission ? { ...def.permission } : undefined }
     }
   }
   if (!config.default_agent) config.default_agent = "orchestrator"

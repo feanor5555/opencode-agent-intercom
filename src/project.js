@@ -5,7 +5,7 @@
 //
 // Disable with OPENCODE_AGENT_INTERCOM_PROJECT_CONTEXT="0".
 
-import { readdirSync, readFileSync, existsSync } from "node:fs"
+import { readdirSync, readFileSync, existsSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { log, errMsg } from "./log.js"
 
@@ -37,86 +37,92 @@ export function projectContext(directory) {
 // Test-only: clears the cache so a test can point at a fresh fixture directory.
 export function resetProjectContext() {
   cache.clear()
-  specCache.clear()
+  projectMdCache.clear()
 }
 
-// A compact PROJECT.md-driven spec block intended for the SYSTEM PROMPT of every
-// agent (orchestrator and subagents alike). Goal: keep ports, key files, runtime
-// facts visible on every turn so the model can't fall back on training-set
-// defaults (e.g. "Spring Boot runs on 8080", "Postgres on 5432") when this project
-// uses different values. The block stays small — full doc still lives in
-// PROJECT.md.
+// Injects the full PROJECT.md content into every agent's system prompt, the
+// same way opencode injects AGENTS.md. No extraction, no caps, no extra
+// instructions — what's in the file is what the model sees. Empty string when
+// the file is absent (the `{{project_md}}` placeholder simply collapses).
 //
-// When PROJECT.md is absent we still inject a short notice: the spec is unknown,
-// and the agent must source operational facts from project files (or escalate
-// via MISSING). That stops silent halluzination just as well as the present case.
-//
-// Cached per directory to keep transformSystem cheap.
-const SPEC_MAX = 1500
-const specCache = new Map()
+// Mtime-keyed cache so the per-turn cost stays at one stat() call but live
+// edits to PROJECT.md are picked up automatically.
+const projectMdCache = new Map()
 
-export function projectSpecBlock(directory) {
-  if (!ENABLED) return ""
-  const key = directory ?? ""
-  if (specCache.has(key)) return specCache.get(key)
-  const value = directory ? buildSpec(directory) : ""
-  specCache.set(key, value)
+// Default PROJECT.md body written when the file is absent. Lists the two
+// load-bearing project documents (ARCHITECTURE.md, TODO.md) with the labels
+// the user wants the LLM to see — those labels also nudge subagents toward
+// the right file when they look for architecture vs. task content.
+const DEFAULT_PROJECT_MD =
+  "# Projekt\n" +
+  "\n" +
+  "## Dokumente\n" +
+  "\n" +
+  "- [ARCHITECTURE.md](ARCHITECTURE.md) — zentrale Datei für die Softwarearchitektur.\n" +
+  "- [TODO.md](TODO.md) — zentrale Datei für Task/TODOs.\n"
+
+// Bootstraps the three project documents at `directory`:
+//   - PROJECT.md   → DEFAULT_PROJECT_MD (with links to the other two)
+//   - ARCHITECTURE.md → empty
+//   - TODO.md      → empty
+// Each is created only when absent — never overwrites the user's content.
+// Idempotent: re-running with all three present is a no-op.
+export function ensureProjectFiles(directory) {
+  if (!ENABLED || !directory) return
+  try {
+    const projectPath = join(directory, "PROJECT.md")
+    if (!existsSync(projectPath)) {
+      writeFileSync(projectPath, DEFAULT_PROJECT_MD, "utf8")
+      log("ensureProjectFiles wrote PROJECT.md", { directory })
+    }
+    const archPath = join(directory, "ARCHITECTURE.md")
+    if (!existsSync(archPath)) {
+      writeFileSync(archPath, "", "utf8")
+      log("ensureProjectFiles wrote ARCHITECTURE.md", { directory })
+    }
+    const todoPath = join(directory, "TODO.md")
+    if (!existsSync(todoPath)) {
+      writeFileSync(todoPath, "", "utf8")
+      log("ensureProjectFiles wrote TODO.md", { directory })
+    }
+  } catch (err) {
+    log("ensureProjectFiles failed", { directory, err: errMsg(err) })
+  }
+}
+
+export function projectMdBlock(directory) {
+  if (!ENABLED || !directory) return ""
+  ensureProjectFiles(directory)
+  const filePath = join(directory, "PROJECT.md")
+  let stat
+  try {
+    stat = statSync(filePath)
+  } catch (err) {
+    if (err && err.code !== "ENOENT") {
+      log("projectMdBlock stat failed", { filePath, err: errMsg(err) })
+    }
+    projectMdCache.set(directory, { mtimeMs: -1, value: "" })
+    return ""
+  }
+  const cached = projectMdCache.get(directory)
+  if (cached && cached.mtimeMs === stat.mtimeMs) return cached.value
+  let value = ""
+  try {
+    const content = readFileSync(filePath, "utf8").trim()
+    if (content) {
+      value = `\n\n---\n📌 PROJECT.md (project index):\n${content}\n---\n`
+    }
+  } catch (err) {
+    log("projectMdBlock read failed", { filePath, err: errMsg(err) })
+  }
+  projectMdCache.set(directory, { mtimeMs: stat.mtimeMs, value })
   return value
 }
 
-// Test-only: drops a single directory's spec cache so a test can mutate the
+// Test-only: drops a single directory's cache so a test can mutate the
 // PROJECT.md on disk and see the next call re-read it.
 export function forgetProjectSpec(directory) {
-  specCache.delete(directory ?? "")
-}
-
-function buildSpec(directory) {
-  try {
-    if (!existsSync(join(directory, "PROJECT.md"))) {
-      return (
-        "\n\n---\n📌 agent-intercom: project spec.\n" +
-        `root: ${directory}\n` +
-        "PROJECT.md: NOT PRESENT — operational facts (ports, URLs, key config paths, " +
-        "framework versions) are NOT specified for this project. Do NOT fall back on " +
-        "framework defaults from your training (e.g. \"Spring Boot port 8080\", \"Postgres " +
-        "port 5432\") — those are almost certainly wrong here. Source any fact you need " +
-        "from the actual project files (application.properties / application.yml / .env / " +
-        "docker-compose.yml / pom.xml / package.json / config/*). When still unknown, " +
-        "stop and report `MISSING: <fact>` (subagents: `BLOCKED: T<n> — MISSING: <fact>` " +
-        "on the first line) so the orchestrator can spawn a planner to specify it.\n" +
-        "---\n"
-      )
-    }
-    const excerpt = projectMdExcerpt(directory)
-    if (!excerpt) {
-      return (
-        "\n\n---\n📌 agent-intercom: project spec.\n" +
-        `root: ${directory}\n` +
-        "PROJECT.md exists but contains none of the operational sections (Status / Runtime " +
-        "facts / Key files / External links). Treat operational facts as unspecified: source " +
-        "them from project files, do not guess framework defaults. If you can't resolve a " +
-        "fact, report `MISSING: <fact>` (subagents: `BLOCKED: T<n> — MISSING: <fact>` first " +
-        "line).\n---\n"
-      )
-    }
-    const capped =
-      excerpt.length > SPEC_MAX
-        ? excerpt.slice(0, SPEC_MAX) + "\n… (PROJECT.md spec truncated — read PROJECT.md for the rest)"
-        : excerpt
-    return (
-      "\n\n---\n📌 agent-intercom: project spec (from PROJECT.md, authoritative for ports, " +
-      "URLs, key files, framework versions). Use these values verbatim — do NOT substitute " +
-      "training-set defaults. If a fact you need is not below, read the actual project file; " +
-      "if still unknown, report `MISSING: <fact>` (subagents: `BLOCKED: T<n> — MISSING: <fact>` " +
-      "first line) so a planner can add it.\n" +
-      `root: ${directory}\n\n` +
-      capped +
-      "\n---\n"
-    )
-  } catch (err) {
-    log("projectSpecBlock failed", errMsg(err))
-    return ""
-  }
+  projectMdCache.delete(directory ?? "")
 }
 
 function build(directory) {
@@ -124,17 +130,14 @@ function build(directory) {
     const lines = treeLines(directory, "", 0)
     const truncated = lines.length > MAX_LINES
     const tree = (truncated ? lines.slice(0, MAX_LINES) : lines).join("\n")
-    // When PROJECT.md exists, name/description are already authoritative there
-    // (Runtime facts + Key files supersede package.json identity); echoing them
-    // here just doubles the bytes the subagent sees on every spawn.
-    const projectMd = hasProjectMd(directory)
-    const meta = projectMd ? "" : packageMeta(directory)
-    const excerpt = projectMd ? projectMdExcerpt(directory) : ""
+    // PROJECT.md content reaches the LLM separately via the system-prompt
+    // `{{project_md}}` placeholder, so the spawn-prompt snapshot stays light:
+    // just root, package.json identity (when present), and a shallow tree.
+    const meta = packageMeta(directory)
     return (
       "--- agent-intercom: project context (auto-provided, for orientation) ---\n" +
       `root: ${directory}\n` +
       (meta ? meta + "\n" : "") +
-      (excerpt ? `PROJECT.md excerpt — authoritative for ports, files, links:\n${excerpt}\n\n` : "") +
       `file tree (depth ${MAX_DEPTH}, vendored/build dirs omitted):\n` +
       tree +
       (truncated ? "\n… (tree truncated)" : "") +
@@ -144,64 +147,6 @@ function build(directory) {
     log("projectContext failed", errMsg(err))
     return ""
   }
-}
-
-function hasProjectMd(directory) {
-  try {
-    return existsSync(join(directory, "PROJECT.md"))
-  } catch {
-    return false
-  }
-}
-
-// Pulls the operational sections out of PROJECT.md so every subagent gets ports,
-// key file paths, external links, and current phase/milestone inline — no need
-// for the orchestrator to remember and re-tip-toe these into every spawn prompt.
-// Total excerpt is capped so it doesn't dominate the context.
-const PROJECT_MD_SECTIONS = ["Status", "Runtime facts", "Key files", "External links"]
-const PROJECT_MD_MAX = 2000
-
-function projectMdExcerpt(directory) {
-  try {
-    const content = readFileSync(join(directory, "PROJECT.md"), "utf8")
-    const out = []
-    for (const name of PROJECT_MD_SECTIONS) {
-      const slice = extractMdSection(content, name)
-      if (slice) out.push(slice)
-    }
-    if (out.length === 0) return ""
-    const joined = out.join("\n\n")
-    return joined.length > PROJECT_MD_MAX
-      ? joined.slice(0, PROJECT_MD_MAX) + "\n… (PROJECT.md excerpt truncated)"
-      : joined
-  } catch {
-    return ""
-  }
-}
-
-function extractMdSection(content, name) {
-  const lines = content.split("\n")
-  const startRe = new RegExp(`^##\\s+${escapeRegex(name)}\\b`, "i")
-  let start = -1
-  for (let i = 0; i < lines.length; i++) {
-    if (startRe.test(lines[i])) {
-      start = i
-      break
-    }
-  }
-  if (start === -1) return ""
-  let end = lines.length
-  for (let i = start + 1; i < lines.length; i++) {
-    if (/^##\s+/.test(lines[i])) {
-      end = i
-      break
-    }
-  }
-  return lines.slice(start, end).join("\n").trim()
-}
-
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
 function treeLines(dir, prefix, depth) {

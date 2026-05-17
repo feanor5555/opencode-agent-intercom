@@ -9,6 +9,7 @@
   },
   "bin": {
     "opencode-agent-intercom-install": "./bin/install.js",
+    "opencode-agent-intercom-init-prompts": "./bin/init-prompts.js",
     "pw": "./bin/pw.js",
     "gen": "./bin/gen.js"
   },

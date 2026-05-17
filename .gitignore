@@ -1,0 +1,12 @@
+node_modules/
+*.log
+CLAUDE.md
+.DS_Store
+.npmrc
+opencode.json
+reviews/
+ui.jpg
+tui/dist/
+.claude/
+designs/
+tui.png

@@ -1,0 +1,52 @@
+{
+  "name": "opencode-agent-intercom",
+  "version": "1.7.0",
+  "description": "OpenCode plugin that gives the primary agent a bidirectional control channel to running subagents — async spawn, message injection, live status and abort.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "bin": {
+    "opencode-agent-intercom-install": "./bin/install.js",
+    "pw": "./bin/pw.js",
+    "gen": "./bin/gen.js"
+  },
+  "files": [
+    "src",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "for f in src/*.js; do node --check \"$f\" || exit 1; done",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "subagent",
+    "orchestrator",
+    "async",
+    "intercom",
+    "task"
+  ],
+  "author": "feanor5555",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/feanor5555/opencode-agent-intercom.git"
+  },
+  "bugs": {
+    "url": "https://github.com/feanor5555/opencode-agent-intercom/issues"
+  },
+  "homepage": "https://github.com/feanor5555/opencode-agent-intercom#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.14.48",
+    "jsonc-parser": "^3.3.1",
+    "playwright-core": "^1.60.0"
+  }
+}

@@ -25,8 +25,9 @@ import { createWebsearchTool, isWebsearchEnabled } from "./websearch.js"
 import { createOutlineTool, isOutlineEnabled } from "./outline.js"
 import {
   listOpen,
-  markDone,
-  markBlocked,
+  removeTask,
+  addTask,
+  editTask,
   todoFilePath,
   TodoFileMissingError,
 } from "./todofile.js"
@@ -34,11 +35,10 @@ import { log, errMsg } from "./log.js"
 import { tokens as fmtTokens, ageSeconds } from "./format.js"
 
 // Matches an optional task-id prefix on the first line of a spawn prompt
-// (T5 / R2). When present, the wake-hook will auto-tick TODO.md on the
-// matching `DONE:`/`BLOCKED:` marker in the subagent's reply. Absence is
-// fine — non-task spawns (status checks, ad-hoc questions) just opt out
-// of auto-tick.
-const SPAWN_TASK_PREFIX_RE = /^\s*(T\d+|R\d+)\s*[:.\-]\s*/m
+// (T5). When present, the wake-hook will auto-tick TODO.md on the matching
+// `DONE:` marker in the subagent's reply. Absence is fine — non-task spawns
+// (status checks, ad-hoc questions) just opt out of auto-tick.
+const SPAWN_TASK_PREFIX_RE = /^\s*(T\d+)\s*[:.\-]\s*/m
 
 function extractTaskId(prompt) {
   const m = SPAWN_TASK_PREFIX_RE.exec(prompt ?? "")
@@ -62,18 +62,6 @@ function extractAllTaskIds(prompt) {
   while ((m = SPAWN_TASK_ID_LINE_RE.exec(prompt)) !== null) ids.add(m[1])
   return ids
 }
-
-// Heuristic for `todo_block(reason)` to catch the failure mode where the
-// orchestrator misuses block to "annotate what the task contains". Real
-// blockers state an EXTERNAL reason; misuse states what's INSIDE the task.
-// Triggers on German + English work-describing words seen in the wild. Kept
-// short — we'd rather have an occasional false positive (the model retries
-// with a sharper reason) than let the failure mode through.
-const TODO_BLOCK_DESCRIBES_WORK_RE =
-  /\b(ben[öo]tigt|requires?|needs?|implementation|implementier(?:ung|en)|Änderung(?:en)?|aenderung(?:en)?|changes?|extension|erweiterung|modification|umsetzung|implementiere)\b/i
-
-const TODO_BLOCK_REAL_BLOCKER_RE =
-  /\b(depends? on T\d+|waiting for|missing\b|external|API ?key|credentials?|design decision|user (?:decision|input|approval)|upstream bug|issue #|permission|hardware|hangs?\b|deadlock)\b/i
 
 const z = tool.schema
 
@@ -327,57 +315,43 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     }
     if (tasks.length === 0) return { output: "TODO.md has no open tasks." }
     const rows = tasks.map((t) => {
-      const tag = t.status === "blocked" ? "BLOCKED" : "OPEN"
       const accept = t.accept ? `\n    accept: ${t.accept}` : ""
-      const reason = t.blockedReason ? ` (blocked: ${t.blockedReason})` : ""
-      return `${tag} ${t.id}. ${t.text}${reason}${accept}`
+      return `${t.id}: ${t.text}${accept}`
     })
     return { output: rows.join("\n") }
   }
 
   async function todoDoneHandler(args, toolCtx) {
     const id = String(args.id || "").trim()
-    if (!/^[TR]\d+$/.test(id)) {
-      return { output: `todo_done failed: id must look like T5 or R2, got "${args.id}".` }
+    if (!/^T\d+$/.test(id)) {
+      return { output: `todo_done failed: id must look like T5, got "${args.id}".` }
     }
-    const res = markDone(await dirFor(toolCtx), id)
-    if (res.alreadyDone) return { output: `${id} was already [x]; no change.` }
-    return { output: `${id} marked done.` }
+    removeTask(await dirFor(toolCtx), id)
+    return { output: `${id} removed from TODO.md.` }
   }
 
-  async function todoBlockHandler(args, toolCtx) {
+  async function todoAddHandler(args, toolCtx) {
+    const title = String(args.title || "").trim()
+    if (!title) return { output: "todo_add failed: title is required." }
+    const accept = args.accept != null ? String(args.accept) : ""
+    const res = addTask(await dirFor(toolCtx), { title, accept })
+    return { output: `Added ${res.id}: ${title}` }
+  }
+
+  async function todoEditHandler(args, toolCtx) {
     const id = String(args.id || "").trim()
-    if (!/^[TR]\d+$/.test(id)) {
-      return { output: `todo_block failed: id must look like T5 or R2, got "${args.id}".` }
+    if (!/^T\d+$/.test(id)) {
+      return { output: `todo_edit failed: id must look like T5, got "${args.id}".` }
     }
-    const reason = String(args.reason || "").trim() || "no reason given"
-
-    // Reason-shape guard: refuse reasons that describe the WORK inside the
-    // task instead of an external blocker. Triggers on common work-describing
-    // words (needs/benötigt/Änderung/Implementierung/changes/…) UNLESS the
-    // reason also names a real blocker (depends on T<n>, waiting for, missing
-    // ext. dep, etc.). False positives are cheap — the orchestrator retries
-    // with a sharper reason — while letting the failure mode through wrecks
-    // the planner's status tracking.
-    if (
-      TODO_BLOCK_DESCRIBES_WORK_RE.test(reason) &&
-      !TODO_BLOCK_REAL_BLOCKER_RE.test(reason)
-    ) {
-      log("todo_block refused: reason describes work", { id, reason })
-      return {
-        output:
-          `todo_block(${id}) refused: the reason "${reason}" describes WORK to do, not an ` +
-          `external blocker. A blocker means the task cannot proceed right now even with full ` +
-          `attention (e.g. "depends on T5", "waiting for user decision", "external API key ` +
-          `missing in .env"). "Needs changes to X" / "benötigt Änderungen an X" is what the ` +
-          `task itself contains — spawn a coder for it instead of blocking. If this really IS ` +
-          `blocked, restate the reason as the EXTERNAL cause.`,
-      }
+    if (args.title === undefined && args.accept === undefined) {
+      return { output: "todo_edit failed: pass at least one of title / accept." }
     }
-
-    const res = markBlocked(await dirFor(toolCtx), id, reason)
-    if (!res.changed && res.alreadyBlocked) return { output: `${id} was already [!]; reason updated.` }
-    return { output: `${id} marked blocked (${reason}).` }
+    const res = editTask(await dirFor(toolCtx), id, {
+      title: args.title,
+      accept: args.accept,
+    })
+    if (!res.changed) return { output: `${id} unchanged (provided values match current).` }
+    return { output: `${id} updated.` }
   }
 
   return {
@@ -386,8 +360,8 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
         'Start a subagent non-blocking. Returns a handle ("researcher#1") for `abort`. You stay ' +
         "responsive; you are woken automatically with the subagent's reply when it finishes. " +
         "One-shot: a subagent replies once and is destroyed. For more work, spawn a fresh one. " +
-        "Optional first-line prefix `T<n>:` or `R<n>:` (taken from TODO.md) opts in to wake-hook " +
-        "auto-tick — omit for ad-hoc questions and status checks.",
+        "Optional first-line prefix `T<n>:` (taken from TODO.md) opts in to wake-hook auto-tick — " +
+        "omit for ad-hoc questions and status checks.",
       args: {
         agent: z.string().describe("Subagent name (coder, planner, researcher, …)"),
         prompt: z.string().describe("Task for the subagent — name the outcome, not the steps"),
@@ -415,37 +389,47 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
 
     todos_open: tool({
       description:
-        "Return open + blocked tasks from TODO.md (id, text, accept-criterion). Call this for any " +
-        "TODO.md status question. Do NOT spawn a subagent to read TODO.md.",
+        "Return the open tasks from TODO.md (id, title, accept-criterion) in feasibility order. " +
+        "Call this whenever you need to know what tasks exist — never spawn a subagent for that.",
       args: {},
       execute: guard("todos_open", listOpenHandler),
     }),
 
     todo_done: tool({
       description:
-        "Correction-only tool. Flip a TODO.md task to done. The wake-hook already calls this " +
-        "automatically when a subagent's reply starts with `DONE: T<n>` matching its spawn id, " +
-        "so call this yourself only when (a) the wake notice contained `marker IGNORED` / " +
-        "`NOT auto-ticked` / `auto-tick failed`, or (b) the user explicitly asks for the change. " +
-        "For listing what's open, call `todos_open` instead.",
+        "Remove a task from TODO.md. The wake-hook also calls this automatically when a subagent's " +
+        "reply starts with `DONE: T<n>` matching its spawn id. Call yourself when (a) you just " +
+        "finished a task that was in TODO.md, (b) the wake notice said `marker IGNORED` / " +
+        "`auto-tick failed`, or (c) the user asks for it.",
       args: {
-        id: z.string().describe("Task id from TODO.md, e.g. T5 or R2 — must already exist in the file"),
+        id: z.string().describe("Task id from TODO.md, e.g. T5 — must already exist in the file"),
       },
       execute: guard("todo_done", todoDoneHandler),
     }),
 
-    todo_block: tool({
+    todo_add: tool({
       description:
-        "Correction-only tool. Flip a TODO.md task to blocked. The wake-hook already calls this " +
-        "automatically when a subagent's reply starts with `BLOCKED: T<n> — <reason>` matching " +
-        "its spawn id, so call this yourself only when (a) the wake notice contained `marker " +
-        "IGNORED` / `NOT auto-ticked` / `auto-tick failed`, or (b) the user explicitly asks for " +
-        "the change. For listing what's open, call `todos_open` instead.",
+        "Append a new task to TODO.md and return its id. Use this whenever new work surfaces — " +
+        "from the user, from your own findings, or from TODOs/tasks you discover in other files " +
+        "(those should be moved here and removed from the source file). Place new tasks in " +
+        "feasibility order; TODO.md is read top-to-bottom.",
       args: {
-        id: z.string().describe("Task id from TODO.md, e.g. T5 or R2 — must already exist in the file"),
-        reason: z.string().describe("One-line reason. Use exactly what the user or the failed wake notice gave; do not infer one from prior context."),
+        title: z.string().describe("Short one-line task title"),
+        accept: z.string().optional().describe("One-line acceptance criterion"),
       },
-      execute: guard("todo_block", todoBlockHandler),
+      execute: guard("todo_add", todoAddHandler),
+    }),
+
+    todo_edit: tool({
+      description:
+        "Edit an existing task's title or accept-criterion in place. The id stays the same. Pass " +
+        '`accept: ""` to drop the accept line.',
+      args: {
+        id: z.string().describe("Task id from TODO.md, e.g. T5 — must already exist in the file"),
+        title: z.string().optional().describe("New one-line title (omit to keep)"),
+        accept: z.string().optional().describe('New one-line accept-criterion ("" to drop the line)'),
+      },
+      execute: guard("todo_edit", todoEditHandler),
     }),
 
     ...(isWebsearchEnabled() ? { web_search: createWebsearchTool() } : {}),

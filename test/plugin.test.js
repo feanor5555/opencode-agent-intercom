@@ -285,11 +285,11 @@ test("list filters subagents by the caller's parentID — no cross-primary leaka
   assert.doesNotMatch(outB.output, /researcher#1/, "primary B must not see primary A's researcher")
 })
 
-test("orchestration guide exposes the three tools and the DONE/BLOCKED marker convention", async () => {
+test("orchestration guide exposes the three tools and the DONE marker convention", async () => {
   // The trimmed guide drops the workflow/phases content and keeps only the
-  // tool list + spawn-prompt format + wake-hook marker convention. Anything
-  // project-specific now lives in the project's AGENTS.md or in the user's
-  // edited per-agent prompt file — not in the plugin's static guide.
+  // tool list + spawn-prompt format + wake-hook DONE-marker convention.
+  // Anything project-specific now lives in the project's AGENTS.md or in the
+  // user's edited per-agent prompt file — not in the plugin's static guide.
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   const out = { system: ["base prompt"] }
@@ -298,8 +298,8 @@ test("orchestration guide exposes the three tools and the DONE/BLOCKED marker co
   assert.match(joined, /spawn\(agent, prompt\)/, "guide must list spawn")
   assert.match(joined, /abort\(handle\)/, "guide must list abort")
   assert.match(joined, /\blist\(\)/, "guide must list list()")
-  assert.match(joined, /DONE: T<n>/, "guide must document the auto-tick marker")
-  assert.match(joined, /BLOCKED: T<n>/, "guide must document the blocked marker")
+  assert.match(joined, /DONE: T<n>/, "guide must document the auto-remove marker")
+  assert.doesNotMatch(joined, /BLOCKED/, "the blocked feature is gone — guide must not mention it")
 })
 
 test("transform hook does not inject the orchestration protocol into a subagent", async () => {

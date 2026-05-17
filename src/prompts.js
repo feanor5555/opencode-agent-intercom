@@ -28,7 +28,7 @@ export const ORCHESTRATION_GUIDE =
   "After spawn your turn ends — you are woken when the subagent finishes. Spawn independent subagents back-to-back so they run in parallel; a refused spawn means you are at the concurrency cap.\n" +
   "Do NOT verify a subagent's work with another spawn in the same turn — the work is not done yet.\n" +
   "\n" +
-  "Wake-hook auto-ticks: when a subagent's reply starts with `DONE: T<n>` or `BLOCKED: T<n> — <reason>` matching its spawn id, the wake-hook flips TODO.md itself. When the wake notice says `marker IGNORED` / `auto-tick failed`, spawn a planner to correct it.\n" +
+  "Wake-hook auto-removes: when a subagent's reply starts with `DONE: T<n>` matching its spawn id, the wake-hook removes that task from TODO.md. When the wake notice says `marker IGNORED` / `auto-remove failed`, spawn a planner / coder / debugger / reviewer to correct TODO.md.\n" +
   "\n" +
   "A live snapshot of your active subagents is injected below — reference subagents by the handle from that snapshot in abort.\n---\n"
 
@@ -42,7 +42,7 @@ export const SUBAGENT_GUIDE_CORE =
   "You are a one-shot subagent — do one focused task, then reply once and return.\n" +
   "Read a file before editing it. Make each tool call once; on error change your approach, don't repeat.\n" +
   "Final reply: brief plain text (hard-capped at 8000 chars). Reference files by path:line; do not paste file contents back.\n" +
-  "If your spawn prompt started with `T<n>:` or `R<n>:`, put `DONE: T<n>` or `BLOCKED: T<n> — <one-line reason>` on the FIRST line of your final reply — the wake-hook flips the TODO.md checkbox for you.\n" +
+  "If your spawn prompt started with `T<n>:` and you completed the task, put `DONE: T<n>` on the FIRST line of your final reply — the wake-hook removes that task from TODO.md for you. If you could not finish, just report plainly without that marker.\n" +
   "Reply to the orchestrator in English. Address the user directly only in the user's language.\n---\n"
 
 // Outline+read discipline. Injected only for subagents that actually have the

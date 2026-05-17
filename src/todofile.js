@@ -1,19 +1,19 @@
 // TODO.md parser/writer. Single fixed file: `<directory>/TODO.md`.
 //
-// Format the planner is expected to write:
+// Format:
 //
-//   - [ ] T5. <short task title>
-//       accept: <one-line criterion>
+//   - T1: <short task title>
+//     accept: <one-line criterion>
 //
-//   - [x] T3. <done task>
-//   - [!] R2. <blocked finding> (blocked: needs API key)
+//   - T2: <another task>
+//     accept: <criterion>
 //
-// IDs are immutable project-wide:
-//   T<n> — regular tasks (sequence T1, T2, T3, …)
-//   R<n> — review findings (separate sequence R1, R2, …)
-//
-// Only `- [ ]` / `- [x]` / `- [!]` lines with a stable ID prefix are tracked.
-// Anything else (headings, prose, blank lines) is preserved verbatim on write.
+// IDs are assigned sequentially by `addTask` (next free T<n> above the current
+// max) and never re-used. Done tasks are REMOVED from TODO.md — there are no
+// checkbox markers, no "blocked" state, no done archive. Tasks should be
+// ordered top-to-bottom by feasibility: the first task is the next one to do.
+// Edits to a task's title or accept-criterion go through `editTask`, which
+// preserves the id.
 
 import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs"
 import { join } from "node:path"
@@ -53,16 +53,8 @@ function findTodoCaseVariant(directory) {
   return undefined
 }
 
-// Status-marker -> internal status name.
-const STATUS = {
-  " ": "open",
-  x: "done",
-  X: "done",
-  "!": "blocked",
-}
-
-// Matches the task header line. Captures: status-char, id (T5 / R2), text.
-const TASK_LINE_RE = /^(\s*)- \[([ xX!])\]\s+([TR]\d+)\.\s*(.*)$/
+// Matches the task header line. Captures: indent, id (T5), text after the colon.
+const TASK_LINE_RE = /^(\s*)- (T\d+):\s*(.*)$/
 const ACCEPT_LINE_RE = /^\s+accept:\s*(.*)$/i
 
 export function todoFilePath(directory) {
@@ -92,83 +84,112 @@ export function parseTasks(content) {
   for (let i = 0; i < lines.length; i++) {
     const m = TASK_LINE_RE.exec(lines[i])
     if (!m) continue
-    const [, indent, marker, id, rest] = m
-    const status = STATUS[marker] ?? "open"
-    // Pull a `(blocked: ...)` suffix off the end so the displayed text stays clean.
-    let text = rest
-    let blockedReason = undefined
-    const bm = /^(.*?)\s*\(blocked:\s*([^)]*)\)\s*$/.exec(rest)
-    if (bm) {
-      text = bm[1].trim()
-      blockedReason = bm[2].trim()
-    }
-    // Optional indented `accept:` line right below.
+    const [, indent, id, rest] = m
     let accept
+    let acceptLineIdx
     if (i + 1 < lines.length) {
       const am = ACCEPT_LINE_RE.exec(lines[i + 1])
-      if (am) accept = am[1].trim()
+      if (am) {
+        accept = am[1].trim()
+        acceptLineIdx = i + 1
+      }
     }
-    tasks.push({ id, status, text: text.trim(), accept, blockedReason, lineIdx: i, indent })
+    tasks.push({ id, text: rest.trim(), accept, lineIdx: i, acceptLineIdx, indent })
   }
   return tasks
 }
 
-// All non-`done` tasks (open + blocked). Each has its accept-criterion attached
-// so the orchestrator's `todos_open` reply gives the caller everything needed to
-// pick the next task without a separate `read` of TODO.md.
+// All tasks currently in TODO.md, top-to-bottom (= feasibility order).
 export function listOpen(directory) {
   const content = readTodoFile(directory)
-  return parseTasks(content).filter((t) => t.status !== "done")
+  return parseTasks(content)
 }
 
-// Flips `- [ ]` → `- [x]` for the given task id. Idempotent: a `- [x]` line
-// returns `{changed:false, alreadyDone:true}`. Throws if the id doesn't exist —
-// the caller (orchestrator or wake-hook) must know that, since it likely means
-// either the planner used the wrong format or the subagent hallucinated an id.
-export function markDone(directory, id) {
-  return flipStatus(directory, id, "x")
-}
-
-// Marks a task blocked: `- [ ]` / `- [x]` → `- [!]` and rewrites the suffix to
-// `(blocked: <reason>)`. Strips any prior `(blocked: …)` so repeated calls
-// don't accumulate suffixes. Idempotent on identical reason.
-export function markBlocked(directory, id, reason) {
-  const content = readTodoFile(directory)
-  const lines = content.split("\n")
-  const found = findTaskLine(lines, id)
-  if (found == null) throw new Error(`task ${id} not found in TODO.md`)
-  const { lineIdx, marker, indent, body } = found
-  const cleanBody = body.replace(/\s*\(blocked:[^)]*\)\s*$/, "").trim()
-  const newSuffix = reason ? ` (blocked: ${reason.replace(/\s+/g, " ").trim()})` : ""
-  const newLine = `${indent}- [!] ${id}. ${cleanBody}${newSuffix}`
-  const wasAlready = marker === "!" && lines[lineIdx] === newLine
-  lines[lineIdx] = newLine
-  if (!wasAlready) writeFileSync(todoFilePath(directory), lines.join("\n"), "utf8")
-  return { changed: !wasAlready, alreadyBlocked: marker === "!" }
-}
-
-function flipStatus(directory, id, targetMarker) {
-  const content = readTodoFile(directory)
-  const lines = content.split("\n")
-  const found = findTaskLine(lines, id)
-  if (found == null) throw new Error(`task ${id} not found in TODO.md`)
-  const { lineIdx, marker, indent, body } = found
-  if (marker === targetMarker) return { changed: false, alreadyDone: targetMarker === "x" }
-  // For done, strip any leftover `(blocked: …)` suffix so a previously blocked
-  // task ends up clean once it's resolved.
-  const cleanBody = targetMarker === "x" ? body.replace(/\s*\(blocked:[^)]*\)\s*$/, "").trim() : body
-  lines[lineIdx] = `${indent}- [${targetMarker}] ${id}. ${cleanBody}`
-  writeFileSync(todoFilePath(directory), lines.join("\n"), "utf8")
-  return { changed: true, alreadyDone: false }
-}
-
-function findTaskLine(lines, id) {
-  for (let i = 0; i < lines.length; i++) {
-    const m = TASK_LINE_RE.exec(lines[i])
-    if (!m) continue
-    const [, indent, marker, lineId, rest] = m
-    if (lineId !== id) continue
-    return { lineIdx: i, marker, indent, body: rest }
+// Next free T-id: max(existing T-ids) + 1, or T1 when empty / file absent.
+export function nextFreeId(directory) {
+  let content
+  try {
+    content = readTodoFile(directory)
+  } catch (err) {
+    if (err instanceof TodoFileMissingError) return "T1"
+    throw err
   }
-  return null
+  const tasks = parseTasks(content)
+  if (tasks.length === 0) return "T1"
+  let max = 0
+  for (const t of tasks) {
+    const n = parseInt(t.id.slice(1), 10)
+    if (Number.isFinite(n) && n > max) max = n
+  }
+  return `T${max + 1}`
+}
+
+// Append a new task with the next free id. Creates an empty TODO.md if absent.
+export function addTask(directory, { title, accept } = {}) {
+  const cleanTitle = (title ?? "").trim()
+  if (!cleanTitle) throw new Error("addTask: title is required")
+  const path = todoFilePath(directory)
+  if (!existsSync(path)) writeFileSync(path, "", "utf8")
+  const id = nextFreeId(directory)
+  const content = readFileSync(path, "utf8")
+  const cleanAccept = (accept ?? "").trim()
+  const block =
+    `- ${id}: ${cleanTitle}\n` + (cleanAccept ? `  accept: ${cleanAccept}\n` : "")
+  const sep = content === "" || content.endsWith("\n") ? "" : "\n"
+  writeFileSync(path, content + sep + block, "utf8")
+  return { id }
+}
+
+// Edit a task's title or accept criterion. Either field is optional — only
+// the provided ones change. Passing `accept: ""` deletes the accept line.
+// Throws if the id doesn't exist.
+export function editTask(directory, id, { title, accept } = {}) {
+  const content = readTodoFile(directory)
+  const lines = content.split("\n")
+  const tasks = parseTasks(content)
+  const t = tasks.find((x) => x.id === id)
+  if (!t) throw new Error(`task ${id} not found in TODO.md`)
+  let changed = false
+  if (title !== undefined) {
+    const newTitle = String(title).trim()
+    if (newTitle && newTitle !== t.text) {
+      lines[t.lineIdx] = `${t.indent}- ${id}: ${newTitle}`
+      changed = true
+    }
+  }
+  if (accept !== undefined) {
+    const newAccept = String(accept).trim()
+    if (t.acceptLineIdx != null) {
+      if (newAccept) {
+        const newLine = `${t.indent}  accept: ${newAccept}`
+        if (lines[t.acceptLineIdx] !== newLine) {
+          lines[t.acceptLineIdx] = newLine
+          changed = true
+        }
+      } else {
+        lines.splice(t.acceptLineIdx, 1)
+        changed = true
+      }
+    } else if (newAccept) {
+      lines.splice(t.lineIdx + 1, 0, `${t.indent}  accept: ${newAccept}`)
+      changed = true
+    }
+  }
+  if (changed) writeFileSync(todoFilePath(directory), lines.join("\n"), "utf8")
+  return { changed }
+}
+
+// Remove a task (its header line + optional accept line). Throws if the id
+// doesn't exist — caller decides whether to treat that as a no-op.
+export function removeTask(directory, id) {
+  const content = readTodoFile(directory)
+  const lines = content.split("\n")
+  const tasks = parseTasks(content)
+  const t = tasks.find((x) => x.id === id)
+  if (!t) throw new Error(`task ${id} not found in TODO.md`)
+  // Delete in reverse line order so the header index stays valid.
+  if (t.acceptLineIdx != null) lines.splice(t.acceptLineIdx, 1)
+  lines.splice(t.lineIdx, 1)
+  writeFileSync(todoFilePath(directory), lines.join("\n"), "utf8")
+  return { changed: true }
 }

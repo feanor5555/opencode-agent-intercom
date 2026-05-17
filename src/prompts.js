@@ -24,6 +24,15 @@ export const ORCHESTRATION_GUIDE =
   "notice contained `marker IGNORED` / `NOT auto-ticked` / `auto-tick failed`, or (b) the user " +
   "explicitly asked you to mark the task. Use the id and reason exactly as given; never infer " +
   "either from prior conversation context.\n" +
+  "  `todo_block` is for REAL external blockers — nothing else. A blocker is a reason the work " +
+  "cannot proceed RIGHT NOW even with full attention:\n" +
+  "    IS a blocker: \"depends on T5 not yet done\", \"waiting for user decision on UI variant\", " +
+  "\"external API credentials missing in .env (KEY_NAME)\", \"upstream library bug X — see " +
+  "issue Y\", \"requires hardware that isn't available\".\n" +
+  "    NOT a blocker: \"needs template changes\", \"needs new service class\", \"requires Java " +
+  "edits\", \"benötigt Änderungen in X.java\". Those describe the WORK the task contains. The " +
+  "right move there is to `spawn(\"coder\", \"T<n>: …\")`, not to block. NEVER mass-block " +
+  "your TODO list to plan with — that erases the planner's status.\n" +
   "- glob / grep — find files and search content. Standalone tools, no bash needed.\n" +
   "Every other tool is disabled. Delegate the goal you want, not a tool name. Spawn the outcome " +
   "(\"summarize the public API of <module>\", \"make the build pass\") and let the subagent pick " +
@@ -49,6 +58,11 @@ export const ORCHESTRATION_GUIDE =
   "After spawn, your turn ends. You are woken automatically when the subagent finishes. Spawn " +
   "independent subagents back-to-back so they run in parallel; if spawn is refused you are at the " +
   "concurrency cap, so wait for one to finish.\n" +
+  "Do NOT verify the subagent's work in the same turn — no `todos_open`, no glob/grep on " +
+  "files the subagent is writing, no `todo_done`/`todo_block`. The subagent has not produced " +
+  "anything yet, so a status read will either error or return stale state, and you will end up " +
+  "looping on it. The wake notice that fires when the subagent finishes will surface the " +
+  "updated state for you.\n" +
   "A live snapshot of your active subagents is injected below on every turn. Reference subagents " +
   "by the handle from that snapshot in abort. Finished subagents are gone from the list; their " +
   "result was delivered in the wake notice that woke this turn.\n" +
@@ -72,10 +86,21 @@ export const ORCHESTRATION_GUIDE =
   "Each phase writes its artifact to its own file; PROJECT.md only points to them. Phase-" +
   "subagents (planner / designer / coder / gitter / reviewer) update PROJECT.md themselves when " +
   "they finish.\n" +
-  "Right-sized chunks: one coherent concern per spawn, aiming for roughly half of maxContext so " +
-  "the subagent has headroom to read, think and write. Split when a single concern obviously " +
-  "won't fit (a huge file, multi-aspect cleanup). The signal to split is writing \"and then\" in " +
-  "a spawn prompt.\n" +
+  "Right-sized chunks — keep every spawn SMALL. Target: ≤ ~15 k tokens of total subagent work " +
+  "(reads + thinking + writes combined). The maxContext limit below is a SAFETY CEILING, not a " +
+  "size target — never spawn anything that needs close to it. Concretely:\n" +
+  "- coder: 1 file modified, ≤ ~100 lines of code change, one bug or one slice. NOT \"implement " +
+  "feature X end-to-end\".\n" +
+  "- planner: ONE document section or ONE focused question per spawn. NOT \"write the whole " +
+  "ARCHITECTURE.md\". Long documents are several spawns, one section each.\n" +
+  "- debugger: one failing test or one error trace per spawn.\n" +
+  "- reviewer: one module or one PR scope, never the whole codebase.\n" +
+  "- documenter / researcher: one topic per spawn.\n" +
+  "Split signals (any one means SPLIT NOW): the word \"and then\" in your spawn prompt; more " +
+  "than two files mentioned in Context; the word \"all\" or \"every\" on a non-trivial corpus; " +
+  "a goal that takes more than 1-3 sentences to describe. After each subagent finishes you will " +
+  "see its actual ctx-used in the wake notice — if it is ≥ 30 k tokens the spawn was too big; " +
+  "rechunk the next one in that area smaller.\n" +
   "\n" +
   "Phases:\n" +
   "0. Inventory — brownfield only (code present, no PROJECT.md state). planner explores one " +

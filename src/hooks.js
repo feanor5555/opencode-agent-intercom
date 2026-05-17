@@ -81,6 +81,16 @@ const CTX_NEAR_BUDGET = 0.7
 // to the user; further denials keep escalating in tone but do not re-notify.
 const BUDGET_NOTIFY_AFTER = 3
 
+// Spawn-size thresholds applied AFTER a subagent finishes. The orchestrator's
+// ORCHESTRATION_GUIDE asks for ≤ ~15 k tokens per spawn; in practice this is
+// hard to feel as a number on the orchestrator side without feedback. The
+// wake notice surfaces the actual ctxTokens consumed and escalates the tone
+// once the spawn was clearly too big, so the next spawn in the same area is
+// scoped tighter. Soft = "noticeably large", hard = "way too big, split next
+// time". Pure messaging — we never auto-abort or re-spawn.
+const LARGE_CTX_TOKENS_SOFT = 30_000
+const LARGE_CTX_TOKENS_HARD = 50_000
+
 // Builds the final system prompt for the current LLM call. We REPLACE opencode's
 // `output.system` array wholesale with one combined string we control, rather
 // than appending — opencode otherwise injects ~150 chars of model-identity
@@ -432,7 +442,7 @@ async function onSessionIdle({ sessionID }, client) {
     await postNotice(
       client,
       parentID,
-      completionNotice(handle, agent, snapshot.result, parentID, taskOutcome),
+      completionNotice(handle, agent, snapshot.result, parentID, taskOutcome, snapshot.ctxTokens),
     )
     showToast(client, {
       title: "agent-intercom",
@@ -526,15 +536,39 @@ function taskOutcomeLine(outcome) {
   }
 }
 
-function completionNotice(handle, agent, result, parentID, taskOutcome) {
+function completionNotice(handle, agent, result, parentID, taskOutcome, ctxTokens) {
   return (
     `🔔 agent-intercom: your subagent "${handle}" (${agent}) has finished and been destroyed.\n` +
     (result ? `Its result:\n${result}\n` : "It produced no text result.\n") +
     `Use this to report back to the user. If you need more work in this area, spawn a fresh ` +
     `subagent — the one above is gone.` +
     taskOutcomeLine(taskOutcome) +
+    spawnSizeNotice(ctxTokens) +
     slotsNoticeAfterFinish(parentID)
   )
+}
+
+// Tail line: surfaces the actual ctx consumption of the finished subagent so
+// the orchestrator gets numerical feedback on whether the spawn was right-sized.
+// Tone escalates in two steps; numbers ≥ HARD are spawn-too-big and the next
+// one in the area should be split tighter.
+function spawnSizeNotice(ctxTokens) {
+  if (!ctxTokens || ctxTokens <= 0) return ""
+  const used = fmtTokens(ctxTokens)
+  if (ctxTokens >= LARGE_CTX_TOKENS_HARD) {
+    return (
+      `\n📏 spawn-size: this subagent used ${used} tokens — far over the ~15 k target. The ` +
+      `task was too big. SPLIT the next spawn in this area into smaller, single-concern pieces ` +
+      `(1 file / 1 slice each) before continuing.`
+    )
+  }
+  if (ctxTokens >= LARGE_CTX_TOKENS_SOFT) {
+    return (
+      `\n📏 spawn-size: this subagent used ${used} tokens — above the ~15 k target. Scope the ` +
+      `next spawn in this area tighter (fewer files, narrower goal).`
+    )
+  }
+  return `\n📏 spawn-size: ${used} tokens (target ≤ ~15 k — ok).`
 }
 
 // Tail line for completion notices: tells the orchestrator how many subagent
@@ -649,6 +683,28 @@ export function createGuardToolExecute(client) {
       log("denied back-to-back list from primary", { sessionID })
       throw new Error(
         "agent-intercom: don't call `list` twice in a row. End your turn — you will be woken.",
+      )
+    }
+    // Post-spawn status-poll guard: while a subagent is in flight, reading
+    // TODO.md (todos_open) or flipping it (todo_done / todo_block) is racy —
+    // the subagent has not produced anything yet, and a hard-error on missing
+    // TODO.md sends small LLMs into a verify-loop they cannot escape. The wake
+    // notice will deliver the new state. Spawn, abort, glob, grep stay
+    // allowed: parallel spawns and exploratory reads are still legitimate.
+    // Gated on `countActiveSubagents` so post-wake checks (subagent already
+    // finished and gone from the registry) work normally.
+    if (
+      (input.tool === "todos_open" ||
+        input.tool === "todo_done" ||
+        input.tool === "todo_block") &&
+      countActiveSubagents(sessionID) > 0
+    ) {
+      log("denied todos_* while subagents are active", { sessionID, tool: input.tool })
+      throw new Error(
+        "agent-intercom: a subagent is still running — do NOT call `" +
+          input.tool +
+          "` while it works. The subagent has not produced anything yet; the wake-hook will surface " +
+          "the updated state in its completion notice. End your turn now.",
       )
     }
     lastPrimaryTool.set(sessionID, input.tool)

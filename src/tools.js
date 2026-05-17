@@ -45,6 +45,36 @@ function extractTaskId(prompt) {
   return m ? m[1] : undefined
 }
 
+// Detects multi-task spawn prompts. Small models like to bundle "T29: do A.
+// T30: do B. T31: do C." into a single coder spawn — that breaks the size
+// rule (multiple files / multiple concerns) and gives the wake-hook only one
+// TODO.md slot to flip. Pattern: any `T\d+:` (with colon) that appears on a
+// line on its own or after a list bullet / number. Counts unique IDs so a
+// pure cross-reference ("uses plans/T3.md") doesn't trip it. Returns the set
+// of distinct IDs found at line-leading positions.
+const SPAWN_TASK_ID_LINE_RE = /(?:^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+)?(T\d+):/g
+
+function extractAllTaskIds(prompt) {
+  if (!prompt) return new Set()
+  const ids = new Set()
+  let m
+  SPAWN_TASK_ID_LINE_RE.lastIndex = 0
+  while ((m = SPAWN_TASK_ID_LINE_RE.exec(prompt)) !== null) ids.add(m[1])
+  return ids
+}
+
+// Heuristic for `todo_block(reason)` to catch the failure mode where the
+// orchestrator misuses block to "annotate what the task contains". Real
+// blockers state an EXTERNAL reason; misuse states what's INSIDE the task.
+// Triggers on German + English work-describing words seen in the wild. Kept
+// short — we'd rather have an occasional false positive (the model retries
+// with a sharper reason) than let the failure mode through.
+const TODO_BLOCK_DESCRIBES_WORK_RE =
+  /\b(ben[öo]tigt|requires?|needs?|implementation|implementier(?:ung|en)|Änderung(?:en)?|aenderung(?:en)?|changes?|extension|erweiterung|modification|umsetzung|implementiere)\b/i
+
+const TODO_BLOCK_REAL_BLOCKER_RE =
+  /\b(depends? on T\d+|waiting for|missing\b|external|API ?key|credentials?|design decision|user (?:decision|input|approval)|upstream bug|issue #|permission|hardware|hangs?\b|deadlock)\b/i
+
 const z = tool.schema
 
 // Wraps a tool handler so any thrown error becomes a friendly output string
@@ -99,6 +129,23 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     if (denied) {
       log("spawn denied", denied)
       return { output: `Denied: ${denied}` }
+    }
+
+    // Multi-task bundle guard: a single spawn carrying several `T<n>:` markers
+    // is the orchestrator trying to dump its whole batch into one coder. The
+    // size rule is per spawn — one concern, one task — so reject up front with
+    // a clear hint to split. Allowed: zero or one ID.
+    const allTaskIds = extractAllTaskIds(args.prompt)
+    if (allTaskIds.size > 1) {
+      const list = [...allTaskIds].sort().join(", ")
+      log("spawn refused: multi-task prompt", { ids: list })
+      return {
+        output:
+          `Spawn refused: this prompt bundles ${allTaskIds.size} tasks (${list}). One spawn = ` +
+          `one task. Issue ${allTaskIds.size} separate spawns instead — they can run back-to-back ` +
+          `(parallel up to maxSubagents). The wake-hook ticks one TODO.md slot per spawn, so a ` +
+          `bundled prompt loses status tracking for all but one of them.`,
+      }
     }
 
     // Pull an optional task id (T5 / R2) off the first line of the prompt.
@@ -304,6 +351,30 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       return { output: `todo_block failed: id must look like T5 or R2, got "${args.id}".` }
     }
     const reason = String(args.reason || "").trim() || "no reason given"
+
+    // Reason-shape guard: refuse reasons that describe the WORK inside the
+    // task instead of an external blocker. Triggers on common work-describing
+    // words (needs/benötigt/Änderung/Implementierung/changes/…) UNLESS the
+    // reason also names a real blocker (depends on T<n>, waiting for, missing
+    // ext. dep, etc.). False positives are cheap — the orchestrator retries
+    // with a sharper reason — while letting the failure mode through wrecks
+    // the planner's status tracking.
+    if (
+      TODO_BLOCK_DESCRIBES_WORK_RE.test(reason) &&
+      !TODO_BLOCK_REAL_BLOCKER_RE.test(reason)
+    ) {
+      log("todo_block refused: reason describes work", { id, reason })
+      return {
+        output:
+          `todo_block(${id}) refused: the reason "${reason}" describes WORK to do, not an ` +
+          `external blocker. A blocker means the task cannot proceed right now even with full ` +
+          `attention (e.g. "depends on T5", "waiting for user decision", "external API key ` +
+          `missing in .env"). "Needs changes to X" / "benötigt Änderungen an X" is what the ` +
+          `task itself contains — spawn a coder for it instead of blocking. If this really IS ` +
+          `blocked, restate the reason as the EXTERNAL cause.`,
+      }
+    }
+
     const res = markBlocked(await dirFor(toolCtx), id, reason)
     if (!res.changed && res.alreadyBlocked) return { output: `${id} was already [!]; reason updated.` }
     return { output: `${id} marked blocked (${reason}).` }

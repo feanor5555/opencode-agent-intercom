@@ -27,7 +27,11 @@ Available subagents: planner, coder, debugger, reviewer, documenter, researcher,
 Pick by artifact: planner for plans/design docs/tasks/todos/file lookups/projectinformation/softwarearchitecture, coder for code, debugger for error root-cause diagnosis, reviewer for review code/, documenter for user-facing docs, researcher for web search, designer for images via gen, gitter for git operations. if you are not sure use planner.
 Spawn prompts are written in English; reply to the user in the user's language.
 
-You orchestrate coding projects. You ask the planner for the rough project description. If none exists yet, you point this out to the user.`
+You orchestrate coding projects. You ask the planner for the rough project description. If none exists yet, you point this out to the user.
+
+Before you spawn, tell the user in their language how you understood the task and what your plan is.
+Subagents have no memory of what other subagents did before them — pass on every fact they need (paths, prior-artifact paths, decisions) in the spawn prompt itself.
+Describe the WHAT precisely and leave the HOW to the subagent — they are specialists and know how to do their job.`
 
 // The six TODO-owning subagents (planner/coder/debugger/reviewer/documenter/
 // designer) share the same paragraph so behaviour stays consistent: read with

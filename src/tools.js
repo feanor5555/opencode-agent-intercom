@@ -30,13 +30,14 @@ import {
   todoFilePath,
   TodoFileMissingError,
 } from "./todofile.js"
-import { existsSync } from "node:fs"
 import { log, errMsg } from "./log.js"
 import { tokens as fmtTokens, ageSeconds } from "./format.js"
 
-// Matches the task-id prefix the orchestrator MUST put on the first line of
-// a spawn prompt once TODO.md exists. Captures the id (T5 / R2). Tolerant
-// about whitespace and trailing colon style.
+// Matches an optional task-id prefix on the first line of a spawn prompt
+// (T5 / R2). When present, the wake-hook will auto-tick TODO.md on the
+// matching `DONE:`/`BLOCKED:` marker in the subagent's reply. Absence is
+// fine — non-task spawns (status checks, ad-hoc questions) just opt out
+// of auto-tick.
 const SPAWN_TASK_PREFIX_RE = /^\s*(T\d+|R\d+)\s*[:.\-]\s*/m
 
 function extractTaskId(prompt) {
@@ -100,21 +101,12 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       return { output: `Denied: ${denied}` }
     }
 
-    // Pull a stable task id (T5 / R2) off the first line of the prompt, if
-    // present. Once TODO.md exists the orchestrator MUST tag every spawn this
-    // way so the wake-hook can auto-tick — but in greenfield phases (no
-    // TODO.md yet) the prefix is optional.
+    // Pull an optional task id (T5 / R2) off the first line of the prompt.
+    // Present → wake-hook auto-ticks TODO.md when the subagent's reply ends
+    // with the matching `DONE:`/`BLOCKED:` marker. Absent → non-task spawn
+    // (status check, ad-hoc question) and auto-tick is skipped. The orchestrator
+    // decides per spawn; the plugin never forces a prefix.
     const taskId = extractTaskId(args.prompt)
-    const todoExists = existsSync(todoFilePath(directory))
-    if (todoExists && !taskId) {
-      log("spawn refused: missing task id prefix", { prompt: args.prompt.slice(0, 80) })
-      return {
-        output:
-          "Spawn refused: TODO.md exists, so every spawn prompt MUST start with a task id like " +
-          "`T5: <text>` or `R2: <text>` (taken from TODO.md). Without it the wake-hook cannot " +
-          "tick the task done. Add the prefix and try again.",
-      }
-    }
     if (taskId) {
       const active = activeTaskIdsFor(toolCtx.sessionID)
       if (active.has(taskId)) {
@@ -296,20 +288,20 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     return { output: rows.join("\n") }
   }
 
-  async function markDoneHandler(args, toolCtx) {
+  async function todoDoneHandler(args, toolCtx) {
     const id = String(args.id || "").trim()
     if (!/^[TR]\d+$/.test(id)) {
-      return { output: `mark_done failed: id must look like T5 or R2, got "${args.id}".` }
+      return { output: `todo_done failed: id must look like T5 or R2, got "${args.id}".` }
     }
     const res = markDone(await dirFor(toolCtx), id)
     if (res.alreadyDone) return { output: `${id} was already [x]; no change.` }
     return { output: `${id} marked done.` }
   }
 
-  async function markBlockedHandler(args, toolCtx) {
+  async function todoBlockHandler(args, toolCtx) {
     const id = String(args.id || "").trim()
     if (!/^[TR]\d+$/.test(id)) {
-      return { output: `mark_blocked failed: id must look like T5 or R2, got "${args.id}".` }
+      return { output: `todo_block failed: id must look like T5 or R2, got "${args.id}".` }
     }
     const reason = String(args.reason || "").trim() || "no reason given"
     const res = markBlocked(await dirFor(toolCtx), id, reason)
@@ -320,13 +312,14 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
   return {
     spawn: tool({
       description:
-        'Start a subagent non-blocking. Returns a handle (e.g. "researcher#1") that identifies ' +
-        "the subagent for `abort` and `list`. The primary stays responsive while the subagent runs, " +
-        "and is woken automatically with the subagent's result when it finishes. A subagent is " +
-        "ONE-SHOT — once it replies it is destroyed. For more work, spawn a fresh subagent.",
+        'Start a subagent non-blocking. Returns a handle ("researcher#1") for `abort`. You stay ' +
+        "responsive; you are woken automatically with the subagent's reply when it finishes. " +
+        "One-shot: a subagent replies once and is destroyed. For more work, spawn a fresh one. " +
+        "Optional first-line prefix `T<n>:` or `R<n>:` (taken from TODO.md) opts in to wake-hook " +
+        "auto-tick — omit for ad-hoc questions and status checks.",
       args: {
-        agent: z.string().describe("Name of the subagent to spawn (e.g. coder, planner, researcher)"),
-        prompt: z.string().describe("The task/instruction for the subagent"),
+        agent: z.string().describe("Subagent name (coder, planner, researcher, …)"),
+        prompt: z.string().describe("Task for the subagent — name the outcome, not the steps"),
         description: z.string().optional().describe("Short title for the subagent session"),
       },
       execute: guard("spawn", spawnHandler),
@@ -334,54 +327,50 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
 
     abort: tool({
       description:
-        "Abort a running subagent. Sends opencode's cooperative abort signal and hard-denies any " +
-        "further tool calls from that subagent. ONLY use when the USER explicitly tells you to " +
-        "stop one; never on your own.",
+        "Stop a running subagent. Use ONLY when the user tells you to. Never on your own.",
       args: {
-        subagent: z.string().describe('Handle (e.g. "researcher#1") or raw sessionID'),
+        subagent: z.string().describe('Handle ("researcher#1") or raw sessionID'),
       },
       execute: guard("abort", abortHandler),
     }),
 
     list: tool({
       description:
-        "List currently active subagents with their handle, agent, status and age. State labels: " +
-        "`busy`/`retry` = working. Finished subagents are not listed — they have been destroyed " +
-        "(one-shot lifecycle); their result was already delivered to you via the wake notice.",
+        "List your currently running subagents (handle, agent, status, age). Finished ones are gone " +
+        "(one-shot); their result already arrived in the wake notice.",
       args: {},
       execute: guard("list", listHandler),
     }),
 
-    list_open: tool({
+    todos_open: tool({
       description:
-        "List open + blocked tasks from TODO.md in the project root, with their stable id (T5, R2, …) " +
-        "and any `accept:` criterion. Errors if TODO.md doesn't exist (greenfield — run planner first). " +
-        "Available to every agent so subagents can see fresh state without re-spawn.",
+        "Return open + blocked tasks from TODO.md (id, text, accept-criterion). Call this for any " +
+        "TODO.md status question. Do NOT spawn a subagent to read TODO.md.",
       args: {},
-      execute: guard("list_open", listOpenHandler),
+      execute: guard("todos_open", listOpenHandler),
     }),
 
-    mark_done: tool({
+    todo_done: tool({
       description:
-        "Mark a TODO.md task as done — flips `- [ ] T5` to `- [x] T5`. Idempotent. Orchestrator-only " +
-        "(the wake-hook auto-calls this when a subagent's reply starts with `DONE: T<n>` matching " +
-        "its spawn id; use this tool manually only when the marker was missing or wrong).",
+        "Flip a TODO.md task to done (`- [ ] T5` → `- [x] T5`). Idempotent. Orchestrator-only. " +
+        "The wake-hook calls this automatically when a subagent's reply starts with " +
+        "`DONE: T<n>` matching its spawn id — call it yourself only for corrections.",
       args: {
         id: z.string().describe("Task id, e.g. T5 or R2"),
       },
-      execute: guard("mark_done", markDoneHandler),
+      execute: guard("todo_done", todoDoneHandler),
     }),
 
-    mark_blocked: tool({
+    todo_block: tool({
       description:
-        "Mark a TODO.md task as blocked — flips its line to `- [!] T5 … (blocked: <reason>)`. " +
-        "Idempotent. Orchestrator-only (the wake-hook auto-calls this when a subagent's reply " +
-        "starts with `BLOCKED: T<n> — <reason>`; use this manually for corrections).",
+        "Flip a TODO.md task to blocked (`- [!] T5 … (blocked: <reason>)`). Idempotent. " +
+        "Orchestrator-only. The wake-hook calls this automatically on `BLOCKED: T<n> — <reason>` " +
+        "in a subagent reply — call it yourself only for corrections.",
       args: {
         id: z.string().describe("Task id, e.g. T5 or R2"),
         reason: z.string().describe("One-line reason why the task is blocked"),
       },
-      execute: guard("mark_blocked", markBlockedHandler),
+      execute: guard("todo_block", todoBlockHandler),
     }),
 
     ...(isWebsearchEnabled() ? { web_search: createWebsearchTool() } : {}),

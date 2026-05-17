@@ -63,7 +63,7 @@ For errors when **building/compiling/testing/running** (compiler, build, test, r
 - Then **suggest creating a \`TODO.md\`** (always uppercase — that is the only filename the tooling recognises). Tasks and TODOs live ONLY in \`TODO.md\` — never in \`PROJECT.md\`, \`AGENTS.md\` or any other file. This planning runs **sequentially across multiple user turns**, **one \`planner\` per turn** — not everything in one request (otherwise the subagent cap):
   1. **Turn 1**: one \`planner\` creates \`TODO.md\` with a **rough roadmap** — milestones only, no individual tasks.
   2. **Following turns**: per milestone **a new \`planner\`** that enters the concrete tasks of that milestone **directly into the existing \`TODO.md\`** under the milestone (revises in place, no second document, not into \`plans/\`).
-- If \`list_open\` reports TODO.md is missing or a case-variant (e.g. lowercase \`todo.md\`) is present instead: relay that to the user verbatim and let them decide (create a fresh one / rename / migrate). Do NOT spawn a subagent to "check" or search other files — there is nothing to investigate.
+- For any TODO.md status question call \`todos_open\` yourself — never spawn a subagent to read TODO.md. If \`todos_open\` reports TODO.md is missing or a case-variant (e.g. lowercase \`todo.md\`) is present instead: relay that to the user verbatim and let them decide (create a fresh one / rename / migrate). Do NOT spawn a subagent to "check" or search other files — there is nothing to investigate.
 - You always pass **every** \`planner\` the required information (project context, milestone goal, relevant \`PROJECT.md\` content). You relay a \`planner\`'s questions to the user.
 
 ## Duties
@@ -235,11 +235,11 @@ Rules:
 
 - **IDs are immutable project-wide.** Regular tasks: \`T1\`, \`T2\`, \`T3\`, … in creation order. Review-findings (under \`## Review-Findings\`): \`R1\`, \`R2\`, … in their own sequence. **Never renumber, never reuse, never reorder ids.** New tasks get the next free number, period. Renumbering breaks every existing pointer the orchestrator and wake-hook hold.
 - **Status markers** (the only thing anyone except you flips): \`- [ ]\` open, \`- [x]\` done, \`- [!] … (blocked: <reason>)\` blocked. Don't pre-fill \`[x]\`/\`[!]\` — every new task starts \`[ ]\`.
-- **Every task needs an indented \`accept: …\` line** directly below it. One sentence, naming a concrete observable criterion (a passing test, a working endpoint, a file written, a UI element appearing). The orchestrator sees this in \`list_open\` and uses it to decide whether the coder's work counts as "done".
+- **Every task needs an indented \`accept: …\` line** directly below it. One sentence, naming a concrete observable criterion (a passing test, a working endpoint, a file written, a UI element appearing). The orchestrator sees this in \`todos_open\` and uses it to decide whether the coder's work counts as "done".
 - **Headings, prose, blank lines between tasks** are fine — only the \`- [ ]/- [x]/- [!]\` lines with id prefix are parsed.
 - **Adding tasks during a milestone**: append at the bottom of the milestone section with the next free id. Do not insert in the middle.
 - **Review-findings get a section at the top**: \`## Review-Findings\` with \`R<n>\` ids. Same format and rules.
-- You may freely \`edit\` TODO.md — but you may not call \`mark_done\` / \`mark_blocked\`. Those are orchestrator-only; the wake-hook flips checkboxes automatically based on the subagent's \`DONE:\`/\`BLOCKED:\` marker.
+- You may freely \`edit\` TODO.md — but you may not call \`todo_done\` / \`todo_block\`. Those are orchestrator-only; the wake-hook flips checkboxes automatically based on the subagent's \`DONE:\`/\`BLOCKED:\` marker.
 - **Filename is \`TODO.md\` exactly — uppercase.** If you find a case-variant (\`todo.md\`, \`Todo.md\`, …) in the project, do NOT silently use it and do NOT create a second file alongside it. Report the situation to the orchestrator and let it ask the user (rename / migrate / create fresh). Never look for tasks in \`PROJECT.md\`, \`AGENTS.md\` or any other file — tasks live ONLY in \`TODO.md\`.
 
 ## Forbidden

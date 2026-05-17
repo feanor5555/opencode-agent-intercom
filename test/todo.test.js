@@ -2,9 +2,9 @@
 //
 // Drives the plugin end-to-end against a real tmp directory + real TODO.md
 // file, exercising: spawn extracting task-id, duplicate rejection, missing-
-// prefix rejection when TODO.md exists, wake-hook auto-ticking on DONE/BLOCKED
-// markers, marker mismatch, no-marker, aborted-session, list_open + mark_done
-// tools, subagent denial of mark_done. Plus a few todofile parser unit tests.
+// optional T-prefix extraction, wake-hook auto-ticking on DONE/BLOCKED markers,
+// marker mismatch, no-marker, aborted-session, todos_open + todo_done tools,
+// subagent denial of todo_done. Plus a few todofile parser unit tests.
 //
 // Run: node --test test/todo.test.js
 
@@ -254,18 +254,18 @@ test("spawn extracts the T-id from the prompt's first line", async () => {
   assert.equal(created.length, 1, "the duplicate must NOT have created another session")
 })
 
-test("spawn rejects missing T-prefix when TODO.md exists", async () => {
+test("spawn accepts prefix-less prompts even when TODO.md exists (non-task spawns)", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   const res = await hooks.tool.spawn.execute(
-    { agent: "coder", prompt: "just do the thing without an id" },
+    { agent: "coder", prompt: "summarize what src/foo.js exports" },
     primaryCtx,
   )
-  assert.match(res.output, /Spawn refused: TODO\.md exists/)
-  assert.equal(created.length, 0)
+  assert.match(res.output, /Spawned subagent "coder#1"/)
+  assert.equal(created.length, 1)
 })
 
-test("spawn allows missing T-prefix in greenfield (no TODO.md)", async () => {
+test("spawn accepts prefix-less prompts in greenfield (no TODO.md)", async () => {
   removeTodo()
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
@@ -426,34 +426,34 @@ test("wake-hook tolerates marker for a spawn without task-id (greenfield)", asyn
 
 // ---------- tool exposure + guards ------------------------------------------
 
-test("list_open tool returns open tasks with their accept-criterion", async () => {
+test("todos_open tool returns open tasks with their accept-criterion", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  const res = await hooks.tool.list_open.execute({}, primaryCtx)
+  const res = await hooks.tool.todos_open.execute({}, primaryCtx)
   assert.match(res.output, /OPEN T1\. add export endpoint/)
   assert.match(res.output, /accept: GET \/export returns 200 with JSON/)
   assert.match(res.output, /OPEN R1\. drop unused dependency/)
   assert.doesNotMatch(res.output, /T3/, "done tasks must be filtered out")
 })
 
-test("list_open errors clearly when TODO.md does not exist", async () => {
+test("todos_open errors clearly when TODO.md does not exist", async () => {
   removeTodo()
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  const res = await hooks.tool.list_open.execute({}, primaryCtx)
+  const res = await hooks.tool.todos_open.execute({}, primaryCtx)
   assert.match(res.output, /TODO\.md not found/)
   assert.match(res.output, /Tasks\/TODOs live ONLY in TODO\.md/)
   assert.match(res.output, /never AGENTS\.md/)
   assert.match(res.output, /Do NOT spawn a subagent/)
 })
 
-test("list_open surfaces case-variant todo.md with rename/migrate options", async () => {
+test("todos_open surfaces case-variant todo.md with rename/migrate options", async () => {
   removeTodo()
   writeFileSync(join(projectDir, "todo.md"), "- [ ] T1. legacy lowercase task\n")
   try {
     const { ctx } = makeCtx()
     const hooks = await plugin(ctx)
-    const res = await hooks.tool.list_open.execute({}, primaryCtx)
+    const res = await hooks.tool.todos_open.execute({}, primaryCtx)
     assert.match(res.output, /case-variant "todo\.md"/)
     assert.match(res.output, /rename "todo\.md" to TODO\.md/)
     assert.match(res.output, /create a fresh empty TODO\.md/)
@@ -465,39 +465,39 @@ test("list_open surfaces case-variant todo.md with rename/migrate options", asyn
   }
 })
 
-test("mark_done tool flips T2 and is idempotent", async () => {
+test("todo_done tool flips T2 and is idempotent", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  const a = await hooks.tool.mark_done.execute({ id: "T2" }, primaryCtx)
+  const a = await hooks.tool.todo_done.execute({ id: "T2" }, primaryCtx)
   assert.match(a.output, /T2 marked done/)
-  const b = await hooks.tool.mark_done.execute({ id: "T2" }, primaryCtx)
+  const b = await hooks.tool.todo_done.execute({ id: "T2" }, primaryCtx)
   assert.match(b.output, /T2 was already \[x\]/)
 })
 
-test("mark_done rejects malformed ids", async () => {
+test("todo_done rejects malformed ids", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  const res = await hooks.tool.mark_done.execute({ id: "task-5" }, primaryCtx)
+  const res = await hooks.tool.todo_done.execute({ id: "task-5" }, primaryCtx)
   assert.match(res.output, /id must look like T5 or R2/)
 })
 
-test("mark_done errors when id is not present in TODO.md", async () => {
+test("todo_done errors when id is not present in TODO.md", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  const res = await hooks.tool.mark_done.execute({ id: "T42" }, primaryCtx)
+  const res = await hooks.tool.todo_done.execute({ id: "T42" }, primaryCtx)
   assert.match(res.output, /T42 not found/)
 })
 
-test("PRIMARY_TOOLS now include list_open/mark_done/mark_blocked", async () => {
+test("PRIMARY_TOOLS now include todos_open/todo_done/todo_block", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   // The orchestrator may call all three without being denied as "non-orchestration".
-  for (const t of ["list_open", "mark_done", "mark_blocked"]) {
+  for (const t of ["todos_open", "todo_done", "todo_block"]) {
     await hooks["tool.execute.before"]({ tool: t, sessionID: "ses_primary", callID: `p-${t}` })
   }
 })
 
-test("subagents are DENIED from calling mark_done/mark_blocked", async () => {
+test("subagents are DENIED from calling todo_done/todo_block", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute(
@@ -505,17 +505,17 @@ test("subagents are DENIED from calling mark_done/mark_blocked", async () => {
     primaryCtx,
   )
   const subID = created[0]
-  // subagent calling mark_done -> denied
+  // subagent calling todo_done -> denied
   await assert.rejects(
-    () => hooks["tool.execute.before"]({ tool: "mark_done", sessionID: subID, callID: "s1" }),
+    () => hooks["tool.execute.before"]({ tool: "todo_done", sessionID: subID, callID: "s1" }),
     /orchestrator-only/,
   )
   await assert.rejects(
-    () => hooks["tool.execute.before"]({ tool: "mark_blocked", sessionID: subID, callID: "s2" }),
+    () => hooks["tool.execute.before"]({ tool: "todo_block", sessionID: subID, callID: "s2" }),
     /orchestrator-only/,
   )
-  // but list_open IS allowed for subagents (read-only)
-  await hooks["tool.execute.before"]({ tool: "list_open", sessionID: subID, callID: "s3" })
+  // but todos_open IS allowed for subagents (read-only)
+  await hooks["tool.execute.before"]({ tool: "todos_open", sessionID: subID, callID: "s3" })
 })
 
 // ---------- sanity: the file path is the project root -----------------------

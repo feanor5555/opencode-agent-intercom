@@ -37,6 +37,86 @@ export function projectContext(directory) {
 // Test-only: clears the cache so a test can point at a fresh fixture directory.
 export function resetProjectContext() {
   cache.clear()
+  specCache.clear()
+}
+
+// A compact PROJECT.md-driven spec block intended for the SYSTEM PROMPT of every
+// agent (orchestrator and subagents alike). Goal: keep ports, key files, runtime
+// facts visible on every turn so the model can't fall back on training-set
+// defaults (e.g. "Spring Boot runs on 8080", "Postgres on 5432") when this project
+// uses different values. The block stays small — full doc still lives in
+// PROJECT.md.
+//
+// When PROJECT.md is absent we still inject a short notice: the spec is unknown,
+// and the agent must source operational facts from project files (or escalate
+// via MISSING). That stops silent halluzination just as well as the present case.
+//
+// Cached per directory to keep transformSystem cheap.
+const SPEC_MAX = 1500
+const specCache = new Map()
+
+export function projectSpecBlock(directory) {
+  if (!ENABLED) return ""
+  const key = directory ?? ""
+  if (specCache.has(key)) return specCache.get(key)
+  const value = directory ? buildSpec(directory) : ""
+  specCache.set(key, value)
+  return value
+}
+
+// Test-only: drops a single directory's spec cache so a test can mutate the
+// PROJECT.md on disk and see the next call re-read it.
+export function forgetProjectSpec(directory) {
+  specCache.delete(directory ?? "")
+}
+
+function buildSpec(directory) {
+  try {
+    if (!existsSync(join(directory, "PROJECT.md"))) {
+      return (
+        "\n\n---\n📌 agent-intercom: project spec.\n" +
+        `root: ${directory}\n` +
+        "PROJECT.md: NOT PRESENT — operational facts (ports, URLs, key config paths, " +
+        "framework versions) are NOT specified for this project. Do NOT fall back on " +
+        "framework defaults from your training (e.g. \"Spring Boot port 8080\", \"Postgres " +
+        "port 5432\") — those are almost certainly wrong here. Source any fact you need " +
+        "from the actual project files (application.properties / application.yml / .env / " +
+        "docker-compose.yml / pom.xml / package.json / config/*). When still unknown, " +
+        "stop and report `MISSING: <fact>` (subagents: `BLOCKED: T<n> — MISSING: <fact>` " +
+        "on the first line) so the orchestrator can spawn a planner to specify it.\n" +
+        "---\n"
+      )
+    }
+    const excerpt = projectMdExcerpt(directory)
+    if (!excerpt) {
+      return (
+        "\n\n---\n📌 agent-intercom: project spec.\n" +
+        `root: ${directory}\n` +
+        "PROJECT.md exists but contains none of the operational sections (Status / Runtime " +
+        "facts / Key files / External links). Treat operational facts as unspecified: source " +
+        "them from project files, do not guess framework defaults. If you can't resolve a " +
+        "fact, report `MISSING: <fact>` (subagents: `BLOCKED: T<n> — MISSING: <fact>` first " +
+        "line).\n---\n"
+      )
+    }
+    const capped =
+      excerpt.length > SPEC_MAX
+        ? excerpt.slice(0, SPEC_MAX) + "\n… (PROJECT.md spec truncated — read PROJECT.md for the rest)"
+        : excerpt
+    return (
+      "\n\n---\n📌 agent-intercom: project spec (from PROJECT.md, authoritative for ports, " +
+      "URLs, key files, framework versions). Use these values verbatim — do NOT substitute " +
+      "training-set defaults. If a fact you need is not below, read the actual project file; " +
+      "if still unknown, report `MISSING: <fact>` (subagents: `BLOCKED: T<n> — MISSING: <fact>` " +
+      "first line) so a planner can add it.\n" +
+      `root: ${directory}\n\n` +
+      capped +
+      "\n---\n"
+    )
+  } catch (err) {
+    log("projectSpecBlock failed", errMsg(err))
+    return ""
+  }
 }
 
 function build(directory) {
@@ -47,11 +127,14 @@ function build(directory) {
     // When PROJECT.md exists, name/description are already authoritative there
     // (Runtime facts + Key files supersede package.json identity); echoing them
     // here just doubles the bytes the subagent sees on every spawn.
-    const meta = hasProjectMd(directory) ? "" : packageMeta(directory)
+    const projectMd = hasProjectMd(directory)
+    const meta = projectMd ? "" : packageMeta(directory)
+    const excerpt = projectMd ? projectMdExcerpt(directory) : ""
     return (
       "--- agent-intercom: project context (auto-provided, for orientation) ---\n" +
       `root: ${directory}\n` +
       (meta ? meta + "\n" : "") +
+      (excerpt ? `PROJECT.md excerpt — authoritative for ports, files, links:\n${excerpt}\n\n` : "") +
       `file tree (depth ${MAX_DEPTH}, vendored/build dirs omitted):\n` +
       tree +
       (truncated ? "\n… (tree truncated)" : "") +
@@ -69,6 +152,56 @@ function hasProjectMd(directory) {
   } catch {
     return false
   }
+}
+
+// Pulls the operational sections out of PROJECT.md so every subagent gets ports,
+// key file paths, external links, and current phase/milestone inline — no need
+// for the orchestrator to remember and re-tip-toe these into every spawn prompt.
+// Total excerpt is capped so it doesn't dominate the context.
+const PROJECT_MD_SECTIONS = ["Status", "Runtime facts", "Key files", "External links"]
+const PROJECT_MD_MAX = 2000
+
+function projectMdExcerpt(directory) {
+  try {
+    const content = readFileSync(join(directory, "PROJECT.md"), "utf8")
+    const out = []
+    for (const name of PROJECT_MD_SECTIONS) {
+      const slice = extractMdSection(content, name)
+      if (slice) out.push(slice)
+    }
+    if (out.length === 0) return ""
+    const joined = out.join("\n\n")
+    return joined.length > PROJECT_MD_MAX
+      ? joined.slice(0, PROJECT_MD_MAX) + "\n… (PROJECT.md excerpt truncated)"
+      : joined
+  } catch {
+    return ""
+  }
+}
+
+function extractMdSection(content, name) {
+  const lines = content.split("\n")
+  const startRe = new RegExp(`^##\\s+${escapeRegex(name)}\\b`, "i")
+  let start = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (startRe.test(lines[i])) {
+      start = i
+      break
+    }
+  }
+  if (start === -1) return ""
+  let end = lines.length
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) {
+      end = i
+      break
+    }
+  }
+  return lines.slice(start, end).join("\n").trim()
+}
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
 function treeLines(dir, prefix, depth) {

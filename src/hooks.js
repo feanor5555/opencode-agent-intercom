@@ -10,9 +10,10 @@ import {
   removeEntry,
   countActiveSubagents,
 } from "./registry.js"
-import { fetchSnapshot, postNotice, showToast, deleteSession, forgetSessionDirectory } from "./client.js"
+import { fetchSnapshot, postNotice, showToast, deleteSession, forgetSessionDirectory, getSessionDirectory } from "./client.js"
 import { getSettings } from "./settings.js"
 import { markDone, markBlocked, todoFilePath } from "./todofile.js"
+import { projectSpecBlock } from "./project.js"
 import { existsSync } from "node:fs"
 import { log, errMsg } from "./log.js"
 import {
@@ -50,17 +51,20 @@ const SUBAGENT_DENIED_TOOLS = new Set(["todo_done", "todo_block"])
 const OUTLINE_DISABLED_AGENTS = new Set(["designer", "gitter"])
 
 // Subagents that get AGENTS.md content preserved in their system prompt.
-// Others (researcher / designer / gitter) work on tasks where the project's
-// `AGENTS.md` is irrelevant — web research, image generation, git operations —
-// so we strip the ~17 KB block from their system prompt. They can still `read`
-// AGENTS.md on demand if a task happens to need it. Orchestrator is treated
-// as "primary" further down and always keeps AGENTS.md.
+// Others strip the ~17 KB block — they can still `read` AGENTS.md on demand
+// if a task happens to need it. Orchestrator is treated as "primary" further
+// down and always keeps AGENTS.md.
+//   - coder / debugger / reviewer keep it: build/test commands, code style,
+//     PR rules are central to their work.
+//   - planner / documenter strip it: planner writes design docs and is told
+//     in its role prompt to reference AGENTS.md via Sources when relevant;
+//     documenter writes user-facing docs that rarely need dev conventions.
+//   - researcher / designer / gitter strip it: web research, image
+//     generation, git operations don't need project code conventions.
 const AGENTS_MD_SUBAGENTS = new Set([
-  "planner",
   "coder",
   "debugger",
   "reviewer",
-  "documenter",
 ])
 
 // How long an entry's ctxTokens stays valid before the transform hook re-fetches
@@ -112,6 +116,13 @@ export function createTransformSystem(client) {
       // Parse opencode's combined system into the three slices we care about.
       const slices = parseOpencodeSystem(output.system)
 
+      // Resolve the session's directory so we can inject the project-spec block.
+      // Subagents already have it on their registry entry (captured at spawn);
+      // primaries are looked up via the session API (cached per session).
+      const sessionDir = isSubagent
+        ? entry.directory
+        : await getSessionDirectory(client, sessionID)
+
       // Compose our guide tail
       const guideParts = []
       if (aborted.has(sessionID)) guideParts.push(ABORT_NOTICE)
@@ -121,11 +132,17 @@ export function createTransformSystem(client) {
           if (!OUTLINE_DISABLED_AGENTS.has(entry.agent)) {
             guideParts.push(SUBAGENT_OUTLINE_GUIDE)
           }
+          // The spec block sits AFTER the guide so the rules above frame how to
+          // read it. Same placement for orchestrator below.
+          const spec = projectSpecBlock(sessionDir)
+          if (spec) guideParts.push(spec)
         }
         const limit = await contextLimitNotice(client, entry)
         if (limit) guideParts.push(limit)
       } else {
         guideParts.push(ORCHESTRATION_GUIDE)
+        const spec = projectSpecBlock(sessionDir)
+        if (spec) guideParts.push(spec)
         guideParts.push(formatLimitsNotice())
         const snapshot = formatSubagentSnapshot(sessionID)
         if (snapshot) guideParts.push(snapshot)

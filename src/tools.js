@@ -352,23 +352,27 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
 
     todo_done: tool({
       description:
-        "Flip a TODO.md task to done (`- [ ] T5` → `- [x] T5`). Idempotent. Orchestrator-only. " +
-        "The wake-hook calls this automatically when a subagent's reply starts with " +
-        "`DONE: T<n>` matching its spawn id — call it yourself only for corrections.",
+        "Correction-only tool. Flip a TODO.md task to done. The wake-hook already calls this " +
+        "automatically when a subagent's reply starts with `DONE: T<n>` matching its spawn id, " +
+        "so call this yourself only when (a) the wake notice contained `marker IGNORED` / " +
+        "`NOT auto-ticked` / `auto-tick failed`, or (b) the user explicitly asks for the change. " +
+        "For listing what's open, call `todos_open` instead.",
       args: {
-        id: z.string().describe("Task id, e.g. T5 or R2"),
+        id: z.string().describe("Task id from TODO.md, e.g. T5 or R2 — must already exist in the file"),
       },
       execute: guard("todo_done", todoDoneHandler),
     }),
 
     todo_block: tool({
       description:
-        "Flip a TODO.md task to blocked (`- [!] T5 … (blocked: <reason>)`). Idempotent. " +
-        "Orchestrator-only. The wake-hook calls this automatically on `BLOCKED: T<n> — <reason>` " +
-        "in a subagent reply — call it yourself only for corrections.",
+        "Correction-only tool. Flip a TODO.md task to blocked. The wake-hook already calls this " +
+        "automatically when a subagent's reply starts with `BLOCKED: T<n> — <reason>` matching " +
+        "its spawn id, so call this yourself only when (a) the wake notice contained `marker " +
+        "IGNORED` / `NOT auto-ticked` / `auto-tick failed`, or (b) the user explicitly asks for " +
+        "the change. For listing what's open, call `todos_open` instead.",
       args: {
-        id: z.string().describe("Task id, e.g. T5 or R2"),
-        reason: z.string().describe("One-line reason why the task is blocked"),
+        id: z.string().describe("Task id from TODO.md, e.g. T5 or R2 — must already exist in the file"),
+        reason: z.string().describe("One-line reason. Use exactly what the user or the failed wake notice gave; do not infer one from prior context."),
       },
       execute: guard("todo_block", todoBlockHandler),
     }),

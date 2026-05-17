@@ -26,23 +26,23 @@ import { tokens as fmtTokens, ageSeconds } from "./format.js"
 // The only tools a primary session may execute — everything else must be
 // delegated to a subagent. The intercom tools plus `glob`/`grep` so the
 // orchestrator can orient itself (read directory trees, search) without doing
-// actual work itself; plus the TODO.md trio (list/mark) so it can track work.
+// actual work itself; plus the TODO.md trio (read + flip) so it can track work.
 const PRIMARY_TOOLS = new Set([
   "spawn",
   "abort",
   "list",
   "glob",
   "grep",
-  "list_open",
-  "mark_done",
-  "mark_blocked",
+  "todos_open",
+  "todo_done",
+  "todo_block",
 ])
 
 // Status-mutating tools that subagents must NOT call. They may read TODO.md
-// via `list_open`, but only the orchestrator (or the wake-hook on its behalf)
+// via `todos_open`, but only the orchestrator (or the wake-hook on its behalf)
 // flips checkboxes — single-writer keeps the file race-free and prevents a
 // confused subagent from ticking the wrong task.
-const SUBAGENT_DENIED_TOOLS = new Set(["mark_done", "mark_blocked"])
+const SUBAGENT_DENIED_TOOLS = new Set(["todo_done", "todo_block"])
 
 // Subagents whose tool gating disables `outline` — they neither read source
 // code nor have the outline tool to call. Skip the outline-discipline block
@@ -493,7 +493,7 @@ function taskOutcomeLine(outcome) {
       return (
         "\n⚠️ TODO.md: this subagent had a task id but its reply did NOT start with " +
         "`DONE: <id>` or `BLOCKED: <id>`. The task was NOT auto-ticked. Verify the work " +
-        "and call `mark_done(id)` or `mark_blocked(id, reason)` yourself if appropriate."
+        "and call `todo_done(id)` or `todo_block(id, reason)` yourself if appropriate."
       )
     case "mismatch":
       return (
@@ -566,7 +566,7 @@ export function createGuardToolExecute(client) {
         log("denied status-mutating tool from subagent", { sessionID, tool: input.tool })
         throw new Error(
           `agent-intercom: \`${input.tool}\` is orchestrator-only. Subagents can read TODO.md ` +
-            "via `list_open` but only the orchestrator (or the wake-hook on its behalf) flips " +
+            "via `todos_open` but only the orchestrator (or the wake-hook on its behalf) flips " +
             "checkboxes. End your reply with `DONE: T<n>` or `BLOCKED: T<n> — <reason>` on the " +
             "FIRST line of your final message; the wake-hook will tick the task automatically.",
         )

@@ -114,7 +114,7 @@ export function parseTasks(content) {
 }
 
 // All non-`done` tasks (open + blocked). Each has its accept-criterion attached
-// so the orchestrator's `list_open` reply gives the caller everything needed to
+// so the orchestrator's `todos_open` reply gives the caller everything needed to
 // pick the next task without a separate `read` of TODO.md.
 export function listOpen(directory) {
   const content = readTodoFile(directory)

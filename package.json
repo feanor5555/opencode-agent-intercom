@@ -1,6 +1,6 @@
 {
   "name": "opencode-agent-intercom",
-  "version": "1.7.0",
+  "version": "1.7.2",
   "description": "OpenCode plugin that gives the primary agent a bidirectional control channel to running subagents — async spawn, message injection, live status and abort.",
   "type": "module",
   "main": "src/index.js",

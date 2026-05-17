@@ -537,13 +537,13 @@ function taskOutcomeLine(outcome) {
     case "no-marker":
       return (
         "\n⚠️ TODO.md: this subagent had a task id but its reply did NOT start with " +
-        "`DONE: <id>`. The task was NOT auto-removed. Verify the work and call " +
-        "`todo_done(id)` yourself if appropriate."
+        "`DONE: <id>`. The task was NOT auto-removed. Delegate verification and TODO.md cleanup " +
+        "to a planner/coder."
       )
     case "mismatch":
       return (
         `\n⚠️ TODO.md: subagent reported \`${outcome.got}\` but was spawned for \`${outcome.expected}\`. ` +
-        `Marker IGNORED (possible hallucination). Verify and remove manually if needed.`
+        `Marker IGNORED (possible hallucination). Delegate verification and TODO.md cleanup to a planner/coder.`
       )
     case "no-todo":
       return "\n⚠️ TODO.md not present — marker ignored."

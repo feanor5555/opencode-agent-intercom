@@ -24,9 +24,10 @@ const ORCHESTRATOR_PROMPT = `# Role: Orchestrator
 
 Your only job is to delegate work to subagents — you have three tools (spawn, abort, list) and nothing else.
 Available subagents: planner, coder, debugger, reviewer, documenter, researcher, designer, gitter.
-Pick by artifact: planner for plans/design docs/TODO.md/file lookups, coder for code changes, debugger for error root-cause diagnosis, reviewer for review docs under reviews/, documenter for user-facing docs, researcher for web research, designer for images via gen, gitter for git operations.
-When you cannot match a request to an obvious agent, give it to coder.
-Spawn prompts are written in English; reply to the user in the user's language.`
+Pick by artifact: planner for plans/design docs/tasks/todos/file lookups/projectinformation/softwarearchitecture, coder for code, debugger for error root-cause diagnosis, reviewer for review code/, documenter for user-facing docs, researcher for web search, designer for images via gen, gitter for git operations. if you are not sure use planner.
+Spawn prompts are written in English; reply to the user in the user's language.
+
+You orchestrate coding projects. You ask the planner for the rough project description. If none exists yet, you point this out to the user.`
 
 // The six TODO-owning subagents (planner/coder/debugger/reviewer/documenter/
 // designer) share the same paragraph so behaviour stays consistent: read with
@@ -43,6 +44,7 @@ const TODO_TOOLS_BLOCK =
 const PLANNER_PROMPT = `# Role: Planner (Subagent)
 
 You write concept and design documents — you implement nothing, no edits in src/, no shell commands.
+The rough project description lives only in PROJECT.md. When asked for it, return what is in PROJECT.md; if PROJECT.md is empty or only the default stub, say so explicitly instead of guessing from the code.
 Plan features as thin vertical slices: each slice runs and is testable on its own, cutting through every layer; one slice per task, no large multi-slice tasks.
 Before any library or framework choice, search current stable versions and compatibility with web_search and use only URLs the search returned.
 ${TODO_TOOLS_BLOCK}
@@ -87,7 +89,7 @@ Final reply: one short paragraph naming the file path and the kind of update (cr
 const RESEARCHER_PROMPT = `# Role: Researcher (Subagent)
 
 You do web research — searches via the \`web_search\` tool, fetches via \`webfetch\`; never curl/wget, never recall URLs from memory.
-Use ONLY URLs the search returned; pick 1–3 of the results.
+Use ONLY URLs the search returned; pick 5–10 of the results.
 For version questions, check the source date and treat hits older than a year with skepticism; for conflicting sources name both.
 For zero hits, try different terms and report honestly if nothing reliable was found.
 Final reply: first line \`DONE: T<n>\` when you completed the task, then a short paragraph or 3–6 bullets, then a \`Sources:\` line listing the URLs you actually consulted.`
@@ -147,7 +149,7 @@ export const AGENTS = {
       "Diagnoses build/test/runtime errors. Finds the root cause but does not fix it itself.",
     mode: "subagent",
     temperature: 0.2,
-    permission: { edit: "deny" },
+    permission: { edit: "deny", write: "deny" },
     prompt: DEBUGGER_PROMPT,
   },
   reviewer: {
@@ -172,7 +174,9 @@ export const AGENTS = {
     mode: "subagent",
     temperature: 0.3,
     permission: {
-      edit: "deny", bash: "deny",
+      read: "deny", edit: "deny", write: "deny", bash: "deny",
+      glob: "deny", grep: "deny", list: "deny",
+      outline: "deny", task: "deny",
       todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
     },
     prompt: RESEARCHER_PROMPT,
@@ -191,7 +195,7 @@ export const AGENTS = {
     mode: "subagent",
     temperature: 0.2,
     permission: {
-      edit: "deny", webfetch: "deny", websearch: "deny", web_search: "deny", outline: "deny",
+      edit: "deny", write: "deny", webfetch: "deny", websearch: "deny", web_search: "deny", outline: "deny",
       todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
     },
     prompt: GITTER_PROMPT,

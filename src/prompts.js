@@ -28,8 +28,6 @@ export const ORCHESTRATION_GUIDE =
   "After spawn your turn ends — you are woken when the subagent finishes. Spawn independent subagents back-to-back so they run in parallel; a refused spawn means you are at the concurrency cap.\n" +
   "Do NOT verify a subagent's work with another spawn in the same turn — the work is not done yet.\n" +
   "\n" +
-  "Wake-hook auto-removes: when a subagent's reply starts with `DONE: T<n>` matching its spawn id, the wake-hook removes that task from TODO.md. When the wake notice says `marker IGNORED` / `auto-remove failed`, spawn a planner / coder / debugger / reviewer to correct TODO.md.\n" +
-  "\n" +
   "A live snapshot of your active subagents is injected below — reference subagents by the handle from that snapshot in abort.\n---\n"
 
 // Injected into every subagent session so subagents share basic working

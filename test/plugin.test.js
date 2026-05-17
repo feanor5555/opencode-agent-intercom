@@ -285,11 +285,11 @@ test("list filters subagents by the caller's parentID — no cross-primary leaka
   assert.doesNotMatch(outB.output, /researcher#1/, "primary B must not see primary A's researcher")
 })
 
-test("orchestration guide exposes the three tools and the DONE marker convention", async () => {
-  // The trimmed guide drops the workflow/phases content and keeps only the
-  // tool list + spawn-prompt format + wake-hook DONE-marker convention.
-  // Anything project-specific now lives in the project's AGENTS.md or in the
-  // user's edited per-agent prompt file — not in the plugin's static guide.
+test("orchestration guide exposes the three tools and stays free of TODO mechanics", async () => {
+  // The trimmed guide lists only the tool protocol + spawn-prompt format.
+  // TODO/DONE-marker mechanics are NOT documented in the orchestrator guide —
+  // the orchestrator has no TODO tools and the wake-notice self-explains when
+  // a marker is missing or mismatched.
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   const out = { system: ["base prompt"] }
@@ -298,7 +298,8 @@ test("orchestration guide exposes the three tools and the DONE marker convention
   assert.match(joined, /spawn\(agent, prompt\)/, "guide must list spawn")
   assert.match(joined, /abort\(handle\)/, "guide must list abort")
   assert.match(joined, /\blist\(\)/, "guide must list list()")
-  assert.match(joined, /DONE: T<n>/, "guide must document the auto-remove marker")
+  assert.doesNotMatch(joined, /DONE:/, "guide must not mention DONE-marker mechanics anymore")
+  assert.doesNotMatch(joined, /todo_done|todos_open|todo_add|todo_edit/, "guide must not mention TODO tools")
   assert.doesNotMatch(joined, /BLOCKED/, "the blocked feature is gone — guide must not mention it")
 })
 

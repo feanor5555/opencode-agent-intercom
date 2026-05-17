@@ -54,12 +54,12 @@ const projectMdCache = new Map()
 // the user wants the LLM to see — those labels also nudge subagents toward
 // the right file when they look for architecture vs. task content.
 const DEFAULT_PROJECT_MD =
-  "# Projekt\n" +
+  "# Project\n" +
   "\n" +
-  "## Dokumente\n" +
+  "## Documents\n" +
   "\n" +
-  "- [ARCHITECTURE.md](ARCHITECTURE.md) — zentrale Datei für die Softwarearchitektur.\n" +
-  "- [TODO.md](TODO.md) — zentrale Datei für Task/TODOs.\n"
+  "- [ARCHITECTURE.md](ARCHITECTURE.md) — canonical file for software architecture.\n" +
+  "- [TODO.md](TODO.md) — canonical file for tasks/TODOs.\n"
 
 // Bootstraps the three project documents at `directory`:
 //   - PROJECT.md   → DEFAULT_PROJECT_MD (with links to the other two)

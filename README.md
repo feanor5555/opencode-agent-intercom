@@ -2,7 +2,12 @@
 
 > **Make your local LLM ship real features. Without the wait. Without the context bloat.**
 
-You spin up a 14B model on your own hardware, point
+**Built for local LLMs in the 3–40 B range** (currently tested daily on a 9 B
+model). Designed around the failure modes of small models — short contexts,
+shaky planning, weak tool selection — not retrofitted from a frontier-model
+pattern.
+
+You spin up a local model on your own hardware, point
 [opencode](https://opencode.ai) at it, and… it kind of works. Edits one file,
 then forgets the project. Calls `task`, your terminal hangs for four minutes,
 comes back with garbage. Melts down at 80 % context. You go back to the cloud.

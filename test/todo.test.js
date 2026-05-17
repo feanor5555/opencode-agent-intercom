@@ -488,34 +488,45 @@ test("todo_done errors when id is not present in TODO.md", async () => {
   assert.match(res.output, /T42 not found/)
 })
 
-test("PRIMARY_TOOLS now include todos_open/todo_done/todo_block", async () => {
+test("orchestrator is DENIED from calling todos_open/todo_done/todo_block (planner-only now)", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  // The orchestrator may call all three without being denied as "non-orchestration".
-  for (const t of ["todos_open", "todo_done", "todo_block"]) {
-    await hooks["tool.execute.before"]({ tool: t, sessionID: "ses_primary", callID: `p-${t}` })
+  for (const t of ["todos_open", "todo_done", "todo_block", "glob", "grep"]) {
+    await assert.rejects(
+      () => hooks["tool.execute.before"]({ tool: t, sessionID: "ses_primary", callID: `p-${t}` }),
+      /orchestrator session/,
+      `${t} should be denied for the orchestrator`,
+    )
   }
 })
 
-test("subagents are DENIED from calling todo_done/todo_block", async () => {
+test("planner subagent is ALLOWED to call todo_done/todo_block; other subagents are DENIED", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
+  // coder subagent: denied
   await hooks.tool.spawn.execute(
     { agent: "coder", prompt: "T1: implement the export endpoint" },
     primaryCtx,
   )
-  const subID = created[0]
-  // subagent calling todo_done -> denied
+  const coderID = created[0]
   await assert.rejects(
-    () => hooks["tool.execute.before"]({ tool: "todo_done", sessionID: subID, callID: "s1" }),
-    /orchestrator-only/,
+    () => hooks["tool.execute.before"]({ tool: "todo_done", sessionID: coderID, callID: "s1" }),
+    /planner-only/,
   )
   await assert.rejects(
-    () => hooks["tool.execute.before"]({ tool: "todo_block", sessionID: subID, callID: "s2" }),
-    /orchestrator-only/,
+    () => hooks["tool.execute.before"]({ tool: "todo_block", sessionID: coderID, callID: "s2" }),
+    /planner-only/,
   )
+  // planner subagent: allowed
+  await hooks.tool.spawn.execute(
+    { agent: "planner", prompt: "T2: write the plan" },
+    primaryCtx,
+  )
+  const plannerID = created[1]
+  await hooks["tool.execute.before"]({ tool: "todo_done", sessionID: plannerID, callID: "p1" })
+  await hooks["tool.execute.before"]({ tool: "todo_block", sessionID: plannerID, callID: "p2" })
   // but todos_open IS allowed for subagents (read-only)
-  await hooks["tool.execute.before"]({ tool: "todos_open", sessionID: subID, callID: "s3" })
+  await hooks["tool.execute.before"]({ tool: "todos_open", sessionID: coderID, callID: "s3" })
 })
 
 // ---------- sanity: the file path is the project root -----------------------

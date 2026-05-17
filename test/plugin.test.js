@@ -189,7 +189,7 @@ test("spawn honors the caller's permission.task allowlist", async () => {
   assert.match(allowed.output, /Spawned subagent "coder#1"/)
 })
 
-test("tool.execute.before restricts a primary to the intercom tools (+ glob/grep)", async () => {
+test("tool.execute.before restricts a primary to the orchestration tools (spawn/abort/list only)", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   // native task -> denied, redirected to spawn
@@ -197,15 +197,18 @@ test("tool.execute.before restricts a primary to the intercom tools (+ glob/grep
     () => hooks["tool.execute.before"]({ tool: "task", sessionID: "ses_primary", callID: "t0" }),
     /spawn/i,
   )
-  // a "do it yourself" tool -> denied (read/edit/write/bash/webfetch/outline)
-  for (const t of ["read", "edit", "write", "bash", "webfetch", "outline"]) {
+  // every "do it yourself" tool, including glob/grep and the TODO trio, is now denied
+  for (const t of [
+    "read", "edit", "write", "bash", "webfetch", "outline",
+    "glob", "grep", "todos_open", "todo_done", "todo_block",
+  ]) {
     await assert.rejects(
       () => hooks["tool.execute.before"]({ tool: t, sessionID: "ses_primary", callID: `d-${t}` }),
       /orchestrator/i,
     )
   }
-  // the intercom tools plus glob/grep pass the guard
-  for (const t of ["spawn", "abort", "list", "glob", "grep"]) {
+  // only the orchestration tools pass the guard
+  for (const t of ["spawn", "abort", "list"]) {
     await hooks["tool.execute.before"]({ tool: t, sessionID: "ses_primary", callID: `a-${t}` })
   }
   // send_message was removed — it must be rejected like any non-orchestration tool
@@ -216,7 +219,7 @@ test("tool.execute.before restricts a primary to the intercom tools (+ glob/grep
 })
 
 test("tool.execute.before denies back-to-back list calls from a primary", async () => {
-  const { ctx } = makeCtx()
+  const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   // first list -> allowed
   await hooks["tool.execute.before"]({ tool: "list", sessionID: "ses_primary", callID: "l1" })
@@ -225,8 +228,9 @@ test("tool.execute.before denies back-to-back list calls from a primary", async 
     () => hooks["tool.execute.before"]({ tool: "list", sessionID: "ses_primary", callID: "l2" }),
     /twice in a row/i,
   )
-  // any other primary tool resets the streak -> list is allowed again
-  await hooks["tool.execute.before"]({ tool: "glob", sessionID: "ses_primary", callID: "g1" })
+  // any other primary tool resets the streak -> list is allowed again. glob is
+  // no longer allowed for primaries, so route through `spawn` (which DOES reset).
+  await hooks["tool.execute.before"]({ tool: "spawn", sessionID: "ses_primary", callID: "sp1" })
   await hooks["tool.execute.before"]({ tool: "list", sessionID: "ses_primary", callID: "l3" })
   // and back-to-back denial still works after the reset
   await assert.rejects(
@@ -281,20 +285,21 @@ test("list filters subagents by the caller's parentID — no cross-primary leaka
   assert.doesNotMatch(outB.output, /researcher#1/, "primary B must not see primary A's researcher")
 })
 
-test("orchestration guide tells the primary to spawn a subagent to read PROJECT.md, not invent it", async () => {
-  // The orchestrator has no read tool. PROJECT.md is the live-state index and
-  // is NOT auto-injected (that would grow unbounded in every LLM call). The
-  // guide must tell the model to spawn a subagent to fetch the file and use
-  // ONLY that authoritative content — never to fabricate values from the user
-  // prompt. (AGENTS.md is conventions-only and IS auto-injected by opencode.)
+test("orchestration guide exposes the three tools and the DONE/BLOCKED marker convention", async () => {
+  // The trimmed guide drops the workflow/phases content and keeps only the
+  // tool list + spawn-prompt format + wake-hook marker convention. Anything
+  // project-specific now lives in the project's AGENTS.md or in the user's
+  // edited per-agent prompt file — not in the plugin's static guide.
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   const out = { system: ["base prompt"] }
   await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, out)
   const joined = out.system.join("")
-  assert.match(joined, /spawn.*coder.*PROJECT\.md/is, "guide must direct the orchestrator to spawn for the read")
-  assert.match(joined, /NEVER invent values|do not invent|never fabricate/i, "guide must forbid inventing PROJECT.md content")
-  assert.match(joined, /PROJECT\.md NOT PRESENT/i, "guide must define the sentinel for missing PROJECT.md")
+  assert.match(joined, /spawn\(agent, prompt\)/, "guide must list spawn")
+  assert.match(joined, /abort\(handle\)/, "guide must list abort")
+  assert.match(joined, /\blist\(\)/, "guide must list list()")
+  assert.match(joined, /DONE: T<n>/, "guide must document the auto-tick marker")
+  assert.match(joined, /BLOCKED: T<n>/, "guide must document the blocked marker")
 })
 
 test("transform hook does not inject the orchestration protocol into a subagent", async () => {
@@ -317,13 +322,13 @@ test("spawn prepends a project-context snapshot to the subagent's task", async (
   assert.match(notices[0], /MY ACTUAL TASK/) // the real task is still there
 })
 
-test("transform hook injects subagent working rules into a subagent session", async () => {
+test("transform hook injects subagent discipline into a subagent session", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
   const out = { system: ["base prompt"] }
   await hooks["experimental.chat.system.transform"]({ sessionID: created[0] }, out)
-  assert.match(out.system.join(""), /working rules for this subagent/i)
+  assert.match(out.system.join(""), /subagent discipline/i)
   assert.match(out.system.join(""), /[Rr]ead.*before editing/)
 })
 

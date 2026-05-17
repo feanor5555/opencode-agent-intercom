@@ -13,7 +13,7 @@ import {
 import { fetchSnapshot, postNotice, showToast, deleteSession, forgetSessionDirectory, getSessionDirectory } from "./client.js"
 import { getSettings } from "./settings.js"
 import { markDone, markBlocked, todoFilePath } from "./todofile.js"
-import { projectSpecBlock } from "./project.js"
+import { projectMdBlock } from "./project.js"
 import { existsSync } from "node:fs"
 import { log, errMsg } from "./log.js"
 import {
@@ -22,28 +22,26 @@ import {
   SUBAGENT_GUIDE_CORE,
   SUBAGENT_OUTLINE_GUIDE,
 } from "./prompts.js"
+import { loadCustomPrompt, applyCustomPrompt } from "./promptsfile.js"
 import { tokens as fmtTokens, ageSeconds } from "./format.js"
 
 // The only tools a primary session may execute — everything else must be
-// delegated to a subagent. The intercom tools plus `glob`/`grep` so the
-// orchestrator can orient itself (read directory trees, search) without doing
-// actual work itself; plus the TODO.md trio (read + flip) so it can track work.
+// delegated to a subagent. Pure orchestration: spawn / abort / list. Even
+// glob, grep, and TODO.md reads are delegated (to the planner), so the
+// orchestrator stays at the coordination layer.
 const PRIMARY_TOOLS = new Set([
   "spawn",
   "abort",
   "list",
-  "glob",
-  "grep",
-  "todos_open",
-  "todo_done",
-  "todo_block",
 ])
 
-// Status-mutating tools that subagents must NOT call. They may read TODO.md
-// via `todos_open`, but only the orchestrator (or the wake-hook on its behalf)
-// flips checkboxes — single-writer keeps the file race-free and prevents a
-// confused subagent from ticking the wrong task.
-const SUBAGENT_DENIED_TOOLS = new Set(["todo_done", "todo_block"])
+// Status-mutating TODO.md tools. Single-writer: only the planner agent (or
+// the wake-hook on its behalf) flips checkboxes. Other subagents may READ
+// TODO.md via `todos_open` but cannot mutate it. Keeping the writer in one
+// agent prevents a confused coder/debugger/reviewer from ticking the wrong
+// task.
+const TODO_WRITE_TOOLS = new Set(["todo_done", "todo_block"])
+const TODO_WRITE_AGENTS = new Set(["planner"])
 
 // Subagents whose tool gating disables `outline` — they neither read source
 // code nor have the outline tool to call. Skip the outline-discipline block
@@ -133,38 +131,64 @@ export function createTransformSystem(client) {
         ? entry.directory
         : await getSessionDirectory(client, sessionID)
 
-      // Compose our guide tail
+      // Build the runtime parts once — both the auto-assembled path and the
+      // custom-template path need them.
+      const abortNotice = aborted.has(sessionID) ? ABORT_NOTICE : ""
+      const projectMd = projectMdBlock(sessionDir) || ""
+      let limits = ""
+      let snapshot = ""
+      let ctxBudget = ""
+      if (isSubagent) {
+        ctxBudget = await contextLimitNotice(client, entry)
+      } else {
+        limits = formatLimitsNotice()
+        snapshot = formatSubagentSnapshot(sessionID) || ""
+      }
+
+      // User-editable per-agent template: `<sessionDir>/.opencode/agent-intercom/<agent>.md`.
+      // When present, it REPLACES the auto-assembled prompt wholesale, with
+      // `{{placeholder}}` tokens for the runtime parts the user chose to keep.
+      // Caches by mtime so the per-turn cost is one stat() call.
+      const customTemplate = sessionDir ? loadCustomPrompt(sessionDir, agentName) : null
+      if (customTemplate) {
+        const result = applyCustomPrompt(customTemplate, {
+          env: slices.env || "",
+          agents_md: keepAgentsMd ? slices.agentsMd || "" : "",
+          project_md: projectMd,
+          limits,
+          snapshot,
+          context_budget: ctxBudget,
+          abort_notice: abortNotice,
+        })
+        output.system.length = 0
+        output.system.push(result)
+        return
+      }
+
+      // No custom file → auto-assemble as before.
       const guideParts = []
-      if (aborted.has(sessionID)) guideParts.push(ABORT_NOTICE)
+      if (abortNotice) guideParts.push(abortNotice)
       if (isSubagent) {
         if (!aborted.has(sessionID)) {
           guideParts.push(SUBAGENT_GUIDE_CORE)
           if (!OUTLINE_DISABLED_AGENTS.has(entry.agent)) {
             guideParts.push(SUBAGENT_OUTLINE_GUIDE)
           }
-          // The spec block sits AFTER the guide so the rules above frame how to
-          // read it. Same placement for orchestrator below.
-          const spec = projectSpecBlock(sessionDir)
-          if (spec) guideParts.push(spec)
+          if (projectMd) guideParts.push(projectMd)
         }
-        const limit = await contextLimitNotice(client, entry)
-        if (limit) guideParts.push(limit)
+        if (ctxBudget) guideParts.push(ctxBudget)
       } else {
         guideParts.push(ORCHESTRATION_GUIDE)
-        const spec = projectSpecBlock(sessionDir)
-        if (spec) guideParts.push(spec)
-        guideParts.push(formatLimitsNotice())
-        const snapshot = formatSubagentSnapshot(sessionID)
+        if (projectMd) guideParts.push(projectMd)
+        guideParts.push(limits)
         if (snapshot) guideParts.push(snapshot)
       }
 
-      // Reassemble
       const combined =
         slices.role +
-        slices.env + // small, useful — always keep
+        slices.env +
         (keepAgentsMd ? slices.agentsMd : "") +
         guideParts.join("")
-
       output.system.length = 0
       output.system.push(combined)
     } catch (err) {
@@ -613,11 +637,15 @@ export function createGuardToolExecute(client) {
     // text and return control. entry.ctxTokens is kept fresh by the transform
     // hook, which runs before each LLM call.
     if (entry) {
-      if (SUBAGENT_DENIED_TOOLS.has(input.tool)) {
-        log("denied status-mutating tool from subagent", { sessionID, tool: input.tool })
+      if (TODO_WRITE_TOOLS.has(input.tool) && !TODO_WRITE_AGENTS.has(entry.agent)) {
+        log("denied todo-write tool from non-planner subagent", {
+          sessionID,
+          agent: entry.agent,
+          tool: input.tool,
+        })
         throw new Error(
-          `agent-intercom: \`${input.tool}\` is orchestrator-only. Subagents can read TODO.md ` +
-            "via `todos_open` but only the orchestrator (or the wake-hook on its behalf) flips " +
+          `agent-intercom: \`${input.tool}\` is planner-only. Other subagents may READ TODO.md ` +
+            "via `todos_open` but only the planner (or the wake-hook on its behalf) flips " +
             "checkboxes. End your reply with `DONE: T<n>` or `BLOCKED: T<n> — <reason>` on the " +
             "FIRST line of your final message; the wake-hook will tick the task automatically.",
         )

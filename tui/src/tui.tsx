@@ -14,7 +14,7 @@ import {
   createRoot,
   createSignal,
 } from "solid-js";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, utimesSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -46,6 +46,25 @@ const DEFAULT_MAX_CONTEXT = 40000;
 // overrides. "*" is the global fallback. Writing this file makes the next
 // LLM request pick up the new values — no opencode restart.
 const LLM_PARAMS_PATH = join(homedir(), ".config", "opencode", "llm-params.json");
+
+// Per-project, per-agent prompt overrides. The main plugin reads each file at
+// every LLM call (mtime-cached) — touching them via `utimesSync` busts that
+// cache without editing the body. Directory resolved against `process.cwd()`:
+// opencode serve's working directory, which for the common single-project
+// workflow is the project root. Run `npx opencode-agent-intercom-init-prompts`
+// to seed the directory with defaults (one .md per agent).
+const PROMPTS_DIR_PATH = join(process.cwd(), ".opencode", "agent-intercom");
+const PROMPT_AGENT_FILES = [
+  "orchestrator.md",
+  "planner.md",
+  "coder.md",
+  "debugger.md",
+  "reviewer.md",
+  "documenter.md",
+  "researcher.md",
+  "designer.md",
+  "gitter.md",
+];
 const LLM_AGENTS = [
   "orchestrator",
   "planner",
@@ -317,6 +336,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // compact.
   const [subagentsExpanded, setSubagentsExpanded] = createSignal(true);
   const [tuiSettingsExpanded, setTuiSettingsExpanded] = createSignal(false);
+  const [promptsExpanded, setPromptsExpanded] = createSignal(false);
 
   // LLM-parameter overrides, shared with the main plugin's chat.params hook.
   // Cycling through LLM_AGENTS lets the user tune one role at a time without
@@ -436,6 +456,47 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     api.kv?.get?.("tool_details_visibility", true) ?? true;
   const toggleActions = (): void => {
     api.keymap?.dispatchCommand?.("session.toggle.actions");
+  };
+
+  // Bumps each prompt file's mtime so the main plugin's mtime-keyed cache
+  // picks it up on the next LLM call. Editing a file in an external editor
+  // already does this — the button is for the case where you want to force a
+  // fresh read without an edit (debugging, scripted writes, etc).
+  const countPromptFiles = (): number => {
+    let n = 0;
+    for (const name of PROMPT_AGENT_FILES) {
+      if (existsSync(join(PROMPTS_DIR_PATH, name))) n++;
+    }
+    return n;
+  };
+  const reloadPrompts = (): void => {
+    try {
+      const now = new Date();
+      let touched = 0;
+      for (const name of PROMPT_AGENT_FILES) {
+        const p = join(PROMPTS_DIR_PATH, name);
+        if (existsSync(p)) {
+          utimesSync(p, now, now);
+          touched++;
+        }
+      }
+      if (touched === 0) {
+        api.ui.toast({
+          variant: "warning",
+          message: `No prompt files under ${PROMPTS_DIR_PATH} — run: npx opencode-agent-intercom-init-prompts`,
+        });
+        return;
+      }
+      api.ui.toast({
+        variant: "success",
+        message: `prompts cache busted (${touched}/${PROMPT_AGENT_FILES.length} files) — next LLM call reloads`,
+      });
+    } catch (err) {
+      api.ui.toast({
+        variant: "error",
+        message: `reload failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   };
 
   // Sessions whose children we track. Seeded from the slot context and from
@@ -817,6 +878,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             onToggleSubagents={() => setSubagentsExpanded((v) => !v)}
             tuiSettingsExpanded={tuiSettingsExpanded}
             onToggleTuiSettings={() => setTuiSettingsExpanded((v) => !v)}
+            promptsExpanded={promptsExpanded}
+            onTogglePrompts={() => setPromptsExpanded((v) => !v)}
+            promptsFileCount={countPromptFiles}
+            onReloadPrompts={reloadPrompts}
             llmParams={llmParams}
             opencodeDefaults={opencodeDefaults}
             llmExpanded={llmExpanded}
@@ -894,6 +959,10 @@ function SubagentPanel(props: {
   onToggleSubagents: () => void;
   tuiSettingsExpanded: () => boolean;
   onToggleTuiSettings: () => void;
+  promptsExpanded: () => boolean;
+  onTogglePrompts: () => void;
+  promptsFileCount: () => number;
+  onReloadPrompts: () => void;
   llmParams: () => LlmParams;
   opencodeDefaults: () => OpencodeDefaults;
   llmExpanded: () => boolean;
@@ -1245,6 +1314,36 @@ function SubagentPanel(props: {
               );
             }}
           </For>
+        </Show>
+      </box>
+      <box flexDirection="column">
+        <box flexDirection="row">
+          <text fg={props.theme.accent} onMouseDown={props.onTogglePrompts}>
+            {props.promptsExpanded() ? "[▼]" : "[▶]"}
+          </text>
+          <text fg={props.theme.text} onMouseDown={props.onTogglePrompts}>
+            {" Prompts"}
+          </text>
+        </box>
+        <Show when={props.promptsExpanded()}>
+          <box flexDirection="row">
+            <text fg={props.theme.textMuted}>{rowLabel("files")}</text>
+            <text
+              fg={
+                props.promptsFileCount() > 0
+                  ? props.theme.success
+                  : props.theme.textMuted
+              }
+            >
+              {`[${props.promptsFileCount()}/9]`}
+            </text>
+          </box>
+          <box flexDirection="row">
+            <text fg={props.theme.textMuted}>{rowLabel("")}</text>
+            <text fg={props.theme.accent} onMouseDown={props.onReloadPrompts}>
+              {"[↻ reload]"}
+            </text>
+          </box>
         </Show>
       </box>
     </box>

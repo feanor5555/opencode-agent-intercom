@@ -15,10 +15,16 @@ import { spawnSync } from "node:child_process"
 import plugin from "../src/index.js"
 import { resetState } from "../src/state.js"
 import { resetProjectContext } from "../src/project.js"
-import { setSettingsPath, resetSettings } from "../src/settings.js"
+import { setSettingsPath, resetSettings, getSearxngUrl } from "../src/settings.js"
 import { resetPermissionGuardCache } from "../src/config.js"
 import { bytes } from "../src/format.js"
 import { rewritePendingTools } from "../src/hooks.js"
+import {
+  normalizeUrl,
+  parseExaEntries,
+  searxToEntries,
+  mergeAndDedup,
+} from "../src/websearch.js"
 
 // outline tests need a working `universal-ctags` binary on PATH or in
 // ~/.local/bin. CI/dev machines may not have it; in that case those tests are
@@ -402,6 +408,31 @@ test("the settings file overrides the subagent cap at runtime", async () => {
   assert.match(refused.output, /Subagent limit reached \(2\/2/)
 })
 
+test("searxngUrl resolves file > env > empty default", () => {
+  const ENV = "OPENCODE_AGENT_INTERCOM_SEARXNG_URL"
+  const saved = process.env[ENV]
+  try {
+    // no file, no env -> empty (searxng disabled)
+    delete process.env[ENV]
+    resetSettings()
+    assert.equal(getSearxngUrl(), "")
+
+    // env only -> env value wins, trailing slash stripped
+    process.env[ENV] = "http://env-host:30080/"
+    resetSettings()
+    assert.equal(getSearxngUrl(), "http://env-host:30080")
+
+    // file present -> file wins over env
+    writeFileSync(settingsFile, JSON.stringify({ searxngUrl: "http://file-host:9999/" }))
+    resetSettings()
+    assert.equal(getSearxngUrl(), "http://file-host:9999")
+  } finally {
+    if (saved === undefined) delete process.env[ENV]
+    else process.env[ENV] = saved
+    resetSettings()
+  }
+})
+
 test("a subagent over the context budget gets a wrap-up instruction injected", async () => {
   // newest assistant message reports ~50k tokens -> over the 40k default budget
   const messages = [
@@ -747,6 +778,56 @@ test("web_search surfaces Exa JSON-RPC errors instead of throwing", async () => 
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+test("web_search merges Exa + searxng and de-dupes by normalized URL", () => {
+  const exaText =
+    "Title: Plugins - OpenCode\n" +
+    "URL: https://opencode.ai/docs/plugins/\n" +
+    "Published: 2026-07-04\n" +
+    "Author: N/A\n" +
+    "Highlights:\n" +
+    "Plugins allow you to extend OpenCode by hooking into events.\n" +
+    "\n---\n" +
+    "Title: Exa-only page\n" +
+    "URL: https://exa.example/only\n" +
+    "Highlights:\n" +
+    "unique to exa"
+
+  const searxResults = [
+    // same page as Exa but with scheme/trailing-slash noise -> must collapse
+    { url: "http://opencode.ai/docs/plugins", title: "Plugins - OpenCode", content: "short" },
+    // searxng-only page
+    { url: "https://github.com/awesome-opencode/awesome-opencode", title: "awesome", content: "list" },
+  ]
+
+  const exaEntries = parseExaEntries(exaText)
+  const searxEntries = searxToEntries(searxResults)
+  assert.equal(exaEntries.length, 2, "two Exa entries parsed")
+  assert.equal(searxEntries.length, 2, "two searxng entries mapped")
+
+  const { merged, duplicates } = mergeAndDedup(exaEntries, searxEntries)
+  assert.equal(duplicates, 1, "one duplicate collapsed")
+  assert.equal(merged.length, 3, "3 unique URLs after dedup")
+
+  const keys = merged.map((e) => normalizeUrl(e.url))
+  assert.equal(new Set(keys).size, keys.length, "no duplicate normalized URLs remain")
+
+  const shared = merged.find((e) => normalizeUrl(e.url) === "opencode.ai/docs/plugins")
+  assert.deepEqual([...shared.sources].sort(), ["exa", "searxng"], "shared URL keeps both sources")
+  // richer Exa snippet wins over searxng's "short"
+  assert.match(shared.content, /extend OpenCode/)
+
+  const sources = new Set(merged.flatMap((e) => e.sources))
+  assert.ok(sources.has("exa") && sources.has("searxng"), "merged list has entries of both sources")
+})
+
+test("normalizeUrl strips scheme, lowercases host, drops trailing slash", () => {
+  assert.equal(normalizeUrl("https://Example.COM/Path/"), "example.com/Path")
+  assert.equal(normalizeUrl("http://example.com/path"), "example.com/path")
+  assert.equal(normalizeUrl("HTTPS://example.com/a?b=1"), "example.com/a?b=1")
+  assert.equal(normalizeUrl(""), "")
+  assert.equal(normalizeUrl(null), "")
 })
 
 test("the outline tool is registered by default", async () => {

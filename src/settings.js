@@ -3,9 +3,14 @@
 // companion TUI plugin can change them live by writing the shared JSON file —
 // no opencode restart needed.
 //
+// The searxng base URL for `web_search` resolves the same way (file key
+// `searxngUrl` > env OPENCODE_AGENT_INTERCOM_SEARXNG_URL > unset). Unset means
+// searxng is disabled and web_search stays Exa-only.
+//
 // Shared file path (the TUI plugin hardcodes the same path, it is a separate
 // npm package and cannot import this module):
-//   ~/.config/opencode/agent-intercom.json   { "maxSubagents": N, "maxContext": N }
+//   ~/.config/opencode/agent-intercom.json
+//     { "maxSubagents": N, "maxContext": N, "searxngUrl": "http://host:port" }
 
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
@@ -28,14 +33,23 @@ function envNum(name, def) {
   return Number.isInteger(n) && n >= 0 ? n : def
 }
 
-// Current settings: { maxSubagents, maxContext }. Cached for TTL_MS so the
-// hot paths (spawn, every subagent transform) don't stat the file constantly.
+// Reads a non-empty string env var, falling back to `def` when unset/blank.
+function envStr(name, def) {
+  const env = process.env[name]
+  if (env === undefined || env.trim() === "") return def
+  return env.trim()
+}
+
+// Current settings: { maxSubagents, maxContext, searxngUrl }. Cached for TTL_MS
+// so the hot paths (spawn, every subagent transform) don't stat the file
+// constantly. searxngUrl is "" when unset (searxng disabled).
 export function getSettings() {
   const now = Date.now()
   if (cache && now - cachedAt < TTL_MS) return cache
   const resolved = {
     maxSubagents: envNum("OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS", DEFAULT_MAX_SUBAGENTS),
     maxContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_CONTEXT", DEFAULT_MAX_CONTEXT),
+    searxngUrl: envStr("OPENCODE_AGENT_INTERCOM_SEARXNG_URL", ""),
   }
   try {
     const raw = JSON.parse(readFileSync(settingsPath, "utf8"))
@@ -45,6 +59,9 @@ export function getSettings() {
     if (Number.isInteger(raw?.maxContext) && raw.maxContext >= 0) {
       resolved.maxContext = raw.maxContext
     }
+    if (typeof raw?.searxngUrl === "string" && raw.searxngUrl.trim() !== "") {
+      resolved.searxngUrl = raw.searxngUrl.trim()
+    }
   } catch {
     // no file / unreadable -> env + defaults; not an error
   }
@@ -52,6 +69,13 @@ export function getSettings() {
   cachedAt = now
   log("settings resolved", resolved)
   return cache
+}
+
+// The resolved searxng base URL (file > env > ""), trailing slashes stripped.
+// Empty string means searxng is disabled and web_search stays Exa-only.
+export function getSearxngUrl() {
+  const url = getSettings().searxngUrl
+  return url ? url.replace(/\/+$/, "") : ""
 }
 
 // Test-only: point at a different file and drop the cache.

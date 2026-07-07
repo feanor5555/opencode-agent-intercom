@@ -207,22 +207,26 @@ export const AGENTS = {
 }
 
 // Merges the plugin's roles into a project's resolved config and makes the
-// orchestrator the default primary. Non-destructive: a role the project already
-// defines (same agent name) is left untouched, and an explicit `default_agent`
-// the project set is respected — so a project can still override anything.
-// `default_agent` is the opencode config key that picks the startup primary
-// (falls back to "build" when unset). Mutates `config` in place.
+// orchestrator the default primary. Non-destructive field-wise merge: the
+// plugin role is the base, and any top-level key the project already set on the
+// same agent name wins — so a project that only sets `model` keeps the plugin's
+// `prompt`/`tools`/`temperature`/`permission`, while a project that also sets
+// `prompt` overrides just that. An explicit `default_agent` the project set is
+// respected. `default_agent` is the opencode config key that picks the startup
+// primary (falls back to "build" when unset). Mutates `config` in place.
 export function installAgents(config) {
   if (!config || typeof config !== "object") return
   if (!config.agent || typeof config.agent !== "object") config.agent = {}
   for (const [name, def] of Object.entries(AGENTS)) {
-    if (!config.agent[name]) {
-      // Shallow-clone def AND its permission sub-object — without the nested
-      // clone every session-instance of the plugin would share the same
-      // permission map and a future per-session tweak would leak across
-      // sessions.
-      config.agent[name] = { ...def, permission: def.permission ? { ...def.permission } : undefined }
-    }
+    // Shallow-clone def AND its permission sub-object — without the nested
+    // clone every session-instance of the plugin would share the same
+    // permission map and a future per-session tweak would leak across
+    // sessions.
+    const base = { ...def, permission: def.permission ? { ...def.permission } : undefined }
+    // Plugin role as base, overlaid by whatever fields the project already set
+    // (user wins per top-level key). Idempotent: re-running just re-applies the
+    // same merge.
+    config.agent[name] = { ...base, ...config.agent[name] }
   }
   if (!config.default_agent) config.default_agent = "orchestrator"
 }

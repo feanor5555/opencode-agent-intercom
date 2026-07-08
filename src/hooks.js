@@ -22,7 +22,7 @@ import { fetchSnapshot, postNotice, showToast, deleteSession, forgetSessionDirec
 import { getSettings } from "./settings.js"
 import { removeTask, todoFilePath } from "./todofile.js"
 import { projectMdBlock, readPlannedSteps, formatPrimarySummary, writePrimarySummary } from "./project.js"
-import { performPrimaryHandoff, lastUserGoal } from "./handoff.js"
+import { performPrimaryHandoff, lastUserGoal, DOC_SUMMARY_PROMPT } from "./handoff.js"
 import { existsSync } from "node:fs"
 import { log, errMsg } from "./log.js"
 import {
@@ -232,6 +232,13 @@ export function createTransformSystem(client) {
                 agent: ORCHESTRATOR_AGENT_NAME,
                 prompt: message,
               }),
+            // Ask the OLD primary (#1, which still holds PROJECT.md /
+            // TODO.md / ARCHITECTURE.md in its context) to emit the three
+            // per-file summaries in one final turn. Implementation lives
+            // further down — it uses the same `promptSession` /
+            // `fetchSnapshot` plumbing as the subagent wake path.
+            promptOldPrimaryForDocSummaries: () =>
+              promptOldPrimaryForDocSummaries(client, sessionID),
             deleteSession: (sid) => deleteSession(client, sid),
             reparent: reparentSubagents,
             forgetPrimary: (sid) => {
@@ -306,6 +313,80 @@ export function createTransformSystem(client) {
       // never break the session
     }
   }
+}
+
+// Asks the OLD primary (#1) — which still holds PROJECT.md / TODO.md /
+// ARCHITECTURE.md in its context from its original kickoff — to emit three
+// short per-file summaries in one final turn. The new orchestrator (#2)
+// embeds those three summaries into its kickoff message and starts its
+// life with full context WITHOUT having to re-read the docs from disk.
+//
+// Flow:
+//   1. `promptSession` the OLD primary with `DOC_SUMMARY_PROMPT`. Non-blocking
+//      (the SDK returns once the request is queued, 204-style).
+//   2. Wait for the LLM to finish — we don't have a "session.idle for
+//      primary" event, so we poll `fetchSnapshot` for a bounded window and
+//      look for a new assistant message at the end of the message list.
+//   3. Harvest the assistant's text via `fetchSnapshot` (which already wraps
+//      the SDK's session.messages + finalResult helpers in client.js).
+//   4. Return the raw text. `performPrimaryHandoff` runs it through
+//      `validateDocSummaries` so the kickoff stays well-formed even if the
+//      LLM gave us a malformed / partial reply.
+//
+// Failure modes (all re-thrown so the handoff can fall back):
+//   - The session was already deleted (opencode returns 404) → snapshot
+//     returns {} → we throw.
+//   - The LLM is slow / the provider is down → snapshot polling times out
+//     after DOC_SUMMARIES_TIMEOUT_MS → we throw.
+//   - The session never produced an assistant message in the window
+//     (e.g. the prompt was rejected) → snapshot has no result → we throw.
+//
+// In every failure case the handoff's `try/catch` replaces the
+// `docSummaries` block with `FALLBACK_DOC_SUMMARIES` so the kickoff still
+// lands. The handoff itself never throws out.
+const DOC_SUMMARIES_TIMEOUT_MS = 15000
+const DOC_SUMMARIES_POLL_MS = 500
+
+async function promptOldPrimaryForDocSummaries(client, primarySessionID) {
+  if (!client || !primarySessionID) {
+    throw new Error("promptOldPrimaryForDocSummaries: missing client or primarySessionID")
+  }
+  // 1. Fire the prompt — non-blocking. We then poll the snapshot to harvest
+  //    the reply; a non-blocking promptAsync is the same shape the
+  //    subagent-wake path uses (client.js: postNotice → session.promptAsync).
+  await promptSession(client, {
+    sessionID: primarySessionID,
+    agent: ORCHESTRATOR_AGENT_NAME,
+    prompt: DOC_SUMMARY_PROMPT,
+  })
+
+  // 2. Poll for a new assistant message at the tail of the message list.
+  //    The primary was a long-lived session; the snapshot already carries
+  //    its prior assistant messages. We use a baseline of `result` being
+  //    defined AND different from a "no-reply" sentinel to know the LLM
+  //    has produced a new reply. A short backoff between polls keeps the
+  //    CPU quiet.
+  const deadline = Date.now() + DOC_SUMMARIES_TIMEOUT_MS
+  let lastResult
+  while (Date.now() < deadline) {
+    const snap = await fetchSnapshot(client, primarySessionID)
+    const result = snap?.result
+    if (result && result !== lastResult) {
+      // 3. First non-empty result wins — by the time we exit the loop the
+      //    primary has spoken. We return immediately rather than waiting
+      //    for an "idle" event, which is the exact same pattern the
+      //    subagent-wake path uses (session.idle → snapshot → result).
+      return result
+    }
+    lastResult = result
+    await sleep(DOC_SUMMARIES_POLL_MS)
+  }
+  // 4. Timed out without a result — let the handoff fall back.
+  throw new Error("promptOldPrimaryForDocSummaries: timed out waiting for the old primary to reply")
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 // Splits opencode's auto-injected system into three labelled slices so we can

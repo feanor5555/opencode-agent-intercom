@@ -69,6 +69,19 @@ function makeDeps(overrides = {}) {
     promptAsync: async (sessionID, message) => {
       call("promptAsync", sessionID, message)
     },
+    // The new required dep. Default fake returns a canned three-section
+    // block so the happy-path tests see the summaries embedded in the
+    // kickoff. Specific tests override via `overrides.docSummaries`.
+    promptOldPrimaryForDocSummaries: async () => {
+      call("promptOldPrimaryForDocSummaries")
+      return overrides.docSummaries ?? [
+        "## PROJECT.md — project index (default fake)",
+        "",
+        "## TODO.md — open task list (default fake)",
+        "",
+        "## ARCHITECTURE.md — architecture facts (default fake)",
+      ].join("\n")
+    },
     reparent: async (fromID, toID) => {
       call("reparent", fromID, toID)
       return reparentedCount
@@ -96,7 +109,7 @@ test("performPrimaryHandoff runs the 9 steps in the right order", async () => {
   const result = await performPrimaryHandoff(deps)
 
   // 1-3: gather, format, write
-  // 4-5: create, prompt
+  // 4-5: create, promptOldPrimaryForDocSummaries, prompt
   // 6-8: reparent, delete, forget
   assert.deepEqual(order(deps._log), [
     "getInFlightSubagents",
@@ -105,6 +118,7 @@ test("performPrimaryHandoff runs the 9 steps in the right order", async () => {
     "formatPrimarySummary",
     "writePrimarySummary",
     "createSession",
+    "promptOldPrimaryForDocSummaries",
     "promptAsync",
     "reparent",
     "deleteSession",
@@ -153,7 +167,7 @@ test("createSession runs BEFORE reparent and receives the orchestrator agent nam
   assert.deepEqual(createCall, ["createSession", { agent: "orchestrator" }])
 })
 
-test("promptAsync (kickoff) embeds the summary markdown AND a directive to read canonical docs", async () => {
+test("promptAsync (kickoff) embeds the summary markdown AND the three per-file doc summaries", async () => {
   const deps = makeDeps()
   const result = await performPrimaryHandoff(deps)
 
@@ -169,12 +183,107 @@ test("promptAsync (kickoff) embeds the summary markdown AND a directive to read 
     "kickoff message must contain the summary markdown verbatim",
   )
 
-  // The new orchestrator is fresh — it must be told to rebuild context from
-  // the canonical docs.
-  for (const doc of ["PROJECT.md", "TODO.md", "ARCHITECTURE.md"]) {
+  // The new orchestrator is fresh — it gets the per-file summaries from
+  // #1's final turn instead of a re-read directive. The three headings
+  // must be present, AND the old "Lies jetzt PROJECT.md …" re-read string
+  // must NOT be present (that path is gone).
+  for (const heading of [
+    "## PROJECT.md —",
+    "## TODO.md —",
+    "## ARCHITECTURE.md —",
+  ]) {
     assert.ok(
-      message.includes(doc),
-      `kickoff message must reference ${doc}`,
+      message.includes(heading),
+      `kickoff message must contain heading ${heading}`,
+    )
+  }
+  assert.ok(
+    !message.includes("Lies jetzt PROJECT.md, TODO.md und ARCHITECTURE.md"),
+    "kickoff message must NOT contain the old re-read directive",
+  )
+})
+
+test("promptOldPrimaryForDocSummaries is called once, between createSession and promptAsync", async () => {
+  const deps = makeDeps()
+  await performPrimaryHandoff(deps)
+
+  const idx = (name) => deps._log.findIndex((e) => e[0] === name)
+  const iCreate = idx("createSession")
+  const iDoc = idx("promptOldPrimaryForDocSummaries")
+  const iPrompt = idx("promptAsync")
+
+  assert.ok(iCreate >= 0, "createSession ran")
+  assert.ok(iDoc >= 0, "promptOldPrimaryForDocSummaries ran")
+  assert.ok(iPrompt >= 0, "promptAsync ran")
+
+  // Sequence: createSession -> promptOldPrimaryForDocSummaries -> promptAsync.
+  // Order is the point — #1's final turn must complete (and the summaries
+  // be validated) BEFORE the new orchestrator is prompted with them.
+  assert.ok(
+    iCreate < iDoc && iDoc < iPrompt,
+    `expected createSession < promptOldPrimaryForDocSummaries < promptAsync, got ` +
+      `${iCreate} < ${iDoc} < ${iPrompt}`,
+  )
+})
+
+test("kickoff message embeds the raw text returned by promptOldPrimaryForDocSummaries", async () => {
+  // Custom three-section text from the fake — proves the wire-through
+  // (not a coincidence with the default fake's text).
+  const docSummaries = [
+    "## PROJECT.md — the project is about an OpenCode plugin intercom.",
+    "",
+    "## TODO.md — currently building doc-summaries for the handoff.",
+    "",
+    "## ARCHITECTURE.md — handoff is a fresh orchestrator with no prior state.",
+  ].join("\n")
+  const deps = makeDeps({ docSummaries })
+
+  await performPrimaryHandoff(deps)
+
+  const promptCall = deps._log.find((e) => e[0] === "promptAsync")
+  const message = promptCall[2]
+
+  // Every non-empty line of the canned summaries must be embedded verbatim.
+  for (const line of docSummaries.split("\n")) {
+    if (line.trim().length === 0) continue
+    assert.ok(
+      message.includes(line),
+      `kickoff must embed line from docSummaries: ${line.slice(0, 60)}…`,
+    )
+  }
+})
+
+test("EDGE CASE: promptOldPrimaryForDocSummaries throws -> kickoff falls back to placeholder block", async () => {
+  // Provider down, session already torn down, LLM timeout — any of those
+  // surfaces as a thrown error from the dep. The handoff must catch it
+  // and use a well-formed three-section placeholder so the kickoff is
+  // always sendable.
+  const deps = makeDeps()
+  deps.promptOldPrimaryForDocSummaries = async () => {
+    deps._log.push(["promptOldPrimaryForDocSummaries"])
+    throw new Error("provider 503")
+  }
+  const result = await performPrimaryHandoff(deps)
+
+  // The handoff still completes end-to-end — reparent / delete / forget
+  // still ran (the error in the dep must not abort the sequence).
+  const order2 = (log) => log.map((e) => e[0])
+  assert.ok(order2(deps._log).includes("reparent"))
+  assert.ok(order2(deps._log).includes("deleteSession"))
+  assert.ok(order2(deps._log).includes("forgetPrimary"))
+  assert.equal(result.newSessionID, "orch2")
+
+  // The kickoff message uses the fallback block, not the default fake's text.
+  const promptCall = deps._log.find((e) => e[0] === "promptAsync")
+  const message = promptCall[2]
+  for (const heading of [
+    "## PROJECT.md — (nicht verfügbar)",
+    "## TODO.md — (nicht verfügbar)",
+    "## ARCHITECTURE.md — (nicht verfügbar)",
+  ]) {
+    assert.ok(
+      message.includes(heading),
+      `fallback kickoff must contain placeholder ${heading}`,
     )
   }
 })
@@ -216,6 +325,7 @@ test("EDGE CASE: empty inFlight + empty goal still produces a valid run", async 
     "formatPrimarySummary",
     "writePrimarySummary",
     "createSession",
+    "promptOldPrimaryForDocSummaries",
     "promptAsync",
     "reparent",
     "deleteSession",
@@ -234,10 +344,18 @@ test("EDGE CASE: empty inFlight + empty goal still produces a valid run", async 
   assert.ok(fmt.notes[0].includes("Diese Subagents liefern jetzt"))
   assert.deepEqual(fmt.plannedSteps, [])
 
-  // Kickoff message still present, still references the canonical docs.
+  // Kickoff message still present, still embeds the three per-file
+  // doc summaries from the default fake.
   const promptCall = deps._log.find((e) => e[0] === "promptAsync")
-  for (const doc of ["PROJECT.md", "TODO.md", "ARCHITECTURE.md"]) {
-    assert.ok(promptCall[2].includes(doc))
+  for (const heading of [
+    "## PROJECT.md —",
+    "## TODO.md —",
+    "## ARCHITECTURE.md —",
+  ]) {
+    assert.ok(
+      promptCall[2].includes(heading),
+      `kickoff must contain heading ${heading}`,
+    )
   }
 })
 

@@ -5,6 +5,58 @@
 // internally and return undefined, since a missing reading is not an error.
 
 import { log, errMsg } from "./log.js"
+import { getSettings } from "./settings.js"
+
+// Sleeps `ms` milliseconds. Resolved via setTimeout so a value of 0 returns
+// immediately without going through the timer queue.
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// Wakes a session with a plain-text notice — non-blocking (204). Used to push a
+// subagent-completion notice into the idle primary so it reports back proactively.
+//
+// Wrapped in a retry+linear-backoff loop driven by `postNoticeRetries` and
+// `postNoticeRetryBackoffMs` from settings. The opencode SDK's promptAsync
+// can transiently fail (network blip, server restart between attempts); a
+// single 5xx must not cost the primary its wake. After `postNoticeRetries`
+// RE-tries are exhausted the last error is re-thrown — the existing
+// try/catch in hooks.js still runs its cleanup path (free slot, log,
+// showToast variant), unchanged.
+//
+// `postNoticeRetries` counts RE-tries only: postNoticeRetries=3 means
+// 1 initial attempt + up to 3 retries = up to 4 total attempts. A value of 0
+// disables retries (single attempt, same as the pre-retry behavior).
+// `postNoticeRetryBackoffMs` is the base delay; we add a small jitter (0–25%
+// of the base) to avoid synchronised thundering-herd retries if opencode
+// comes back up under load.
+export async function postNotice(client, sessionID, text) {
+  const { postNoticeRetries, postNoticeRetryBackoffMs } = getSettings()
+  const maxAttempts = Math.max(1, postNoticeRetries + 1)
+  let lastErr
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await client.session.promptAsync({
+        path: { id: sessionID },
+        body: { parts: [{ type: "text", text }] },
+      })
+      return
+    } catch (err) {
+      lastErr = err
+      if (attempt >= maxAttempts) break
+      const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(postNoticeRetryBackoffMs / 4)))
+      const delay = (attempt * postNoticeRetryBackoffMs) + jitter
+      log("postNotice: retrying after failure", {
+        attempt,
+        maxAttempts,
+        delayMs: delay,
+        err: errMsg(err),
+      })
+      await sleep(delay)
+    }
+  }
+  throw lastErr
+}
 
 // The SDK client wraps responses as { data, error, response }. Older shapes
 // returned the payload directly — unwrap defensively either way.
@@ -26,15 +78,6 @@ export async function promptSession(client, { sessionID, agent, prompt }) {
   await client.session.promptAsync({
     path: { id: sessionID },
     body: { agent, parts: [{ type: "text", text: prompt }] },
-  })
-}
-
-// Wakes a session with a plain-text notice — non-blocking (204). Used to push a
-// subagent-completion notice into the idle primary so it reports back proactively.
-export async function postNotice(client, sessionID, text) {
-  await client.session.promptAsync({
-    path: { id: sessionID },
-    body: { parts: [{ type: "text", text }] },
   })
 }
 
@@ -158,12 +201,20 @@ function finalResult(messages) {
 }
 
 // Sums the tokens of the newest assistant message — a proxy for "how much
-// context is this subagent working with". Mirrors opencode's own
-// `getCurrentTokenUsage` (input + output + reasoning + cache.read + cache.write);
-// cache.read is a SEPARATE field, not a subset of input. An in-progress
-// assistant step carries a `tokens` object that is still all-zero, so skip
-// zero sums and keep walking back to the last completed step. Undefined if
-// none yet.
+// context is this session working with". Mirrors opencode's own context-limit
+// check (found in the opencode binary): `input + output + cache.read +
+// cache.write`. cache.read/cache.write are SEPARATE from input here — the
+// stored `tokens.input` is the noCache portion, so input + cache.read +
+// cache.write reconstructs the total input. reasoning is INTENTIONALLY
+// EXCLUDED: opencode's context-overflow check excludes it (reasoning tokens
+// are generated, not retained as context fill), and including it inflated the
+// measurement on thinking models — which made the orchestrator handoff
+// (`maxPrimaryContext`) fire far too early, right after a reasoning-heavy turn.
+// (opencode's `totalTokens` cost metric DOES add reasoning, but that is for
+// billing/usage accounting, not context-size gauging — do not copy it here.)
+// An in-progress assistant step carries a `tokens` object that is still
+// all-zero, so skip zero sums and keep walking back to the last completed
+// step. Undefined if none yet.
 function latestContextTokens(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const t = messages[i]?.info?.tokens
@@ -171,7 +222,6 @@ function latestContextTokens(messages) {
     const sum =
       (t.input ?? 0) +
       (t.output ?? 0) +
-      (t.reasoning ?? 0) +
       (t.cache?.read ?? 0) +
       (t.cache?.write ?? 0)
     if (sum > 0) return sum

@@ -8,10 +8,13 @@ import {
   abortSession,
   showToast,
   getSessionDirectory,
+  deleteSession,
+  forgetSessionDirectory,
 } from "./client.js"
 import {
   resolve,
   upsertSession,
+  removeEntry,
   trackPrimary,
   countActiveSubagents,
   effectiveState,
@@ -161,14 +164,19 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // and bypass the limit. countActiveSubagents includes pendingSpawns, so
     // the synchronous reserve() that follows makes the slot visible to any
     // later spawn() in the same micro-batch.
+    //
+    // The cap is GLOBAL across all orchestrator primaries in this process —
+    // see countActiveSubagents in registry.js. We pass toolCtx.sessionID for
+    // signature compatibility, but the value is ignored.
     if (maxSubagents > 0) {
       const active = countActiveSubagents(toolCtx.sessionID)
       if (active >= maxSubagents) {
         log("spawn refused: subagent limit", { active, limit: maxSubagents })
         return {
           output:
-            `Subagent limit reached (${active}/${maxSubagents} running). Wait for one to finish ` +
-            `— you are woken automatically — or abort one with abort(handle) before spawning again.`,
+            `Subagent limit reached (${active}/${maxSubagents} running globally across all ` +
+            `orchestrator sessions). Wait for one to finish — you are woken automatically — or ` +
+            `abort one with abort(handle) before spawning again.`,
         }
       }
     }
@@ -230,25 +238,26 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     }
   }
 
-  // Tail-line for spawn output: tells the orchestrator how many slots remain
-  // so it knows whether the next spawn() will succeed. Empty when the cap is
-  // disabled (maxSubagents=0 means "no cap").
+  // Tail-line for spawn output: tells the orchestrator how many global slots
+  // remain so it knows whether the next spawn() will succeed. Empty when the
+  // cap is disabled (maxSubagents=0 means "no cap").
   function slotsNoticeAfterSpawn(primaryID) {
     const maxSubagents = getSettings().maxSubagents
     if (maxSubagents <= 0) return ""
     // countActiveSubagents reads from the registry (the freshly upserted entry
     // is already there) plus pendingSpawns (this handler's own reservation is
     // still held until the finally block). Subtract it so the number we report
-    // matches what the orchestrator sees after this call returns.
+    // matches what the orchestrator sees after this call returns. The cap is
+    // global, so the count is the same regardless of which primary asked.
     const active = countActiveSubagents(primaryID) - 1
     const free = Math.max(0, maxSubagents - active)
     if (free === 0) {
       return (
-        ` Subagent slots: ${active}/${maxSubagents} — CAP REACHED, no further spawn() will succeed ` +
-        `until a subagent finishes (you will be woken).`
+        ` Subagent slots: ${active}/${maxSubagents} (global, across all sessions) — CAP REACHED, ` +
+        `no further spawn() will succeed until a subagent finishes (you will be woken).`
       )
     }
-    return ` Subagent slots: ${active}/${maxSubagents} — ${free} free.`
+    return ` Subagent slots: ${active}/${maxSubagents} (global, across all sessions) — ${free} free.`
   }
 
   async function abortHandler(args, toolCtx) {
@@ -261,6 +270,19 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
 
     const confirmed = await signalAbort(client, entry.sessionID)
     log("aborted", { handle: entry.handle, confirmed })
+
+    // Mirror the onSessionIdle cleanup path: the event hook skips aborted
+    // sessions (`if (!entry || aborted.has(sessionID)) return`), so without
+    // this branch the registry/bySession entry and the opencode session would
+    // leak for the lifetime of the opencode process. removeEntry itself drops
+    // the sessionID from the `aborted` Set; by the time it runs the opencode
+    // session is already being aborted, so further tool calls are blocked
+    // regardless of the Set. All three operations are best-effort.
+    removeEntry(entry.sessionID)
+    const ok = await deleteSession(client, entry.sessionID)
+    if (ok) log("deleted opencode session (aborted)", { handle: entry.handle, sessionID: entry.sessionID })
+    forgetSessionDirectory(entry.sessionID)
+
     return {
       output:
         `Abort signalled for "${entry.handle}"${confirmed ? "" : " (abort call did not confirm)"}. ` +

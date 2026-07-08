@@ -46,33 +46,37 @@ export function effectiveState(entry) {
   return entry.status ?? "unknown"
 }
 
-// Counts a primary's active subagents — excludes aborted ones (which no
+// Counts ALL active subagents across every primary in this opencode process —
+// the cap is global, not per-primary. Aborted subagents are excluded (they no
 // longer occupy a concurrency slot, even before opencode has confirmed the
 // abort). Finished subagents are not in the registry at all, so no special
 // case for them. Pending spawns (between cap-check and upsertSession) are
 // included so parallel spawn() calls in the same turn cannot bypass the cap.
+//
+// The `primaryID` arg is preserved for backwards compatibility with existing
+// call sites but is ignored: with a global cap, the count is the same
+// regardless of which primary asked.
 export function countActiveSubagents(primaryID) {
-  let n = pendingSpawns.get(primaryID) ?? 0
+  let n = pendingSpawns.count
   for (const e of registry.values()) {
-    if (e.parentID !== primaryID) continue
     if (effectiveState(e) === "aborted") continue
     n += 1
   }
   return n
 }
 
-// Atomically reserve a concurrency slot for a primary (synchronous, no awaits
+// Atomically reserve a global concurrency slot (synchronous, no awaits
 // between caller's cap-check and this call). Caller MUST pair every reserve()
 // with exactly one releasePendingSpawn() — typically in a `finally` so an
 // error in the spawn pipeline doesn't leak a phantom slot.
+//
+// The `primaryID` arg is ignored (the cap is global).
 export function reservePendingSpawn(primaryID) {
-  pendingSpawns.set(primaryID, (pendingSpawns.get(primaryID) ?? 0) + 1)
+  pendingSpawns.count += 1
 }
 
 export function releasePendingSpawn(primaryID) {
-  const n = pendingSpawns.get(primaryID) ?? 0
-  if (n <= 1) pendingSpawns.delete(primaryID)
-  else pendingSpawns.set(primaryID, n - 1)
+  if (pendingSpawns.count > 0) pendingSpawns.count -= 1
 }
 
 // Idempotent registration keyed by sessionID. opencode fires `session.created`

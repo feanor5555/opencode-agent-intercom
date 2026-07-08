@@ -359,6 +359,73 @@ test("EDGE CASE: empty inFlight + empty goal still produces a valid run", async 
   }
 })
 
+test("REGRESSION: getInFlightSubagents returning a Promise (real registryMutex.runExclusive) — handoff completes", async () => {
+  // Root cause: in production, deps.getInFlightSubagents IS the real
+  // `inFlightSubagentsFor` from src/registry.js, which returns a Promise
+  // (registryMutex.runExclusive). handoff.js must `await` it. Since commit
+  // 727ce1c the line in question was `const inFlight = deps.getInFlightSubagents(...)`
+  // (no `await`), so `inFlight` was a Promise, `inFlight.map` was undefined,
+  // and handoff aborted on every turn with "inFlight.map is not a function"
+  // — meaning createSession was never reached and the orchestrator could
+  // never be renewed.
+  //
+  // This fake mirrors the real signature: it returns a Promise that
+  // resolves to the in-flight array. The handoff must still complete the
+  // full 9-step sequence — including createSession + promptAsync — and
+  // must NOT throw. With the missing `await` this test throws
+  // `TypeError: inFlight.map is not a function` (the bug).
+  const inFlightArr = [
+    { handle: "researcher#1", agent: "researcher", task: "scan the repo" },
+  ]
+  const deps = makeDeps({ inFlight: inFlightArr })
+  deps.getInFlightSubagents = async (parentID) => {
+    deps._log.push(["getInFlightSubagents", parentID])
+    // Real helper resolves via registryMutex.runExclusive — small async gap.
+    await Promise.resolve()
+    return inFlightArr
+  }
+
+  // Must not throw. Without the fix this resolves to a rejected promise
+  // (`TypeError: inFlight.map is not a function` inside performPrimaryHandoff).
+  const result = await performPrimaryHandoff(deps)
+
+  // The full 9-step sequence ran end-to-end — createSession + promptAsync
+  // reached. That is what the renewal feature needs.
+  assert.deepEqual(order(deps._log), [
+    "getInFlightSubagents",
+    "getPlannedSteps",
+    "getLastUserGoal",
+    "formatPrimarySummary",
+    "writePrimarySummary",
+    "createSession",
+    "promptOldPrimaryForDocSummaries",
+    "promptAsync",
+    "reparent",
+    "deleteSession",
+    "forgetPrimary",
+  ])
+
+  // Return value is well-formed.
+  assert.equal(result.newSessionID, "orch2")
+  assert.equal(result.reparented, 1)
+  assert.equal(typeof result.summaryMarkdown, "string")
+
+  // The summary actually consumed the resolved (not Promise) array —
+  // proves `await` resolved, not just that we survived.
+  const fmt = deps._log.find((e) => e[0] === "formatPrimarySummary")[1]
+  assert.ok(fmt.stand.includes("(1 Subagent(s) wurden re-parented)"),
+    "stand line must reference the resolved array length, not Promise")
+  assert.ok(fmt.notes.some((n) => n.includes("researcher#1")),
+    "notes must include the entry from the resolved array")
+
+  // createSession + promptAsync must both be present (the ones the bug
+  // prevented from running).
+  const iCreate = deps._log.findIndex((e) => e[0] === "createSession")
+  const iPrompt = deps._log.findIndex((e) => e[0] === "promptAsync")
+  assert.ok(iCreate >= 0, "createSession must run after the await fix")
+  assert.ok(iPrompt > iCreate, "promptAsync must run after createSession")
+})
+
 test("EDGE CASE: goal set but inFlight empty — stand line omits the reparented count", async () => {
   const deps = makeDeps({ inFlight: [] })
   await performPrimaryHandoff(deps)

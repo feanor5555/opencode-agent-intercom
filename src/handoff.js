@@ -55,7 +55,7 @@
 // @returns {Promise<{ newSessionID: string, reparented: number, summaryMarkdown: string }>}
 export async function performPrimaryHandoff(deps) {
   // 1. Gather.
-  const inFlight = deps.getInFlightSubagents(deps.primarySessionID)
+  const inFlight = await deps.getInFlightSubagents(deps.primarySessionID)
   const steps = deps.getPlannedSteps(deps.directory)
   const goal = deps.getLastUserGoal()
 

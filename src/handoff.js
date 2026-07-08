@@ -6,6 +6,13 @@
 // `deps`, which makes the whole sequence testable in isolation against
 // recording fakes — no opencode runtime, no I/O, no SDK calls.
 //
+// `src/log.js` is the only exception: it is a leaf helper (debug-logging
+// only, appends to `/tmp/opencode-agent-intercom/debug.log`, no plugin
+// runtime dependencies), imported so the outer try/catch in
+// `performPrimaryHandoff` can surface uncaught throws with the full stack
+// instead of letting them bubble silently.
+import { log, errMsg } from "./log.js"
+//
 // Sequence (do NOT reorder):
 //   1. Gather in-flight subagents, planned steps, and the last user goal.
 //   2. Build a summary object with a stand-up line, reparented-subagent notes
@@ -19,9 +26,20 @@
 //      summaries; the new orchestrator's kickoff message embeds the
 //      stand-up summary + those three summaries — no re-read of disk.
 //   6. Reparent all in-flight subagents of the old primary onto the new one.
-//   7. Delete the old primary session.
-//   8. Drop the old primary from the primary-tracking maps (forgetPrimary).
-//   9. Return { newSessionID, reparented, summaryMarkdown }.
+//   7. WAIT for the in-flight subagents to drain (i.e. every wake handler
+//      has snapshotted the NEW parentID and is delivering to the new
+//      orchestrator). Without this wait, opencode's DB cascade walks
+//      orphaned msg_* rows after step 8 deletes orchestrator1, and the
+//      cleanup DELETE /session/{msg_…} calls fail the schema check
+//      ("Expected a string starting with `ses`, got `msg_…`", every 5s).
+//      `reparentSubagents` only fixes the in-memory registry — it does
+//      NOT touch the opencode DB row chain. The wait drains the same
+//      `!entry.dispatched` set `inFlightSubagentsFor` exposes, so by the
+//      time it returns every delivery in flight has already pinned itself
+//      to the NEW orchestrator and is independent of orchestrator1's row.
+//   8. Delete the old primary session.
+//   9. Drop the old primary from the primary-tracking maps (forgetPrimary).
+//  10. Return { newSessionID, reparented, summaryMarkdown }.
 //
 // See test/handoff.test.js for the recording-fake harness that exercises this.
 //
@@ -47,6 +65,7 @@
 // @property {(opts: { agent: string }) => Promise<string>} createSession
 // @property {(sessionID: string, message: string) => Promise<void>} promptAsync
 // @property {(fromID: string, toID: string) => Promise<number>} reparent
+// @property {(parentID: string) => Promise<boolean>} waitForInFlightEmpty
 // @property {(sessionID: string) => Promise<void>} deleteSession
 // @property {(sessionID: string) => void} forgetPrimary
 // @property {() => Promise<string>} promptOldPrimaryForDocSummaries
@@ -54,6 +73,30 @@
 // @param {PrimaryHandoffDeps} deps
 // @returns {Promise<{ newSessionID: string, reparented: number, summaryMarkdown: string }>}
 export async function performPrimaryHandoff(deps) {
+  // Outer try/catch: any uncaught throw inside the sequence is logged with
+  // the full stack via the plugin's `log` helper and re-thrown so the caller
+  // (hooks.js → performPrimaryHandoff(...).catch) can react. We do NOT
+  // swallow — that would leave the user with a hung primary and no
+  // orchestrator #2. Caller behaviour on the rejected promise: log the
+  // message, drop `handoffInProgress` so a later turn can retry. The error
+  // was previously invisible at this layer (it bubbled up unwrapped); now it
+  // lands in the debug log as a tagged "primary handoff failed" line with
+  // the stack trace, which is the operational signal we need to debug the
+  // orphan-cascade bug from the issue report.
+  try {
+    return await performPrimaryHandoffInner(deps)
+  } catch (err) {
+    log("primary handoff failed", err?.stack ?? errMsg(err))
+    throw err
+  }
+}
+
+// Inner helper: the actual 10-step sequence. Split out from the public
+// entry point so the outer try/catch above can log + re-throw without
+// duplicating the reparent/delete/cleanup discipline. The structure is
+// identical to slice 6a; only the step 7 (delete-old-primary) now sits
+// behind a `waitForInFlightEmpty` drain.
+async function performPrimaryHandoffInner(deps) {
   // 1. Gather.
   const inFlight = await deps.getInFlightSubagents(deps.primarySessionID)
   const steps = deps.getPlannedSteps(deps.directory)
@@ -114,13 +157,30 @@ export async function performPrimaryHandoff(deps) {
   // 6. Move in-flight subagents of the old primary onto the new orchestrator.
   const reparented = await deps.reparent(deps.primarySessionID, newID)
 
-  // 7. Now — and only now — delete the old primary session.
+  // 7. Wait for the in-flight set to drain. `reparentSubagents` only rewrites
+  // the in-memory registry — it does NOT update the opencode DB rows
+  // (message.parentID / message chain). If we delete orchestrator1 while
+  // any subagent's DB parentID still points at it, opencode's cascade
+  // cleanup walks orphaned msg_* rows and issues DELETE /session/{msg_…}
+  // calls, which the schema rejects ("Expected a string starting with
+  // `ses`, got `msg_…`", every 5s). The wait drains the same
+  // `!entry.dispatched` set that `inFlightSubagentsFor` exposes, so by the
+  // time it returns every wake handler has snapshotted the NEW parentID
+  // and is delivering to the new orchestrator (its DB row is independent of
+  // orchestrator1's). On timeout we log and proceed — the alternative
+  // (refusing to delete) leaves the user with no primary at all.
+  const drained = await deps.waitForInFlightEmpty(deps.primarySessionID)
+  if (!drained) {
+    log("primary handoff: in-flight drain timed out, proceeding with delete")
+  }
+
+  // 8. Now — and only now — delete the old primary session.
   await deps.deleteSession(deps.primarySessionID)
 
-  // 8. Drop the old primary from primarySessions / primaryCtx maps.
+  // 9. Drop the old primary from primarySessions / primaryCtx maps.
   deps.forgetPrimary(deps.primarySessionID)
 
-  // 9. Return the handoff result.
+  // 10. Return the handoff result.
   return { newSessionID: newID, reparented, summaryMarkdown: md }
 }
 

@@ -86,6 +86,10 @@ function makeDeps(overrides = {}) {
       call("reparent", fromID, toID)
       return reparentedCount
     },
+    waitForInFlightEmpty: async () => {
+      call("waitForInFlightEmpty")
+      return true
+    },
     deleteSession: async (sessionID) => {
       call("deleteSession", sessionID)
     },
@@ -110,7 +114,7 @@ test("performPrimaryHandoff runs the 9 steps in the right order", async () => {
 
   // 1-3: gather, format, write
   // 4-5: create, promptOldPrimaryForDocSummaries, prompt
-  // 6-8: reparent, delete, forget
+  // 6-8: reparent, waitForInFlightEmpty, delete, forget
   assert.deepEqual(order(deps._log), [
     "getInFlightSubagents",
     "getPlannedSteps",
@@ -121,6 +125,7 @@ test("performPrimaryHandoff runs the 9 steps in the right order", async () => {
     "promptOldPrimaryForDocSummaries",
     "promptAsync",
     "reparent",
+    "waitForInFlightEmpty",
     "deleteSession",
     "forgetPrimary",
   ])
@@ -328,6 +333,7 @@ test("EDGE CASE: empty inFlight + empty goal still produces a valid run", async 
     "promptOldPrimaryForDocSummaries",
     "promptAsync",
     "reparent",
+    "waitForInFlightEmpty",
     "deleteSession",
     "forgetPrimary",
   ])
@@ -401,6 +407,7 @@ test("REGRESSION: getInFlightSubagents returning a Promise (real registryMutex.r
     "promptOldPrimaryForDocSummaries",
     "promptAsync",
     "reparent",
+    "waitForInFlightEmpty",
     "deleteSession",
     "forgetPrimary",
   ])

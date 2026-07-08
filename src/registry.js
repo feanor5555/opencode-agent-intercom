@@ -354,6 +354,51 @@ export function inFlightSubagentsFor(parentID) {
   })
 }
 
+// Awaits until the in-flight set for `parentID` drains to empty, then
+// returns. Polls in `pollMs`-sized ticks up to `timeoutMs` total. Used by
+// `performPrimaryHandoff` (handoff.js, step 7 — "delete old primary"):
+// `reparentSubagents` only rewrites the in-memory registry's `parentID` — it
+// does NOT touch opencode's DB rows (message.parentID / message chain). If
+// the old primary is deleted while its subagents still carry (in the DB) a
+// parentID pointing at it, opencode's cascade cleanup walks orphaned `msg_*`
+// rows and issues `DELETE /session/{msg_…}` calls, which the schema rejects
+// ("Expected a string starting with `ses`, got `msg_…`", repeated every 5s).
+// Waiting for the registry to drain — the same predicate
+// `inFlightSubagentsFor` uses — ensures every wake handler has already
+// snapshotted the NEW parentID and is delivering to the new orchestrator
+// before the old session row is removed. Resolves with `true` when the set
+// drained, `false` when the timeout fired with still-in-flight children
+// (caller decides whether to proceed; handoff.js logs and proceeds).
+//
+// Re-checks are made via `inFlightSubagentsFor`, so we honour the same
+// `!entry.dispatched` filter (a dispatched entry's delivery has already
+// been pinned to a target — no point waiting on it, and treating it as
+// "still in flight" would mean we never time out).
+//
+// Args:
+//   parentID  — the OLD primary's session id (the one about to be deleted).
+//   pollMs    — gap between polls; default 500ms. Each poll is a single
+//               runExclusive read, cheap.
+//   timeoutMs — total budget; default 10000ms. With in-flight subagents
+//               typically completing in a couple of seconds, 10s is a
+//               generous outer bound that still keeps the handoff snappy.
+//               The wake-critical-section race is bounded by LLM reply
+//               latency + the snapshot poll, which is seconds not tens.
+export async function waitForInFlightEmpty(parentID, pollMs = 500, timeoutMs = 10000) {
+  if (!parentID) return true
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const remaining = await inFlightSubagentsFor(parentID)
+    if (remaining.length === 0) return true
+    await sleep(pollMs)
+  }
+  return false
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 // ----------------------------------------------------------------------------
 // Primary (non-subagent) context-token cache.
 //

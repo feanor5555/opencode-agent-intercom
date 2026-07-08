@@ -1,7 +1,20 @@
 // Subagent bookkeeping: friendly handles and the sessionID <-> entry mapping.
 // Operates on the module-level shared state in state.js.
 
-import { registry, bySession, primarySessions, counters, aborted, pendingSpawns } from "./state.js"
+import {
+  registry,
+  bySession,
+  primarySessions,
+  counters,
+  aborted,
+  pendingSpawns,
+  registryMutex,
+  primaryCtx,
+} from "./state.js"
+
+// Re-export so callers (e.g. hooks.js in the next slice) can grab the mutex
+// from registry.js without having to know it lives in state.js.
+export { registryMutex }
 
 // Marks a session as one that has used this plugin's tools.
 export function trackPrimary(sessionID) {
@@ -10,6 +23,26 @@ export function trackPrimary(sessionID) {
 
 export function isPrimary(sessionID) {
   return primarySessions.has(sessionID)
+}
+
+// Removes `sessionID` from BOTH the `primarySessions` set and the `primaryCtx`
+// map. Sync, idempotent — calling on an unknown id is a safe no-op (`.delete`
+// on a Set/Map returns false but does not throw). Used by the orchestrator-
+// handoff sequence (§14.7 in ARCHITECTURE.md, step 8) to drop the OLD primary
+// from primary-tracking maps once its in-flight subagents have been reparented
+// and its session deleted.
+//
+// ARCHITECTURE.md §14.7 references this function under the name
+// `forgetPrimary` — but the helper did NOT actually exist (the §14.7 plan
+// assumed a one-liner the slice never built). This is the real definition.
+// Kept sync because the only caller (`performPrimaryHandoff` in handoff.js)
+// invokes it as a fire-and-forget step after the async reparent/delete have
+// already settled — there is nothing to await and adding an `async` would just
+// hand the caller a Promise they immediately ignore.
+export function forgetPrimary(sessionID) {
+  if (!sessionID) return
+  primarySessions.delete(sessionID)
+  primaryCtx.delete(sessionID)
 }
 
 // Per-agent monotonic friendly handle, e.g. "researcher#1".
@@ -135,7 +168,160 @@ export function removeEntry(sessionID) {
   return true
 }
 
+// Rewrites `parentID` on every in-flight registry entry from `fromID` to
+// `toID`, returning the number of entries that were reparented. Used by the
+// orchestrator→orchestrator handoff to ensure subagent results currently in
+// flight wake the NEW primary instead of the (about-to-be-deleted) old one.
+//
+// "In-flight" here means: every entry still present in the registry whose
+// `parentID === fromID` AND whose wake handler has not yet snapshotted it
+// (`!dispatched`). The registry is one-shot — finished subagents are removed
+// in the wake critical section (see onSessionIdle in hooks.js), so any entry
+// still present is either actively running or already mid-dispatch. The
+// `dispatched` latch is set by the wake handler BEFORE it reads parentID and
+// removes the entry (both under the same mutex, see hooks.js:494-512), so
+// observing `dispatched === true` means the handler has already captured the
+// OLD parentID and will deliver to it — reparenting that entry would
+// contradict the snapshotted target. We therefore skip dispatched entries
+// and leave the in-flight delivery undisturbed.
+//
+// Locking: the entire rewrite happens under one registryMutex.runExclusive
+// section. The body mutates `entry.parentID` directly on the live entry
+// objects — it does NOT call any other registry function that would itself
+// acquire the mutex (removeEntry, upsertSession, etc.); nesting
+// runExclusive on the FIFO chain would deadlock. See removeEntryLocked
+// for the same pattern used by the wake critical section.
+//
+// Returns 0 for: fromID === toID (no-op), unknown fromID (no match), or a
+// fromID whose every matching entry is already dispatched.
+//
+// No persistent wake/results queue exists in this codebase (results are
+// delivered inline by onSessionIdle, one-shot), so there is nothing to
+// re-key outside the registry.
+export async function reparentSubagents(fromID, toID) {
+  return registryMutex.runExclusive(() => {
+    if (!fromID || !toID || fromID === toID) return 0
+    let n = 0
+    for (const e of registry.values()) {
+      if (e.parentID !== fromID) continue
+      // Skip entries whose wake handler has already snapshotted them — the
+      // snapshot pins the old parentID; touching parentID now would not
+      // change where the in-flight delivery lands.
+      if (e.dispatched) continue
+      e.parentID = toID
+      n += 1
+    }
+    return n
+  })
+}
+
+// Returns a snapshot of every in-flight subagent of `parentID`, shaped for the
+// orchestrator-handoff sequence (`performPrimaryHandoff` in handoff.js, step
+// 1 — "Gather"). In-flight means: still present in the registry AND not yet
+// dispatched, mirroring the criterion `reparentSubagents` uses (see its
+// doc-comment above for why `!dispatched` is part of the definition). The
+// output contract matches handoff.js's `InFlightSubagent` typedef: `{ handle,
+// agent, task }` where `task` is the spawn-prompt the primary gave
+// (entry.prompt) — falling back to the stable TODO id (entry.taskId) and then
+// the agent name when both are absent (e.g. an event-hook-only registration
+// that never went through `upsertSession`).
+//
+// Locking: the read runs under `registryMutex.runExclusive` so a concurrent
+// `removeEntry` / `upsertSession` cannot splice the iteration in half. The
+// function does NOT mutate state, only reads — nesting under runExclusive is
+// fine here (no FIFO deadlock risk because there are no nested locking
+// calls). Sync bodies inside runExclusive are allowed and resolve to the
+// returned array, so callers can either `await` the Promise OR use the
+// value inline; `performPrimaryHandoff` does the former.
+export function inFlightSubagentsFor(parentID) {
+  if (!parentID) return []
+  return registryMutex.runExclusive(() => {
+    const out = []
+    for (const e of registry.values()) {
+      if (e.parentID !== parentID) continue
+      if (e.dispatched) continue
+      out.push({
+        handle: e.handle,
+        agent: e.agent,
+        task: e.prompt || e.taskId || e.agent,
+      })
+    }
+    return out
+  })
+}
+
+// ----------------------------------------------------------------------------
+// Primary (non-subagent) context-token cache.
+//
+// Pure helpers around the `primaryCtx` Map in state.js. hooks.js (the real
+// one, NOT a test) calls these on each primary turn to refresh the cached
+// measurement; tests cover the read/write/TTL logic in isolation by seeding
+// `lastFetchAt` directly. The hot path in hooks.js is therefore "if
+// shouldRefreshPrimary then fetch and recordPrimaryContext", and the fetch
+// itself stays in hooks.js — no client import here.
+//
+// Locking discipline: deferred to the handoff slice. In the measurement slice
+// the cache is single-writer (the transform hook on the primary's session) and
+// the only reader is the same hook on the next turn; the eventual handoff
+// slice adds the lock when another reader shows up.
+// ----------------------------------------------------------------------------
+
+// Writes { tokens, lastFetchAt: Date.now() } for a primary session. tokens may
+// be undefined (no completed assistant step yet) — that is still a valid
+// measurement and is cached as-is so the next turn can see "we already looked".
+export function recordPrimaryContext(sessionID, tokens) {
+  if (!sessionID) return
+  primaryCtx.set(sessionID, { tokens, lastFetchAt: Date.now() })
+}
+
+// Returns the cached tokens for a primary session, or undefined if no entry
+// has been recorded yet. Does NOT check the TTL — callers that care about
+// staleness must call shouldRefreshPrimary first.
+export function primaryContextTokens(sessionID) {
+  return primaryCtx.get(sessionID)?.tokens
+}
+
+// True when the cache has no entry for this primary OR the entry is older
+// than `ttlMs` (default 3000ms, mirroring the subagent ctx path). Kept as a
+// pure predicate so tests can backdate `lastFetchAt` and assert the flip
+// without any real clock or fetch.
+export function shouldRefreshPrimary(sessionID, ttlMs = 3000) {
+  const entry = primaryCtx.get(sessionID)
+  if (!entry) return true
+  return Date.now() - entry.lastFetchAt >= ttlMs
+}
+
+// Pure predicate for the handoff trigger: should the primary session be
+// handed off to a fresh orchestrator right now? Reads the cached token
+// count (no I/O, no lock) and compares it to `maxPrimaryContext`.
+//
+// Returns false in three cases:
+//   - `maxPrimaryContext` is not a positive number (0 / negative / NaN /
+//     non-number ⇒ handoff disabled, regardless of usage).
+//   - No cached token count yet for this session (`primaryContextTokens`
+//     returns undefined when no measurement has been recorded).
+//   - The cached count is somehow non-numeric (defensive — `recordPrimaryContext`
+//     only stores numbers or undefined, so this should not occur in practice).
+//
+// Otherwise returns true iff `primaryContextTokens(sessionID) >= maxPrimaryContext`.
+// The boundary case (tokens === threshold) counts as "trigger": once the
+// primary has consumed the full budget it should hand off, not wait for
+// the *next* turn to push it over.
+//
+// Intentionally side-effect free: does not bump `lastFetchAt`, does not
+// clear the cache, does not touch the mutex. The next slice (hooks.js
+// trigger) is responsible for the actual handoff.
+export function shouldTriggerPrimaryHandoff(sessionID, maxPrimaryContext) {
+  if (typeof maxPrimaryContext !== "number" || !Number.isFinite(maxPrimaryContext) || maxPrimaryContext <= 0) {
+    return false
+  }
+  const tokens = primaryContextTokens(sessionID)
+  if (typeof tokens !== "number" || !Number.isFinite(tokens)) return false
+  return tokens >= maxPrimaryContext
+}
+
 function createEntry(sessionID, agent, prompt, parentID, taskId, directory) {
+  const now = Date.now()
   const entry = {
     handle: nextHandle(agent),
     sessionID,
@@ -154,7 +340,15 @@ function createEntry(sessionID, agent, prompt, parentID, taskId, directory) {
     // different project but share the same factory ctx).
     directory: directory || undefined,
     status: "busy",
-    spawnedAt: Date.now(),
+    spawnedAt: now,
+    // Wall-clock ms of the most recent lifecycle event observed for this
+    // subagent (session.created / .status / .idle / any). Initialized at
+    // spawnedAt; bumped on every event by the event handler. Read by the
+    // inactivity watchdog (sweepWatchdog) to detect a hung LLM call: if the
+    // gap exceeds maxSubagentAgeMs, the subagent is auto-aborted and its
+    // slot freed. Distinct from `lastActivity` (a short string snapshot of
+    // what the subagent was last doing, used by the system-prompt snapshot).
+    lastActivityAt: now,
     lastActivity: undefined,
     ctxTokens: undefined,
     // wall-clock timestamp of the most recent fetchSnapshot() that returned
@@ -174,6 +368,11 @@ function createEntry(sessionID, agent, prompt, parentID, taskId, directory) {
     // Latch: true after notifyParentOfDenialLoop has fired for this subagent
     // so the parent isn't spammed every subsequent over-budget turn.
     notifiedParentOfLoop: false,
+    // Latch: set true the instant sweepWatchdog decides this subagent has
+    // timed out, BEFORE we call signalAbort / postNotice / removeEntry.
+    // Used to keep the watchdog and the normal onSessionIdle path from both
+    // acting on the same session in the same sweep window.
+    timedOut: false,
   }
   registry.set(entry.handle, entry)
   bySession.set(sessionID, entry.handle)

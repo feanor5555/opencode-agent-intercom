@@ -8,12 +8,21 @@ import {
   isPrimary,
   effectiveState,
   removeEntry,
+  removeEntryLocked,
   countActiveSubagents,
+  registryMutex,
+  shouldRefreshPrimary,
+  recordPrimaryContext,
+  shouldTriggerPrimaryHandoff,
+  inFlightSubagentsFor,
+  reparentSubagents,
+  forgetPrimary,
 } from "./registry.js"
-import { fetchSnapshot, postNotice, showToast, deleteSession, forgetSessionDirectory, getSessionDirectory } from "./client.js"
+import { fetchSnapshot, postNotice, showToast, deleteSession, forgetSessionDirectory, getSessionDirectory, abortSession, createChildSession, promptSession } from "./client.js"
 import { getSettings } from "./settings.js"
 import { removeTask, todoFilePath } from "./todofile.js"
-import { projectMdBlock } from "./project.js"
+import { projectMdBlock, readPlannedSteps, formatPrimarySummary, writePrimarySummary } from "./project.js"
+import { performPrimaryHandoff, lastUserGoal } from "./handoff.js"
 import { existsSync } from "node:fs"
 import { log, errMsg } from "./log.js"
 import {
@@ -74,6 +83,20 @@ const AGENTS_MD_SUBAGENTS = new Set([
 // close to the budget so the lockdown still triggers promptly.
 const CTX_TTL_MS = 3000
 const CTX_NEAR_BUDGET = 0.7
+
+// Re-entrancy guard for the orchestrator handoff. The transform hook fires on
+// every primary turn; without this, multiple turns in a row would each kick
+// off a fresh handoff before the first one finished (each handoff does
+// deleteSession on the old primary, so re-entry would race on the same id).
+// Cleared by the .catch handler (retry on failure) AND inside forgetPrimary
+// once orchestrator1 has been replaced by orchestrator2.
+const handoffInProgress = new Set()
+
+// Orchestrator agent name passed to the new session in the handoff. The
+// README + package.json declare "orchestrator" as the default primary agent;
+// FLAGGED: a project that overrides `default_agent` in opencode.json will not
+// be honored here — runtime verification required.
+const ORCHESTRATOR_AGENT_NAME = "orchestrator"
 
 // How many over-budget tool-call denials before we notify the primary that
 // this subagent is stuck in a denial loop. We never auto-abort — abort is
@@ -144,6 +167,90 @@ export function createTransformSystem(client) {
       if (isSubagent) {
         ctxBudget = await contextLimitNotice(client, entry)
       } else {
+        // Primary (non-subagent) turn. Measurement only — record the current
+        // context-token count, TTL-guarded via shouldRefreshPrimary. No
+        // threshold check, no handoff trigger; that's a later slice.
+        if (shouldRefreshPrimary(sessionID)) {
+          const snap = await fetchSnapshot(client, sessionID)
+          recordPrimaryContext(sessionID, snap?.ctxTokens)
+        }
+        // Slice 6b-ii-b: trigger an orchestrator→orchestrator handoff when
+        // the recorded context exceeds maxPrimaryContext. Fire-and-forget: the
+        // transform hook MUST return normally (opencode awaits it before
+        // injecting the system prompt), so the handoff runs in a detached
+        // promise. The `handoffInProgress` set guards against re-entry while
+        // a handoff is in flight — it is cleared both by the .catch handler
+        // (so a failed handoff can retry on a later turn) and by the
+        // forgetPrimary wrapper (which fires once orchestrator1 has been
+        // successfully replaced by orchestrator2).
+        const { maxPrimaryContext } = getSettings()
+        if (
+          shouldTriggerPrimaryHandoff(sessionID, maxPrimaryContext) &&
+          !handoffInProgress.has(sessionID)
+        ) {
+          handoffInProgress.add(sessionID)
+          showToast(client, {
+            title: "agent-intercom",
+            message: "primary context limit reached — handing off to a fresh orchestrator",
+          })
+          const handoffDeps = {
+            primarySessionID: sessionID,
+            directory: sessionDir,
+            orchestratorAgentName: ORCHESTRATOR_AGENT_NAME,
+            getInFlightSubagents: inFlightSubagentsFor,
+            getPlannedSteps: readPlannedSteps,
+            getLastUserGoal: () => lastUserGoal(input.messages),
+            formatPrimarySummary,
+            writePrimarySummary,
+            // handoff.js calls `createSession({ agent })`; client.js exposes
+            // `createChildSession(client, { parentID, title, directory })`.
+            // We bridge the two shapes here. CRITICAL: parentID is OMITTED
+            // on purpose so orchestrator2 is created as a ROOT/independent
+            // session in opencode — NOT a child of orchestrator1. If we
+            // passed parentID=sessionID, opencode would treat orchestrator2
+            // as a child and the subsequent deleteSession(orchestrator1)
+            // would CASCADE-DELETE orchestrator2 along with it, destroying
+            // the very session the handoff just created. The SDK's
+            // SessionCreateData declares parentID as optional (types.gen.d.ts
+            // SessionCreateData.body.parentID?: string), so omitting it gives
+            // us a root session — exactly what we want for a true handoff.
+            // Subagent reparenting (below) uses the PLUGIN's own registry
+            // parentID field and is unrelated to opencode's session tree.
+            createSession: ({ agent }) =>
+              createChildSession(client, {
+                title: `orchestrator#2 (handoff from ${sessionID})`,
+                directory: sessionDir,
+              }),
+            // handoff.js calls `promptAsync(sessionID, message)`; client.js
+            // exposes `promptSession(client, { sessionID, agent, prompt })`.
+            // We bridge: the kickoff message must set `agent` so opencode
+            // routes the first turn to the orchestrator role for the new
+            // (otherwise empty) session.
+            promptAsync: (sid, message) =>
+              promptSession(client, {
+                sessionID: sid,
+                agent: ORCHESTRATOR_AGENT_NAME,
+                prompt: message,
+              }),
+            deleteSession: (sid) => deleteSession(client, sid),
+            reparent: reparentSubagents,
+            forgetPrimary: (sid) => {
+              forgetPrimary(sid)
+              handoffInProgress.delete(sid)
+            },
+          }
+          void performPrimaryHandoff(handoffDeps)
+            .then(({ newSessionID, reparented }) => {
+              showToast(client, {
+                title: "agent-intercom",
+                message: `handoff complete — new session ${newSessionID}, ${reparented} subagent(s) reparented`,
+              })
+            })
+            .catch((err) => {
+              log("primary handoff failed", errMsg(err))
+              handoffInProgress.delete(sessionID) // allow retry on a later turn
+            })
+        }
         limits = formatLimitsNotice()
         snapshot = formatSubagentSnapshot(sessionID) || ""
       }
@@ -401,10 +508,25 @@ const unknownEventsSeen = new Set()
 // for auto-tick from `entry.directory` (captured per-session at spawn time) —
 // NOT from the factory closure, which only reflects where opencode serve was
 // started and is wrong for sessions created with ?directory=other-project.
+//
+// The first call also arms the inactivity watchdog (see sweepWatchdog).
 export function createEventHandler(client) {
+  ensureWatchdogStarted(client)
   return async function handleEvent({ event }) {
     try {
       const props = event?.properties ?? {}
+      // Bump the entry's lastActivityAt on EVERY event for a tracked session,
+      // before dispatch — this is the dead-man's-switch signal for the
+      // watchdog. A subagent that keeps emitting events is alive; one that
+      // goes silent gets timed out. We touch by every sessionID we can find
+      // on the event payload (status/idle use `sessionID` at top level;
+      // session.created nests it under `info.id`). Done unconditionally:
+      // touching a non-tracked session is a cheap Map miss.
+      const sid = props?.sessionID ?? props?.info?.id
+      if (sid) {
+        const e = entryForSession(sid)
+        if (e) e.lastActivityAt = Date.now()
+      }
       switch (event?.type) {
         case "session.created":
           onSessionCreated(props)
@@ -414,6 +536,9 @@ export function createEventHandler(client) {
           break
         case "session.idle":
           await onSessionIdle(props, client)
+          break
+        case "session.error":
+          await onSessionError(props, client)
           break
         default:
           if (event?.type && !unknownEventsSeen.has(event.type)) {
@@ -445,28 +570,58 @@ function onSessionStatus({ sessionID, status }) {
 // something it spawns a fresh one. Aborted subagents skip the wake (the user
 // already asked for it to stop). Re-entry by a duplicate idle event is a no-op
 // because the entry is already gone.
+//
+// Double-fire guard vs the inactivity watchdog: if sweepWatchdog has already
+// aborted this subagent because it went silent, `aborted.has(sessionID)` is
+// true AND removeEntry has already run (so entryForSession returns undefined).
+// Either guard alone is sufficient; both together make the intent explicit.
 async function onSessionIdle({ sessionID }, client) {
-  const entry = entryForSession(sessionID)
-  if (!entry || aborted.has(sessionID)) return
-  entry.status = "idle"
-  if (!entry.parentID) return
-  const handle = entry.handle
-  const parentID = entry.parentID
-  const agent = entry.agent
-  const taskId = entry.taskId
-  const directory = entry.directory
+  // CRITICAL SECTION per §14.7: read all delivery-target fields from the
+  // registry and remove the entry from the registry under the same mutex,
+  // then release the lock BEFORE any network I/O (postNotice/fetchSnapshot).
+  // The wake race (§14.7): a future reparentSubagents swaps parentID on
+  // in-flight entries. We must atomically (a) read parentID, (b) verify
+  // the entry is still ours (not already cleared by another path), (c)
+  // claim it via a `dispatched` latch so any concurrent mutation sees
+  // we've taken responsibility, and (d) removeEntry — all in one
+  // runExclusive. Once we hold the snapshot, postNotice to that exact
+  // parentID may proceed outside the lock; the network call is
+  // retry-irrelevant because the snapshot is now stable.
+  const wake = await registryMutex.runExclusive(() => {
+    const e = entryForSession(sessionID)
+    if (!e || aborted.has(sessionID) || e.timedOut || e.errored || e.dispatched) return null
+    e.status = "idle"
+    if (!e.parentID) return null
+    // Latch BEFORE removal so any other path that runs under the same mutex
+    // (a concurrent onSessionIdle duplicate, a future reparentSubagents, a
+    // sweepWatchdog iteration) either sees `dispatched` and skips or never
+    // touches this entry at all. Cheap, idempotent, single-write.
+    e.dispatched = true
+    // Inline removeEntry (via removeEntryLocked) instead of awaiting removeEntry:
+    // removeEntry itself is wrapped in runExclusive, and the FIFO mutex is
+    // not re-entrant — nesting runExclusive inside runExclusive on the same
+    // `_tail` would deadlock. The body is identical to removeEntry's; we just
+    // skip the inner lock acquisition because we already hold the outer one.
+    // Returns a real boolean synchronously, so the truthy-branch below is
+    // correct (a missing entry now actually returns null instead of leaking
+    // a truthy Promise object — that was the regression slice 1a introduced).
+    const removed = removeEntryLocked(sessionID)
+    return removed ? {
+      handle: e.handle,
+      parentID: e.parentID,
+      agent: e.agent,
+      taskId: e.taskId,
+      directory: e.directory,
+    } : null
+  })
+  if (!wake) return
+  const { handle, parentID, agent, taskId, directory } = wake
   try {
     const snapshot = await fetchSnapshot(client, sessionID)
     // Auto-tick TODO.md based on the subagent's `DONE: T<n>` marker, if it's
     // present and matches the spawn-assigned task id. Done BEFORE
     // removeEntry/postNotice so the completion notice can report the outcome.
     const taskOutcome = autoMarkTask(directory, taskId, snapshot.result)
-    // Drop the entry BEFORE rendering the slot notice so the freed slot is
-    // already reflected in countActiveSubagents — otherwise the orchestrator
-    // would see "0 free" even though this very subagent just released its slot.
-    if (removeEntry(sessionID)) {
-      log("removed finished subagent", { handle, sessionID })
-    }
     await postNotice(
       client,
       parentID,
@@ -483,13 +638,111 @@ async function onSessionIdle({ sessionID }, client) {
     // Fall through to cleanup of the underlying opencode session — keeping it
     // around would only leak: a one-shot subagent gets exactly one wake
     // attempt. If it failed, the user can re-prompt via the primary.
-    if (removeEntry(sessionID)) {
-      log("removed finished subagent (after notify failure)", { handle, sessionID })
-    }
   }
   const ok = await deleteSession(client, sessionID)
   if (ok) log("deleted opencode session", { handle, sessionID })
   forgetSessionDirectory(sessionID)
+}
+
+// A tracked subagent's LLM call failed (provider auth error, API error,
+// output-length, abort, or generic unknown). opencode surfaces this as
+// `session.error` BEFORE the eventual `session.idle`, so catching it here
+// gives the orchestrator a precise, immediate signal — the 90 s inactivity
+// watchdog is the fallback for subagents that go silent without an explicit
+// error event.
+//
+// Idempotency: the same subagent may receive `session.error` AND a later
+// `session.idle`, and the watchdog sweep could run in between. We latch
+// `entry.errored = true` FIRST, then onSessionIdle and sweepWatchdog both
+// early-return on that flag (just like they do for `timedOut`/`aborted`).
+//
+// Scope guard: `session.error` may fire for sessions we do not track (e.g.
+// the orchestrator's own primary, or any user session). If `entryForSession`
+// returns nothing, this is not a subagent we spawned — log and return without
+// touching it.
+//
+// Best-effort: every step is wrapped in try/catch and we never throw out of
+// the event handler, so a failure here cannot poison the rest of the event
+// stream.
+async function onSessionError(props, client) {
+  const sessionID = props?.sessionID
+  if (!sessionID) {
+    // type-level: sessionID is optional. Nothing to attribute the failure to.
+    log("session.error with no sessionID — ignored")
+    return
+  }
+  const entry = entryForSession(sessionID)
+  if (!entry) {
+    // Not one of our subagents. Don't touch it.
+    return
+  }
+  if (entry.timedOut || entry.errored || aborted.has(sessionID)) {
+    // Already being handled by another path (watchdog or a prior error event).
+    return
+  }
+  // Latch FIRST so onSessionIdle / sweepWatchdog skip this entry even if
+  // they race us between here and the postNotice below.
+  entry.errored = true
+  const errText = extractErrorMessage(props?.error)
+  log("subagent llm error", {
+    handle: entry.handle,
+    sessionID,
+    error: errText,
+  })
+  // Mark aborted so the tool-guard denies any in-flight tool calls that
+  // race the cleanup (mirrors the watchdog path).
+  aborted.add(sessionID)
+  // Wake the parent with the error notice. Best-effort — a failed notice
+  // must not stop us from freeing the slot.
+  try {
+    await postNotice(client, entry.parentID, errorNotice(entry, errText))
+    showToast(client, {
+      title: "agent-intercom",
+      message: `${entry.handle} failed`,
+      variant: "error",
+    })
+  } catch (err) {
+    log("session.error: postNotice failed", { handle: entry.handle, err: errMsg(err) })
+  }
+  // Free the slot. Same cleanup as onSessionIdle / the watchdog, so the
+  // global cap drops by one and the opencode session goes away.
+  if (await removeEntry(sessionID)) {
+    log("removed errored subagent", { handle: entry.handle, sessionID })
+  }
+  try {
+    const ok = await deleteSession(client, sessionID)
+    if (ok) log("deleted opencode session (errored)", { handle: entry.handle, sessionID })
+  } catch (err) {
+    log("session.error: deleteSession failed", { handle: entry.handle, sessionID, err: errMsg(err) })
+  }
+  forgetSessionDirectory(sessionID)
+}
+
+// Extracts a human-readable message from the `error` payload of a
+// `session.error` event. The payload is one of:
+//   ProviderAuthError        — { name: "ProviderAuthError", data: { providerID, message } }
+//   UnknownError             — { name: "UnknownError", data: { message } }
+//   MessageOutputLengthError — { name: "MessageOutputLengthError", data: { … } }
+//   MessageAbortedError      — { name: "MessageAbortedError", data: { message } }
+//   ApiError                 — { name: "APIError", data: { message, statusCode?, isRetryable, … } }
+// All of them have a `name` field that names the kind, and most have a
+// `data.message`. We compose `<name>: <data.message>` when both exist, fall
+// back to just one of them when only one is present, and return "unknown
+// error" if the payload is missing or empty. Defensive against every field
+// being undefined — opencode has been known to ship `error: undefined`.
+function extractErrorMessage(error) {
+  if (!error || typeof error !== "object") return "unknown error"
+  const name = typeof error.name === "string" && error.name ? error.name : null
+  const dataMsg =
+    error.data && typeof error.data === "object" && typeof error.data.message === "string"
+      ? error.data.message
+      : null
+  // MessageAbortedError carries no `message` field; surface the kind so the
+  // orchestrator at least sees "MessageAbortedError" rather than "unknown".
+  if (name && dataMsg) return `${name}: ${dataMsg}`
+  if (name) return name
+  if (dataMsg) return dataMsg
+  return "unknown error"
 }
 
 // Marker the subagent is taught to put on the FIRST non-empty line of its
@@ -769,6 +1022,178 @@ function denialLoopNotice(entry) {
     `Tell the user the subagent appears stuck and ask whether to abort it (via the TUI ✕ button, ` +
     `or by telling you to abort it by handle). Do NOT abort on your own — abort is user-only.`
   )
+}
+
+// ---- Inactivity watchdog (dead-man's switch) ---------------------------------
+//
+// What this guards against: an LLM call inside a subagent that hangs forever
+// (server timeout, network partition, model that never streams a token). No
+// `session.idle` event ever fires, so the normal wake-on-finish path never
+// runs, and the registry entry + global slot stay occupied for the life of
+// the opencode process. The orchestrator also never gets woken, so it sits
+// idle waiting for a result that will never arrive.
+//
+// The fix is a periodic sweep over the registry: any entry whose `lastActivityAt`
+// is older than `maxSubagentAgeMs` is treated as hung, aborted cooperatively,
+// and its slot is freed. The orchestrator is woken with a timeout notice so it
+// can re-dispatch.
+//
+// Important: the threshold is INACTIVITY (time since the last event), not
+// total lifetime. A long-running subagent that keeps emitting events is
+// healthy — its `lastActivityAt` gets bumped on every event by `handleEvent`
+// above, so it never trips. Only a subagent that produces ZERO events for
+// `maxSubagentAgeMs` (default 90 s) gets killed.
+
+// How often the sweep runs. 5 s is a good balance: cheap (just a Map scan
+// over a handful of entries) and timely enough that the worst-case extra
+// hang over the configured threshold is 5 s. The sweep is asynchronous, but
+// the work per tick is small (a Map scan + maybe one abort call) so it
+// doesn't need to be unref'd.
+const WATCHDOG_INTERVAL_MS = 5000
+
+// Module-level: the interval handle + the flag that ensures we only arm the
+// timer once per process. createEventHandler may be invoked more than once
+// across plugin reloads within the same opencode process — restarting the
+// timer on every call would leak intervals.
+let watchdogInterval = null
+let watchdogClient = null
+
+export function ensureWatchdogStarted(client) {
+  if (watchdogInterval) {
+    // Already running; keep the freshest client so future sweeps use it.
+    watchdogClient = client
+    return
+  }
+  watchdogClient = client
+  const handle = setInterval(() => {
+    void sweepWatchdog()
+  }, WATCHDOG_INTERVAL_MS)
+  // Don't pin the opencode event loop on this interval: the watchdog only
+  // matters while subagents (and therefore the plugin) are alive. If
+  // opencode tears the plugin factory down for a clean shutdown, the interval
+  // goes with it. (setInterval is the kind of handle that would otherwise
+  // keep node alive indefinitely — see node's "active handles" semantics.)
+  if (typeof handle.unref === "function") handle.unref()
+  watchdogInterval = handle
+  log("watchdog started", { intervalMs: WATCHDOG_INTERVAL_MS })
+}
+
+// Sweeps the registry once and times out any subagent whose last event is
+// older than the configured inactivity window. Best-effort: a single failed
+// abort on one entry doesn't stop the others from being checked.
+export async function sweepWatchdog() {
+  const maxAge = getSettings().maxSubagentAgeMs
+  if (maxAge <= 0) return // watchdog disabled
+  const now = Date.now()
+  // Snapshot the entries first — we mutate the registry (removeEntry) below,
+  // so iterating the live Map would skip or revisit entries.
+  const entries = [...registry.values()]
+  for (const entry of entries) {
+    if (entry.timedOut) continue
+    if (entry.errored) continue
+    if (aborted.has(entry.sessionID)) continue
+    // session.idle fires just before the entry is removed; if a stray idle
+    // sneaks through the gap, `entry.status === "idle"` covers it.
+    if (entry.status === "idle") continue
+    const last = entry.lastActivityAt ?? entry.spawnedAt
+    if (now - last <= maxAge) continue
+
+    // Latch FIRST so any racing event handler / onSessionIdle skips this entry.
+    entry.timedOut = true
+    await timeoutSubagent(entry, maxAge, now - last)
+  }
+}
+
+// Performs the actual timeout for one entry: abort the opencode session,
+// post a wake notice to the parent, and free the slot by running the same
+// cleanup path as onSessionIdle (removeEntry + deleteSession +
+// forgetSessionDirectory). Best-effort; failures are logged, never thrown.
+export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
+  const sessionID = entry.sessionID
+  const handle = entry.handle
+  const agent = entry.agent
+  const parentID = entry.parentID
+  log("subagent timed out (inactivity)", {
+    handle,
+    sessionID,
+    agent,
+    silentMs,
+    maxAgeMs,
+  })
+
+  // 1. Cooperative abort (best-effort, mirrors signalAbort in tools.js).
+  try {
+    await abortSession(watchdogClient, sessionID)
+  } catch (err) {
+    log("watchdog: abort failed", { handle, sessionID, err: errMsg(err) })
+  }
+  // Mark aborted so the guardToolExecute hook denies any in-flight tool
+  // calls that race the abort signal. removeEntry will drop this set entry
+  // below; ordering matters only for the tool-guard window.
+  aborted.add(sessionID)
+
+  // 2. Wake the parent with a timeout notice (mirrors postNotice in onSessionIdle).
+  if (parentID && watchdogClient) {
+    try {
+      await postNotice(
+        watchdogClient,
+        parentID,
+        timeoutNotice(entry, maxAgeMs, silentMs),
+      )
+    } catch (err) {
+      log("watchdog: postNotice failed", { handle, parentID, err: errMsg(err) })
+    }
+  }
+
+  // 3. Free the slot: same cleanup as onSessionIdle, so the global cap drops
+  //    by one. Best-effort — a missing entry means another path already
+  //    cleaned it up, which is fine.
+  if (await removeEntry(sessionID)) {
+    log("watchdog: removed timed-out subagent", { handle, sessionID })
+  }
+  try {
+    const ok = await deleteSession(watchdogClient, sessionID)
+    if (ok) log("watchdog: deleted opencode session", { handle, sessionID })
+  } catch (err) {
+    log("watchdog: deleteSession failed", { handle, sessionID, err: errMsg(err) })
+  }
+  forgetSessionDirectory(sessionID)
+}
+
+// Wake-notice sent to the parent when the watchdog times out a subagent.
+// Sibling of completionNotice — keeps the same emoji + phrasing vocabulary so
+// the orchestrator's pattern-matching notices stay consistent.
+export function timeoutNotice(entry, maxAgeMs, silentMs) {
+  const silentSec = Math.round(silentMs / 1000)
+  const maxSec = Math.round(maxAgeMs / 1000)
+  return (
+    `🔔 agent-intercom: subagent "${entry.handle}" (${entry.agent}, session ${entry.sessionID}) ` +
+    `timed out after ${silentSec}s of inactivity (limit ${maxSec}s) — slot freed. ` +
+    `You may re-dispatch with spawn() if the work is still needed.`
+  )
+}
+
+// Wake-notice sent to the parent when a subagent's LLM call failed (caught
+// via `session.error`). Sibling of completionNotice / timeoutNotice — same
+// emoji + phrasing vocabulary so the orchestrator's pattern-matching notices
+// stay consistent. We append a `slots` line via slotsNoticeAfterFinish so the
+// freed slot is visible to the orchestrator, matching the completion path.
+function errorNotice(entry, message) {
+  return (
+    `🔔 agent-intercom: subagent "${entry.handle}" (${entry.agent}, session ${entry.sessionID}) ` +
+    `failed: ${message}. Slot freed. ` +
+    `You may re-dispatch with spawn() if the work is still needed.` +
+    slotsNoticeAfterFinish(entry.parentID)
+  )
+}
+
+// Test-only: stop the watchdog interval so unit tests don't leak timers.
+export function _stopWatchdogForTests() {
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval)
+    watchdogInterval = null
+    watchdogClient = null
+  }
 }
 
 // Rewrites any pending tool-part in the message history to a completed denial.

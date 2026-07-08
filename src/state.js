@@ -9,7 +9,8 @@
 // hook runs in a different one, and they must see the same registry.
 
 // handle -> { handle, sessionID, agent, prompt, parentID, status, spawnedAt,
-//             lastActivity, ctxTokens, lastTokensFetchAt }
+//             lastActivityAt, lastActivity, ctxTokens, lastTokensFetchAt,
+//             timedOut }
 //
 // One-shot subagent lifecycle: each entry lives from `spawn` until the
 // subagent goes idle (= completed its single reply). At that point the event
@@ -53,6 +54,40 @@ export const pendingSpawns = { count: 0 }
 // of ending the turn after a spawn; one snapshot per turn is plenty).
 export const lastPrimaryTool = new Map()
 
+// sessionID -> { tokens:number|undefined, lastFetchAt:number }.
+// Cached context-token measurement for primary (non-subagent) sessions. The
+// transform hook refreshes this on each primary turn (TTL-guarded, mirroring
+// the subagent ctx path) and a future slice will read it to drive the
+// context-refresh handoff. MEASUREMENT ONLY in this slice — the threshold
+// comparison and handoff trigger are intentionally NOT here.
+export const primaryCtx = new Map()
+
+// Minimal async mutex (promise-chain FIFO lock) for serializing critical
+// sections over the shared state in this module. Dependency-free.
+//
+// Usage: `await registryMutex.runExclusive(() => doStuff())`. Subsequent
+// callers queue behind any in-flight holder; the returned Promise resolves
+// with whatever `fn` resolves to (or rejects with whatever it rejects with —
+// rejections do NOT poison the lock, the next waiter still gets to run).
+// Sync functions are fine: `runExclusive` returns a Promise that resolves to
+// the function's return value.
+//
+// We expose only `runExclusive` because every caller in this codebase has the
+// shape "do a few mutations, return; on error report and bail" — they don't
+// need to hold the lock across awaits manually, so acquire/release would only
+// be a footgun.
+export const registryMutex = {
+  _tail: Promise.resolve(),
+  runExclusive(fn) {
+    const next = this._tail.then(() => fn())
+    // Swallow rejections on the tail itself so one failure doesn't break the
+    // chain for every subsequent caller. Each waiter's own promise (`next`)
+    // still rejects if fn rejects — only the lock's bookkeeping is reset.
+    this._tail = next.catch(() => {})
+    return next
+  },
+}
+
 // Test-only: clears all shared state so unit tests run in isolation.
 // Not part of the plugin contract — opencode never calls this.
 export function resetState() {
@@ -63,4 +98,5 @@ export function resetState() {
   counters.clear()
   pendingSpawns.count = 0
   lastPrimaryTool.clear()
+  primaryCtx.clear()
 }

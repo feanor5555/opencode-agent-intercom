@@ -17,6 +17,7 @@ import {
   inFlightSubagentsFor,
   reparentSubagents,
   forgetPrimary,
+  waitForInFlightEmpty,
 } from "./registry.js"
 import { fetchSnapshot, postNotice, showToast, deleteSession, forgetSessionDirectory, getSessionDirectory, abortSession, createChildSession, promptSession } from "./client.js"
 import { getSettings } from "./settings.js"
@@ -241,6 +242,15 @@ export function createTransformSystem(client) {
               promptOldPrimaryForDocSummaries(client, sessionID),
             deleteSession: (sid) => deleteSession(client, sid),
             reparent: reparentSubagents,
+            // Drains the in-flight subagent set for the old primary before we
+            // delete its session. handoff.js calls this between reparent and
+            // deleteSession so opencode's DB cascade never sees an orphaned
+            // msg_* row that still points at the old id (which produces the
+            // "Expected a string starting with `ses`, got `msg_…`" schema
+            // errors). Signature matches registry.waitForInFlightEmpty:
+            // (parentID) → Promise<boolean>, true when drained, false on
+            // timeout (handoff.js logs and proceeds).
+            waitForInFlightEmpty,
             forgetPrimary: (sid) => {
               forgetPrimary(sid)
               handoffInProgress.delete(sid)

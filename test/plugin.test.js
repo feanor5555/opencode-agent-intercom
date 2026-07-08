@@ -70,8 +70,12 @@ beforeEach(() => {
 })
 
 // Builds a fresh mock ctx. `taskPerm` optionally seeds an agent's
-// `permission.task` map so the permission path can be exercised.
-function makeCtx({ taskPerm, messages = [] } = {}) {
+// `permission.task` map so the permission path can be exercised. `agentPerm`
+// optionally seeds a per-agent `permission` map (e.g. `{ planner: { permission:
+// { bash: "deny" } } }`) so the runtime per-agent-deny guard can be exercised;
+// when both are set, `agentPerm` is merged over the `taskPerm` seed (so a test
+// can pin `orchestrator.permission.task` and add a subagent deny in one mock).
+function makeCtx({ taskPerm, agentPerm, messages = [] } = {}) {
   let counter = 0
   const created = []
   const aborted = []
@@ -79,7 +83,8 @@ function makeCtx({ taskPerm, messages = [] } = {}) {
   const prompted = []
   const notices = []
   const toasts = []
-  const agentConfig = taskPerm ? { orchestrator: { permission: { task: taskPerm } } } : {}
+  const baseAgentConfig = taskPerm ? { orchestrator: { permission: { task: taskPerm } } } : {}
+  const agentConfig = agentPerm ? { ...baseAgentConfig, ...agentPerm } : baseAgentConfig
   const client = {
     session: {
       create: async () => {
@@ -263,6 +268,109 @@ test("tool.execute.before lets a tracked subagent run any tool", async () => {
   // a tracked subagent is not a primary — it may do work itself
   await hooks["tool.execute.before"]({ tool: "bash", sessionID: created[0], callID: "s0" })
   await hooks["tool.execute.before"]({ tool: "task", sessionID: created[0], callID: "s1" })
+})
+
+// --- per-agent `permission.<tool> = "deny"` runtime re-enforcement ---------
+// The agents.js schema strip hides denied tools from the LLM, but the
+// guard is a defense-in-depth re-check in case a project override or future
+// opencode change re-exposes a denied tool. These tests cover the four
+// observable behaviors of that re-check.
+
+test("tool.execute.before hard-denies a subagent calling a tool in its deny map", async () => {
+  // planner has `bash: "deny"` — even though the schema strip is what hides
+  // `bash` from the planner's LLM, the runtime guard must still hard-deny
+  // if the tool is somehow invoked.
+  const { ctx, created } = makeCtx({
+    agentPerm: { planner: { permission: { bash: "deny" } } },
+  })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
+  await assert.rejects(
+    () =>
+      hooks["tool.execute.before"]({
+        tool: "bash",
+        sessionID: created[0],
+        callID: "p0",
+      }),
+    /not permitted to call "bash"/,
+  )
+})
+
+test("tool.execute.before allows a subagent calling a tool NOT in its deny map", async () => {
+  // coder has `bash: "deny"` (matches agents.js config) but no entry for
+  // `edit` — the runtime re-check must not over-deny other tools.
+  const { ctx, created } = makeCtx({
+    agentPerm: { coder: { permission: { bash: "deny" } } },
+  })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
+  // `edit` is not in the deny map -> allowed
+  await hooks["tool.execute.before"]({
+    tool: "edit",
+    sessionID: created[0],
+    callID: "c-edit",
+  })
+  // `bash` IS in the deny map -> denied
+  await assert.rejects(
+    () =>
+      hooks["tool.execute.before"]({
+        tool: "bash",
+        sessionID: created[0],
+        callID: "c-bash",
+      }),
+    /not permitted to call "bash"/,
+  )
+})
+
+test("tool.execute.before does NOT consult the new check for the `task` tool", async () => {
+  // `permission.task` is an allowlist, not a plain deny, and its enforcement
+  // lives in spawn's checkTaskPermission. A bare `task: "deny"` in the agent
+  // config is the signal the schema strip uses to HIDE opencode's native
+  // `task` tool from the LLM — it must NOT cause the runtime guard to
+  // over-deny when the subagent calls `task`. checkToolPermission explicitly
+  // short-circuits on `tool === "task"` and returns null, so the new
+  // per-agent-deny path is bypassed.
+  const { ctx, created } = makeCtx({
+    agentPerm: { researcher: { permission: { task: "deny" } } },
+  })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  // Calling `task` must NOT trip the new per-agent-deny path. For a
+  // subagent the existing guard lets `task` through (the schema strip is
+  // what hides it from the LLM; the runtime guard doesn't deny it), so
+  // this call resolves without throwing.
+  await hooks["tool.execute.before"]({
+    tool: "task",
+    sessionID: created[0],
+    callID: "t1",
+  })
+})
+
+test("tool.execute.before primary behavior is unchanged after the new per-agent-deny check", async () => {
+  // The new check is a subagent-only layer (it sits inside the
+  // `if (entry)` branch in hooks.js). The primary's existing guard
+  // (orchestration-only allowlist, back-to-back list denial) must still
+  // work exactly as before.
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  // primary calling a non-orchestration tool -> denied (orchestrator reason)
+  await assert.rejects(
+    () =>
+      hooks["tool.execute.before"]({
+        tool: "bash",
+        sessionID: "ses_primary",
+        callID: "p-bash",
+      }),
+    /orchestrator/i,
+  )
+  // primary's allowed tools still pass
+  for (const t of ["spawn", "abort", "list"]) {
+    await hooks["tool.execute.before"]({
+      tool: t,
+      sessionID: "ses_primary",
+      callID: `p-${t}`,
+    })
+  }
 })
 
 test("transform hook injects the orchestration protocol into a primary session", async () => {

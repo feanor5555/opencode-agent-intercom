@@ -124,6 +124,6 @@ export default async (ctx) => {
       }
     },
     event: createEventHandler(client),
-    "tool.execute.before": createGuardToolExecute(client),
+    "tool.execute.before": createGuardToolExecute(client, permissionGuard),
   }
 }

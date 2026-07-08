@@ -614,7 +614,7 @@ function slotsNoticeAfterFinish(primaryID) {
 // Bound to a client so it can read live state, though the budget path no
 // longer aborts: notification of the parent happens in contextLimitNotice
 // when the LLM-turn-based threshold is crossed; the guard only denies.
-export function createGuardToolExecute(client) {
+export function createGuardToolExecute(client, permissionGuard) {
   return async function guardToolExecute(input) {
     const sessionID = input?.sessionID
     if (!sessionID) return
@@ -645,6 +645,27 @@ export function createGuardToolExecute(client) {
             "TODO.md. End your reply with `DONE: T<n>` on the FIRST line of your final message " +
             "if your spawn was task-tracked and you finished the work.",
         )
+      }
+      // Defense in depth: re-check the per-agent `permission.<tool> = "deny"`
+      // map at runtime, even though agents.js strips denied tools from the
+      // LLM schema. If the schema strip is bypassed (project override, MCP
+      // plugin re-adding a tool, future opencode change to how tools merge),
+      // this still hard-denies. `permission.task` is intentionally NOT
+      // consulted here — it is an allowlist handled by spawn's
+      // checkTaskPermission, and its bare-string `"deny"` form is the signal
+      // we use to HIDE opencode's blocking native `task` tool from the LLM
+      // (see config.js).
+      if (permissionGuard) {
+        const reason = await permissionGuard.checkToolPermission(entry.agent, input.tool)
+        if (reason) {
+          log("denied tool call: per-agent permission deny", {
+            sessionID,
+            agent: entry.agent,
+            tool: input.tool,
+            reason,
+          })
+          throw new Error(`agent-intercom: ${reason}. This tool is in the agent's deny map.`)
+        }
       }
       const maxContext = getSettings().maxContext
       if (maxContext > 0 && entry.ctxTokens != null && entry.ctxTokens >= maxContext) {

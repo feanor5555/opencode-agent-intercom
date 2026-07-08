@@ -11,7 +11,8 @@
 // npm package and cannot import this module):
 //   ~/.config/opencode/agent-intercom.json
 //     { "maxSubagents": N, "maxContext": N, "maxPrimaryContext": N,
-//       "maxSubagentAgeMs": N, "searxngUrl": "http://host:port" }
+//       "maxSubagentAgeMs": N, "searxngUrl": "http://host:port",
+//       "postNoticeRetries": N, "postNoticeRetryBackoffMs": N }
 
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
@@ -31,6 +32,14 @@ const DEFAULT_MAX_PRIMARY_CONTEXT = 80000
 // (which keeps emitting events) is never tripped, short enough that a hung
 // LLM call doesn't silently pin a slot for the life of the process.
 const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
+// Retry policy for the postNotice transport call (pushes a wake notice into
+// the primary session on subagent completion/timeout/error). The opencode
+// SDK can transiently fail to deliver a promptAsync; without retries a single
+// network blip costs the primary its wake. Mirrors the maxContext pattern —
+// env > file > default. 0 disables retries (single attempt). postNoticeRetries
+// counts RE-tries only — the first attempt is always made.
+const DEFAULT_POST_NOTICE_RETRIES = 3
+const DEFAULT_POST_NOTICE_RETRY_BACKOFF_MS = 500
 const TTL_MS = 2000
 
 let settingsPath = join(homedir(), ".config", "opencode", "agent-intercom.json")
@@ -53,11 +62,14 @@ function envStr(name, def) {
 }
 
 // Current settings: { maxSubagents, maxContext, maxPrimaryContext,
-// maxSubagentAgeMs, searxngUrl }. Cached for TTL_MS so the hot paths (spawn,
-// every subagent transform) don't stat the file constantly. searxngUrl is ""
-// when unset (searxng disabled). maxSubagentAgeMs is the inactivity watchdog
-// window; 0 disables it. maxPrimaryContext is the orchestrator primary-
-// session context-refresh threshold (tokens); 0 disables auto-handoff.
+// maxSubagentAgeMs, searxngUrl, postNoticeRetries, postNoticeRetryBackoffMs }.
+// Cached for TTL_MS so the hot paths (spawn, every subagent transform) don't
+// stat the file constantly. searxngUrl is "" when unset (searxng disabled).
+// maxSubagentAgeMs is the inactivity watchdog window; 0 disables it.
+// maxPrimaryContext is the orchestrator primary-session context-refresh
+// threshold (tokens); 0 disables auto-handoff. postNoticeRetries counts
+// RE-tries (0 = single attempt, no retry). postNoticeRetryBackoffMs is the
+// base delay between attempts (linear, with a small jitter).
 export function getSettings() {
   const now = Date.now()
   if (cache && now - cachedAt < TTL_MS) return cache
@@ -67,6 +79,8 @@ export function getSettings() {
     maxPrimaryContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT", DEFAULT_MAX_PRIMARY_CONTEXT),
     maxSubagentAgeMs: envNum("OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS", DEFAULT_MAX_SUBAGENT_AGE_MS),
     searxngUrl: envStr("OPENCODE_AGENT_INTERCOM_SEARXNG_URL", ""),
+    postNoticeRetries: envNum("OPENCODE_AGENT_INTERCOM_POST_NOTICE_RETRIES", DEFAULT_POST_NOTICE_RETRIES),
+    postNoticeRetryBackoffMs: envNum("OPENCODE_AGENT_INTERCOM_POST_NOTICE_RETRY_BACKOFF_MS", DEFAULT_POST_NOTICE_RETRY_BACKOFF_MS),
   }
   try {
     const raw = JSON.parse(readFileSync(settingsPath, "utf8"))
@@ -84,6 +98,12 @@ export function getSettings() {
     }
     if (typeof raw?.searxngUrl === "string" && raw.searxngUrl.trim() !== "") {
       resolved.searxngUrl = raw.searxngUrl.trim()
+    }
+    if (Number.isInteger(raw?.postNoticeRetries) && raw.postNoticeRetries >= 0) {
+      resolved.postNoticeRetries = raw.postNoticeRetries
+    }
+    if (Number.isInteger(raw?.postNoticeRetryBackoffMs) && raw.postNoticeRetryBackoffMs >= 0) {
+      resolved.postNoticeRetryBackoffMs = raw.postNoticeRetryBackoffMs
     }
   } catch {
     // no file / unreadable -> env + defaults; not an error

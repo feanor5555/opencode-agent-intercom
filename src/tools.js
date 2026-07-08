@@ -278,7 +278,9 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // the sessionID from the `aborted` Set; by the time it runs the opencode
     // session is already being aborted, so further tool calls are blocked
     // regardless of the Set. All three operations are best-effort.
-    removeEntry(entry.sessionID)
+    if (await removeEntry(entry.sessionID)) {
+      log("removed aborted subagent", { handle: entry.handle, sessionID: entry.sessionID })
+    }
     const ok = await deleteSession(client, entry.sessionID)
     if (ok) log("deleted opencode session (aborted)", { handle: entry.handle, sessionID: entry.sessionID })
     forgetSessionDirectory(entry.sessionID)

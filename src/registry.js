@@ -46,10 +46,71 @@ export function forgetPrimary(sessionID) {
 }
 
 // Per-agent monotonic friendly handle, e.g. "researcher#1".
+//
+// The counter is "monotonic w.r.t. live handles": it never goes below the
+// highest-numbered handle currently held by a live entry for `agent`. This
+// means a freshly allocated handle can never collide with one still in flight
+// (whether that in-flight handle will be the same number we just released, or
+// higher). Aborted/finished subagents release their handle back into the pool
+// when doing so does NOT cause a collision with a still-live entry — see
+// `releaseHandle` and the "decrement-when-max" policy in its doc-comment.
 export function nextHandle(agent) {
   const n = (counters.get(agent) ?? 0) + 1
   counters.set(agent, n)
   return `${agent}#${n}`
+}
+
+// Extracts the numeric suffix of a handle ("researcher#7" → 7). Returns NaN
+// for malformed handles (no '#' separator, non-numeric suffix). The current
+// handle format is always `${agent}#${n}` so this never trips in production,
+// but the NaN is a useful fail-safe for releaseHandle, which guards against
+// it before touching the counter.
+function parseHandleNumber(handle) {
+  if (typeof handle !== "string") return NaN
+  const i = handle.lastIndexOf("#")
+  if (i < 0) return NaN
+  return Number.parseInt(handle.slice(i + 1), 10)
+}
+
+// Decrements the per-agent counter when (and only when) the handle being
+// released is the highest-numbered handle currently allocated for `agent`.
+// This is the "decrement-when-max" policy: an aborted subagent reclaims its
+// handle number ONLY if no live entry for the same agent holds a higher
+// number. Rationale:
+//
+//   1. If a higher-numbered handle is still live (e.g. we just aborted
+//      researcher#2 while researcher#3 is still running), the counter must
+//      stay at 3 — a subsequent spawn must get #4, NOT #2, because
+//      researcher#3 is using #3 right now and reusing #2 is harmless but
+//      misleading (the count of *live* subagents would be 1 while the
+//      counter says 2).
+//
+//   2. If the handle being released IS the current max (the common case:
+//      spawn → abort with no other in-flight subagents), decrementing makes
+//      the next spawn reuse the same number. So the typical lifecycle
+//      "researcher#1 → abort → researcher#1" leaves the counter at 1
+//      instead of inflating it to 2.
+//
+//   3. The counter stays monotonic w.r.t. live handles (it never goes below
+//      the highest in-use number), so we cannot accidentally hand out a
+//      number that collides with a live entry. That's the safety
+//      invariant T6 calls out as "monotonic-safe (no collisions with live
+//      handles)".
+//
+// The two call sites — removeEntry and removeEntryLocked — invoke this
+// before the entry is actually deleted from `bySession`, so we still have
+// the handle string to parse. We pass `agent` and `n` explicitly rather
+// than re-reading the entry, because both call sites have already
+// resolved the handle into a local variable and we want a single,
+// parameter-shaped helper.
+function releaseHandle(agent, n) {
+  if (!agent) return
+  if (!Number.isFinite(n) || n <= 0) return
+  const cur = counters.get(agent)
+  // Only decrement when this handle is the current max — see policy above.
+  if (cur === n) counters.set(agent, n - 1)
+  // If `cur` is undefined (shouldn't happen — we only release handles we
+  // allocated, and allocation always sets the counter), leave it alone.
 }
 
 // Looks up an entry by friendly handle or raw sessionID.
@@ -159,9 +220,52 @@ function upgradeProvisionalAgent(entry, agent) {
 // Removes an entry from all shared maps. The event hook calls this immediately
 // after delivering a subagent's completion notice (one-shot lifecycle), so the
 // registry never holds a "finished" subagent.
-export function removeEntry(sessionID) {
+//
+// Also reclaims the per-agent handle counter via `releaseHandle` (the
+// "decrement-when-max" policy in releaseHandle's doc-comment) so that
+// aborting/finishing a subagent does not inflate the counter for future
+// spawns. Without this, "researcher#1" that was immediately aborted would
+// leave the counter at 1 forever, so every subsequent researcher spawn
+// would get #2, #3, … and the visible handle number would diverge from the
+// number of actually-lived researcher subagents.
+//
+// The body is wrapped in registryMutex.runExclusive so concurrent calls from
+// different plugin instances (orchestrator + subagent session hooks) cannot
+// interleave e.g. an in-flight `removeEntry` racing with an `upsertSession`
+// for a re-spawn. The function's sync body is fine inside runExclusive —
+// callers may still `await` the returned Promise.
+export async function removeEntry(sessionID) {
+  return registryMutex.runExclusive(() => {
+    const handle = bySession.get(sessionID)
+    if (!handle) return false
+    // Capture the agent + handle number BEFORE we delete from bySession:
+    // releaseHandle needs both, and we want the release decision made
+    // against the same state this call is mutating (no TOCTOU window where
+    // another spawn could increment the counter in between).
+    const entry = registry.get(handle)
+    if (entry) releaseHandle(entry.agent, parseHandleNumber(handle))
+    registry.delete(handle)
+    bySession.delete(sessionID)
+    aborted.delete(sessionID)
+    return true
+  })
+}
+
+// Same body as removeEntry, but NO runExclusive wrapper. Use this only when
+// the caller is ALREADY inside a registryMutex.runExclusive section — e.g.
+// the wake-dispatch critical section (§14.7), which must atomically read
+// parentID and remove the entry under the same lock without deadlocking on
+// the FIFO chain (removeEntry is itself a runExclusive call; nesting it
+// inside another runExclusive blocks the tail forever). Returns boolean
+// synchronously to match the inline body.
+//
+// Counter-reclaim (releaseHandle) is done here too, for the same reason as
+// in removeEntry — see that function's doc-comment for the policy.
+export function removeEntryLocked(sessionID) {
   const handle = bySession.get(sessionID)
   if (!handle) return false
+  const entry = registry.get(handle)
+  if (entry) releaseHandle(entry.agent, parseHandleNumber(handle))
   registry.delete(handle)
   bySession.delete(sessionID)
   aborted.delete(sessionID)

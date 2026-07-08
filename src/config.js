@@ -1,4 +1,8 @@
-// Honors each caller's `permission.task` allowlist in `spawn`.
+// Honors each caller's `permission.task` allowlist in `spawn`, and re-enforces
+// each subagent's `permission.<tool> = "deny"` map at the runtime tool guard
+// (defense in depth — the schema strip in agents.js hides denied tools from
+// the LLM, but a project override or future opencode change could re-expose
+// them).
 //
 // The custom `spawn` tool sits outside opencode's native `permission.task`
 // enforcement, so it would otherwise bypass the allowlist. We deliberately
@@ -53,7 +57,35 @@ export function createPermissionGuard(client) {
     return null
   }
 
-  return { checkTaskPermission }
+  // Defense-in-depth runtime re-check of the per-agent `permission.<tool>`
+  // deny map. Returns null when the tool is allowed for `callerAgent`, or a
+  // reason string when it is denied. Reads the same live config the
+  // Permission.disabled schema strip uses, so a project override that REMOVED
+  // a deny is honored (no false-deny). Returns null on any read failure — the
+  // primary hard-deny layer (PRIMARY_TOOLS, aborted, over-budget) still runs
+  // and the LLM-side schema strip is the main defense.
+  //
+  // The `task` key is intentionally NOT handled here. `permission.task` is an
+  // allowlist, not a simple deny, and its enforcement lives in
+  // `checkTaskPermission` above (called from `spawn`). Honoring a bare
+  // `task: "deny"` here would over-deny: that string is the signal we use to
+  // HIDE opencode's blocking native `task` tool, NOT to disable `spawn`.
+  async function checkToolPermission(callerAgent, tool) {
+    if (!callerAgent || !tool || tool === "task") return null
+    try {
+      const config = await loadConfig(client)
+      const decision = config?.agent?.[callerAgent]?.permission?.[tool]
+      if (decision === "deny") {
+        return `agent "${callerAgent}" is not permitted to call "${tool}" (permission.${tool})`
+      }
+      return null
+    } catch (err) {
+      log("checkToolPermission failed", errMsg(err))
+      return null
+    }
+  }
+
+  return { checkTaskPermission, checkToolPermission }
 }
 
 // `permission.task` is either a bare decision string or a per-agent map with an

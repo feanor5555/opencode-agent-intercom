@@ -10,7 +10,8 @@
 // Shared file path (the TUI plugin hardcodes the same path, it is a separate
 // npm package and cannot import this module):
 //   ~/.config/opencode/agent-intercom.json
-//     { "maxSubagents": N, "maxContext": N, "searxngUrl": "http://host:port" }
+//     { "maxSubagents": N, "maxContext": N, "maxPrimaryContext": N,
+//       "maxSubagentAgeMs": N, "searxngUrl": "http://host:port" }
 
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
@@ -19,6 +20,17 @@ import { log } from "./log.js"
 
 const DEFAULT_MAX_SUBAGENTS = 1
 const DEFAULT_MAX_CONTEXT = 40000
+// Threshold (in tokens) at which the orchestrator primary session triggers a
+// context-refresh handoff. Independent of maxContext (which gates subagents).
+// 0 disables auto-handoff entirely.
+const DEFAULT_MAX_PRIMARY_CONTEXT = 80000
+// Inactivity watchdog for subagents: if a tracked subagent produces no events
+// for this many ms, the hooks sweep aborts it, frees its slot, and wakes the
+// orchestrator with a timeout notice. 0 disables the watchdog entirely.
+// 90 s is the default — long enough that a healthy long-running subagent
+// (which keeps emitting events) is never tripped, short enough that a hung
+// LLM call doesn't silently pin a slot for the life of the process.
+const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
 const TTL_MS = 2000
 
 let settingsPath = join(homedir(), ".config", "opencode", "agent-intercom.json")
@@ -40,15 +52,20 @@ function envStr(name, def) {
   return env.trim()
 }
 
-// Current settings: { maxSubagents, maxContext, searxngUrl }. Cached for TTL_MS
-// so the hot paths (spawn, every subagent transform) don't stat the file
-// constantly. searxngUrl is "" when unset (searxng disabled).
+// Current settings: { maxSubagents, maxContext, maxPrimaryContext,
+// maxSubagentAgeMs, searxngUrl }. Cached for TTL_MS so the hot paths (spawn,
+// every subagent transform) don't stat the file constantly. searxngUrl is ""
+// when unset (searxng disabled). maxSubagentAgeMs is the inactivity watchdog
+// window; 0 disables it. maxPrimaryContext is the orchestrator primary-
+// session context-refresh threshold (tokens); 0 disables auto-handoff.
 export function getSettings() {
   const now = Date.now()
   if (cache && now - cachedAt < TTL_MS) return cache
   const resolved = {
     maxSubagents: envNum("OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS", DEFAULT_MAX_SUBAGENTS),
     maxContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_CONTEXT", DEFAULT_MAX_CONTEXT),
+    maxPrimaryContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT", DEFAULT_MAX_PRIMARY_CONTEXT),
+    maxSubagentAgeMs: envNum("OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS", DEFAULT_MAX_SUBAGENT_AGE_MS),
     searxngUrl: envStr("OPENCODE_AGENT_INTERCOM_SEARXNG_URL", ""),
   }
   try {
@@ -58,6 +75,12 @@ export function getSettings() {
     }
     if (Number.isInteger(raw?.maxContext) && raw.maxContext >= 0) {
       resolved.maxContext = raw.maxContext
+    }
+    if (Number.isInteger(raw?.maxPrimaryContext) && raw.maxPrimaryContext >= 0) {
+      resolved.maxPrimaryContext = raw.maxPrimaryContext
+    }
+    if (Number.isInteger(raw?.maxSubagentAgeMs) && raw.maxSubagentAgeMs >= 0) {
+      resolved.maxSubagentAgeMs = raw.maxSubagentAgeMs
     }
     if (typeof raw?.searxngUrl === "string" && raw.searxngUrl.trim() !== "") {
       resolved.searxngUrl = raw.searxngUrl.trim()

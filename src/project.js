@@ -5,7 +5,7 @@
 //
 // Disable with OPENCODE_AGENT_INTERCOM_PROJECT_CONTEXT="0".
 
-import { readdirSync, readFileSync, existsSync, statSync, writeFileSync } from "node:fs"
+import { readdirSync, readFileSync, existsSync, statSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { log, errMsg } from "./log.js"
 
@@ -123,6 +123,185 @@ export function projectMdBlock(directory) {
 // PROJECT.md on disk and see the next call re-read it.
 export function forgetProjectSpec(directory) {
   projectMdCache.delete(directory ?? "")
+}
+
+// --- Primary-agent handoff summary ------------------------------------------
+//
+// The "primary summary" is a short markdown brief captured by the orchestrator
+// at handoff time: where the project stands, what to watch out for, and what
+// the next orchestrator session should do. Persisted under a per-plugin state
+// dir so it lives alongside (not inside) the user's project documents —
+// distinct from PROJECT.md, which is user-editable project index content.
+
+// Per-plugin state dir, mirroring opencode's own `.opencode/` convention so
+// the plugin's persisted artifacts don't clutter the project root.
+const PRIMARY_SUMMARY_DIR = ".opencode/agent-intercom"
+const PRIMARY_SUMMARY_FILE = "primary-summary.md"
+
+// The three section headers, in fixed order. Kept as constants so a later
+// slice (content gathering + threshold compare) reads them back the same way
+// `formatPrimarySummary` writes them.
+const SECTION_STAND = "Stand / Aktueller Zustand"
+const SECTION_NOTES = "Zu beachtende Punkte"
+const SECTION_PLANNED = "Geplante Schritte"
+
+// Returns the absolute path where the primary handoff summary lives for
+// `directory`. Pure — no filesystem access.
+export function primarySummaryPath(directory) {
+  return join(directory, PRIMARY_SUMMARY_DIR, PRIMARY_SUMMARY_FILE)
+}
+
+// Renders a markdown primary summary from structured input. PURE: deterministic
+// output, no I/O, no timestamps. `stand` accepts a string (rendered as a
+// paragraph) or an array of strings (rendered as a bulleted list, mirroring
+// notes/plannedSteps). Empty / missing sections render as a bare header so the
+// consuming agent can see they were intentionally empty, not forgotten.
+export function formatPrimarySummary({ stand, notes, plannedSteps } = {}) {
+  const lines = []
+  lines.push(`## ${SECTION_STAND}`)
+  lines.push("")
+  lines.push(...renderStandSection(stand))
+  lines.push("")
+  lines.push(`## ${SECTION_NOTES}`)
+  lines.push("")
+  lines.push(...renderListSection(notes))
+  lines.push("")
+  lines.push(`## ${SECTION_PLANNED}`)
+  lines.push("")
+  lines.push(...renderListSection(plannedSteps))
+  return lines.join("\n") + "\n"
+}
+
+function renderStandSection(stand) {
+  if (stand == null) return []
+  if (Array.isArray(stand)) return renderListSection(stand)
+  const text = String(stand).trim()
+  return text ? [text] : []
+}
+
+function renderListSection(items) {
+  if (!Array.isArray(items)) return []
+  const cleaned = items.map((s) => String(s ?? "").trim()).filter(Boolean)
+  return cleaned.map((s) => `- ${s}`)
+}
+
+// Writes the primary summary markdown to disk, creating the per-plugin state
+// dir if needed. Thin I/O — caller is responsible for providing already-
+// formatted markdown (use formatPrimarySummary).
+export function writePrimarySummary(directory, markdown) {
+  if (!directory) return
+  const filePath = primarySummaryPath(directory)
+  try {
+    mkdirSync(join(directory, PRIMARY_SUMMARY_DIR), { recursive: true })
+    writeFileSync(filePath, markdown ?? "", "utf8")
+  } catch (err) {
+    log("writePrimarySummary failed", { filePath, err: errMsg(err) })
+  }
+}
+
+// Returns the primary summary markdown for `directory`, or "" when absent /
+// unreadable. Parallel to projectMdBlock: same "empty string when missing"
+// contract so the system-prompt placeholder collapses cleanly.
+export function readPrimarySummary(directory) {
+  if (!directory) return ""
+  const filePath = primarySummaryPath(directory)
+  try {
+    return readFileSync(filePath, "utf8")
+  } catch (err) {
+    if (err && err.code !== "ENOENT") {
+      log("readPrimarySummary failed", { filePath, err: errMsg(err) })
+    }
+    return ""
+  }
+}
+
+// --- TODO.md: planned-step extraction for handoff ---------------------------
+//
+// Reads `<directory>/TODO.md` and returns the OPEN / planned task lines as a
+// flat string array. Used by `performPrimaryHandoff` (handoff.js, step 1) to
+// populate the "Geplante Schritte" section of the new orchestrator's kickoff
+// summary — the new orchestrator is a fresh session and needs to see what was
+// still on the list before the handoff.
+//
+// Parse heuristic (deliberately tolerant — the project may use either layout):
+//
+//   1. If the file contains a `## Offen` (German) heading, return the list
+//      items under it — everything between that heading and the next `## …`
+//      heading (or EOF). Items are de-bulleted (`- ` prefix stripped) and
+//      trimmed. Continuation lines (the indented `accept:` block under a
+//      `- T<n>: …` header) are kept as-is — they belong to the task and the
+//      new orchestrator needs to see the acceptance criterion.
+//
+//   2. Otherwise, treat the whole file as the candidate list and return any
+//      non-empty markdown list item whose first character is `- ` or `* `.
+//      This handles the canonical `todofile.js` layout (`- T5: …` lines,
+//      flat top-to-bottom) AND a loose checkbox layout (`- [ ] …`).
+//
+//   3. If the file is absent, unreadable, or empty, return `[]` — same
+//      "graceful empty" contract as `readPrimarySummary` so the handoff
+//      summary's plannedSteps section simply renders as a bare header.
+//
+// The parser is intentionally NOT linked to `todofile.parseTasks`:
+// `readPlannedSteps` returns plain strings (one per planned step) suitable
+// for direct rendering in the markdown summary, whereas `parseTasks` returns
+// structured `{id, text, accept, …}` records intended for the TODO tools.
+export function readPlannedSteps(directory) {
+  if (!directory) return []
+  const filePath = join(directory, "TODO.md")
+  let content
+  try {
+    content = readFileSync(filePath, "utf8")
+  } catch (err) {
+    if (err && err.code !== "ENOENT") {
+      log("readPlannedSteps failed", { filePath, err: errMsg(err) })
+    }
+    return []
+  }
+  return extractPlannedStepLines(content)
+}
+
+// Pure parser — split out from readPlannedSteps so a unit test can drive it
+// without touching the filesystem.
+function extractPlannedStepLines(content) {
+  const lines = content.split("\n")
+  // Step 1: find a `## Offen` section and bound it by the next `## ` heading.
+  const offenIdx = lines.findIndex((l) => /^##\s+Offen\s*$/i.test(l))
+  let region
+  if (offenIdx >= 0) {
+    let endIdx = lines.length
+    for (let i = offenIdx + 1; i < lines.length; i++) {
+      if (/^##\s+/.test(lines[i])) {
+        endIdx = i
+        break
+      }
+    }
+    region = lines.slice(offenIdx + 1, endIdx)
+    return region.map(stripBullet).filter(nonEmpty)
+  }
+  // Step 2: no Offen heading — fall back to top-level list items across the
+  // whole file. Anything that starts with `- ` or `* ` (with optional leading
+  // whitespace — but we don't accept deeply-nested items; they're a different
+  // document). Continuation lines (the indented `accept:` block) are kept as
+  // their own strings, glued to their parent task by file order. Heading
+  // lines (`# …` / `## …`) are stripped — they're document structure, not
+  // tasks, and we don't want the title "TODO" appearing in the handoff
+  // summary.
+  return lines
+    .map(stripBullet)
+    .filter((s) => s.length > 0 && !/^#{1,6}\s/.test(s))
+}
+
+// Strips a leading `- ` / `* ` / `- [ ] ` / `- [x] ` bullet (with optional
+// whitespace before) and trims. Non-bullet lines are returned unchanged
+// (trimmed) — that lets `accept:` continuation lines flow through.
+function stripBullet(line) {
+  const trimmed = line.replace(/^\s+/, "").replace(/\s+$/, "")
+  const m = /^(?:[-*])\s+(?:\[[ xX]\]\s+)?(.*)$/.exec(trimmed)
+  return m ? m[1].trim() : trimmed
+}
+
+function nonEmpty(s) {
+  return s.length > 0
 }
 
 function build(directory) {

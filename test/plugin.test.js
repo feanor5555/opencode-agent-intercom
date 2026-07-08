@@ -149,8 +149,15 @@ test("the send_message tool is not registered (one-shot subagent lifecycle)", as
   assert.equal(hooks.tool.send_message, undefined)
 })
 
-test("abort flags the session: tool.execute.before denies its tool calls", async () => {
-  const { ctx, created, aborted } = makeCtx()
+test("abort cleans the subagent up: cooperative abort signal + best-effort session delete + entry reap", async () => {
+  // Confirms the abort handler's no-leak behavior:
+  //   1. session.abort was called (cooperative signal sent to opencode)
+  //   2. session.delete was called (best-effort cleanup of the underlying
+  //      opencode session — this is the leak fix)
+  //   3. a second abort referencing the same handle returns Unknown (the
+  //      registry entry was reaped; the entry must not linger)
+  // Pre-cleanup the subagent's tool calls pass through (no false-deny).
+  const { ctx, created, aborted, deleted } = makeCtx()
   const hooks = await plugin(ctx)
   const { metadata } = await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
   const subID = created[0]
@@ -159,19 +166,23 @@ test("abort flags the session: tool.execute.before denies its tool calls", async
   await hooks["tool.execute.before"]({ tool: "bash", sessionID: subID, callID: "c0" })
 
   await hooks.tool.abort.execute({ subagent: metadata.handle }, toolCtx)
-  assert.deepEqual(aborted, [subID]) // cooperative abort was also signalled
+  assert.deepEqual(aborted, [subID]) // cooperative abort was signalled
+  assert.deepEqual(deleted, [subID]) // AND the opencode session is best-effort deleted (no leak)
 
-  // after abort: tool calls from the subagent are hard-denied
-  await assert.rejects(
-    () => hooks["tool.execute.before"]({ tool: "bash", sessionID: subID, callID: "c1" }),
-    /aborted/i,
-  )
-  // the abort-deny is scoped: an unrelated session is not rejected as "aborted"
-  // (a primary calling an intercom tool passes the guard)
-  await hooks["tool.execute.before"]({ tool: "list", sessionID: "ses_unrelated", callID: "c2" })
+  // After abort+cleanup the registry is purged, so a re-abort returns Unknown.
+  // This is the user-facing consequence of "no leak": a torn-down subagent is
+  // truly gone, not parked as aborted.
+  const reabort = await hooks.tool.abort.execute({ subagent: metadata.handle }, toolCtx)
+  assert.match(reabort.output, /Unknown subagent/)
 })
 
-test("transform hook injects a hard STOP for an aborted subagent", async () => {
+test("abort cleanup removes the entry: the transform hook does NOT inject ABORTED after the abort handler ran", async () => {
+  // Aborting a subagent used to leave the entry in the registry with status
+  // "aborted" so the transform hook could inject a hard STOP at the LLM level.
+  // That path is now retired: the abort handler itself cleans the entry up, so
+  // a subsequent transform finds no aborted entry to annotate. The subagent
+  // session is dead at the opencode level anyway (tool calls stop on their own),
+  // so the leftover STOPlet would have been belt-and-braces.
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   const { metadata } = await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
@@ -181,7 +192,7 @@ test("transform hook injects a hard STOP for an aborted subagent", async () => {
 
   const out = { system: ["base prompt"] }
   await hooks["experimental.chat.system.transform"]({ sessionID: subID }, out)
-  assert.match(out.system.join(""), /ABORTED/)
+  assert.doesNotMatch(out.system.join(""), /ABORTED/)
 })
 
 test("spawn honors the caller's permission.task allowlist", async () => {
@@ -269,11 +280,15 @@ test("transform hook shows a primary a live snapshot of its spawned subagents", 
   await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
   const out = { system: ["base prompt"] }
   await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, out)
-  assert.match(out.system.join(""), /subagents you have spawned/i)
+  assert.match(out.system.join(""), /active subagents across all orchestrator sessions/i)
   assert.match(out.system.join(""), /researcher#1 \(researcher\)/)
 })
 
 test("list filters subagents by the caller's parentID — no cross-primary leakage", async () => {
+  // The subagent cap is GLOBAL (shared across primaries) — raise it so this
+  // test isolates the list-filtering concern it actually exercises.
+  writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 5 }))
+  resetSettings()
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   // Primary A spawns researcher#1
@@ -379,7 +394,7 @@ test("spawn output reports remaining slots; the last allowed spawn says CAP REAC
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   const first = await hooks.tool.spawn.execute({ agent: "coder", prompt: "a" }, toolCtx)
-  assert.match(first.output, /Subagent slots: 1\/2 — 1 free/)
+  assert.match(first.output, /Subagent slots: 1\/2 \(global, across all sessions\) — 1 free/)
   const second = await hooks.tool.spawn.execute({ agent: "coder", prompt: "b" }, toolCtx)
   assert.match(second.output, /CAP REACHED/)
 })
@@ -394,7 +409,7 @@ test("the completion notice tells the primary how many slots are now free", asyn
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: created[0] } } })
   const wake = notices.find((n) => /finished and been destroyed/.test(n))
   assert.ok(wake, "primary must be woken with the completion notice")
-  assert.match(wake, /Subagent slots: 1\/2 — 1 free/)
+  assert.match(wake, /Subagent slots: 1\/2 \(global, across all sessions\) — 1 free/)
 })
 
 test("the settings file overrides the subagent cap at runtime", async () => {
@@ -658,7 +673,12 @@ test("an aborted subagent going idle does not wake the primary", async () => {
   assert.deepEqual(prompted, before)
 })
 
-test("resolve accepts both the friendly handle and the raw sessionID (via abort)", async () => {
+test("abort resolves the friendly handle and cleans the entry so a re-abort returns Unknown", async () => {
+  // The friendly handle resolves via resolve(). After abort, cleanup removes
+  // the entry from the registry, so a second abort referencing either the
+  // handle or the raw sessionID no longer matches anything. This is the
+  // intended behavior — re-aborting a torn-down subagent is meaningless and
+  // a no-op signal must NOT leave a fresh entry dangling in the registry.
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
@@ -666,10 +686,11 @@ test("resolve accepts both the friendly handle and the raw sessionID (via abort)
   const byHandle = await hooks.tool.abort.execute({ subagent: "researcher#1" }, toolCtx)
   assert.match(byHandle.output, /Abort signalled/)
 
-  // After abort the entry stays in the registry (marked aborted), so a second
-  // abort referencing the same sessionID still resolves and is idempotent.
+  // After abort+cleanup the entry is gone; a repeat abort returns Unknown.
+  const byHandleAgain = await hooks.tool.abort.execute({ subagent: "researcher#1" }, toolCtx)
+  assert.match(byHandleAgain.output, /Unknown subagent/)
   const bySessionID = await hooks.tool.abort.execute({ subagent: created[0] }, toolCtx)
-  assert.match(bySessionID.output, /Abort signalled/)
+  assert.match(bySessionID.output, /Unknown subagent/)
 
   const unknown = await hooks.tool.abort.execute({ subagent: "nope#9" }, toolCtx)
   assert.match(unknown.output, /Unknown subagent/)

@@ -356,29 +356,30 @@ function formatLimitsNotice() {
   )
 }
 
-// A compact, live list of THIS primary's currently active subagents — injected
-// into the primary's system prompt so it always knows what is running. Fed from
-// the module-level registry, kept fresh by the `event` hook (status/idle).
-// Aborted subagents are filtered out; finished subagents are not in the
-// registry at all (event hook removes them on idle). Returns the empty string
-// when nothing is active.
+// A compact, live list of ALL active subagents across every primary in this
+// opencode process — the subagent cap is global, so the orchestrator needs to
+// see subagents spawned by other primaries too (those still consume the shared
+// slot budget). Injected into the primary's system prompt so it always knows
+// what is running. Fed from the module-level registry, kept fresh by the
+// `event` hook (status/idle). Aborted subagents are filtered out; finished
+// subagents are not in the registry at all (event hook removes them on idle).
+// Returns the empty string when nothing is active.
 function formatSubagentSnapshot(primaryID) {
-  const mine = [...registry.values()].filter((e) => {
-    if (e.parentID !== primaryID) return false
-    return effectiveState(e) !== "aborted"
-  })
+  const mine = [...registry.values()].filter((e) => effectiveState(e) !== "aborted")
   if (mine.length === 0) return ""
   const rows = mine.map((e) => {
     const state = effectiveState(e)
     const ctx = e.ctxTokens == null ? "? ctx" : `${fmtTokens(e.ctxTokens)} ctx`
     const age = ageSeconds(e.spawnedAt)
     const last = e.lastActivity ? ` · last: ${e.lastActivity.slice(0, 80)}` : ""
-    return `• ${e.handle} (${e.agent}) — ${state} · ${ctx} · ${age}s${last}`
+    const owner = e.parentID === primaryID ? "" : " · [other session]"
+    return `• ${e.handle} (${e.agent}) — ${state} · ${ctx} · ${age}s${last}${owner}`
   })
   return (
-    "\n\n---\n📋 agent-intercom: active subagents you have spawned. They are one-shot — a finished " +
-    "subagent disappears from this list. To stop one, use `abort` (only on user request); for " +
-    "more work, spawn a fresh subagent:\n" +
+    "\n\n---\n📋 agent-intercom: active subagents across all orchestrator sessions in this process " +
+    "(the subagent cap is global). They are one-shot — a finished subagent disappears from this " +
+    "list. To stop one, use `abort` (only on user request); for more work, spawn a fresh " +
+    "subagent:\n" +
     rows.join("\n") +
     "\n---\n"
   )
@@ -592,13 +593,14 @@ function spawnSizeNotice(ctxTokens) {
 // Tail line for completion notices: tells the orchestrator how many subagent
 // slots are now free so it knows whether the next spawn() will succeed. Empty
 // when the cap is disabled. Called after removeEntry, so the freed slot is
-// already counted out.
+// already counted out. The cap is GLOBAL — the count includes subagents from
+// every primary in this process.
 function slotsNoticeAfterFinish(primaryID) {
   const maxSubagents = getSettings().maxSubagents
   if (maxSubagents <= 0) return ""
   const active = countActiveSubagents(primaryID)
   const free = Math.max(0, maxSubagents - active)
-  return `\nSubagent slots: ${active}/${maxSubagents} — ${free} free.`
+  return `\nSubagent slots: ${active}/${maxSubagents} (global, across all sessions) — ${free} free.`
 }
 
 // Guards tool execution before it runs:

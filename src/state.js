@@ -31,13 +31,22 @@ export const aborted = new Set()
 // agent name -> monotonic counter, for friendly handles
 export const counters = new Map()
 
-// primaryID -> count of spawn() calls currently between the cap check and the
-// final upsertSession (i.e. holding a reserved slot but not yet visible in the
-// registry). Without this counter, N parallel spawn tool-calls in the same
-// orchestrator turn all read "0 active" before any of them reaches upsert ->
-// the cap is silently bypassed. countActiveSubagents adds this counter so the
-// reservation is atomic across the synchronous check-and-increment.
-export const pendingSpawns = new Map()
+// GLOBAL count of spawn() calls currently between the cap check and the final
+// upsertSession (i.e. holding a reserved slot but not yet visible in the
+// registry), across ALL primaries running in this opencode process. Without
+// this counter, N parallel spawn tool-calls in the same orchestrator turn all
+// read "0 active" before any of them reaches upsert -> the cap is silently
+// bypassed. countActiveSubagents adds this counter so the reservation is
+// atomic across the synchronous check-and-increment.
+//
+// The cap itself is global (shared across every orchestrator primary in the
+// process) — see countActiveSubagents / reservePendingSpawn in registry.js.
+//
+// Wrapped in an object so the binding can be reassigned by resetState() and
+// shared across importers via a single live reference (ES module exports are
+// bindings, not values; a bare `let pendingSpawns` would be read-only at the
+// importer).
+export const pendingSpawns = { count: 0 }
 
 // primaryID -> name of the last tool the primary successfully invoked. Used by
 // the guard to deny back-to-back `list` calls (small LLMs poll status instead
@@ -52,6 +61,6 @@ export function resetState() {
   primarySessions.clear()
   aborted.clear()
   counters.clear()
-  pendingSpawns.clear()
+  pendingSpawns.count = 0
   lastPrimaryTool.clear()
 }

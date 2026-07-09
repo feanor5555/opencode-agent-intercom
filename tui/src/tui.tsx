@@ -655,7 +655,14 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   };
 
   const trackPrimary = (sessionID: string | undefined): void => {
-    if (!sessionID || primaryIDs.has(sessionID)) return;
+    // Hard gate: only real session IDs (ses_*) may enter primary tracking.
+    // Some event payloads carry a parentID that is NOT a session — e.g.
+    // message.updated's info.parentID is the previous MESSAGE (msg_*). A
+    // non-session ID in primaryIDs makes the fallback poll call
+    // session.children({sessionID: "msg_…"}) forever, which the server
+    // rejects with a schema error on every tick.
+    if (!sessionID || !sessionID.startsWith("ses_")) return;
+    if (primaryIDs.has(sessionID)) return;
     primaryIDs.add(sessionID);
     scheduleRefresh();
   };
@@ -688,6 +695,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
                 text:
                   `🔔 agent-intercom: an error occurred with your subagent "${entry.handle}" ` +
                   `(${entry.agent}) — it was terminated and did not finish. Report this to the user.`,
+                // Marks the message as plugin-generated so the main plugin's
+                // handoff goal scan skips it (same marker client.js sets on
+                // every notice — see src/pluginmsg.js in the main package).
+                metadata: { agentIntercom: true },
               },
             ],
           });
@@ -737,11 +748,18 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const poll = setInterval(() => void refresh(), POLL_FALLBACK_MS);
 
   // Event payloads differ per type; we only opportunistically read parentID
-  // off session.created/updated, so narrow defensively from unknown.
+  // off session.* events, so narrow defensively from unknown.
   const onSessionEvent = (event: unknown): void => {
     const info = (event as { properties?: { info?: unknown } }).properties
       ?.info as { parentID?: string } | undefined;
     if (info && typeof info.parentID === "string") trackPrimary(info.parentID);
+    scheduleRefresh();
+  };
+
+  // message.updated's info is a Message whose parentID points at the previous
+  // MESSAGE in the chain (msg_*), not at a session — it must never feed the
+  // primary tracking. Only use it as a refresh trigger.
+  const onMessageEvent = (): void => {
     scheduleRefresh();
   };
 
@@ -828,7 +846,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     api.event.on("session.idle", onSessionIdle),
     api.event.on("session.error", onSessionEvent),
     api.event.on("session.status", onSessionEvent),
-    api.event.on("message.updated", onSessionEvent),
+    api.event.on("message.updated", onMessageEvent),
   ];
 
   api.lifecycle.onDispose(() => {

@@ -6,6 +6,7 @@
 
 import { log, errMsg } from "./log.js"
 import { getSettings } from "./settings.js"
+import { intercomTextPart } from "./pluginmsg.js"
 
 // Sleeps `ms` milliseconds. Resolved via setTimeout so a value of 0 returns
 // immediately without going through the timer queue.
@@ -38,7 +39,10 @@ export async function postNotice(client, sessionID, text) {
     try {
       await client.session.promptAsync({
         path: { id: sessionID },
-        body: { parts: [{ type: "text", text }] },
+        // intercomTextPart marks the message as plugin-generated
+        // (metadata: { agentIntercom: true }) so history scans like the
+        // handoff's lastUserGoal can skip it — see src/pluginmsg.js.
+        body: { parts: [intercomTextPart(text)] },
       })
       return
     } catch (err) {
@@ -74,10 +78,14 @@ export async function createChildSession(client, { parentID, title, directory })
 }
 
 // Fires a non-blocking prompt into a session — returns immediately (204).
+// The part is marked as plugin-generated (see src/pluginmsg.js): this
+// covers the handoff kickoff, the DOC_SUMMARY prompt and spawn task
+// prompts — none of them is a REAL user message and none may ever be
+// picked up as `Letztes Ziel:` by a later handoff's goal scan.
 export async function promptSession(client, { sessionID, agent, prompt }) {
   await client.session.promptAsync({
     path: { id: sessionID },
-    body: { agent, parts: [{ type: "text", text: prompt }] },
+    body: { agent, parts: [intercomTextPart(prompt)] },
   })
 }
 
@@ -158,6 +166,25 @@ function capResult(text, sessionID) {
     `\n\n[truncated — ${omitted} more characters omitted to fit the orchestrator's context. ` +
     `Open subagent session ${sessionID} in the TUI for the full output.]`
   )
+}
+
+// Best-effort fetch of a session's full message list (Array<{info, parts}>).
+// Returns [] on any failure — callers treat "no messages" and "fetch failed"
+// alike (e.g. the handoff's last-user-goal lookup degrades to an empty goal).
+// Same timeout discipline as fetchSnapshot.
+export async function fetchMessages(client, sessionID) {
+  try {
+    const resp = unwrap(
+      await client.session.messages({
+        path: { id: sessionID },
+        signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
+      }),
+    )
+    return Array.isArray(resp) ? resp : []
+  } catch (err) {
+    log("session.messages failed", errMsg(err))
+    return []
+  }
 }
 
 // Best-effort snapshot of a session: a short description of its last activity,

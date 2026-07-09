@@ -25,6 +25,11 @@ import {
   DOC_SUMMARY_MAX_CHARS,
   FALLBACK_DOC_SUMMARIES,
   validateDocSummaries,
+  HISTORY_SUMMARY_MAX_CHARS,
+  extractHistorySummary,
+  DOC_SUMMARIES_TIMEOUT_MS,
+  looksLikeDocSummariesReply,
+  requestDocSummaries,
 } from "../src/handoff.js"
 
 // ===========================================================================
@@ -76,6 +81,21 @@ test("DOC_SUMMARY_PROMPT mentions the per-section character cap", () => {
   // cap so the model actually respects it. Loose match: just check the
   // number 400 appears.
   assert.match(DOC_SUMMARY_PROMPT, /400\s*characters/i)
+})
+
+test("DOC_SUMMARY_PROMPT also requests the Session-Verlauf section, after the three doc sections", () => {
+  // The history block rides on the SAME final turn as the doc summaries —
+  // one prompt, one reply, one timeout/fallback path. The prompt must name
+  // the heading literally (the extractor regexes on it) and ask for the
+  // 800-1000 character target.
+  assert.ok(
+    DOC_SUMMARY_PROMPT.includes("## Session-Verlauf"),
+    "DOC_SUMMARY_PROMPT must mention ## Session-Verlauf",
+  )
+  const iArch = DOC_SUMMARY_PROMPT.indexOf("## ARCHITECTURE.md")
+  const iHist = DOC_SUMMARY_PROMPT.indexOf("## Session-Verlauf")
+  assert.ok(iHist > iArch, "Session-Verlauf comes after the three doc sections")
+  assert.match(DOC_SUMMARY_PROMPT, /800-1000\s*characters/i)
 })
 
 // ===========================================================================
@@ -309,4 +329,240 @@ test("validateDocSummaries output has stable, well-formed markdown: each section
   ]) {
     assert.ok(out.includes(heading), `output contains ${heading}`)
   }
+})
+
+// ===========================================================================
+// four-section reply: validateDocSummaries + extractHistorySummary side by side
+// ===========================================================================
+
+const FOUR_SECTION_REPLY = [
+  "## PROJECT.md — project index",
+  "",
+  "## TODO.md — task list",
+  "",
+  "## ARCHITECTURE.md — architecture",
+  "",
+  "## Session-Verlauf — implemented the handoff slice; decided to reuse the doc-summary turn " +
+    "because a second prompt would double the timeout window; currently wiring tests; next step " +
+    "is the runtime verification.",
+].join("\n")
+
+test("validateDocSummaries ignores the trailing Session-Verlauf section: ARCHITECTURE.md body is not swallowed", () => {
+  const out = validateDocSummaries(FOUR_SECTION_REPLY)
+  assert.ok(out.includes("## ARCHITECTURE.md — architecture"), "ARCHITECTURE.md body intact")
+  assert.ok(
+    !out.includes("Session-Verlauf"),
+    "the doc-summaries block must not contain the history section",
+  )
+})
+
+test("extractHistorySummary extracts the Session-Verlauf block with its heading", () => {
+  const out = extractHistorySummary(FOUR_SECTION_REPLY)
+  assert.ok(out.startsWith("## Session-Verlauf — "), "block starts with the heading")
+  assert.ok(out.includes("implemented the handoff slice"), "body carried over")
+  assert.ok(out.includes("runtime verification."), "body carried to its end")
+  assert.ok(!out.includes("## ARCHITECTURE.md"), "no bleed from the preceding section")
+})
+
+test("extractHistorySummary returns '' when the section is missing (three-section reply)", () => {
+  const threeSections = [
+    "## PROJECT.md — project index",
+    "",
+    "## TODO.md — task list",
+    "",
+    "## ARCHITECTURE.md — architecture",
+  ].join("\n")
+  assert.equal(extractHistorySummary(threeSections), "")
+})
+
+test("extractHistorySummary returns '' on empty / non-string / empty-body input", () => {
+  assert.equal(extractHistorySummary(""), "")
+  assert.equal(extractHistorySummary("   \n  "), "")
+  assert.equal(extractHistorySummary(undefined), "")
+  assert.equal(extractHistorySummary(null), "")
+  assert.equal(extractHistorySummary(42), "")
+  // Heading present but no body → still "" (an empty block is useless).
+  assert.equal(extractHistorySummary("## Session-Verlauf — \n"), "")
+})
+
+test("extractHistorySummary truncates runaway bodies at HISTORY_SUMMARY_MAX_CHARS with an ellipsis", () => {
+  const long = "z".repeat(HISTORY_SUMMARY_MAX_CHARS + 500)
+  const out = extractHistorySummary(`## Session-Verlauf — ${long}`)
+  const body = out.replace("## Session-Verlauf — ", "")
+  assert.ok(
+    body.length <= HISTORY_SUMMARY_MAX_CHARS,
+    `body length ${body.length} exceeds cap ${HISTORY_SUMMARY_MAX_CHARS}`,
+  )
+  assert.ok(body.endsWith("…"), "truncated body ends with ellipsis")
+})
+
+test("extractHistorySummary does NOT truncate bodies at or under the cap", () => {
+  const body = "w".repeat(HISTORY_SUMMARY_MAX_CHARS)
+  const out = extractHistorySummary(`## Session-Verlauf — ${body}`)
+  assert.equal(out, `## Session-Verlauf — ${body}`)
+  assert.ok(!out.endsWith("…"), "at-cap body is not ellipsised")
+})
+
+test("extractHistorySummary tolerates the section appearing before the doc sections", () => {
+  // The prompt asks for it last, but a small model may reorder. The
+  // extractor must stop at the next `## ` heading instead of swallowing it.
+  const reordered = [
+    "## Session-Verlauf — did things first",
+    "",
+    "## PROJECT.md — project index",
+  ].join("\n")
+  const out = extractHistorySummary(reordered)
+  assert.equal(out, "## Session-Verlauf — did things first")
+})
+
+// ===========================================================================
+// requestDocSummaries — baseline-before-prompt poll discipline
+//
+// Live-verified bug this guards against: the old implementation compared the
+// polled result against the PREVIOUS poll (starting at undefined), so the
+// very first poll returned the old primary's PREVIOUS final answer as if it
+// were the summaries reply — the DOC_SUMMARY prompt never reached an LLM and
+// the kickoff fell back to "(nicht verfügbar)" ×3.
+//
+// All tests run on virtual time (injected `now`/`sleep`) — no real waiting.
+// ===========================================================================
+
+const SUMMARIES_REPLY = [
+  "## PROJECT.md — project index",
+  "",
+  "## TODO.md — open tasks",
+  "",
+  "## ARCHITECTURE.md — architecture facts",
+  "",
+  "## Session-Verlauf — session history",
+].join("\n")
+
+// Virtual-clock harness: `script` is an array of results fetchResult yields
+// on successive calls (last entry repeats forever). Records the interleaving
+// of fetch/prompt calls so the tests can assert baseline-before-prompt.
+function makePollHarness(script, opts = {}) {
+  let t = 0
+  let i = 0
+  const calls = []
+  return {
+    calls,
+    run: () =>
+      requestDocSummaries({
+        fetchResult: async () => {
+          const value = script[Math.min(i, script.length - 1)]
+          i++
+          calls.push(["fetch", value])
+          return value
+        },
+        sendPrompt: async () => {
+          calls.push(["prompt"])
+        },
+        sleep: async (ms) => {
+          t += ms
+        },
+        now: () => t,
+        timeoutMs: opts.timeoutMs ?? 10_000,
+        pollMs: opts.pollMs ?? 500,
+      }),
+  }
+}
+
+test("requestDocSummaries: takes the baseline BEFORE sending the prompt", async () => {
+  const h = makePollHarness(["OLD ANSWER", SUMMARIES_REPLY])
+  await h.run()
+  const iFirstFetch = h.calls.findIndex((c) => c[0] === "fetch")
+  const iPrompt = h.calls.findIndex((c) => c[0] === "prompt")
+  assert.ok(iFirstFetch >= 0 && iPrompt >= 0)
+  assert.ok(
+    iFirstFetch < iPrompt,
+    "baseline fetch must run BEFORE the summary prompt is sent",
+  )
+})
+
+test("requestDocSummaries: does NOT return the old primary's stale final result", async () => {
+  // The stale result stays visible for several polls before the summary
+  // reply lands — the old implementation returned it on the FIRST poll.
+  const h = makePollHarness([
+    "OLD ANSWER", // baseline
+    "OLD ANSWER", // poll 1 — must not be returned
+    "OLD ANSWER", // poll 2 — must not be returned
+    SUMMARIES_REPLY,
+  ])
+  const out = await h.run()
+  assert.equal(out, SUMMARIES_REPLY, "only the CHANGED summaries reply is returned")
+  // It really polled past the stale result (baseline + ≥2 stale polls + hit).
+  assert.ok(h.calls.filter((c) => c[0] === "fetch").length >= 4)
+})
+
+test("requestDocSummaries: re-baselines on the interrupted in-flight turn's reply and keeps waiting", async () => {
+  // The handoff fires from the system.transform of an INCOMING turn, so that
+  // turn's reply usually lands BEFORE the summary turn queued behind it. A
+  // changed-but-foreign result must NOT be returned — it becomes the new
+  // baseline and the poll keeps going until the real summaries reply.
+  const h = makePollHarness([
+    "OLD ANSWER",               // baseline
+    "OLD ANSWER",               // poll 1
+    "REPLY TO THE IN-FLIGHT USER TURN", // poll 2 — changed, but no summaries shape
+    "REPLY TO THE IN-FLIGHT USER TURN", // poll 3 — now equals the re-baseline
+    SUMMARIES_REPLY,            // poll 4 — the summary turn's reply
+  ])
+  const out = await h.run()
+  assert.equal(out, SUMMARIES_REPLY)
+})
+
+test("requestDocSummaries: times out (throws) when the result never changes", async () => {
+  const h = makePollHarness(["OLD ANSWER"], { timeoutMs: 3_000, pollMs: 500 })
+  await assert.rejects(h.run(), /timed out/)
+})
+
+test("requestDocSummaries: times out (throws) when only foreign replies land, never the summaries", async () => {
+  const h = makePollHarness(
+    ["OLD ANSWER", "foreign reply 1", "foreign reply 2", "foreign reply 3"],
+    { timeoutMs: 3_000, pollMs: 500 },
+  )
+  await assert.rejects(h.run(), /timed out/)
+})
+
+test("requestDocSummaries: works when the session had NO prior result (undefined baseline)", async () => {
+  const h = makePollHarness([undefined, undefined, SUMMARIES_REPLY])
+  const out = await h.run()
+  assert.equal(out, SUMMARIES_REPLY)
+})
+
+test("requestDocSummaries: a failed baseline fetch does not abort — the shape check still lands the reply", async () => {
+  let first = true
+  let t = 0
+  const out = await requestDocSummaries({
+    fetchResult: async () => {
+      if (first) {
+        first = false
+        throw new Error("snapshot 503")
+      }
+      return SUMMARIES_REPLY
+    },
+    sendPrompt: async () => {},
+    sleep: async (ms) => { t += ms },
+    now: () => t,
+    timeoutMs: 5_000,
+    pollMs: 500,
+  })
+  assert.equal(out, SUMMARIES_REPLY)
+})
+
+test("DOC_SUMMARIES_TIMEOUT_MS is sized for the queued-behind-a-busy-turn case (120 s)", () => {
+  // Live measurement: the interrupted in-flight turn alone took 42 s before
+  // the summary turn could even start. The old 15 s window could never work.
+  assert.equal(DOC_SUMMARIES_TIMEOUT_MS, 120_000)
+})
+
+test("looksLikeDocSummariesReply: matches the PROJECT.md heading, even after preamble prose", () => {
+  assert.equal(looksLikeDocSummariesReply(SUMMARIES_REPLY), true)
+  assert.equal(
+    looksLikeDocSummariesReply("Sure, here you go:\n## PROJECT.md — index"),
+    true,
+    "/m heading match must survive a preamble line",
+  )
+  assert.equal(looksLikeDocSummariesReply("REPLY TO THE IN-FLIGHT USER TURN"), false)
+  assert.equal(looksLikeDocSummariesReply(""), false)
+  assert.equal(looksLikeDocSummariesReply(undefined), false)
 })

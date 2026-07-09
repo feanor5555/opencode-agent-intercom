@@ -1,7 +1,12 @@
-// Slice 6a: pure orchestrator-handoff orchestration. Exercises the 9-step
+// Pure orchestrator-handoff orchestration. Exercises the drain-guarded
 // sequence in src/handoff.js against a recording fake `deps`. The test
 // imports ONLY handoff.js + node builtins, so the suite cannot hang on a
 // real opencode runtime.
+//
+// Sequence under test (src/handoff.js module header):
+//   beginDrain → gather (steps/goal) → createSession → bindDrainTarget →
+//   doc summaries → reparent → getInFlightSubagents(newID) → format/write →
+//   promptAsync (kickoff) → flushDrain → deleteSession(old) → forgetPrimary.
 //
 // Run: node --test --test-timeout=2000 test/handoff.test.js
 
@@ -13,7 +18,7 @@ import { performPrimaryHandoff } from "../src/handoff.js"
 // ---- recording fake factory -------------------------------------------------
 
 function makeDeps(overrides = {}) {
-  const log = [] // ordered list of "name" or ["name", arg0, arg1, ...]
+  const log = [] // ordered list of ["name", arg0, arg1, ...]
 
   const call = (name, ...args) => {
     log.push([name, ...args])
@@ -32,6 +37,20 @@ function makeDeps(overrides = {}) {
     directory: "/tmp/work",
     orchestratorAgentName: "orchestrator",
 
+    beginDrain: () => {
+      call("beginDrain")
+    },
+    bindDrainTarget: (newID) => {
+      call("bindDrainTarget", newID)
+    },
+    flushDrain: async () => {
+      call("flushDrain")
+      return 0
+    },
+    abortDrain: async () => {
+      call("abortDrain")
+      return 0
+    },
     getInFlightSubagents: (parentID) => {
       call("getInFlightSubagents", parentID)
       return inFlight
@@ -69,9 +88,10 @@ function makeDeps(overrides = {}) {
     promptAsync: async (sessionID, message) => {
       call("promptAsync", sessionID, message)
     },
-    // The new required dep. Default fake returns a canned three-section
-    // block so the happy-path tests see the summaries embedded in the
-    // kickoff. Specific tests override via `overrides.docSummaries`.
+    // Default fake returns a canned four-section block (three doc summaries
+    // + the Session-Verlauf history block) so the happy-path tests see
+    // everything embedded in the kickoff. Specific tests override via
+    // `overrides.docSummaries`.
     promptOldPrimaryForDocSummaries: async () => {
       call("promptOldPrimaryForDocSummaries")
       return overrides.docSummaries ?? [
@@ -80,15 +100,13 @@ function makeDeps(overrides = {}) {
         "## TODO.md — open task list (default fake)",
         "",
         "## ARCHITECTURE.md — architecture facts (default fake)",
+        "",
+        "## Session-Verlauf — session history (default fake)",
       ].join("\n")
     },
     reparent: async (fromID, toID) => {
       call("reparent", fromID, toID)
       return reparentedCount
-    },
-    waitForInFlightEmpty: async () => {
-      call("waitForInFlightEmpty")
-      return true
     },
     deleteSession: async (sessionID) => {
       call("deleteSession", sessionID)
@@ -106,29 +124,30 @@ function makeDeps(overrides = {}) {
 
 const order = (log) => log.map((entry) => entry[0])
 
+const HAPPY_PATH_ORDER = [
+  "beginDrain",
+  "getPlannedSteps",
+  "getLastUserGoal",
+  "createSession",
+  "bindDrainTarget",
+  "promptOldPrimaryForDocSummaries",
+  "reparent",
+  "getInFlightSubagents",
+  "formatPrimarySummary",
+  "writePrimarySummary",
+  "promptAsync",
+  "flushDrain",
+  "deleteSession",
+  "forgetPrimary",
+]
+
 // ---- tests -----------------------------------------------------------------
 
-test("performPrimaryHandoff runs the 9 steps in the right order", async () => {
+test("performPrimaryHandoff runs the drain-guarded sequence in the right order", async () => {
   const deps = makeDeps()
   const result = await performPrimaryHandoff(deps)
 
-  // 1-3: gather, format, write
-  // 4-5: create, promptOldPrimaryForDocSummaries, prompt
-  // 6-8: reparent, waitForInFlightEmpty, delete, forget
-  assert.deepEqual(order(deps._log), [
-    "getInFlightSubagents",
-    "getPlannedSteps",
-    "getLastUserGoal",
-    "formatPrimarySummary",
-    "writePrimarySummary",
-    "createSession",
-    "promptOldPrimaryForDocSummaries",
-    "promptAsync",
-    "reparent",
-    "waitForInFlightEmpty",
-    "deleteSession",
-    "forgetPrimary",
-  ])
+  assert.deepEqual(order(deps._log), HAPPY_PATH_ORDER)
 
   // shape of the return value
   assert.equal(result.newSessionID, "orch2")
@@ -170,6 +189,85 @@ test("createSession runs BEFORE reparent and receives the orchestrator agent nam
 
   const createCall = deps._log[iCreate]
   assert.deepEqual(createCall, ["createSession", { agent: "orchestrator" }])
+})
+
+test("(a) reparent completes BEFORE the kickoff is composed and sent; the in-flight list is read post-reparent with the NEW id", async () => {
+  const deps = makeDeps()
+  await performPrimaryHandoff(deps)
+
+  const idx = (name) => deps._log.findIndex((e) => e[0] === name)
+  const iReparent = idx("reparent")
+  const iInFlight = idx("getInFlightSubagents")
+  const iFormat = idx("formatPrimarySummary")
+  const iPrompt = idx("promptAsync")
+
+  assert.ok(iReparent >= 0, "reparent ran")
+  assert.ok(
+    iReparent < iInFlight && iInFlight < iFormat && iFormat < iPrompt,
+    `expected reparent < getInFlightSubagents < format < promptAsync, got ` +
+      `${iReparent} < ${iInFlight} < ${iFormat} < ${iPrompt}`,
+  )
+
+  // The in-flight list is keyed by the NEW session id — post-reparent truth,
+  // not the handoff-start snapshot.
+  assert.deepEqual(deps._log[iInFlight], ["getInFlightSubagents", "orch2"])
+})
+
+test("(a) kickoff announces the POST-reparent in-flight state: a subagent that finished mid-handoff is not listed", async () => {
+  // Live-verified nuance 1: the kickoff used to render the handoff-START
+  // snapshot, announcing a subagent as re-parented whose result had already
+  // been delivered elsewhere. Now the list is read AFTER reparent — a
+  // subagent that finished during the doc-summary wait (simulated by
+  // mutating the array the getInFlightSubagents fake returns) must be gone
+  // from the announcement.
+  const inFlightArr = [
+    { handle: "explore#1", agent: "explore", task: "accept criteria" },
+    { handle: "coder#1", agent: "coder", task: "fix the bug" },
+  ]
+  const deps = makeDeps({ inFlight: inFlightArr })
+  deps.promptOldPrimaryForDocSummaries = async () => {
+    deps._log.push(["promptOldPrimaryForDocSummaries"])
+    // explore#1 finishes while the old primary produces its summaries — the
+    // wake path removes it from the registry (its notice goes to the drain).
+    inFlightArr.shift()
+    return "## PROJECT.md — p\n\n## TODO.md — t\n\n## ARCHITECTURE.md — a"
+  }
+
+  await performPrimaryHandoff(deps)
+
+  const message = deps._log.find((e) => e[0] === "promptAsync")[2]
+  assert.ok(!message.includes("explore#1"), "finished subagent must NOT be announced as re-parented")
+  assert.ok(message.includes("coder#1"), "still-running subagent stays announced")
+  assert.ok(
+    message.includes("(1 Subagent(s) wurden re-parented)"),
+    "stand line counts the post-reparent list, not the start snapshot",
+  )
+})
+
+test("flushDrain runs AFTER the kickoff promptAsync and BEFORE the old session is deleted", async () => {
+  const deps = makeDeps()
+  await performPrimaryHandoff(deps)
+
+  const idx = (name) => deps._log.findIndex((e) => e[0] === name)
+  const iPrompt = idx("promptAsync")
+  const iFlush = idx("flushDrain")
+  const iDelete = idx("deleteSession")
+
+  assert.ok(iPrompt >= 0 && iFlush > iPrompt, "flushDrain must come after the kickoff")
+  assert.ok(iDelete > iFlush, "old session is deleted only after the buffer was flushed")
+  assert.ok(!order(deps._log).includes("abortDrain"), "success path never aborts the drain")
+})
+
+test("bindDrainTarget is called with the new session id, right after createSession", async () => {
+  const deps = makeDeps()
+  await performPrimaryHandoff(deps)
+
+  const idx = (name) => deps._log.findIndex((e) => e[0] === name)
+  const iCreate = idx("createSession")
+  const iBind = idx("bindDrainTarget")
+  const iDoc = idx("promptOldPrimaryForDocSummaries")
+  assert.ok(iCreate < iBind && iBind < iDoc, "bind sits between createSession and the doc-summary wait")
+  assert.deepEqual(deps._log[iBind], ["bindDrainTarget", "orch2"])
 })
 
 test("promptAsync (kickoff) embeds the summary markdown AND the three per-file doc summaries", async () => {
@@ -270,12 +368,14 @@ test("EDGE CASE: promptOldPrimaryForDocSummaries throws -> kickoff falls back to
   }
   const result = await performPrimaryHandoff(deps)
 
-  // The handoff still completes end-to-end — reparent / delete / forget
-  // still ran (the error in the dep must not abort the sequence).
-  const order2 = (log) => log.map((e) => e[0])
-  assert.ok(order2(deps._log).includes("reparent"))
-  assert.ok(order2(deps._log).includes("deleteSession"))
-  assert.ok(order2(deps._log).includes("forgetPrimary"))
+  // The handoff still completes end-to-end — reparent / flush / delete /
+  // forget still ran (the error in the dep must not abort the sequence).
+  const names = order(deps._log)
+  assert.ok(names.includes("reparent"))
+  assert.ok(names.includes("flushDrain"))
+  assert.ok(names.includes("deleteSession"))
+  assert.ok(names.includes("forgetPrimary"))
+  assert.ok(!names.includes("abortDrain"), "doc-summary fallback is not a handoff failure")
   assert.equal(result.newSessionID, "orch2")
 
   // The kickoff message uses the fallback block, not the default fake's text.
@@ -291,6 +391,63 @@ test("EDGE CASE: promptOldPrimaryForDocSummaries throws -> kickoff falls back to
       `fallback kickoff must contain placeholder ${heading}`,
     )
   }
+
+  // The history block rides on the same reply that just failed — there is
+  // no fallback text for it, the kickoff simply omits it.
+  assert.ok(
+    !message.includes("## Session-Verlauf"),
+    "failed doc-summaries turn must not leave a Session-Verlauf block behind",
+  )
+})
+
+test("kickoff embeds the Session-Verlauf history block from the old primary's reply", async () => {
+  const deps = makeDeps()
+  await performPrimaryHandoff(deps)
+
+  const promptCall = deps._log.find((e) => e[0] === "promptAsync")
+  const message = promptCall[2]
+  assert.ok(
+    message.includes("## Session-Verlauf — session history (default fake)"),
+    "kickoff must contain the Session-Verlauf block with its heading",
+  )
+  // The block sits between the summary markdown and the doc summaries —
+  // its heading must appear before the PROJECT.md heading.
+  const iHist = message.indexOf("## Session-Verlauf")
+  const iProject = message.indexOf("## PROJECT.md")
+  assert.ok(
+    iHist >= 0 && iProject > iHist,
+    "Session-Verlauf block precedes the doc summaries in the kickoff",
+  )
+})
+
+test("EDGE CASE: reply WITHOUT a Session-Verlauf section -> handoff completes, block omitted, docs kept", async () => {
+  // A model that ignores the fourth section must not break anything: the
+  // three doc summaries are still embedded and the history block is
+  // simply absent (no fallback text, no empty heading).
+  const docSummaries = [
+    "## PROJECT.md — project index (no history)",
+    "",
+    "## TODO.md — open task list (no history)",
+    "",
+    "## ARCHITECTURE.md — architecture facts (no history)",
+  ].join("\n")
+  const deps = makeDeps({ docSummaries })
+
+  const result = await performPrimaryHandoff(deps)
+  assert.equal(result.newSessionID, "orch2")
+
+  const names = deps._log.map((e) => e[0])
+  assert.ok(names.includes("reparent"))
+  assert.ok(names.includes("deleteSession"))
+  assert.ok(names.includes("forgetPrimary"))
+
+  const promptCall = deps._log.find((e) => e[0] === "promptAsync")
+  const message = promptCall[2]
+  assert.ok(message.includes("## PROJECT.md — project index (no history)"))
+  assert.ok(
+    !message.includes("## Session-Verlauf"),
+    "kickoff must omit the Session-Verlauf block when the reply lacks it",
+  )
 })
 
 test("summaryObject fed to formatPrimarySummary has the goal line, the inFlight notes, and plannedSteps", async () => {
@@ -323,29 +480,22 @@ test("EDGE CASE: empty inFlight + empty goal still produces a valid run", async 
   const result = await performPrimaryHandoff(deps)
 
   // Same call order, same number of steps — robustness.
-  assert.deepEqual(order(deps._log), [
-    "getInFlightSubagents",
-    "getPlannedSteps",
-    "getLastUserGoal",
-    "formatPrimarySummary",
-    "writePrimarySummary",
-    "createSession",
-    "promptOldPrimaryForDocSummaries",
-    "promptAsync",
-    "reparent",
-    "waitForInFlightEmpty",
-    "deleteSession",
-    "forgetPrimary",
-  ])
+  assert.deepEqual(order(deps._log), HAPPY_PATH_ORDER)
 
   assert.equal(result.newSessionID, "orch2")
   // reparented count when nothing was in-flight: 0
   assert.equal(result.reparented, 0)
   assert.equal(typeof result.summaryMarkdown, "string")
 
-  // The summary itself still has well-formed sections.
+  // The summary itself still has well-formed sections. An empty goal (no
+  // real user message in the old session — e.g. only plugin notices) renders
+  // an EXPLICIT placeholder, not a bare "Letztes Ziel: " that invites a
+  // small model to invent a goal.
   const fmt = deps._log.find((e) => e[0] === "formatPrimarySummary")[1]
-  assert.equal(fmt.stand, "Letztes Ziel: ")
+  assert.equal(
+    fmt.stand,
+    "Letztes Ziel: (kein echtes Nutzer-Ziel in der Session-History gefunden — siehe Geplante Schritte / TODO.md)",
+  )
   assert.equal(fmt.notes.length, 1) // just the header line
   assert.ok(fmt.notes[0].includes("Diese Subagents liefern jetzt"))
   assert.deepEqual(fmt.plannedSteps, [])
@@ -368,18 +518,8 @@ test("EDGE CASE: empty inFlight + empty goal still produces a valid run", async 
 test("REGRESSION: getInFlightSubagents returning a Promise (real registryMutex.runExclusive) — handoff completes", async () => {
   // Root cause: in production, deps.getInFlightSubagents IS the real
   // `inFlightSubagentsFor` from src/registry.js, which returns a Promise
-  // (registryMutex.runExclusive). handoff.js must `await` it. Since commit
-  // 727ce1c the line in question was `const inFlight = deps.getInFlightSubagents(...)`
-  // (no `await`), so `inFlight` was a Promise, `inFlight.map` was undefined,
-  // and handoff aborted on every turn with "inFlight.map is not a function"
-  // — meaning createSession was never reached and the orchestrator could
-  // never be renewed.
-  //
-  // This fake mirrors the real signature: it returns a Promise that
-  // resolves to the in-flight array. The handoff must still complete the
-  // full 9-step sequence — including createSession + promptAsync — and
-  // must NOT throw. With the missing `await` this test throws
-  // `TypeError: inFlight.map is not a function` (the bug).
+  // (registryMutex.runExclusive). handoff.js must `await` it — a missing
+  // `await` makes `inFlight.map` throw and aborts the renewal on every turn.
   const inFlightArr = [
     { handle: "researcher#1", agent: "researcher", task: "scan the repo" },
   ]
@@ -395,22 +535,8 @@ test("REGRESSION: getInFlightSubagents returning a Promise (real registryMutex.r
   // (`TypeError: inFlight.map is not a function` inside performPrimaryHandoff).
   const result = await performPrimaryHandoff(deps)
 
-  // The full 9-step sequence ran end-to-end — createSession + promptAsync
-  // reached. That is what the renewal feature needs.
-  assert.deepEqual(order(deps._log), [
-    "getInFlightSubagents",
-    "getPlannedSteps",
-    "getLastUserGoal",
-    "formatPrimarySummary",
-    "writePrimarySummary",
-    "createSession",
-    "promptOldPrimaryForDocSummaries",
-    "promptAsync",
-    "reparent",
-    "waitForInFlightEmpty",
-    "deleteSession",
-    "forgetPrimary",
-  ])
+  // The full sequence ran end-to-end — createSession + promptAsync reached.
+  assert.deepEqual(order(deps._log), HAPPY_PATH_ORDER)
 
   // Return value is well-formed.
   assert.equal(result.newSessionID, "orch2")
@@ -439,4 +565,124 @@ test("EDGE CASE: goal set but inFlight empty — stand line omits the reparented
   const fmt = deps._log.find((e) => e[0] === "formatPrimarySummary")[1]
   assert.equal(fmt.stand, "Letztes Ziel: ship the feature")
   assert.ok(!fmt.stand.includes("re-parented"))
+})
+
+test("getLastUserGoal returning a Promise (real session.messages fetch) — goal lands in the stand line", async () => {
+  // In production getLastUserGoal is async: the transform-hook input has no
+  // `messages` field, so hooks.js fetches the old primary's history via the
+  // session API. handoff.js must await the dep — a Promise leaking into the
+  // stand line would render "Letztes Ziel: [object Promise]".
+  const deps = makeDeps()
+  deps.getLastUserGoal = async () => {
+    deps._log.push(["getLastUserGoal"])
+    await Promise.resolve()
+    return "goal fetched from session messages"
+  }
+  await performPrimaryHandoff(deps)
+  const fmt = deps._log.find((e) => e[0] === "formatPrimarySummary")[1]
+  assert.ok(
+    fmt.stand.includes("Letztes Ziel: goal fetched from session messages"),
+    `stand line must carry the awaited goal, got: ${fmt.stand}`,
+  )
+  assert.ok(!fmt.stand.includes("[object Promise]"))
+})
+
+test("EDGE CASE: getLastUserGoal throws — handoff still completes end-to-end with an empty goal", async () => {
+  // The goal lookup is best-effort (a failed session.messages fetch, a torn
+  // down session). It must NEVER fail the handoff — reparent / delete /
+  // forget still run and the stand line degrades to an empty goal.
+  const deps = makeDeps()
+  deps.getLastUserGoal = async () => {
+    deps._log.push(["getLastUserGoal"])
+    throw new Error("session.messages 404")
+  }
+  const result = await performPrimaryHandoff(deps)
+  assert.equal(result.newSessionID, "orch2")
+
+  const names = deps._log.map((e) => e[0])
+  for (const step of ["createSession", "promptAsync", "reparent", "flushDrain", "deleteSession", "forgetPrimary"]) {
+    assert.ok(names.includes(step), `${step} must still run after a failed goal lookup`)
+  }
+
+  const fmt = deps._log.find((e) => e[0] === "formatPrimarySummary")[1]
+  assert.ok(
+    fmt.stand.startsWith("Letztes Ziel: "),
+    "stand line stays well-formed with an empty goal",
+  )
+})
+
+// ---- failure path: revert + drain abort -------------------------------------
+
+test("(e) kickoff promptAsync throws — reparent reverted, orphan new session deleted, drain aborted, old primary untouched", async () => {
+  const deps = makeDeps()
+  deps.promptAsync = async (sessionID, message) => {
+    deps._log.push(["promptAsync", sessionID, message])
+    throw new Error("kickoff transport down")
+  }
+
+  await assert.rejects(() => performPrimaryHandoff(deps), /kickoff transport down/)
+
+  const names = order(deps._log)
+  // Revert discipline: un-reparent (new → old), delete the ORPHANED new
+  // session (never the old one), abort the drain. No flush, no forget.
+  const reparentCalls = deps._log.filter((e) => e[0] === "reparent")
+  assert.equal(reparentCalls.length, 2, "reparent ran forward and reverted")
+  assert.deepEqual(reparentCalls[0], ["reparent", "primary-1", "orch2"])
+  assert.deepEqual(reparentCalls[1], ["reparent", "orch2", "primary-1"])
+
+  const deleteCalls = deps._log.filter((e) => e[0] === "deleteSession")
+  assert.deepEqual(deleteCalls, [["deleteSession", "orch2"]],
+    "only the orphaned NEW session is deleted; the old primary survives a failed handoff")
+
+  assert.ok(names.includes("abortDrain"), "failure path aborts the drain (buffer handed back)")
+  assert.ok(!names.includes("flushDrain"), "no flush on failure")
+  assert.ok(!names.includes("forgetPrimary"), "old primary stays tracked for the retry")
+
+  // Order: revert-reparent before abortDrain, both after the failed prompt.
+  const iPrompt = deps._log.findIndex((e) => e[0] === "promptAsync")
+  const iRevert = deps._log.findIndex(
+    (e, i) => e[0] === "reparent" && i > iPrompt,
+  )
+  const iAbort = names.indexOf("abortDrain")
+  assert.ok(iRevert > iPrompt && iAbort > iRevert)
+})
+
+test("(e) createSession throws — drain aborted, nothing reparented, nothing deleted", async () => {
+  const deps = makeDeps()
+  deps.createSession = async () => {
+    deps._log.push(["createSession"])
+    throw new Error("session API 500")
+  }
+
+  await assert.rejects(() => performPrimaryHandoff(deps), /session API 500/)
+
+  const names = order(deps._log)
+  assert.ok(names.includes("beginDrain"))
+  assert.ok(names.includes("abortDrain"), "drain aborted so the buffer cannot leak")
+  assert.ok(!names.includes("bindDrainTarget"), "no new session to bind")
+  assert.ok(!names.includes("reparent"))
+  assert.ok(!names.includes("deleteSession"))
+  assert.ok(!names.includes("promptAsync"))
+  assert.ok(!names.includes("forgetPrimary"))
+})
+
+test("post-kickoff failures do NOT revert: a failing old-session delete still finishes the handoff", async () => {
+  // Once the kickoff is delivered the new session is live — reverting past
+  // that point (deleting #2) would be strictly worse than a zombie old
+  // session. deleteSession failure is logged and the sequence proceeds to
+  // forgetPrimary and returns the result.
+  const deps = makeDeps()
+  deps.deleteSession = async (sessionID) => {
+    deps._log.push(["deleteSession", sessionID])
+    throw new Error("delete hiccup")
+  }
+
+  const result = await performPrimaryHandoff(deps)
+  assert.equal(result.newSessionID, "orch2")
+
+  const names = order(deps._log)
+  assert.ok(names.includes("forgetPrimary"), "forgetPrimary still runs")
+  assert.ok(!names.includes("abortDrain"), "no revert after the point of no return")
+  // Only ONE reparent (forward) — no revert.
+  assert.equal(deps._log.filter((e) => e[0] === "reparent").length, 1)
 })

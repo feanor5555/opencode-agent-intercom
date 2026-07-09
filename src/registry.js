@@ -10,6 +10,10 @@ import {
   pendingSpawns,
   registryMutex,
   primaryCtx,
+  pendingHandoffs,
+  handoffInProgress,
+  handoffDrains,
+  handoffRedirects,
 } from "./state.js"
 
 // Re-export so callers (e.g. hooks.js in the next slice) can grab the mutex
@@ -43,6 +47,13 @@ export function forgetPrimary(sessionID) {
   if (!sessionID) return
   primarySessions.delete(sessionID)
   primaryCtx.delete(sessionID)
+  // Handoff bookkeeping for the OLD primary dies with it: clear the
+  // in-progress latch (this is the success-path release — the failure path
+  // is releaseHandoff) and any pending flag the doc-summary turn's transform
+  // might have raced in. The session is deleted at this point; a stale flag
+  // could never be claimed again (no further idle events) but would leak.
+  pendingHandoffs.delete(sessionID)
+  handoffInProgress.delete(sessionID)
 }
 
 // Per-agent monotonic friendly handle, e.g. "researcher#1".
@@ -354,49 +365,125 @@ export function inFlightSubagentsFor(parentID) {
   })
 }
 
-// Awaits until the in-flight set for `parentID` drains to empty, then
-// returns. Polls in `pollMs`-sized ticks up to `timeoutMs` total. Used by
-// `performPrimaryHandoff` (handoff.js, step 7 — "delete old primary"):
-// `reparentSubagents` only rewrites the in-memory registry's `parentID` — it
-// does NOT touch opencode's DB rows (message.parentID / message chain). If
-// the old primary is deleted while its subagents still carry (in the DB) a
-// parentID pointing at it, opencode's cascade cleanup walks orphaned `msg_*`
-// rows and issues `DELETE /session/{msg_…}` calls, which the schema rejects
-// ("Expected a string starting with `ses`, got `msg_…`", repeated every 5s).
-// Waiting for the registry to drain — the same predicate
-// `inFlightSubagentsFor` uses — ensures every wake handler has already
-// snapshotted the NEW parentID and is delivering to the new orchestrator
-// before the old session row is removed. Resolves with `true` when the set
-// drained, `false` when the timeout fired with still-in-flight children
-// (caller decides whether to proceed; handoff.js logs and proceeds).
+// ----------------------------------------------------------------------------
+// Handoff delivery drain + redirect (the re-parent window).
 //
-// Re-checks are made via `inFlightSubagentsFor`, so we honour the same
-// `!entry.dispatched` filter (a dispatched entry's delivery has already
-// been pinned to a target — no point waiting on it, and treating it as
-// "still in flight" would mean we never time out).
+// `reparentSubagents` only rewrites the in-memory registry's `parentID` — a
+// wake handler that has ALREADY snapshotted the old primary as its delivery
+// target (dispatched + removed from the registry, delivery in flight) is
+// invisible to the registry, and a subagent can also finish at any point
+// between the moment the handoff starts and the moment the new session has
+// received its kickoff. In that window the old session is about to die (a
+// notice posted there is lost with the delete — live-verified) and the new
+// session either does not exist yet or has not seen the kickoff (a notice
+// posted there would arrive before its context). The fix is a DELIVERY
+// ROUTER, consulted at post time by every parent-notice path in hooks.js
+// (completion / error / timeout / denial-loop):
 //
-// Args:
-//   parentID  — the OLD primary's session id (the one about to be deleted).
-//   pollMs    — gap between polls; default 500ms. Each poll is a single
-//               runExclusive read, cheap.
-//   timeoutMs — total budget; default 10000ms. With in-flight subagents
-//               typically completing in a couple of seconds, 10s is a
-//               generous outer bound that still keeps the handoff snappy.
-//               The wake-critical-section race is bounded by LLM reply
-//               latency + the snapshot poll, which is seconds not tens.
-export async function waitForInFlightEmpty(parentID, pollMs = 500, timeoutMs = 10000) {
-  if (!parentID) return true
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const remaining = await inFlightSubagentsFor(parentID)
-    if (remaining.length === 0) return true
-    await sleep(pollMs)
-  }
-  return false
+//   beginHandoffDrain(oldID)            handoff step 0 — buffer opens
+//   bindHandoffDrainTarget(oldID,newID) after createSession — the new id is
+//                                       intercepted too (a reparented entry's
+//                                       wake must not beat the kickoff)
+//   flushHandoffDrain(oldID)            after the kickoff was sent — records
+//                                       the old→new redirect and hands the
+//                                       buffered notices to the caller for
+//                                       delivery to the NEW session
+//   abortHandoffDrain(oldID)            failure path — hands the buffer back
+//                                       for delivery to the OLD session
+//                                       (which survives a failed handoff);
+//                                       never leaves a drain behind
+//
+// All four are synchronous Map/Set operations, so each transition is atomic
+// w.r.t. a concurrently delivering wake handler (single-threaded JS: the
+// router either sees the drain or the redirect, never a gap — flush installs
+// the redirect BEFORE removing the drain keys).
+// ----------------------------------------------------------------------------
+
+// Opens the drain for an orchestrator handoff. Idempotent: a second begin for
+// the same old primary returns the existing drain (runScheduledHandoff's
+// claim gate makes concurrent handoffs for one primary impossible anyway).
+export function beginHandoffDrain(oldID) {
+  if (!oldID) return null
+  let drain = handoffDrains.get(oldID)
+  if (drain) return drain
+  drain = { oldID, newID: null, notices: [] }
+  handoffDrains.set(oldID, drain)
+  return drain
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+// Binds the freshly created new-orchestrator session to the drain, keying the
+// drain under the new id as well: from this moment until the flush, notices
+// addressed to EITHER session are buffered. Necessary because the reparent
+// step rewrites registry parentIDs to the new id BEFORE the kickoff is sent —
+// a subagent finishing in that gap would otherwise deliver to the new session
+// ahead of its kickoff.
+export function bindHandoffDrainTarget(oldID, newID) {
+  const drain = handoffDrains.get(oldID)
+  if (!drain || !newID) return false
+  drain.newID = newID
+  handoffDrains.set(newID, drain)
+  return true
+}
+
+// Success path: close the drain and return the buffer for delivery to the
+// NEW session. Installs the old→new redirect FIRST, then removes the drain
+// keys — a concurrently routing delivery therefore always finds either the
+// drain (→ buffered) or the redirect (→ new session), never the bare old id.
+// Returns { newID, notices } or null when no bound drain exists.
+export function flushHandoffDrain(oldID) {
+  const drain = handoffDrains.get(oldID)
+  if (!drain || !drain.newID) return null
+  handoffRedirects.set(oldID, drain.newID)
+  handoffDrains.delete(oldID)
+  handoffDrains.delete(drain.newID)
+  return { newID: drain.newID, notices: drain.notices }
+}
+
+// Failure path: close the drain WITHOUT installing a redirect and return the
+// buffer for delivery to the OLD session — a failed handoff never deletes the
+// old primary, so it is alive and remains the correct target. Returns
+// { notices } or null when no drain exists. Either way no drain survives, so
+// a failed handoff cannot leak buffered notices.
+export function abortHandoffDrain(oldID) {
+  const drain = handoffDrains.get(oldID)
+  if (!drain) return null
+  handoffDrains.delete(oldID)
+  if (drain.newID) handoffDrains.delete(drain.newID)
+  return { notices: drain.notices }
+}
+
+// Follows the handoff-redirect chain from `sessionID` to the currently live
+// primary. Multiple handoffs chain (old1→old2→new3); the seen-set guards
+// against a (should-be-impossible) cycle.
+export function resolveDeliveryTarget(sessionID) {
+  let cur = sessionID
+  const seen = new Set()
+  while (handoffRedirects.has(cur) && !seen.has(cur)) {
+    seen.add(cur)
+    cur = handoffRedirects.get(cur)
+  }
+  return cur
+}
+
+// THE router: every parent-notice post in hooks.js goes through here.
+// Synchronous, so the buffered/direct decision is atomic. Resolution order:
+//   1. Follow redirects (a completed handoff moved the target).
+//   2. If the resolved target has an open drain (a handoff is executing for
+//      it right now), buffer the notice → { buffered: true }.
+//   3. Otherwise → { buffered: false, target } and the caller posts to
+//      `target` (which may differ from `parentID` after a handoff).
+export function routeParentNotice(parentID, notice) {
+  const target = resolveDeliveryTarget(parentID)
+  const drain = handoffDrains.get(target)
+  if (drain) {
+    drain.notices.push(notice)
+    return { buffered: true }
+  }
+  return { buffered: false, target }
+}
+
+export function hasHandoffDrain(sessionID) {
+  return handoffDrains.has(sessionID)
 }
 
 // ----------------------------------------------------------------------------
@@ -467,6 +554,74 @@ export function shouldTriggerPrimaryHandoff(sessionID, maxPrimaryContext) {
   const tokens = primaryContextTokens(sessionID)
   if (typeof tokens !== "number" || !Number.isFinite(tokens)) return false
   return tokens >= maxPrimaryContext
+}
+
+// ----------------------------------------------------------------------------
+// Idle-gated handoff scheduling.
+//
+// The transform hook fires WHILE the triggering turn is already running.
+// Starting the handoff there deletes the old primary mid-turn: the triggering
+// user message is never answered and the doc-summary prompt queues behind the
+// busy turn (both live-verified). So the transform hook only SCHEDULES
+// (markHandoffPending) and the `session.idle` handler EXECUTES
+// (claimPendingHandoff → performPrimaryHandoff) — the idle EVENT is the
+// load-bearing signal, not a `session.status` poll (which often returns `{}`
+// even for actively running sessions).
+//
+// All four helpers are synchronous set operations over state.js, so a claim
+// is atomic w.r.t. a duplicate idle event: the second claim in the same
+// microtask queue sees the flag already consumed.
+// ----------------------------------------------------------------------------
+
+// Transform-side gate: schedule a handoff for this primary iff the context
+// threshold is exceeded AND no handoff is already pending or executing.
+// Returns true only when the flag was NEWLY set (callers use this to emit a
+// one-shot "scheduled" toast — repeated over-budget turns don't re-toast).
+export function scheduleHandoffIfNeeded(sessionID, maxPrimaryContext) {
+  if (!shouldTriggerPrimaryHandoff(sessionID, maxPrimaryContext)) return false
+  return markHandoffPending(sessionID)
+}
+
+// Marks a primary's handoff as pending. False when the id is falsy, a handoff
+// is already executing for it, or the flag is already set.
+export function markHandoffPending(sessionID) {
+  if (!sessionID) return false
+  if (handoffInProgress.has(sessionID)) return false
+  if (pendingHandoffs.has(sessionID)) return false
+  pendingHandoffs.add(sessionID)
+  return true
+}
+
+export function hasHandoffPending(sessionID) {
+  return pendingHandoffs.has(sessionID)
+}
+
+// Idle-side gate: atomically consume the pending flag and latch the
+// in-progress state. True exactly once per scheduled handoff — a duplicate
+// idle event (or an idle racing the executing handoff, e.g. after the
+// doc-summary turn on the old primary) returns false.
+export function claimPendingHandoff(sessionID) {
+  if (!sessionID) return false
+  if (!pendingHandoffs.has(sessionID)) return false
+  if (handoffInProgress.has(sessionID)) return false
+  pendingHandoffs.delete(sessionID)
+  handoffInProgress.add(sessionID)
+  return true
+}
+
+// Failure-path release: clears the in-progress latch so a LATER over-budget
+// turn can re-schedule (its transform re-marks pending, the following idle
+// re-claims). The consumed pending flag is intentionally NOT restored — the
+// retry must go through a fresh schedule so a permanently failing handoff
+// doesn't hot-loop on every idle event. The success path releases via
+// forgetPrimary instead.
+export function releaseHandoff(sessionID) {
+  if (!sessionID) return
+  handoffInProgress.delete(sessionID)
+}
+
+export function isHandoffInProgress(sessionID) {
+  return handoffInProgress.has(sessionID)
 }
 
 function createEntry(sessionID, agent, prompt, parentID, taskId, directory) {

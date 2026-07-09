@@ -83,7 +83,11 @@ test("postNotice succeeds on a later attempt after transient failures", async ()
   assert.equal(client.calls.length, 3)
   for (const c of client.calls) {
     assert.equal(c.path.id, "sess-1")
-    assert.deepEqual(c.body.parts, [{ type: "text", text: "wake up" }])
+    // Parts carry the plugin-message marker (src/pluginmsg.js) so goal
+    // scans can tell notices from real user messages.
+    assert.deepEqual(c.body.parts, [
+      { type: "text", text: "wake up", metadata: { agentIntercom: true } },
+    ])
   }
 })
 

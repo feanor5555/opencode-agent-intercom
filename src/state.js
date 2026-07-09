@@ -62,6 +62,46 @@ export const lastPrimaryTool = new Map()
 // comparison and handoff trigger are intentionally NOT here.
 export const primaryCtx = new Map()
 
+// sessionIDs of primary sessions whose context crossed maxPrimaryContext and
+// whose orchestrator handoff is SCHEDULED but not yet started. The transform
+// hook only MARKS (it fires while the triggering turn is already running —
+// starting the handoff there would delete the old session mid-turn and
+// swallow the triggering user message, live-verified). EXECUTION is gated on
+// the primary's next `session.idle` event, i.e. after the triggering turn has
+// been fully answered. See markHandoffPending / claimPendingHandoff in
+// registry.js.
+export const pendingHandoffs = new Set()
+
+// sessionIDs with an orchestrator handoff currently EXECUTING (between
+// claimPendingHandoff and forgetPrimary on success / releaseHandoff on
+// failure). Guards against double execution: a second idle event, a re-mark
+// from the doc-summary turn's transform, and any other scheduling path all
+// check this set. Lives here (not module-local in hooks.js) so registry.js
+// can gate on it and resetState() can clear it between tests.
+export const handoffInProgress = new Set()
+
+// sessionID -> drain object { oldID, newID, notices: [] }. A drain is opened
+// at the START of an orchestrator handoff (beginHandoffDrain) and keyed under
+// the OLD primary's id; once the new session exists it is ALSO keyed under
+// the new id (bindHandoffDrainTarget). While a drain is open, every parent
+// notice addressed to either id (subagent completion / error / timeout /
+// denial-loop) is BUFFERED into `notices` instead of being posted — the old
+// session is about to be deleted (a notice there would be lost) and the new
+// session must receive its kickoff FIRST (a notice before the kickoff would
+// arrive without context). On success flushHandoffDrain removes both keys and
+// delivers the buffer to the new session; on failure abortHandoffDrain
+// removes both keys and the buffer is delivered back to the still-existing
+// old session — either way the buffer cannot leak. See registry.js.
+export const handoffDrains = new Map()
+
+// oldPrimaryID -> newPrimaryID, recorded by flushHandoffDrain on a SUCCESSFUL
+// handoff. Late deliveries whose wake snapshot still carries the old (now
+// deleted) primary id are re-routed to the new session via this map
+// (resolveDeliveryTarget follows chains across multiple handoffs). Entries
+// are never removed within a process: one tiny record per successful handoff,
+// and a straggler can in principle arrive arbitrarily late.
+export const handoffRedirects = new Map()
+
 // Minimal async mutex (promise-chain FIFO lock) for serializing critical
 // sections over the shared state in this module. Dependency-free.
 //
@@ -99,4 +139,8 @@ export function resetState() {
   pendingSpawns.count = 0
   lastPrimaryTool.clear()
   primaryCtx.clear()
+  pendingHandoffs.clear()
+  handoffInProgress.clear()
+  handoffDrains.clear()
+  handoffRedirects.clear()
 }

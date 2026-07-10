@@ -3,19 +3,19 @@
 // JSONL record per hook call to a file. Off unless OPENCODE_AGENT_INTERCOM_LOG_REQUESTS=1.
 
 import { appendFileSync, mkdirSync } from "node:fs"
-import { dirname } from "node:path"
-import { log, errMsg } from "./log.js"
+import { dirname, join } from "node:path"
+import { log, errMsg, cacheDir } from "./log.js"
 
 const ENABLED = process.env.OPENCODE_AGENT_INTERCOM_LOG_REQUESTS === "1"
 const FILE =
   process.env.OPENCODE_AGENT_INTERCOM_LOG_REQUESTS_FILE ||
-  "/tmp/opencode-agent-intercom/requests.jsonl"
+  join(cacheDir(), "requests.jsonl")
 
 let dirEnsured = false
 function ensureDir() {
   if (dirEnsured) return
   try {
-    mkdirSync(dirname(FILE), { recursive: true })
+    mkdirSync(dirname(FILE), { recursive: true, mode: 0o700 })
     dirEnsured = true
   } catch (err) {
     log("reqlog mkdir failed", errMsg(err))

@@ -8,13 +8,20 @@ import {
   counters,
   aborted,
   pendingSpawns,
+  pendingTaskIds,
   registryMutex,
   primaryCtx,
   pendingHandoffs,
   handoffInProgress,
   handoffDrains,
   handoffRedirects,
+  lastPrimaryTool,
 } from "./state.js"
+// client.js does NOT import registry.js (verified — it only imports log /
+// settings / pluginmsg), so importing forgetSessionDirectory here creates no
+// import cycle. This is the clean cut the alternative (a dynamic import inside
+// forgetPrimary) would only paper over.
+import { forgetSessionDirectory } from "./client.js"
 
 // Re-export so callers (e.g. hooks.js in the next slice) can grab the mutex
 // from registry.js without having to know it lives in state.js.
@@ -47,6 +54,13 @@ export function forgetPrimary(sessionID) {
   if (!sessionID) return
   primarySessions.delete(sessionID)
   primaryCtx.delete(sessionID)
+  // Per-session caches keyed by the OLD primary's id must die with it too,
+  // otherwise they leak for the lifetime of the opencode process: the
+  // directory cache in client.js (populated by getSessionDirectory on every
+  // primary transform) and the last-tool marker used by the guard's list-spam
+  // heuristic. Neither is reachable again once the session is deleted.
+  forgetSessionDirectory(sessionID)
+  lastPrimaryTool.delete(sessionID)
   // Handoff bookkeeping for the OLD primary dies with it: clear the
   // in-progress latch (this is the success-path release — the failure path
   // is releaseHandoff) and any pending flag the doc-summary turn's transform
@@ -184,6 +198,25 @@ export function releasePendingSpawn(primaryID) {
   if (pendingSpawns.count > 0) pendingSpawns.count -= 1
 }
 
+// Task-id reservation, the pendingSpawns analogue for the duplicate-task guard.
+// `spawn` calls reservePendingTaskId(taskId) in the SAME synchronous block as
+// its duplicate check (before any await), so a second spawn() in the same turn
+// carrying the same id observes it via isTaskIdPending and is rejected — closing
+// the TOCTOU window between the check and upsertSession writing the id onto the
+// entry. Every reserve MUST be paired with exactly one release (in the spawn
+// handler's finally). No-op for a falsy id: prefix-free spawns opt out.
+export function reservePendingTaskId(taskId) {
+  if (taskId) pendingTaskIds.add(taskId)
+}
+
+export function releasePendingTaskId(taskId) {
+  if (taskId) pendingTaskIds.delete(taskId)
+}
+
+export function isTaskIdPending(taskId) {
+  return !!taskId && pendingTaskIds.has(taskId)
+}
+
 // Idempotent registration keyed by sessionID. opencode fires `session.created`
 // for plugin-spawned sessions too — and it can fire *during* the `session.create`
 // await, before `spawn` even has the sessionID. So either path may run first:
@@ -245,7 +278,12 @@ function upgradeProvisionalAgent(entry, agent) {
 // interleave e.g. an in-flight `removeEntry` racing with an `upsertSession`
 // for a re-spawn. The function's sync body is fine inside runExclusive —
 // callers may still `await` the returned Promise.
-export async function removeEntry(sessionID) {
+// `clearAborted` (default true) controls whether the `aborted` set entry is
+// dropped alongside the registry entry. Teardown paths that set an abort
+// marker before deleting the opencode session pass `false` so the tool-guard
+// keeps hard-denying in-flight tool calls throughout teardown (they clear the
+// marker themselves once deleteSession is through — see hooks.js).
+export async function removeEntry(sessionID, { clearAborted = true } = {}) {
   return registryMutex.runExclusive(() => {
     const handle = bySession.get(sessionID)
     if (!handle) return false
@@ -257,7 +295,7 @@ export async function removeEntry(sessionID) {
     if (entry) releaseHandle(entry.agent, parseHandleNumber(handle))
     registry.delete(handle)
     bySession.delete(sessionID)
-    aborted.delete(sessionID)
+    if (clearAborted) aborted.delete(sessionID)
     return true
   })
 }
@@ -465,6 +503,32 @@ export function resolveDeliveryTarget(sessionID) {
   return cur
 }
 
+// Generation number of a primary session for handoff labelling: the original
+// user session is #1, and each successful handoff produces the next number.
+// Derived purely from the existing handoff-redirect chain (no extra state):
+// walk it backward from `sessionID`, counting predecessors. The redirect for
+// `sessionID`'s own (in-flight) handoff is installed only at flush time, so a
+// new session created off `sessionID` is `handoffGeneration(sessionID) + 1`.
+export function handoffGeneration(sessionID) {
+  let gen = 1
+  let cur = sessionID
+  const seen = new Set()
+  while (!seen.has(cur)) {
+    seen.add(cur)
+    let predecessor
+    for (const [oldID, newID] of handoffRedirects) {
+      if (newID === cur) {
+        predecessor = oldID
+        break
+      }
+    }
+    if (predecessor === undefined) break
+    gen++
+    cur = predecessor
+  }
+  return gen
+}
+
 // THE router: every parent-notice post in hooks.js goes through here.
 // Synchronous, so the buffered/direct decision is atomic. Resolution order:
 //   1. Follow redirects (a completed handoff moved the target).
@@ -517,11 +581,16 @@ export function primaryContextTokens(sessionID) {
   return primaryCtx.get(sessionID)?.tokens
 }
 
+// How long a cached ctx measurement stays valid before a re-fetch. Single
+// source of truth for both the primary path (below) and the subagent ctx path
+// in hooks.js, which imports this constant.
+export const CTX_TTL_MS = 3000
+
 // True when the cache has no entry for this primary OR the entry is older
-// than `ttlMs` (default 3000ms, mirroring the subagent ctx path). Kept as a
+// than `ttlMs` (default CTX_TTL_MS, mirroring the subagent ctx path). Kept as a
 // pure predicate so tests can backdate `lastFetchAt` and assert the flip
 // without any real clock or fetch.
-export function shouldRefreshPrimary(sessionID, ttlMs = 3000) {
+export function shouldRefreshPrimary(sessionID, ttlMs = CTX_TTL_MS) {
   const entry = primaryCtx.get(sessionID)
   if (!entry) return true
   return Date.now() - entry.lastFetchAt >= ttlMs

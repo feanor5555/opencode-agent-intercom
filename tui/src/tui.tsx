@@ -43,7 +43,8 @@ const DEFAULT_MAX_SUBAGENTS = 1;
 const DEFAULT_MAX_CONTEXT = 40000;
 
 // Shared with the main plugin's chat.params hook: per-agent LLM parameter
-// overrides. "*" is the global fallback. Writing this file makes the next
+// overrides. Each agent is configured individually (no "*" global fallback;
+// legacy "*" blocks are dropped on read). Writing this file makes the next
 // LLM request pick up the new values — no opencode restart.
 const LLM_PARAMS_PATH = join(homedir(), ".config", "opencode", "llm-params.json");
 
@@ -187,7 +188,7 @@ function readSettings(): Settings {
   };
   try {
     const raw = JSON.parse(readFileSync(SETTINGS_PATH, "utf8"));
-    if (Number.isInteger(raw?.maxSubagents) && raw.maxSubagents >= 1) {
+    if (Number.isInteger(raw?.maxSubagents) && raw.maxSubagents >= 0) {
       s.maxSubagents = raw.maxSubagents;
     }
     if (Number.isInteger(raw?.maxContext) && raw.maxContext >= 0) {
@@ -322,11 +323,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
 
   // Step a setting by delta and save. Deltas are in the setting's own unit:
   // subagents ±1, context ±5000 tokens (= 5k on the display).
-  // maxSubagents is clamped at 1 — 0 would break the orchestration concept
-  // (the orchestrator can't do work itself, so it needs at least one subagent
-  // slot). maxContext is clamped at 0 (= "no budget", lockdown disabled).
+  // Both settings are clamped at 0. maxSubagents=0 means "no cap" (unlimited
+  // concurrent subagents); maxContext=0 means "no budget" (lockdown disabled).
   const adjustSetting = (key: keyof Settings, delta: number): void => {
-    if (key === "maxSubagents") setMaxSubagents((v) => Math.max(1, v + delta));
+    if (key === "maxSubagents") setMaxSubagents((v) => Math.max(0, v + delta));
     else setMaxContext((v) => Math.max(0, v + delta));
     writeSettings({ maxSubagents: maxSubagents(), maxContext: maxContext() });
   };
@@ -680,32 +680,11 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         variant: "warning",
         message: `Aborted ${entry?.handle ?? id}`,
       });
-      // The main intercom plugin only wakes the orchestrator when a subagent
-      // finishes on its own (via its session.idle hook). A panel-initiated
-      // abort goes straight through session.abort() and never reaches that
-      // path, so the orchestrator would never learn its subagent was stopped.
-      // Wake the parent ourselves with an explicit abort notice.
-      if (entry?.parentID) {
-        try {
-          await api.client.session.promptAsync({
-            sessionID: entry.parentID,
-            parts: [
-              {
-                type: "text",
-                text:
-                  `🔔 agent-intercom: an error occurred with your subagent "${entry.handle}" ` +
-                  `(${entry.agent}) — it was terminated and did not finish. Report this to the user.`,
-                // Marks the message as plugin-generated so the main plugin's
-                // handoff goal scan skips it (same marker client.js sets on
-                // every notice — see src/pluginmsg.js in the main package).
-                metadata: { agentIntercom: true },
-              },
-            ],
-          });
-        } catch {
-          // best-effort wake — never let it break the abort flow.
-        }
-      }
+      // Do NOT wake the parent from here. session.abort() makes opencode emit
+      // session.error (MessageAbortedError) for this subagent, and the main
+      // intercom plugin's onSessionError already posts a single abort notice
+      // to the parent and frees the slot. Posting our own here would produce a
+      // second, contradictory wake notice.
     } catch {
       api.ui.toast({ variant: "error", message: `Abort failed for ${id}` });
     }
@@ -1212,7 +1191,7 @@ function SubagentPanel(props: {
             <text fg={props.theme.accent} {...holdRepeat(() => props.onAdjust("maxSubagents", -1))}>
               {"[-]"}
             </text>
-            <text fg={props.theme.text}>{numCell(props.maxSubagents())}</text>
+            <text fg={props.theme.text}>{numCell(props.maxSubagents() === 0 ? "unlimited" : props.maxSubagents())}</text>
             <text fg={props.theme.accent} {...holdRepeat(() => props.onAdjust("maxSubagents", 1))}>
               {"[+]"}
             </text>

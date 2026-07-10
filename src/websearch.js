@@ -11,7 +11,9 @@
 //      that.
 //
 // Exa: anonymous use 150 calls/day, 3 QPS, no auth. Set EXA_API_KEY in the
-// environment to use a paid Exa tier (the key is appended to the URL).
+// environment to use a paid Exa tier (the key is sent as an `x-api-key`
+// header, never in the URL query — a query string leaks the secret into
+// proxy/server access logs).
 // searxng: enabled only when a base URL is configured (no token), resolved via
 // settings (file `searxngUrl` > env OPENCODE_AGENT_INTERCOM_SEARXNG_URL).
 // Unset → Exa-only, the historic behaviour.
@@ -27,9 +29,19 @@ const EXA_MCP_URL = "https://mcp.exa.ai/mcp"
 const EXA_TIMEOUT_MS = 30_000
 const SEARXNG_TIMEOUT_MS = 12_000
 
-function exaUrl() {
+// Build the Exa request headers. When EXA_API_KEY is set it goes in the
+// `x-api-key` header — NOT the URL query. A `?exaApiKey=<secret>` query string
+// lands in proxy/server access logs; a header does not. Verified against the
+// live endpoint: a bad key in the `x-api-key` header returns the same
+// `401 Invalid API key` as the query form, i.e. the endpoint honors the header.
+function exaHeaders() {
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json, text/event-stream",
+  }
   const key = process.env.EXA_API_KEY
-  return key ? `${EXA_MCP_URL}?exaApiKey=${encodeURIComponent(key)}` : EXA_MCP_URL
+  if (key) headers["x-api-key"] = key
+  return headers
 }
 
 function searxngUrl() {
@@ -63,12 +75,9 @@ function parseSseResult(body) {
 }
 
 async function callExa(toolName, args, signal) {
-  const res = await fetch(exaUrl(), {
+  const res = await fetch(EXA_MCP_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json, text/event-stream",
-    },
+    headers: exaHeaders(),
     body: JSON.stringify({
       jsonrpc: "2.0",
       id: 1,

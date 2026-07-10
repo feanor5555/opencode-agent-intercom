@@ -1,5 +1,11 @@
 // opencode lifecycle hooks: system-prompt injection, session events, and the
 // tool-call guard (aborted-subagent hard-deny + native-`task` enforcement).
+//
+// The notice builders live in notices.js, the shared subagent teardown +
+// parent-notice delivery in teardown.js, the inactivity watchdog in
+// watchdog.js, and the primary-handoff wiring in handoffwiring.js — this file
+// keeps the three hook factories (transform / event / guard) plus their
+// close helpers.
 
 import { aborted, registry, lastPrimaryTool } from "./state.js"
 import {
@@ -7,35 +13,17 @@ import {
   upsertSession,
   isPrimary,
   effectiveState,
-  removeEntry,
   removeEntryLocked,
-  countActiveSubagents,
   registryMutex,
   shouldRefreshPrimary,
   recordPrimaryContext,
   scheduleHandoffIfNeeded,
-  claimPendingHandoff,
-  releaseHandoff,
-  inFlightSubagentsFor,
-  reparentSubagents,
-  forgetPrimary,
-  beginHandoffDrain,
-  bindHandoffDrainTarget,
-  flushHandoffDrain,
-  abortHandoffDrain,
-  routeParentNotice,
+  CTX_TTL_MS,
 } from "./registry.js"
-import { fetchSnapshot, fetchMessages, postNotice, showToast, deleteSession, forgetSessionDirectory, getSessionDirectory, abortSession, createChildSession, promptSession } from "./client.js"
+import { fetchSnapshot, showToast, getSessionDirectory } from "./client.js"
 import { getSettings } from "./settings.js"
 import { removeTask, todoFilePath } from "./todofile.js"
-import { projectMdBlock, readPlannedSteps, formatPrimarySummary, writePrimarySummary } from "./project.js"
-import {
-  performPrimaryHandoff,
-  runScheduledHandoff,
-  lastUserGoal,
-  requestDocSummaries,
-  DOC_SUMMARY_PROMPT,
-} from "./handoff.js"
+import { projectMdBlock } from "./project.js"
 import { existsSync } from "node:fs"
 import { log, errMsg } from "./log.js"
 import {
@@ -46,6 +34,14 @@ import {
 } from "./prompts.js"
 import { loadCustomPrompt, applyCustomPrompt } from "./promptsfile.js"
 import { tokens as fmtTokens, ageSeconds } from "./format.js"
+import { postParentNotice, teardownSubagent } from "./teardown.js"
+import { completionNotice, errorNotice, denialLoopNotice } from "./notices.js"
+import { ensureWatchdogStarted } from "./watchdog.js"
+import { maybeRunPendingHandoff } from "./handoffwiring.js"
+
+// Re-exported so existing importers (test/plugin.test.js) keep resolving it
+// from hooks.js after the watchdog code moved to its own module.
+export { timeoutSubagent } from "./watchdog.js"
 
 // The only tools a primary session may execute — everything else must be
 // delegated to a subagent. Pure orchestration: spawn / abort / list. Even
@@ -63,7 +59,7 @@ const PRIMARY_TOOLS = new Set([
 // — list, add new tasks, edit existing ones, remove completed ones.
 // The other two subagents (researcher, gitter) get no TODO tools at all: they
 // hand off whatever they find to the others, who manage the list.
-const TODO_TOOLS = new Set(["todos_open", "todo_done", "todo_add", "todo_edit"])
+export const TODO_TOOLS = new Set(["todos_open", "todo_done", "todo_add", "todo_edit"])
 const TODO_AGENTS = new Set([
   "planner", "coder", "debugger", "reviewer", "documenter", "designer",
 ])
@@ -90,23 +86,17 @@ const AGENTS_MD_SUBAGENTS = new Set([
   "reviewer",
 ])
 
-// How long an entry's ctxTokens stays valid before the transform hook re-fetches
-// the live snapshot. Caps the HTTP-fetch frequency on each subagent LLM call to
-// at most once per CTX_TTL_MS, the main hot-path tax. Bypassed once we are
-// close to the budget so the lockdown still triggers promptly.
-const CTX_TTL_MS = 3000
+// CTX_TTL_MS (imported from registry.js) caps how often an entry's ctxTokens is
+// re-fetched from the live snapshot on each subagent LLM call — the main
+// hot-path tax. Bypassed once we are close to the budget so the lockdown still
+// triggers promptly.
 const CTX_NEAR_BUDGET = 0.7
 
 // Handoff re-entrancy state lives in state.js (`pendingHandoffs` +
 // `handoffInProgress`), gated via registry.js (scheduleHandoffIfNeeded /
 // claimPendingHandoff / releaseHandoff / forgetPrimary). The transform hook
-// only SCHEDULES a handoff; execution is idle-gated — see maybeRunPendingHandoff.
-
-// Orchestrator agent name passed to the new session in the handoff. The
-// README + package.json declare "orchestrator" as the default primary agent;
-// FLAGGED: a project that overrides `default_agent` in opencode.json will not
-// be honored here — runtime verification required.
-const ORCHESTRATOR_AGENT_NAME = "orchestrator"
+// only SCHEDULES a handoff; execution is idle-gated — see maybeRunPendingHandoff
+// in handoffwiring.js.
 
 // How many over-budget tool-call denials before we notify the primary that
 // this subagent is stuck in a denial loop. We never auto-abort — abort is
@@ -114,16 +104,6 @@ const ORCHESTRATOR_AGENT_NAME = "orchestrator"
 // notice is a one-shot heads-up so the orchestrator can surface the situation
 // to the user; further denials keep escalating in tone but do not re-notify.
 const BUDGET_NOTIFY_AFTER = 3
-
-// Spawn-size thresholds applied AFTER a subagent finishes. The orchestrator's
-// ORCHESTRATION_GUIDE asks for ≤ ~15 k tokens per spawn; in practice this is
-// hard to feel as a number on the orchestrator side without feedback. The
-// wake notice surfaces the actual ctxTokens consumed and escalates the tone
-// once the spawn was clearly too big, so the next spawn in the same area is
-// scoped tighter. Soft = "noticeably large", hard = "way too big, split next
-// time". Pure messaging — we never auto-abort or re-spawn.
-const LARGE_CTX_TOKENS_SOFT = 30_000
-const LARGE_CTX_TOKENS_HARD = 50_000
 
 // Builds the final system prompt for the current LLM call. We REPLACE opencode's
 // `output.system` array wholesale with one combined string we control, rather
@@ -260,227 +240,6 @@ export function createTransformSystem(client) {
   }
 }
 
-// Idle-gated handoff, execution side. Called from the `session.idle` event
-// for EVERY idle session (subagent idles are a cheap no-op: only primary
-// transforms ever set the pending flag). The claim is synchronous, so a
-// duplicate idle event — or an idle racing an executing handoff, e.g. the
-// old primary going idle again after its doc-summary turn — cannot start a
-// second handoff. Runs detached from the event handler (the full handoff
-// includes a ~2-minute-capped doc-summary poll; blocking the event stream
-// on it would starve subagent wakes).
-//
-// Because execution now starts on idle, the old primary has ALREADY fully
-// answered the triggering user message when the handoff begins: the answer
-// is produced and delivered by the OLD session (exactly one responder), and
-// the doc-summary prompt hits an idle session instead of queuing behind a
-// busy turn.
-//
-// Success clears the in-progress latch via deps.forgetPrimary (inside the
-// handoff sequence); failure clears it via releaseHandoff inside
-// runScheduledHandoff, so a later over-budget turn re-schedules and the next
-// idle retries.
-function maybeRunPendingHandoff(client, sessionID) {
-  return runScheduledHandoff({
-    claim: () => claimPendingHandoff(sessionID),
-    release: () => releaseHandoff(sessionID),
-    getDeps: async () =>
-      buildPrimaryHandoffDeps(client, sessionID, await getSessionDirectory(client, sessionID)),
-    perform: async (deps) => {
-      showToast(client, {
-        title: "agent-intercom",
-        message: "primary context limit reached — handing off to a fresh orchestrator",
-      })
-      const result = await performPrimaryHandoff(deps)
-      showToast(client, {
-        title: "agent-intercom",
-        message: `handoff complete — new session ${result.newSessionID}, ${result.reparented} subagent(s) reparented`,
-      })
-      return result
-    },
-  })
-}
-
-// Routes a parent notice through the handoff delivery router before posting.
-// EVERY parent-notice path (subagent completion, error, timeout, denial-loop)
-// must go through here instead of calling postNotice directly: during an
-// executing orchestrator handoff the notice is buffered by the drain (and
-// flushed to the NEW session right after its kickoff), and after a completed
-// handoff the old→new redirect re-targets stragglers whose wake snapshot
-// still carries the deleted old primary. The routing decision is synchronous
-// (routeParentNotice in registry.js), so it cannot tear against the handoff's
-// own drain transitions.
-async function postParentNotice(client, parentID, notice) {
-  const routed = routeParentNotice(parentID, notice)
-  if (routed.buffered) {
-    log("parent notice buffered during primary handoff", { parentID })
-    return
-  }
-  if (routed.target !== parentID) {
-    log("parent notice re-routed to handoff successor", { parentID, target: routed.target })
-  }
-  await postNotice(client, routed.target, notice)
-}
-
-// Assembles the dependency object for performPrimaryHandoff — the bridge
-// between the pure handoff sequence (handoff.js) and the live client /
-// registry / project plumbing. Extracted from the transform hook when the
-// trigger moved to the idle event; the content is unchanged.
-function buildPrimaryHandoffDeps(client, sessionID, sessionDir) {
-  return {
-    primarySessionID: sessionID,
-    directory: sessionDir,
-    orchestratorAgentName: ORCHESTRATOR_AGENT_NAME,
-    getInFlightSubagents: inFlightSubagentsFor,
-    getPlannedSteps: readPlannedSteps,
-    // The last user goal is fetched from the old primary's own message
-    // history via the session API (the transform hook input carries no
-    // `messages` field, and by execution time we are in the event hook
-    // anyway). fetchMessages is best-effort ([] on failure) → empty goal,
-    // never a failed handoff. Since the handoff now runs at idle, the
-    // triggering user message has been persisted and answered — it IS the
-    // newest user message here.
-    getLastUserGoal: async () => lastUserGoal(await fetchMessages(client, sessionID)),
-    formatPrimarySummary,
-    writePrimarySummary,
-    // handoff.js calls `createSession({ agent })`; client.js exposes
-    // `createChildSession(client, { parentID, title, directory })`.
-    // We bridge the two shapes here. CRITICAL: parentID is OMITTED
-    // on purpose so orchestrator2 is created as a ROOT/independent
-    // session in opencode — NOT a child of orchestrator1. If we
-    // passed parentID=sessionID, opencode would treat orchestrator2
-    // as a child and the subsequent deleteSession(orchestrator1)
-    // would CASCADE-DELETE orchestrator2 along with it, destroying
-    // the very session the handoff just created. The SDK's
-    // SessionCreateData declares parentID as optional (types.gen.d.ts
-    // SessionCreateData.body.parentID?: string), so omitting it gives
-    // us a root session — exactly what we want for a true handoff.
-    // Subagent reparenting uses the PLUGIN's own registry parentID
-    // field and is unrelated to opencode's session tree.
-    createSession: ({ agent }) =>
-      createChildSession(client, {
-        title: `orchestrator#2 (handoff from ${sessionID})`,
-        directory: sessionDir,
-      }),
-    // handoff.js calls `promptAsync(sessionID, message)`; client.js
-    // exposes `promptSession(client, { sessionID, agent, prompt })`.
-    // We bridge: the kickoff message must set `agent` so opencode
-    // routes the first turn to the orchestrator role for the new
-    // (otherwise empty) session.
-    promptAsync: (sid, message) =>
-      promptSession(client, {
-        sessionID: sid,
-        agent: ORCHESTRATOR_AGENT_NAME,
-        prompt: message,
-      }),
-    // Ask the OLD primary (#1, which still holds PROJECT.md / TODO.md /
-    // ARCHITECTURE.md in its context) to emit the three per-file summaries
-    // plus the Session-Verlauf history block in one final turn. The old
-    // primary is idle at this point, so the prompt starts immediately
-    // instead of queuing behind an in-flight turn.
-    promptOldPrimaryForDocSummaries: () => promptOldPrimaryForDocSummaries(client, sessionID),
-    deleteSession: (sid) => deleteSession(client, sid),
-    reparent: reparentSubagents,
-    // Handoff delivery drain (registry.js): step 0 opens the buffer for the
-    // old primary, step 2 binds the new session into it. While the drain is
-    // open, postParentNotice buffers every subagent notice addressed to
-    // either session instead of posting — see the router doc-comments.
-    beginDrain: () => beginHandoffDrain(sessionID),
-    bindDrainTarget: (newID) => bindHandoffDrainTarget(sessionID, newID),
-    // Success path (step 7, after the kickoff was sent): close the drain,
-    // install the old→new redirect, and deliver the buffered notices to the
-    // NEW session in arrival order. Per-notice failures are logged and do
-    // not stop the remaining notices (best-effort — the alternative would
-    // drop everything behind the first transport hiccup).
-    flushDrain: async () => {
-      const flushed = flushHandoffDrain(sessionID)
-      if (!flushed) return 0
-      for (const notice of flushed.notices) {
-        try {
-          await postNotice(client, flushed.newID, notice)
-        } catch (err) {
-          log("handoff flushDrain: notice delivery failed", {
-            target: flushed.newID,
-            err: errMsg(err),
-          })
-        }
-      }
-      return flushed.notices.length
-    },
-    // Failure path: close the drain WITHOUT a redirect and deliver the
-    // buffered notices back to the OLD primary — it survives a failed
-    // handoff and remains the live orchestrator. Best-effort per notice.
-    abortDrain: async () => {
-      const drained = abortHandoffDrain(sessionID)
-      if (!drained) return 0
-      for (const notice of drained.notices) {
-        try {
-          await postNotice(client, sessionID, notice)
-        } catch (err) {
-          log("handoff abortDrain: notice delivery failed", {
-            target: sessionID,
-            err: errMsg(err),
-          })
-        }
-      }
-      return drained.notices.length
-    },
-    // registry.forgetPrimary also clears the pending/in-progress handoff
-    // flags for the old id — the success-path release.
-    forgetPrimary,
-  }
-}
-
-// Asks the OLD primary (#1) — which still holds PROJECT.md / TODO.md /
-// ARCHITECTURE.md in its context from its original kickoff — to emit three
-// short per-file summaries plus a session-history summary (Session-Verlauf)
-// in one final turn. The new orchestrator (#2) embeds those blocks into its
-// kickoff message and starts its life with full context WITHOUT having to
-// re-read the docs from disk.
-//
-// Flow (implemented by `requestDocSummaries` in handoff.js — injectable
-// core, so the baseline/poll discipline is unit-testable without a runtime):
-//   1. BASELINE: read the old primary's CURRENT final result BEFORE sending
-//      the prompt. Without it the first poll returns the primary's PREVIOUS
-//      answer as if it were the summaries (live-verified bug — the summary
-//      prompt never reached an LLM and the kickoff fell back).
-//   2. `promptSession` the OLD primary with `DOC_SUMMARY_PROMPT`. Non-blocking
-//      (the SDK returns once the request is queued, 204-style). The handoff
-//      fires mid-turn, so this queues BEHIND the in-flight user turn.
-//   3. Poll `fetchSnapshot` until the final result has CHANGED from the
-//      baseline AND looks like the summaries reply (`## PROJECT.md —`). A
-//      changed-but-foreign result is the interrupted in-flight turn's reply —
-//      re-baseline and keep waiting for the summary turn behind it.
-//   4. Return the raw text. `performPrimaryHandoff` runs it through
-//      `validateDocSummaries` so the kickoff stays well-formed even if the
-//      LLM gave us a malformed / partial reply.
-//
-// Failure modes (all re-thrown so the handoff can fall back):
-//   - The session was already deleted (opencode returns 404) → snapshot
-//     returns {} → no result ever changes → timeout → we throw.
-//   - The LLM is slow / the provider is down → polling times out after
-//     DOC_SUMMARIES_TIMEOUT_MS (handoff.js, 120 s — sized for a measured
-//     42 s in-flight turn plus the summary turn itself) → we throw.
-//   - The session never produced a summaries-shaped reply in the window
-//     (e.g. the prompt was rejected) → timeout → we throw.
-//
-// In every failure case the handoff's `try/catch` replaces the
-// `docSummaries` block with `FALLBACK_DOC_SUMMARIES` so the kickoff still
-// lands. The handoff itself never throws out.
-async function promptOldPrimaryForDocSummaries(client, primarySessionID) {
-  if (!client || !primarySessionID) {
-    throw new Error("promptOldPrimaryForDocSummaries: missing client or primarySessionID")
-  }
-  return requestDocSummaries({
-    fetchResult: async () => (await fetchSnapshot(client, primarySessionID))?.result,
-    sendPrompt: () =>
-      promptSession(client, {
-        sessionID: primarySessionID,
-        agent: ORCHESTRATOR_AGENT_NAME,
-        prompt: DOC_SUMMARY_PROMPT,
-      }),
-  })
-}
-
 // Splits opencode's auto-injected system into three labelled slices so we can
 // rebuild it on our terms. Defensive: when a marker is missing, the rest goes
 // into the role slice and the others come back empty — the worst case is that
@@ -554,10 +313,16 @@ async function contextLimitNotice(client, entry) {
     entry.ctxTokens != null && entry.ctxTokens > maxContext * CTX_NEAR_BUDGET
   if (!cacheFresh || nearBudget) {
     const snapshot = await fetchSnapshot(client, entry.sessionID)
-    if (snapshot.ctxTokens != null) {
-      entry.ctxTokens = snapshot.ctxTokens
-      entry.lastTokensFetchAt = now
-    }
+    // Stamp the fetch time even when the snapshot came back empty (no assistant
+    // step yet → ctxTokens null). Guarding this behind `ctxTokens != null` left
+    // lastTokensFetchAt at 0 forever, so `cacheFresh` stayed false and the
+    // full-history HTTP fetch re-ran on EVERY subagent tool call until the
+    // first token count appeared — the exact hot-path tax this cache exists to
+    // prevent. Same CTX_TTL_MS applies to the empty case (no new constant): an
+    // early-life empty snapshot is retried at the normal cadence, and the
+    // near-budget bypass is unaffected (it needs a known ctxTokens anyway).
+    entry.lastTokensFetchAt = now
+    if (snapshot.ctxTokens != null) entry.ctxTokens = snapshot.ctxTokens
     if (snapshot.lastActivity) entry.lastActivity = snapshot.lastActivity
   }
 
@@ -620,6 +385,32 @@ async function contextLimitNotice(client, entry) {
   )
 }
 
+// Tells the primary that a subagent is stuck in a denial loop — over budget,
+// ignoring STOP injections, still trying tool calls. Fires once when the
+// stopInjections counter crosses BUDGET_NOTIFY_AFTER. We do NOT abort: that
+// is strictly user-only (TUI ✕ or "kill the subagent" to the orchestrator).
+// The subagent stays alive so the user can still inspect its session.
+async function notifyParentOfDenialLoop(client, entry) {
+  log("denial loop: notifying parent", {
+    handle: entry.handle,
+    ctxTokens: entry.ctxTokens,
+    stopInjections: entry.stopInjections,
+    denials: entry.budgetDenials,
+  })
+  if (entry.parentID) {
+    try {
+      await postParentNotice(client, entry.parentID, denialLoopNotice(entry))
+    } catch (err) {
+      log("denial loop: notify parent failed", errMsg(err))
+    }
+  }
+  showToast(client, {
+    title: "agent-intercom",
+    message: `${entry.handle} stuck — user action needed`,
+    variant: "warning",
+  })
+}
+
 // One-line block telling the orchestrator the CURRENT runtime limits so the
 // "right-sized chunks" sizing rule in ORCHESTRATION_GUIDE has a concrete
 // number to anchor on. The guide refers to `maxContext` abstractly; the user
@@ -645,9 +436,9 @@ function formatLimitsNotice() {
 // subagents are not in the registry at all (event hook removes them on idle).
 // Returns the empty string when nothing is active.
 function formatSubagentSnapshot(primaryID) {
-  const mine = [...registry.values()].filter((e) => effectiveState(e) !== "aborted")
-  if (mine.length === 0) return ""
-  const rows = mine.map((e) => {
+  const active = [...registry.values()].filter((e) => effectiveState(e) !== "aborted")
+  if (active.length === 0) return ""
+  const rows = active.map((e) => {
     const state = effectiveState(e)
     const ctx = e.ctxTokens == null ? "? ctx" : `${fmtTokens(e.ctxTokens)} ctx`
     const age = ageSeconds(e.spawnedAt)
@@ -825,9 +616,11 @@ async function onSessionIdle({ sessionID }, client) {
     // around would only leak: a one-shot subagent gets exactly one wake
     // attempt. If it failed, the user can re-prompt via the primary.
   }
-  const ok = await deleteSession(client, sessionID)
-  if (ok) log("deleted opencode session", { handle, sessionID })
-  forgetSessionDirectory(sessionID)
+  await teardownSubagent(
+    client,
+    { sessionID, handle, parentID },
+    { entryRemoved: true, label: "" },
+  )
 }
 
 // A tracked subagent's LLM call failed (provider auth error, API error,
@@ -870,38 +663,30 @@ async function onSessionError(props, client) {
   // they race us between here and the postNotice below.
   entry.errored = true
   const errText = extractErrorMessage(props?.error)
+  // A user-initiated abort (TUI ✕ or session.abort) surfaces here as a
+  // MessageAbortedError, not a real failure. Phrase the notice accordingly so
+  // the orchestrator does not report a bug to the user for a deliberate stop.
+  const wasAborted = errorName(props?.error) === "MessageAbortedError"
   log("subagent llm error", {
     handle: entry.handle,
     sessionID,
     error: errText,
+    aborted: wasAborted,
   })
-  // Mark aborted so the tool-guard denies any in-flight tool calls that
-  // race the cleanup (mirrors the watchdog path).
-  aborted.add(sessionID)
-  // Wake the parent with the error notice. Best-effort — a failed notice
-  // must not stop us from freeing the slot.
-  try {
-    await postParentNotice(client, entry.parentID, errorNotice(entry, errText))
-    showToast(client, {
+  // Wake the parent with the error notice, then free the slot — same teardown
+  // as onSessionIdle / the watchdog. markAborted keeps the tool-guard hard-
+  // denying in-flight tool calls throughout removeEntry + deleteSession
+  // (mirrors the watchdog path); see teardownSubagent.
+  await teardownSubagent(client, entry, {
+    notice: errorNotice(entry, errText, wasAborted),
+    toast: {
       title: "agent-intercom",
-      message: `${entry.handle} failed`,
-      variant: "error",
-    })
-  } catch (err) {
-    log("session.error: postNotice failed", { handle: entry.handle, err: errMsg(err) })
-  }
-  // Free the slot. Same cleanup as onSessionIdle / the watchdog, so the
-  // global cap drops by one and the opencode session goes away.
-  if (await removeEntry(sessionID)) {
-    log("removed errored subagent", { handle: entry.handle, sessionID })
-  }
-  try {
-    const ok = await deleteSession(client, sessionID)
-    if (ok) log("deleted opencode session (errored)", { handle: entry.handle, sessionID })
-  } catch (err) {
-    log("session.error: deleteSession failed", { handle: entry.handle, sessionID, err: errMsg(err) })
-  }
-  forgetSessionDirectory(sessionID)
+      message: wasAborted ? `${entry.handle} aborted` : `${entry.handle} failed`,
+      variant: wasAborted ? "warning" : "error",
+    },
+    markAborted: true,
+    label: "session.error",
+  })
 }
 
 // Extracts a human-readable message from the `error` payload of a
@@ -929,6 +714,12 @@ function extractErrorMessage(error) {
   if (name) return name
   if (dataMsg) return dataMsg
   return "unknown error"
+}
+
+// The `name` field of a session.error payload, if present. Used to distinguish
+// a user-initiated abort (MessageAbortedError) from a genuine failure.
+function errorName(error) {
+  return error && typeof error === "object" && typeof error.name === "string" ? error.name : null
 }
 
 // Marker the subagent is taught to put on the FIRST non-empty line of its
@@ -967,79 +758,6 @@ function firstNonEmptyLine(text) {
     if (line.trim()) return line
   }
   return ""
-}
-
-function taskOutcomeLine(outcome) {
-  if (!outcome || outcome.kind === "no-task") return ""
-  switch (outcome.kind) {
-    case "done":
-      return `\n📋 TODO.md: ${outcome.id} removed.`
-    case "no-marker":
-      return (
-        "\n⚠️ TODO.md: this subagent had a task id but its reply did NOT start with " +
-        "`DONE: <id>`. The task was NOT auto-removed. Delegate verification and TODO.md cleanup " +
-        "to a planner/coder."
-      )
-    case "mismatch":
-      return (
-        `\n⚠️ TODO.md: subagent reported \`${outcome.got}\` but was spawned for \`${outcome.expected}\`. ` +
-        `Marker IGNORED (possible hallucination). Delegate verification and TODO.md cleanup to a planner/coder.`
-      )
-    case "no-todo":
-      return "\n⚠️ TODO.md not present — marker ignored."
-    case "error":
-      return `\n⚠️ TODO.md: auto-remove failed: ${outcome.message}`
-    default:
-      return ""
-  }
-}
-
-function completionNotice(handle, agent, result, parentID, taskOutcome, ctxTokens) {
-  return (
-    `🔔 agent-intercom: your subagent "${handle}" (${agent}) has finished and been destroyed.\n` +
-    (result ? `Its result:\n${result}\n` : "It produced no text result.\n") +
-    `Use this to report back to the user. If you need more work in this area, spawn a fresh ` +
-    `subagent — the one above is gone.` +
-    taskOutcomeLine(taskOutcome) +
-    spawnSizeNotice(ctxTokens) +
-    slotsNoticeAfterFinish(parentID)
-  )
-}
-
-// Tail line: surfaces the actual ctx consumption of the finished subagent so
-// the orchestrator gets numerical feedback on whether the spawn was right-sized.
-// Tone escalates in two steps; numbers ≥ HARD are spawn-too-big and the next
-// one in the area should be split tighter.
-function spawnSizeNotice(ctxTokens) {
-  if (!ctxTokens || ctxTokens <= 0) return ""
-  const used = fmtTokens(ctxTokens)
-  if (ctxTokens >= LARGE_CTX_TOKENS_HARD) {
-    return (
-      `\n📏 spawn-size: this subagent used ${used} tokens — far over the ~15 k target. The ` +
-      `task was too big. SPLIT the next spawn in this area into smaller, single-concern pieces ` +
-      `(1 file / 1 slice each) before continuing.`
-    )
-  }
-  if (ctxTokens >= LARGE_CTX_TOKENS_SOFT) {
-    return (
-      `\n📏 spawn-size: this subagent used ${used} tokens — above the ~15 k target. Scope the ` +
-      `next spawn in this area tighter (fewer files, narrower goal).`
-    )
-  }
-  return `\n📏 spawn-size: ${used} tokens (target ≤ ~15 k — ok).`
-}
-
-// Tail line for completion notices: tells the orchestrator how many subagent
-// slots are now free so it knows whether the next spawn() will succeed. Empty
-// when the cap is disabled. Called after removeEntry, so the freed slot is
-// already counted out. The cap is GLOBAL — the count includes subagents from
-// every primary in this process.
-function slotsNoticeAfterFinish(primaryID) {
-  const maxSubagents = getSettings().maxSubagents
-  if (maxSubagents <= 0) return ""
-  const active = countActiveSubagents(primaryID)
-  const free = Math.max(0, maxSubagents - active)
-  return `\nSubagent slots: ${active}/${maxSubagents} (global, across all sessions) — ${free} free.`
 }
 
 // Guards tool execution before it runs:
@@ -1144,7 +862,7 @@ export function createGuardToolExecute(client, permissionGuard) {
     }
 
     // Not a tracked subagent -> a primary session. It may only run the
-    // intercom tools (+ glob/grep); everything else it must delegate.
+    // intercom tools (spawn/abort/list); everything else it must delegate.
     if (!PRIMARY_TOOLS.has(input.tool)) {
       log("denied non-orchestration tool from primary", { sessionID, tool: input.tool })
       const hint =
@@ -1162,7 +880,7 @@ export function createGuardToolExecute(client, permissionGuard) {
     // turn after a spawn — the snapshot in the system prompt already shows the
     // same info each turn, and finished subagents wake the primary on their
     // own. One `list` per "stretch" is enough; the second back-to-back call is
-    // denied. Any other tool call (spawn/abort/glob/grep) resets the streak.
+    // denied. Any other tool call (spawn/abort) resets the streak.
     if (input.tool === "list" && lastPrimaryTool.get(sessionID) === "list") {
       log("denied back-to-back list from primary", { sessionID })
       throw new Error(
@@ -1170,215 +888,6 @@ export function createGuardToolExecute(client, permissionGuard) {
       )
     }
     lastPrimaryTool.set(sessionID, input.tool)
-  }
-}
-
-// Tells the primary that a subagent is stuck in a denial loop — over budget,
-// ignoring STOP injections, still trying tool calls. Fires once when the
-// stopInjections counter crosses BUDGET_NOTIFY_AFTER. We do NOT abort: that
-// is strictly user-only (TUI ✕ or "kill the subagent" to the orchestrator).
-// The subagent stays alive so the user can still inspect its session.
-async function notifyParentOfDenialLoop(client, entry) {
-  log("denial loop: notifying parent", {
-    handle: entry.handle,
-    ctxTokens: entry.ctxTokens,
-    stopInjections: entry.stopInjections,
-    denials: entry.budgetDenials,
-  })
-  if (entry.parentID) {
-    try {
-      await postParentNotice(client, entry.parentID, denialLoopNotice(entry))
-    } catch (err) {
-      log("denial loop: notify parent failed", errMsg(err))
-    }
-  }
-  showToast(client, {
-    title: "agent-intercom",
-    message: `${entry.handle} stuck — user action needed`,
-    variant: "warning",
-  })
-}
-
-function denialLoopNotice(entry) {
-  return (
-    `⚠️ agent-intercom: subagent "${entry.handle}" (${entry.agent}) is OVER its context budget ` +
-    `(${fmtTokens(entry.ctxTokens)} tokens) and keeps calling tools instead of wrapping up — ` +
-    `it has ignored ${entry.stopInjections} STOP injection${entry.stopInjections === 1 ? "" : "s"}. ` +
-    `It is still alive, still consuming time, still producing nothing useful. ` +
-    `Tell the user the subagent appears stuck and ask whether to abort it (via the TUI ✕ button, ` +
-    `or by telling you to abort it by handle). Do NOT abort on your own — abort is user-only.`
-  )
-}
-
-// ---- Inactivity watchdog (dead-man's switch) ---------------------------------
-//
-// What this guards against: an LLM call inside a subagent that hangs forever
-// (server timeout, network partition, model that never streams a token). No
-// `session.idle` event ever fires, so the normal wake-on-finish path never
-// runs, and the registry entry + global slot stay occupied for the life of
-// the opencode process. The orchestrator also never gets woken, so it sits
-// idle waiting for a result that will never arrive.
-//
-// The fix is a periodic sweep over the registry: any entry whose `lastActivityAt`
-// is older than `maxSubagentAgeMs` is treated as hung, aborted cooperatively,
-// and its slot is freed. The orchestrator is woken with a timeout notice so it
-// can re-dispatch.
-//
-// Important: the threshold is INACTIVITY (time since the last event), not
-// total lifetime. A long-running subagent that keeps emitting events is
-// healthy — its `lastActivityAt` gets bumped on every event by `handleEvent`
-// above, so it never trips. Only a subagent that produces ZERO events for
-// `maxSubagentAgeMs` (default 90 s) gets killed.
-
-// How often the sweep runs. 5 s is a good balance: cheap (just a Map scan
-// over a handful of entries) and timely enough that the worst-case extra
-// hang over the configured threshold is 5 s. The sweep is asynchronous, but
-// the work per tick is small (a Map scan + maybe one abort call) so it
-// doesn't need to be unref'd.
-const WATCHDOG_INTERVAL_MS = 5000
-
-// Module-level: the interval handle + the flag that ensures we only arm the
-// timer once per process. createEventHandler may be invoked more than once
-// across plugin reloads within the same opencode process — restarting the
-// timer on every call would leak intervals.
-let watchdogInterval = null
-let watchdogClient = null
-
-export function ensureWatchdogStarted(client) {
-  if (watchdogInterval) {
-    // Already running; keep the freshest client so future sweeps use it.
-    watchdogClient = client
-    return
-  }
-  watchdogClient = client
-  const handle = setInterval(() => {
-    void sweepWatchdog()
-  }, WATCHDOG_INTERVAL_MS)
-  // Don't pin the opencode event loop on this interval: the watchdog only
-  // matters while subagents (and therefore the plugin) are alive. If
-  // opencode tears the plugin factory down for a clean shutdown, the interval
-  // goes with it. (setInterval is the kind of handle that would otherwise
-  // keep node alive indefinitely — see node's "active handles" semantics.)
-  if (typeof handle.unref === "function") handle.unref()
-  watchdogInterval = handle
-  log("watchdog started", { intervalMs: WATCHDOG_INTERVAL_MS })
-}
-
-// Sweeps the registry once and times out any subagent whose last event is
-// older than the configured inactivity window. Best-effort: a single failed
-// abort on one entry doesn't stop the others from being checked.
-export async function sweepWatchdog() {
-  const maxAge = getSettings().maxSubagentAgeMs
-  if (maxAge <= 0) return // watchdog disabled
-  const now = Date.now()
-  // Snapshot the entries first — we mutate the registry (removeEntry) below,
-  // so iterating the live Map would skip or revisit entries.
-  const entries = [...registry.values()]
-  for (const entry of entries) {
-    if (entry.timedOut) continue
-    if (entry.errored) continue
-    if (aborted.has(entry.sessionID)) continue
-    // session.idle fires just before the entry is removed; if a stray idle
-    // sneaks through the gap, `entry.status === "idle"` covers it.
-    if (entry.status === "idle") continue
-    const last = entry.lastActivityAt ?? entry.spawnedAt
-    if (now - last <= maxAge) continue
-
-    // Latch FIRST so any racing event handler / onSessionIdle skips this entry.
-    entry.timedOut = true
-    await timeoutSubagent(entry, maxAge, now - last)
-  }
-}
-
-// Performs the actual timeout for one entry: abort the opencode session,
-// post a wake notice to the parent, and free the slot by running the same
-// cleanup path as onSessionIdle (removeEntry + deleteSession +
-// forgetSessionDirectory). Best-effort; failures are logged, never thrown.
-export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
-  const sessionID = entry.sessionID
-  const handle = entry.handle
-  const agent = entry.agent
-  const parentID = entry.parentID
-  log("subagent timed out (inactivity)", {
-    handle,
-    sessionID,
-    agent,
-    silentMs,
-    maxAgeMs,
-  })
-
-  // 1. Cooperative abort (best-effort, mirrors signalAbort in tools.js).
-  try {
-    await abortSession(watchdogClient, sessionID)
-  } catch (err) {
-    log("watchdog: abort failed", { handle, sessionID, err: errMsg(err) })
-  }
-  // Mark aborted so the guardToolExecute hook denies any in-flight tool
-  // calls that race the abort signal. removeEntry will drop this set entry
-  // below; ordering matters only for the tool-guard window.
-  aborted.add(sessionID)
-
-  // 2. Wake the parent with a timeout notice (mirrors postNotice in onSessionIdle).
-  if (parentID && watchdogClient) {
-    try {
-      await postParentNotice(
-        watchdogClient,
-        parentID,
-        timeoutNotice(entry, maxAgeMs, silentMs),
-      )
-    } catch (err) {
-      log("watchdog: postNotice failed", { handle, parentID, err: errMsg(err) })
-    }
-  }
-
-  // 3. Free the slot: same cleanup as onSessionIdle, so the global cap drops
-  //    by one. Best-effort — a missing entry means another path already
-  //    cleaned it up, which is fine.
-  if (await removeEntry(sessionID)) {
-    log("watchdog: removed timed-out subagent", { handle, sessionID })
-  }
-  try {
-    const ok = await deleteSession(watchdogClient, sessionID)
-    if (ok) log("watchdog: deleted opencode session", { handle, sessionID })
-  } catch (err) {
-    log("watchdog: deleteSession failed", { handle, sessionID, err: errMsg(err) })
-  }
-  forgetSessionDirectory(sessionID)
-}
-
-// Wake-notice sent to the parent when the watchdog times out a subagent.
-// Sibling of completionNotice — keeps the same emoji + phrasing vocabulary so
-// the orchestrator's pattern-matching notices stay consistent.
-export function timeoutNotice(entry, maxAgeMs, silentMs) {
-  const silentSec = Math.round(silentMs / 1000)
-  const maxSec = Math.round(maxAgeMs / 1000)
-  return (
-    `🔔 agent-intercom: subagent "${entry.handle}" (${entry.agent}, session ${entry.sessionID}) ` +
-    `timed out after ${silentSec}s of inactivity (limit ${maxSec}s) — slot freed. ` +
-    `You may re-dispatch with spawn() if the work is still needed.`
-  )
-}
-
-// Wake-notice sent to the parent when a subagent's LLM call failed (caught
-// via `session.error`). Sibling of completionNotice / timeoutNotice — same
-// emoji + phrasing vocabulary so the orchestrator's pattern-matching notices
-// stay consistent. We append a `slots` line via slotsNoticeAfterFinish so the
-// freed slot is visible to the orchestrator, matching the completion path.
-function errorNotice(entry, message) {
-  return (
-    `🔔 agent-intercom: subagent "${entry.handle}" (${entry.agent}, session ${entry.sessionID}) ` +
-    `failed: ${message}. Slot freed. ` +
-    `You may re-dispatch with spawn() if the work is still needed.` +
-    slotsNoticeAfterFinish(entry.parentID)
-  )
-}
-
-// Test-only: stop the watchdog interval so unit tests don't leak timers.
-export function _stopWatchdogForTests() {
-  if (watchdogInterval) {
-    clearInterval(watchdogInterval)
-    watchdogInterval = null
-    watchdogClient = null
   }
 }
 

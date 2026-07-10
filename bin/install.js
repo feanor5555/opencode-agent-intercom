@@ -17,6 +17,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { parse, modify, applyEdits } from "jsonc-parser";
+import { ensureChromium } from "./chromium.js";
 
 const PLUGIN = "opencode-agent-intercom";
 const TUI_PLUGIN = "opencode-agent-intercom-tui";
@@ -293,30 +294,18 @@ async function installChromium() {
     console.log("= skipping chromium install (OPENCODE_AGENT_INTERCOM_SKIP_CHROMIUM=1)");
     return;
   }
-  let chromium;
-  try {
-    ({ chromium } = await import("playwright-core"));
-  } catch (err) {
-    console.error(`! could not load playwright-core: ${err.message}`);
-    return;
-  }
-  let exe = "";
-  try {
-    exe = chromium.executablePath();
-  } catch {}
-  if (exe && existsSync(exe)) {
-    console.log("= chromium already installed for playwright");
-    return;
-  }
-  console.log("Installing chromium for playwright (`pw` tool)...");
+  // `cwd` on the installer dir so `npx playwright` resolves the plugin's own
+  // playwright-core.
   const here = dirname(fileURLToPath(import.meta.url));
-  const result = spawnSync("npx", ["-y", "playwright@latest", "install", "chromium"], {
-    cwd: here,
-    stdio: "inherit",
-  });
-  if (result.status !== 0) {
+  try {
+    const { downloaded } = await ensureChromium({
+      cwd: here,
+      onDownload: () => console.log("Installing chromium for playwright (`pw` tool)..."),
+    });
+    if (!downloaded) console.log("= chromium already installed for playwright");
+  } catch (err) {
     console.error(
-      `! chromium install failed (exit ${result.status}). The plugin still works, ` +
+      `! chromium install failed: ${err.message}. The plugin still works, ` +
         `but the \`pw\` tool will install chromium on first use instead.`,
     );
     process.exitCode = 1;

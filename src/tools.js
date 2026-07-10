@@ -21,6 +21,9 @@ import {
   reservePendingSpawn,
   releasePendingSpawn,
   activeTaskIdsFor,
+  reservePendingTaskId,
+  releasePendingTaskId,
+  isTaskIdPending,
 } from "./registry.js"
 import { projectContext } from "./project.js"
 import { getSettings } from "./settings.js"
@@ -139,15 +142,25 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       }
     }
 
-    // Pull an optional task id (T5 / R2) off the first line of the prompt.
+    // Pull an optional task id (T5) off the first line of the prompt.
     // Present → wake-hook auto-ticks TODO.md when the subagent's reply ends
-    // with the matching `DONE:`/`BLOCKED:` marker. Absent → non-task spawn
+    // with the matching `DONE:` marker. Absent → non-task spawn
     // (status check, ad-hoc question) and auto-tick is skipped. The orchestrator
     // decides per spawn; the plugin never forces a prefix.
+    // Atomic duplicate-task check-and-reserve. The id is only written onto the
+    // registry entry by upsertSession AFTER the createChildSession /
+    // promptSession awaits below, so a bare check against activeTaskIdsFor would
+    // leave a TOCTOU window: two spawn() calls in the same turn carrying the
+    // same task-id both pass the check, both start, and the wake-hook double-
+    // ticks TODO.md on the matching DONE: marker. Reserving the id in
+    // pendingTaskIds in THIS synchronous block (before the first await) makes it
+    // visible to any later spawn() in the same micro-batch — mirrors the
+    // pendingSpawns cap reservation. Prefix-free spawns pass taskId=undefined
+    // and never reserve, so they cannot block one another.
     const taskId = extractTaskId(args.prompt)
     if (taskId) {
       const active = activeTaskIdsFor(toolCtx.sessionID)
-      if (active.has(taskId)) {
+      if (active.has(taskId) || isTaskIdPending(taskId)) {
         log("spawn refused: duplicate task id", { taskId })
         return {
           output:
@@ -156,34 +169,40 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
             `one (only if the user says so) and then re-spawn.`,
         }
       }
+      reservePendingTaskId(taskId)
     }
 
-    const maxSubagents = getSettings().maxSubagents
-    // Atomic cap-check-and-reserve: any await between count and reserve would
-    // let parallel spawn() calls in the same turn all observe "active < cap"
-    // and bypass the limit. countActiveSubagents includes pendingSpawns, so
-    // the synchronous reserve() that follows makes the slot visible to any
-    // later spawn() in the same micro-batch.
-    //
-    // The cap is GLOBAL across all orchestrator primaries in this process —
-    // see countActiveSubagents in registry.js. We pass toolCtx.sessionID for
-    // signature compatibility, but the value is ignored.
-    if (maxSubagents > 0) {
-      const active = countActiveSubagents(toolCtx.sessionID)
-      if (active >= maxSubagents) {
-        log("spawn refused: subagent limit", { active, limit: maxSubagents })
-        return {
-          output:
-            `Subagent limit reached (${active}/${maxSubagents} running globally across all ` +
-            `orchestrator sessions). Wait for one to finish — you are woken automatically — or ` +
-            `abort one with abort(handle) before spawning again.`,
+    // From here on the task-id reservation is held; a single finally releases it
+    // (and the spawn slot, once reserved) on every exit — cap-reject, failure,
+    // or success.
+    let entry
+    let reservedSpawn = false
+    try {
+      const maxSubagents = getSettings().maxSubagents
+      // Atomic cap-check-and-reserve: any await between count and reserve would
+      // let parallel spawn() calls in the same turn all observe "active < cap"
+      // and bypass the limit. countActiveSubagents includes pendingSpawns, so
+      // the synchronous reserve() that follows makes the slot visible to any
+      // later spawn() in the same micro-batch.
+      //
+      // The cap is GLOBAL across all orchestrator primaries in this process —
+      // see countActiveSubagents in registry.js. We pass toolCtx.sessionID for
+      // signature compatibility, but the value is ignored.
+      if (maxSubagents > 0) {
+        const active = countActiveSubagents(toolCtx.sessionID)
+        if (active >= maxSubagents) {
+          log("spawn refused: subagent limit", { active, limit: maxSubagents })
+          return {
+            output:
+              `Subagent limit reached (${active}/${maxSubagents} running globally across all ` +
+              `orchestrator sessions). Wait for one to finish — you are woken automatically — or ` +
+              `abort one with abort(handle) before spawning again.`,
+          }
         }
       }
-    }
-    reservePendingSpawn(toolCtx.sessionID)
+      reservePendingSpawn(toolCtx.sessionID)
+      reservedSpawn = true
 
-    let entry
-    try {
       const sessionID = await createChildSession(client, {
         parentID: toolCtx.sessionID,
         title: args.description || `${args.agent}: ${args.prompt.slice(0, 60)}`,
@@ -191,10 +210,29 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       })
       if (!sessionID) return { output: "Failed to create subagent session." }
 
-      // Prepend a light project snapshot so the subagent does not start blind.
-      const ctxBlock = projectContext(directory)
-      const fullPrompt = ctxBlock ? `${ctxBlock}\n\n${args.prompt}` : args.prompt
-      await promptSession(client, { sessionID, agent: args.agent, prompt: fullPrompt })
+      // The child session now exists at the opencode level. If anything below
+      // throws (typically promptSession), guard() would catch it and report an
+      // error — but the orphaned session (plus any provisional registry entry
+      // the session.created event auto-registered in the meantime) would leak
+      // for the process lifetime. Best-effort teardown here, then re-throw so
+      // guard() still surfaces the ORIGINAL failure. Cleanup errors are logged,
+      // never allowed to mask the original error. The outer finally still
+      // releases the pendingSpawn / pendingTaskId reservations on this path.
+      try {
+        // Prepend a light project snapshot so the subagent does not start blind.
+        const ctxBlock = projectContext(directory)
+        const fullPrompt = ctxBlock ? `${ctxBlock}\n\n${args.prompt}` : args.prompt
+        await promptSession(client, { sessionID, agent: args.agent, prompt: fullPrompt })
+      } catch (err) {
+        try {
+          await removeEntry(sessionID)
+          await deleteSession(client, sessionID)
+          forgetSessionDirectory(sessionID)
+        } catch (cleanupErr) {
+          log("spawn cleanup after prompt failure failed", errMsg(cleanupErr))
+        }
+        throw err
+      }
 
       entry = upsertSession(sessionID, {
         agent: args.agent,
@@ -233,8 +271,13 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       }
     } finally {
       // The slot is now owned by the registry entry (if we got that far) or by
-      // nothing (on failure). Either way the pending reservation is done.
-      releasePendingSpawn(toolCtx.sessionID)
+      // nothing (on failure). Either way the reservations are done. Release the
+      // spawn slot only if we actually reserved it (a cap-reject returns before
+      // reservePendingSpawn — releasing then would decrement a CONCURRENT
+      // spawn's reservation, since the counter is global). The task-id release
+      // is idempotent and a no-op for prefix-free spawns.
+      if (reservedSpawn) releasePendingSpawn(toolCtx.sessionID)
+      releasePendingTaskId(taskId)
     }
   }
 
@@ -263,7 +306,14 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
   async function abortHandler(args, toolCtx) {
     trackPrimary(toolCtx.sessionID)
     const entry = resolve(args.subagent)
-    if (!entry) return unknown(args.subagent)
+    // Ownership check: handles are per-role numbered (coder#1, …) and the
+    // registry is shared across every primary in the process, so resolve()
+    // can hand back a subagent belonging to a *different* orchestrator. Only
+    // the parent that spawned it may abort it. Report a foreign subagent with
+    // the same "unknown" message as a nonexistent one (the module treats
+    // unknown handles uniformly — do not leak that some other session owns
+    // it) and return rather than throw, so the model keeps working.
+    if (!entry || entry.parentID !== toolCtx.sessionID) return unknown(args.subagent)
 
     aborted.add(entry.sessionID)
     entry.status = "aborted"
@@ -274,16 +324,22 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // Mirror the onSessionIdle cleanup path: the event hook skips aborted
     // sessions (`if (!entry || aborted.has(sessionID)) return`), so without
     // this branch the registry/bySession entry and the opencode session would
-    // leak for the lifetime of the opencode process. removeEntry itself drops
-    // the sessionID from the `aborted` Set; by the time it runs the opencode
-    // session is already being aborted, so further tool calls are blocked
-    // regardless of the Set. All three operations are best-effort.
-    if (await removeEntry(entry.sessionID)) {
-      log("removed aborted subagent", { handle: entry.handle, sessionID: entry.sessionID })
+    // leak for the lifetime of the opencode process. Keep the abort marker in
+    // place across removeEntry + deleteSession (clearAborted: false) so a
+    // tool call still in flight is hard-denied as aborted throughout teardown,
+    // not misclassified as a primary once the registry entry is gone. The
+    // finally drops the marker so the Set never grows unbounded. All
+    // operations are best-effort.
+    try {
+      if (await removeEntry(entry.sessionID, { clearAborted: false })) {
+        log("removed aborted subagent", { handle: entry.handle, sessionID: entry.sessionID })
+      }
+      const ok = await deleteSession(client, entry.sessionID)
+      if (ok) log("deleted opencode session (aborted)", { handle: entry.handle, sessionID: entry.sessionID })
+      forgetSessionDirectory(entry.sessionID)
+    } finally {
+      aborted.delete(entry.sessionID)
     }
-    const ok = await deleteSession(client, entry.sessionID)
-    if (ok) log("deleted opencode session (aborted)", { handle: entry.handle, sessionID: entry.sessionID })
-    forgetSessionDirectory(entry.sessionID)
 
     return {
       output:
@@ -457,6 +513,6 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     }),
 
     ...(isWebsearchEnabled() ? { web_search: createWebsearchTool() } : {}),
-    ...(isOutlineEnabled() ? { outline: createOutlineTool({ directory: factoryDirectory }) } : {}),
+    ...(isOutlineEnabled() ? { outline: createOutlineTool({ dirFor }) } : {}),
   }
 }

@@ -15,12 +15,18 @@
 // Disable entirely with OPENCODE_AGENT_INTERCOM_DISABLE_OUTLINE=1.
 
 import { tool } from "@opencode-ai/plugin"
-import { execFile } from "node:child_process"
+import { execFile, spawnSync } from "node:child_process"
 import { promisify } from "node:util"
-import { isAbsolute, resolve as resolvePath } from "node:path"
-import { join } from "node:path"
+import {
+  isAbsolute,
+  resolve as resolvePath,
+  relative as relativePath,
+  dirname,
+  basename,
+  join,
+} from "node:path"
 import { homedir } from "node:os"
-import { existsSync } from "node:fs"
+import { existsSync, realpathSync } from "node:fs"
 import { log, errMsg } from "./log.js"
 
 const z = tool.schema
@@ -35,21 +41,49 @@ const MAX_DECLARATIONS = 200
 // well under a second; anything taking longer than 10s is something pathological.
 const CTAGS_TIMEOUT_MS = 10_000
 
-// Cache the resolved ctags binary path across calls in the same process. We
-// also check ~/.local/bin/ctags as a fallback for the case where the installer
-// put the binary there but `~/.local/bin` is not on PATH for whatever reason
-// (some shell startup files only add it under specific conditions).
-let resolvedCtagsPath = null
+// Message shown when no usable Universal Ctags binary can be resolved. Kept as
+// a single constant so the resolution short-circuit and the runtime ENOENT
+// branch report identically.
+const CTAGS_MISSING_MSG =
+  "outline failed: ctags not found on PATH. Run `npx opencode-agent-intercom-install` " +
+  "to install it (or install universal-ctags via your package manager)."
 
+// The `--version` probe. Returns true only for a genuine Universal Ctags —
+// Exuberant/BSD ctags reject the flags we pass and would otherwise fail
+// cryptically on the first real outline call. Runs synchronously so the
+// resolver stays a plain sync function at its call sites. Injectable via
+// `setCtagsProbe` for tests.
+function defaultCtagsProbe(bin) {
+  const r = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 5000 })
+  return r.status === 0 && typeof r.stdout === "string" && r.stdout.includes("Universal Ctags")
+}
+let ctagsProbe = defaultCtagsProbe
+
+// Test seam: swap the probe and clear the per-process cache. Call with no
+// argument to restore the real probe. Not part of the tool's public surface.
+export function setCtagsProbe(fn) {
+  ctagsProbe = fn || defaultCtagsProbe
+  resolvedCtagsPath = undefined
+}
+
+// Resolved ctags binary, cached across calls in the same process: `undefined`
+// = not yet resolved, a string = the chosen binary, `null` = none usable.
+let resolvedCtagsPath
+
+// Prefer the installer's own self-built universal-ctags 6.2.1 under
+// ~/.local/bin/ctags — a known-good, deterministic build — over whatever
+// `ctags` sits on PATH. Each candidate must pass the Universal-Ctags probe; if
+// the local build is absent or fails (interrupted build, wrong variant), fall
+// back to the PATH candidate, which must pass the same probe. Result cached.
 function resolveCtagsBinary() {
-  if (resolvedCtagsPath !== null) return resolvedCtagsPath || null
-  // First choice: rely on PATH — this is what every working install ends up at.
-  resolvedCtagsPath = "ctags"
-  // Fallback: if our installer placed it in ~/.local/bin but the user's PATH
-  // doesn't include that dir, fall back to the absolute path so the tool still
-  // works without a shell reload.
-  const localBin = join(homedir(), ".local", "bin", "ctags")
-  if (existsSync(localBin)) resolvedCtagsPath = localBin
+  if (resolvedCtagsPath !== undefined) return resolvedCtagsPath
+  resolvedCtagsPath = null
+  for (const bin of [join(homedir(), ".local", "bin", "ctags"), "ctags"]) {
+    if (ctagsProbe(bin)) {
+      resolvedCtagsPath = bin
+      break
+    }
+  }
   return resolvedCtagsPath
 }
 
@@ -159,20 +193,42 @@ export function isOutlineEnabled() {
   return process.env.OPENCODE_AGENT_INTERCOM_DISABLE_OUTLINE !== "1"
 }
 
-// Exposed for tests so they can detect whether ctags is installed and skip
-// outline tests gracefully when it isn't.
-export async function probeCtags() {
+// Resolve a path to its canonical (symlink-free) form. When the path itself
+// does not exist yet (e.g. a file the caller mistyped), canonicalise the
+// deepest existing ancestor and re-append the trailing segments, so a symlink
+// anywhere in the existing prefix is still followed. Falls back to a plain
+// lexical resolve if even the root is unreadable.
+function canonicalize(p) {
   try {
-    const { stdout } = await execFileP(resolveCtagsBinary(), ["--version"], {
-      timeout: 5000,
-    })
-    return stdout.includes("Universal Ctags")
+    return realpathSync(p)
   } catch {
-    return false
+    const parent = dirname(p)
+    if (parent === p) return resolvePath(p)
+    return join(canonicalize(parent), basename(p))
   }
 }
 
-export function createOutlineTool({ directory }) {
+// True when `target` is `base` itself or lives underneath it. Uses a
+// path.relative test (not string startsWith, which mis-fires on sibling dirs
+// sharing a name prefix) against the canonicalised forms of both, so a
+// symlink pointing outside the tree is caught too.
+function isInsideDirectory(base, target) {
+  const rel = relativePath(canonicalize(base), canonicalize(target))
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
+}
+
+// Exposed for tests so they can detect whether a usable Universal Ctags is
+// installed and skip outline tests gracefully when it isn't.
+export async function probeCtags() {
+  return resolveCtagsBinary() !== null
+}
+
+// `dirFor(toolCtx)` resolves the session's authoritative project directory per
+// call (GET /session/<id> → info.directory), mirroring the TODO tools. The
+// plugin factory runs once per project/process, so a factory-captured directory
+// would be `opencode serve`'s cwd — NOT the session directory set via
+// `?directory=`. Resolving per call keeps relative paths anchored correctly.
+export function createOutlineTool({ dirFor }) {
   return tool({
     description:
       "Return the top-level declarations of a source file (function/class/type/method/variable " +
@@ -186,14 +242,26 @@ export function createOutlineTool({ directory }) {
         .min(1)
         .describe("File path (absolute or relative to the project root)"),
     },
-    execute: async (args) => {
+    execute: async (args, toolCtx) => {
+      const directory = await dirFor(toolCtx)
       const target = isAbsolute(args.path) ? args.path : resolvePath(directory, args.path)
+      // Containment: the resolved target must stay inside the session directory.
+      // Rejects `../` traversal, absolute paths pointing elsewhere, and symlink
+      // escapes (canonicalize follows links before the comparison). Reported as
+      // a normal tool-error string, never thrown.
+      if (!isInsideDirectory(directory, target)) {
+        return { output: `outline: path escapes the project directory: ${args.path}` }
+      }
       if (!existsSync(target)) {
         return { output: `outline: file not found: ${args.path}` }
       }
+      const bin = resolveCtagsBinary()
+      if (!bin) {
+        return { output: CTAGS_MISSING_MSG }
+      }
       try {
         const { stdout } = await execFileP(
-          resolveCtagsBinary(),
+          bin,
           [
             "--output-format=u-ctags",
             "--fields=+nzKS",
@@ -207,14 +275,10 @@ export function createOutlineTool({ directory }) {
         )
         return { output: formatTags(args.path, stdout) }
       } catch (err) {
-        // ENOENT on the binary itself = ctags not installed. Give a clear
-        // install hint instead of a confusing spawn error.
+        // ENOENT on the binary itself = ctags vanished between probe and call.
+        // Give a clear install hint instead of a confusing spawn error.
         if (err && err.code === "ENOENT") {
-          return {
-            output:
-              "outline failed: ctags not found on PATH. Run `npx opencode-agent-intercom-install` " +
-              "to install it (or install universal-ctags via your package manager).",
-          }
+          return { output: CTAGS_MISSING_MSG }
         }
         log("outline ctags failed", errMsg(err))
         return { output: `outline failed: ${errMsg(err)}` }

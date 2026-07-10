@@ -448,7 +448,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // layout cache that a raw KV write would miss. `api.kv.get` reads the reactive
   // store, so the label re-renders when the value changes.
   const thinkingOn = (): boolean =>
-    api.kv?.get?.("thinking_visibility", true) ?? true;
+    (api.kv?.get?.<string>("thinking_mode", "hide") ?? "hide") === "show";
   const toggleThinking = (): void => {
     api.keymap?.dispatchCommand?.("session.toggle.thinking");
   };

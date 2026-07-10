@@ -1,8 +1,7 @@
 // Slice 5: reparentSubagents(fromID, toID) — the handoff primitive that moves
 // every in-flight subagent of one primary onto another.
 //
-// Verified against real code (NOT against ARCHITECTURE.md, whose §14.7
-// referenced a `forgetPrimary` that does not exist):
+// Verified against real code:
 //   - Entry field for the parent session id is `parentID` (registry.js:223).
 //   - "In-flight" = entry still in the registry (one-shot: finished entries
 //     are removed in the wake critical section, hooks.js:494-512) AND not
@@ -55,7 +54,7 @@ test("reparentSubagents rewrites parentID on every matching entry and returns th
 })
 
 test("reparentSubagents skips dispatched entries (the wake latch invariant)", async () => {
-  // Reproduces the §14.7 race the implementation is built to honour: a wake
+  // Reproduces the wake race the implementation is built to honour: a wake
   // handler has already snapshotted this entry's old parentID and is mid-
   // delivery to it. Mutating parentID now would not redirect the delivery —
   // it would only corrupt the registry. The function must leave dispatched

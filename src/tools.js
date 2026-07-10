@@ -15,6 +15,7 @@ import {
   resolve,
   upsertSession,
   removeEntry,
+  entryForSession,
   trackPrimary,
   countActiveSubagents,
   effectiveState,
@@ -116,6 +117,21 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
   }
 
   async function spawnHandler(args, toolCtx) {
+    // Only the orchestrator delegates. A caller that already has a registry
+    // entry is a subagent — refuse with a friendly tool result (not a throw,
+    // which small models retry into a loop) and do NOT trackPrimary it: doing
+    // so would misregister the subagent's own session as an orchestrator
+    // primary. The subagent reports the need in its final reply; the
+    // orchestrator decides and spawns. Checked BEFORE trackPrimary.
+    if (entryForSession(toolCtx.sessionID)) {
+      log("spawn refused: caller is a subagent", { sessionID: toolCtx.sessionID })
+      return {
+        output:
+          "You are a subagent — you cannot spawn other agents. If this task needs another " +
+          "agent, name it and what it should do in your final reply; the orchestrator decides " +
+          "and spawns it.",
+      }
+    }
     trackPrimary(toolCtx.sessionID)
     const directory = await dirFor(toolCtx)
 

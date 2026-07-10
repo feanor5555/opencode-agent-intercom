@@ -39,6 +39,7 @@ export const SUBAGENT_GUIDE_CORE =
   "\n\n---\n🔧 agent-intercom: subagent discipline.\n" +
   "You are a one-shot subagent — do one focused task, then reply once and return.\n" +
   "Read a file before editing it. Make each tool call once; on error change your approach, don't repeat.\n" +
+  "You cannot spawn agents. If the task needs another agent, name it and what it should do in your final reply — the orchestrator dispatches it; you never spawn.\n" +
   "Final reply: brief plain text (hard-capped at 8000 chars). Reference files by path:line; do not paste file contents back.\n" +
   "If your spawn prompt started with `T<n>:` and you completed the task, put `DONE: T<n>` on the FIRST line of your final reply — the wake-hook removes that task from TODO.md for you. If you could not finish, just report plainly without that marker.\n" +
   "Reply to the orchestrator in English. Address the user directly only in the user's language.\n---\n"

@@ -14,7 +14,7 @@ import { join } from "node:path"
 import { spawnSync } from "node:child_process"
 import plugin from "../src/index.js"
 import { resetState, aborted, pendingTaskIds, lastPrimaryTool } from "../src/state.js"
-import { entryForSession, forgetPrimary, trackPrimary } from "../src/registry.js"
+import { entryForSession, forgetPrimary, trackPrimary, isPrimary } from "../src/registry.js"
 import { getSessionDirectory } from "../src/client.js"
 import { resetProjectContext } from "../src/project.js"
 import { setSettingsPath, resetSettings, getSearxngUrl, getSettings } from "../src/settings.js"
@@ -437,13 +437,14 @@ test("tool.execute.before denies back-to-back list calls from a primary", async 
   )
 })
 
-test("tool.execute.before lets a tracked subagent run any tool", async () => {
+test("tool.execute.before lets a tracked subagent run work tools (but not delegation)", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
-  // a tracked subagent is not a primary — it may do work itself
+  // a tracked subagent is not a primary — it may do actual work itself. The one
+  // thing it may NOT do is delegate (spawn/task); that is covered separately.
   await hooks["tool.execute.before"]({ tool: "bash", sessionID: created[0], callID: "s0" })
-  await hooks["tool.execute.before"]({ tool: "task", sessionID: created[0], callID: "s1" })
+  await hooks["tool.execute.before"]({ tool: "read", sessionID: created[0], callID: "s1" })
 })
 
 // --- per-agent `permission.<tool> = "deny"` runtime re-enforcement ---------
@@ -498,28 +499,62 @@ test("tool.execute.before allows a subagent calling a tool NOT in its deny map",
   )
 })
 
-test("tool.execute.before does NOT consult the new check for the `task` tool", async () => {
-  // `permission.task` is an allowlist, not a plain deny, and its enforcement
-  // lives in spawn's checkTaskPermission. A bare `task: "deny"` in the agent
-  // config is the signal the schema strip uses to HIDE opencode's native
-  // `task` tool from the LLM — it must NOT cause the runtime guard to
-  // over-deny when the subagent calls `task`. checkToolPermission explicitly
-  // short-circuits on `tool === "task"` and returns null, so the new
-  // per-agent-deny path is bypassed.
-  const { ctx, created } = makeCtx({
-    agentPerm: { researcher: { permission: { task: "deny" } } },
-  })
+test("tool.execute.before hard-denies the native `task` tool from a subagent", async () => {
+  // Only the orchestrator delegates: a subagent must not spawn work of its own.
+  // checkToolPermission still SKIPS `task` (config.js) — `permission.task` has
+  // allowlist / schema-strip semantics, not a plain per-tool deny — so the
+  // refusal here comes from a dedicated, UNCONDITIONAL guard line in the
+  // subagent branch, independent of config. Even with no `task: "deny"` in the
+  // mock config the call is rejected (a project override could not re-open it).
+  const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
-  // Calling `task` must NOT trip the new per-agent-deny path. For a
-  // subagent the existing guard lets `task` through (the schema strip is
-  // what hides it from the LLM; the runtime guard doesn't deny it), so
-  // this call resolves without throwing.
-  await hooks["tool.execute.before"]({
-    tool: "task",
-    sessionID: created[0],
-    callID: "t1",
-  })
+  await assert.rejects(
+    () => hooks["tool.execute.before"]({ tool: "task", sessionID: created[0], callID: "t1" }),
+    /subagent cannot spawn/i,
+  )
+})
+
+// --- only-the-orchestrator-delegates enforcement ---------------------------
+
+test("every subagent role denies spawn and task in its permission map", () => {
+  const subagents = Object.entries(AGENTS).filter(([, def]) => def.mode === "subagent")
+  assert.equal(subagents.length, 8, "expected 8 subagent roles")
+  for (const [name, def] of subagents) {
+    assert.equal(def.permission?.spawn, "deny", `${name} must deny spawn`)
+    assert.equal(def.permission?.task, "deny", `${name} must deny task`)
+    assert.equal(def.permission?.abort, "deny", `${name} must deny abort`)
+    assert.equal(def.permission?.list, "deny", `${name} must deny list`)
+  }
+  // the orchestrator is the sole delegator — it keeps spawn/abort/list.
+  assert.notEqual(AGENTS.orchestrator.permission?.spawn, "deny")
+  assert.notEqual(AGENTS.orchestrator.permission?.abort, "deny")
+  assert.notEqual(AGENTS.orchestrator.permission?.list, "deny")
+})
+
+test("spawn from a subagent session is refused as a tool result and creates no session", async () => {
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+  // the orchestrator spawns a subagent (this also proves the orchestrator path works)
+  await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
+  const subID = created[0]
+  const countBefore = created.length
+  // the subagent now tries to spawn another agent -> friendly refusal, no throw,
+  // no new session, and the subagent's session is NOT misregistered as primary.
+  const subCtx = { sessionID: subID, agent: "coder", messageID: "m2" }
+  const res = await hooks.tool.spawn.execute({ agent: "researcher", prompt: "y" }, subCtx)
+  assert.match(res.output, /you are a subagent/i)
+  assert.equal(created.length, countBefore, "no new session may be created for a subagent spawn")
+  assert.equal(isPrimary(subID), false, "subagent caller must not be tracked as a primary")
+})
+
+test("the orchestrator (a primary) can still spawn subagents", async () => {
+  const { ctx, created, prompted } = makeCtx()
+  const hooks = await plugin(ctx)
+  const res = await hooks.tool.spawn.execute({ agent: "planner", prompt: "do x" }, toolCtx)
+  assert.match(res.output, /Spawned subagent "planner#1"/)
+  assert.equal(created.length, 1)
+  assert.deepEqual(prompted, [created[0]])
 })
 
 test("tool.execute.before primary behavior is unchanged after the new per-agent-deny check", async () => {

@@ -65,7 +65,7 @@ Final reply: first line \`DONE: T<n>\` when you completed the task, then a short
 
 const DEBUGGER_PROMPT = `# Role: Debugger (Subagent)
 
-You diagnose errors — find the root cause; the fix is left to a coder spawn.
+You diagnose errors — find the root cause; you do not fix it and you do not spawn anyone. The orchestrator dispatches a coder for the fix.
 Reproduce the failure yourself → read the full stack trace → form a hypothesis, check it, confirm or discard.
 Separate the surface error from the real cause.
 For cryptic errors search with web_search; for runtime errors in a web page use the pw CLI from bash (\`pw start\`, \`pw goto\`, \`pw screenshot\`, \`pw evaluate\`, \`pw stop\`).
@@ -115,6 +115,19 @@ Before each commit, run \`git log -10\` to match the project's existing pattern 
 On pre-commit hook failure, fix the underlying issue and create a NEW commit (do not amend); force-push only on a personal feature branch.
 Final reply: first line \`DONE: T<n>\` when you completed the task, then one bullet per action (commit hash + subject, pushed branch, PR #N).`
 
+// No subagent may delegate. Only the orchestrator spawns; a subagent that
+// needs work from another agent reports it in its final reply, and the
+// orchestrator decides and spawns. Denying the custom async tools
+// (`spawn`/`abort`/`list`) plus opencode's native blocking `task` makes the
+// schema strip hide all four from every subagent's LLM — a tool that stays in
+// the schema but gets thrown by the guard drives small models into a denial
+// loop, so hiding them at the schema level is the primary defense. The
+// spawnHandler caller-gate and the guard's task-deny are the runtime backstops
+// for the case a project override re-exposes them.
+const SUBAGENT_NO_DELEGATION = {
+  spawn: "deny", task: "deny", abort: "deny", list: "deny",
+}
+
 // The 9 roles. `tools` disables the tools a role must not have; everything else
 // stays enabled by default (incl. the intercom tools and any MCP tools). The
 // runtime guard in hooks.js still hard-enforces the primary-only restriction.
@@ -138,7 +151,7 @@ export const AGENTS = {
       "Writes concept/design documents. Plans but does not implement. Researches current versions before every concept.",
     mode: "subagent",
     temperature: 0.3,
-    permission: { bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, bash: "deny" },
     prompt: PLANNER_PROMPT,
   },
   coder: {
@@ -146,6 +159,7 @@ export const AGENTS = {
       "Implements code changes in thin vertical slices, runs build/test commands, verifies before reporting back.",
     mode: "subagent",
     temperature: 0.2,
+    permission: { ...SUBAGENT_NO_DELEGATION },
     prompt: CODER_PROMPT,
   },
   debugger: {
@@ -153,7 +167,7 @@ export const AGENTS = {
       "Diagnoses build/test/runtime errors. Finds the root cause but does not fix it itself.",
     mode: "subagent",
     temperature: 0.2,
-    permission: { edit: "deny", write: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, edit: "deny", write: "deny" },
     prompt: DEBUGGER_PROMPT,
   },
   reviewer: {
@@ -161,7 +175,7 @@ export const AGENTS = {
       "Critical developer. Reviews code against best practices, clean code, performance. Writes a review document in reviews/, changes no source code.",
     mode: "subagent",
     temperature: 0.2,
-    permission: { bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, bash: "deny" },
     prompt: REVIEWER_PROMPT,
   },
   documenter: {
@@ -169,7 +183,7 @@ export const AGENTS = {
       "Writes user/API documentation (README, usage, changelog). Reads the actual code, invents nothing.",
     mode: "subagent",
     temperature: 0.3,
-    permission: { bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, bash: "deny" },
     prompt: DOCUMENTER_PROMPT,
   },
   researcher: {
@@ -178,9 +192,10 @@ export const AGENTS = {
     mode: "subagent",
     temperature: 0.3,
     permission: {
+      ...SUBAGENT_NO_DELEGATION,
       read: "deny", edit: "deny", write: "deny", bash: "deny",
-      glob: "deny", grep: "deny", list: "deny",
-      outline: "deny", task: "deny",
+      glob: "deny", grep: "deny",
+      outline: "deny",
       todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
     },
     prompt: RESEARCHER_PROMPT,
@@ -190,7 +205,7 @@ export const AGENTS = {
       "Generates images (UI mockups, screen designs, icons, illustrations, hero graphics) from a written brief. Saves files to disk; does not write source code. Can research visual references on the web.",
     mode: "subagent",
     temperature: 0.4,
-    permission: { websearch: "deny", outline: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, websearch: "deny", outline: "deny" },
     prompt: DESIGNER_PROMPT,
   },
   gitter: {
@@ -199,6 +214,7 @@ export const AGENTS = {
     mode: "subagent",
     temperature: 0.2,
     permission: {
+      ...SUBAGENT_NO_DELEGATION,
       edit: "deny", write: "deny", webfetch: "deny", websearch: "deny", web_search: "deny", outline: "deny",
       todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
     },

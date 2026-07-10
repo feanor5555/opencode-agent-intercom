@@ -790,6 +790,22 @@ export function createGuardToolExecute(client, permissionGuard) {
     // text and return control. entry.ctxTokens is kept fresh by the transform
     // hook, which runs before each LLM call.
     if (entry) {
+      // Hard backstop: a subagent may not spawn work of its own. The custom
+      // `spawn` tool is gated in its handler (friendly refusal); opencode's
+      // native blocking `task` has no handler of ours to gate, and
+      // checkToolPermission below deliberately skips `task` (see config.js), so
+      // deny it here unconditionally — independent of the per-agent permission
+      // map, so a project override that dropped the schema-strip deny cannot
+      // re-open it. The subagent reports any need for another agent in its
+      // final reply; the orchestrator dispatches.
+      if (input.tool === "task") {
+        log("denied native task from subagent", { sessionID, agent: entry.agent })
+        throw new Error(
+          "agent-intercom: a subagent cannot spawn other agents. If this task needs another " +
+            "agent, name it and what it should do in your final reply — the orchestrator decides " +
+            "and dispatches it.",
+        )
+      }
       if (TODO_TOOLS.has(input.tool) && !TODO_AGENTS.has(entry.agent)) {
         log("denied todo tool from non-todo subagent", {
           sessionID,

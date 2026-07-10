@@ -45,7 +45,7 @@ export async function postParentNotice(client, parentID, notice) {
 // (a clean one-shot completion is not an abort), so it passes markAborted:false.
 //
 // `entryRemoved` is the idle path's genuine divergence: it already removed its
-// registry entry INSIDE the wake-race mutex (§14.7), before any network I/O, so
+// registry entry INSIDE the wake-race mutex, before any network I/O, so
 // the helper must not remove it a second time. The errored/timeout paths remove
 // it here.
 //

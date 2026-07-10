@@ -1,4 +1,4 @@
-// Slice 1b: wake-dispatch critical section (§14.7).
+// Slice 1b: wake-dispatch critical section.
 //
 // Verifies that the registryMutex serializes the wake path so that:
 //   (a) read-parentID/claim-entry/removeEntry happen atomically under the lock
@@ -94,7 +94,7 @@ test("wake critical section holds the lock across snapshot+removeEntry", async (
   assert.equal(concurrentEntry, undefined, "entry gone by the time concurrent runs")
   // The wake section's release-marker MUST be observed strictly before the
   // concurrent holder's "inside-after-wake" tag, otherwise the lock would
-  // be broken and the wake race (§14.7) would be a real window.
+  // be broken and the wake race would be a real window.
   const wakeRelease = observed.findIndex((x) => x[0] === "wake:release-marker")
   const concurrentIdx = observed.findIndex((x) => x[0] === "concurrent:inside-after-wake")
   assert.ok(wakeRelease >= 0 && concurrentIdx >= 0, "both markers recorded")

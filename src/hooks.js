@@ -549,10 +549,10 @@ function onSessionStatus({ sessionID, status }) {
 // true AND removeEntry has already run (so entryForSession returns undefined).
 // Either guard alone is sufficient; both together make the intent explicit.
 async function onSessionIdle({ sessionID }, client) {
-  // CRITICAL SECTION per §14.7: read all delivery-target fields from the
+  // CRITICAL SECTION: read all delivery-target fields from the
   // registry and remove the entry from the registry under the same mutex,
   // then release the lock BEFORE any network I/O (postNotice/fetchSnapshot).
-  // The wake race (§14.7): a future reparentSubagents swaps parentID on
+  // The wake race: a future reparentSubagents swaps parentID on
   // in-flight entries. We must atomically (a) read parentID, (b) verify
   // the entry is still ours (not already cleared by another path), (c)
   // claim it via a `dispatched` latch so any concurrent mutation sees

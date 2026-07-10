@@ -1,4 +1,4 @@
-// Slice 1b: regression test for the wake-dispatch critical section (§14.7).
+// Slice 1b: regression test for the wake-dispatch critical section.
 //
 // This test exercises the EXACT critical-section shape used by
 // `onSessionIdle` in src/hooks.js — `runExclusive { read parentID +

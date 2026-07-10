@@ -39,13 +39,9 @@ export function isPrimary(sessionID) {
 // Removes `sessionID` from BOTH the `primarySessions` set and the `primaryCtx`
 // map. Sync, idempotent — calling on an unknown id is a safe no-op (`.delete`
 // on a Set/Map returns false but does not throw). Used by the orchestrator-
-// handoff sequence (§14.7 in ARCHITECTURE.md, step 8) to drop the OLD primary
-// from primary-tracking maps once its in-flight subagents have been reparented
-// and its session deleted.
+// handoff sequence to drop the OLD primary from primary-tracking maps once its
+// in-flight subagents have been reparented and its session deleted.
 //
-// ARCHITECTURE.md §14.7 references this function under the name
-// `forgetPrimary` — but the helper did NOT actually exist (the §14.7 plan
-// assumed a one-liner the slice never built). This is the real definition.
 // Kept sync because the only caller (`performPrimaryHandoff` in handoff.js)
 // invokes it as a fire-and-forget step after the async reparent/delete have
 // already settled — there is nothing to await and adding an `async` would just
@@ -302,7 +298,7 @@ export async function removeEntry(sessionID, { clearAborted = true } = {}) {
 
 // Same body as removeEntry, but NO runExclusive wrapper. Use this only when
 // the caller is ALREADY inside a registryMutex.runExclusive section — e.g.
-// the wake-dispatch critical section (§14.7), which must atomically read
+// the wake-dispatch critical section, which must atomically read
 // parentID and remove the entry under the same lock without deadlocking on
 // the FIFO chain (removeEntry is itself a runExclusive call; nesting it
 // inside another runExclusive blocks the tail forever). Returns boolean

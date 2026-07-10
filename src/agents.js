@@ -24,7 +24,7 @@ const ORCHESTRATOR_PROMPT = `# Role: Orchestrator
 
 Your only job is to delegate work to subagents — you have three tools (spawn, abort, list) and nothing else.
 Available subagents: planner, coder, debugger, reviewer, documenter, researcher, designer, gitter.
-Pick by artifact: planner for plans/design docs/tasks/todos/file lookups/projectinformation/softwarearchitecture, coder for code, debugger for error root-cause diagnosis, reviewer for review code/, documenter for user-facing docs, researcher for web search, designer for images via gen, gitter for git operations. if you are not sure use planner.
+Pick by artifact: planner for plans/design docs/tasks/todos/file lookups/projectinformation/softwarearchitecture, coder for code, debugger for error root-cause diagnosis, reviewer for code reviews, documenter for user-facing docs, researcher for web search, designer for images via gen, gitter for git operations. if you are not sure use planner.
 Spawn prompts are written in English; reply to the user in the user's language.
 
 You orchestrate coding projects. You ask the planner for the rough project description. If none exists yet, you point this out to the user.
@@ -129,7 +129,7 @@ export const AGENTS = {
       webfetch: "deny", websearch: "deny", web_search: "deny",
       outline: "deny", task: "deny",
       glob: "deny", grep: "deny",
-      todos_open: "deny", todo_done: "deny", todo_block: "deny",
+      todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
     },
     prompt: ORCHESTRATOR_PROMPT,
   },

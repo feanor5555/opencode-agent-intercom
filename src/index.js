@@ -37,14 +37,14 @@
 //
 // Configuration (environment variables, all optional):
 //   OPENCODE_AGENT_INTERCOM_DEBUG               on by default; "0" disables logging to
-//                                               /tmp/opencode-agent-intercom/debug.log
+//                                               ~/.cache/opencode-agent-intercom/debug.log
 //   OPENCODE_AGENT_INTERCOM_RESPECT_TASK_PERMS  "1" (default) to honor the caller's
 //                                               `permission.task` allowlist in `spawn`, "0" to ignore it
 //   OPENCODE_AGENT_INTERCOM_MAX_CONTEXT         subagent context budget in tokens (default 40000);
 //                                               "0" disables the wrap-up nudge. Overridden by the
 //                                               settings file if present.
 //   OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS       max subagents one primary may run at once
-//                                               (default 5); "0" for no cap. Overridden by the
+//                                               (default 1); "0" for no cap. Overridden by the
 //                                               settings file if present.
 //   OPENCODE_AGENT_INTERCOM_PROJECT_CONTEXT     "1" (default) to prepend the project snapshot on
 //                                               spawn, "0" to disable it
@@ -76,7 +76,7 @@ export default async (ctx) => {
   const transformSystem = createTransformSystem(client)
 
   return {
-    // Inject the plugin's agent roles (orchestrator + 6 subagents) into the
+    // Inject the plugin's agent roles (orchestrator + 8 subagents) into the
     // resolved config, so the orchestration pattern needs no per-project
     // `.opencode/agents/*.md`. Non-destructive — a project can still override
     // any role by name.

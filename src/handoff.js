@@ -8,7 +8,7 @@
 //
 // Two exceptions, both pure leaves with no plugin runtime dependencies:
 //   - `src/log.js` (debug-logging only, appends to
-//     `/tmp/opencode-agent-intercom/debug.log`), imported so the outer
+//     `~/.cache/opencode-agent-intercom/debug.log`), imported so the outer
 //     try/catch in `performPrimaryHandoff` can surface uncaught throws with
 //     the full stack instead of letting them bubble silently.
 //   - `src/pluginmsg.js` (constants + pure predicates), imported so
@@ -183,6 +183,7 @@ async function performPrimaryHandoffInner(deps) {
       docSummaries = validateDocSummaries(raw)
       historySummary = extractHistorySummary(raw)
     } catch (err) {
+      log("primary handoff: doc summaries failed, using fallback", errMsg(err))
       docSummaries = FALLBACK_DOC_SUMMARIES
     }
 

@@ -1,12 +1,12 @@
 // Shared mutable state for opencode-agent-intercom.
 //
 // This MUST live at module scope. opencode instantiates the plugin factory
-// once per session within a single process — the orchestrator session and each
-// subagent session each get their own factory invocation, so closure-local
-// state is NOT shared between them. The module is imported exactly once per
-// process, so module-level state IS shared across every instance: `spawn` runs
-// in the orchestrator's instance while the subagent's `chat.system.transform`
-// hook runs in a different one, and they must see the same registry.
+// once per project (or less often) within a single process — NOT per session
+// (see the "Plugin-Factory" footgun in CLAUDE.md). Closure-local state from a
+// factory invocation therefore is NOT a reliable per-session store. The module
+// itself is imported exactly once per process, so module-level state IS shared
+// across every hook invocation: `spawn` runs while the subagent's
+// `chat.system.transform` hook runs, and they must see the same registry.
 
 // handle -> { handle, sessionID, agent, prompt, parentID, status, spawnedAt,
 //             lastActivityAt, lastActivity, ctxTokens, lastTokensFetchAt,
@@ -48,6 +48,18 @@ export const counters = new Map()
 // bindings, not values; a bare `let pendingSpawns` would be read-only at the
 // importer).
 export const pendingSpawns = { count: 0 }
+
+// GLOBAL set of task-ids (T<n>) currently reserved by an in-flight spawn()
+// call that passed the duplicate-task check but has not yet written the id onto
+// its registry entry via upsertSession. Mirrors pendingSpawns for the task-id
+// guard: the id is checked-and-reserved in the same synchronous block (before
+// the first await), so two spawn() calls in the same turn carrying the same
+// task-id cannot both slip past the check while the awaits of createChildSession
+// / promptSession are in flight. The reservation is released in the spawn
+// handler's finally (success, cap-reject, or exception). Only real task-ids are
+// reserved — prefix-free spawns opt out of the guard entirely and never touch
+// this set, so they cannot block one another.
+export const pendingTaskIds = new Set()
 
 // primaryID -> name of the last tool the primary successfully invoked. Used by
 // the guard to deny back-to-back `list` calls (small LLMs poll status instead
@@ -137,6 +149,7 @@ export function resetState() {
   aborted.clear()
   counters.clear()
   pendingSpawns.count = 0
+  pendingTaskIds.clear()
   lastPrimaryTool.clear()
   primaryCtx.clear()
   pendingHandoffs.clear()

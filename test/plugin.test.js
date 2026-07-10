@@ -13,18 +13,21 @@ import { tmpdir, homedir } from "node:os"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
 import plugin from "../src/index.js"
-import { resetState } from "../src/state.js"
+import { resetState, aborted, pendingTaskIds, lastPrimaryTool } from "../src/state.js"
+import { entryForSession, forgetPrimary, trackPrimary } from "../src/registry.js"
+import { getSessionDirectory } from "../src/client.js"
 import { resetProjectContext } from "../src/project.js"
-import { setSettingsPath, resetSettings, getSearxngUrl } from "../src/settings.js"
+import { setSettingsPath, resetSettings, getSearxngUrl, getSettings } from "../src/settings.js"
 import { resetPermissionGuardCache } from "../src/config.js"
-import { bytes } from "../src/format.js"
-import { rewritePendingTools } from "../src/hooks.js"
+import { rewritePendingTools, TODO_TOOLS, timeoutSubagent } from "../src/hooks.js"
+import { AGENTS } from "../src/agents.js"
 import {
   normalizeUrl,
   parseExaEntries,
   searxToEntries,
   mergeAndDedup,
 } from "../src/websearch.js"
+import { setCtagsProbe, probeCtags } from "../src/outline.js"
 
 // outline tests need a working `universal-ctags` binary on PATH or in
 // ~/.local/bin. CI/dev machines may not have it; in that case those tests are
@@ -67,6 +70,9 @@ beforeEach(() => {
   resetPermissionGuardCache()
   rmSync(settingsFile, { force: true })
   resetSettings()
+  // Restore the real ctags probe + clear its per-process cache so a mock-probe
+  // test cannot leak a fake binary path into the real-ctags outline tests.
+  setCtagsProbe()
 })
 
 // Builds a fresh mock ctx. `taskPerm` optionally seeds an agent's
@@ -146,6 +152,52 @@ test("spawn registers a subagent and returns a friendly handle", async () => {
   assert.match(listed.output, /researcher#1/)
 })
 
+test("forgetPrimary drops the old primary's directory cache and last-tool marker", async () => {
+  const sid = "ses_old_primary"
+  trackPrimary(sid)
+  lastPrimaryTool.set(sid, "list")
+
+  // Populate the client.js sessionDirCache and count how often the underlying
+  // session.get is hit so we can prove the cache was cleared (not just missed).
+  let getCalls = 0
+  const client = {
+    session: {
+      get: async () => {
+        getCalls += 1
+        return { data: { directory: "/tmp/proj" } }
+      },
+    },
+  }
+  assert.equal(await getSessionDirectory(client, sid), "/tmp/proj")
+  assert.equal(await getSessionDirectory(client, sid), "/tmp/proj") // cached
+  assert.equal(getCalls, 1, "second lookup should have been cached")
+
+  forgetPrimary(sid)
+
+  assert.equal(lastPrimaryTool.has(sid), false, "lastPrimaryTool not cleared")
+  // Cache was dropped → the next lookup re-fetches.
+  assert.equal(await getSessionDirectory(client, sid), "/tmp/proj")
+  assert.equal(getCalls, 2, "directory cache was not cleared by forgetPrimary")
+})
+
+test("spawn cleans up the orphaned child session when the prompt fails", async () => {
+  // createChildSession succeeds, then promptSession throws. Without cleanup the
+  // opencode session (and any provisional registry entry) would leak. The
+  // handler must best-effort delete the session and report the error.
+  const { ctx, created, deleted } = makeCtx()
+  ctx.client.session.promptAsync = async () => {
+    throw new Error("boom prompt")
+  }
+  const hooks = await plugin(ctx)
+  const res = await hooks.tool.spawn.execute({ agent: "researcher", prompt: "do x" }, toolCtx)
+
+  assert.match(res.output, /spawn failed: .*boom prompt/i, "original error not surfaced")
+  const subID = created[0]
+  assert.ok(subID, "a child session should have been created")
+  assert.ok(deleted.includes(subID), "orphaned session was not deleted")
+  assert.equal(entryForSession(subID), undefined, "a registry entry leaked after the failed spawn")
+})
+
 test("the send_message tool is not registered (one-shot subagent lifecycle)", async () => {
   // send_message was removed: subagents are one-shot — they run to a single
   // reply and are then destroyed. The orchestrator cannot inject mid-flight.
@@ -181,6 +233,33 @@ test("abort cleans the subagent up: cooperative abort signal + best-effort sessi
   assert.match(reabort.output, /Unknown subagent/)
 })
 
+test("abort is ownership-scoped: a primary cannot abort another primary's subagent", async () => {
+  // Handles are per-role numbered (researcher#1, …) and the registry is shared
+  // across every primary in one opencode serve process, so resolve() can return
+  // a subagent owned by a *different* orchestrator. abort() must refuse unless
+  // the caller is the parent that spawned it — otherwise two parallel
+  // orchestrators would clobber each other's children. The foreign case looks
+  // identical to a nonexistent handle ("Unknown subagent") on purpose.
+  const { ctx, created, aborted: abortCalls } = makeCtx()
+  const hooks = await plugin(ctx)
+
+  const ctxB = { sessionID: "ses_primaryB", agent: "orchestrator", messageID: "mB" }
+  const { metadata } = await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, ctxB)
+  const subID = created[0]
+
+  // Parent A (ses_primary) tries to abort parent B's subagent → refused.
+  const res = await hooks.tool.abort.execute({ subagent: metadata.handle }, toolCtx)
+  assert.match(res.output, /Unknown subagent/)
+  assert.deepEqual(abortCalls, []) // no cooperative abort was signalled
+  assert.equal(aborted.has(subID), false) // not marked aborted
+  assert.ok(entryForSession(subID)) // the foreign entry is left untouched
+
+  // The rightful parent B can still abort it.
+  const ownRes = await hooks.tool.abort.execute({ subagent: metadata.handle }, ctxB)
+  assert.match(ownRes.output, /Abort signalled/)
+  assert.deepEqual(abortCalls, [subID])
+})
+
 test("abort cleanup removes the entry: the transform hook does NOT inject ABORTED after the abort handler ran", async () => {
   // Aborting a subagent used to leave the entry in the registry with status
   // "aborted" so the transform hook could inject a hard STOP at the LLM level.
@@ -198,6 +277,87 @@ test("abort cleanup removes the entry: the transform hook does NOT inject ABORTE
   const out = { system: ["base prompt"] }
   await hooks["experimental.chat.system.transform"]({ sessionID: subID }, out)
   assert.doesNotMatch(out.system.join(""), /ABORTED/)
+})
+
+test("session.error teardown keeps the abort marker until deleteSession is through: an in-flight tool call is denied as ABORTED, not misclassified as a primary", async () => {
+  // Regression: onSessionError used to run removeEntry (which clears the
+  // `aborted` marker) BEFORE deleteSession. In that window the registry entry
+  // is gone but the opencode session still exists, so a tool call that raced
+  // the teardown fell through to primary-classification (checked against
+  // PRIMARY_TOOLS) instead of the hard abort-deny. We gate deleteSession to
+  // freeze the teardown mid-flight and assert the classification.
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  const subID = created[0]
+
+  let releaseDelete
+  const deleteGate = new Promise((r) => { releaseDelete = r })
+  let deleteEntered
+  const deleteReached = new Promise((r) => { deleteEntered = r })
+  ctx.client.session.delete = async () => {
+    deleteEntered()
+    await deleteGate
+    return { data: true }
+  }
+
+  // Fire session.error without awaiting — teardown parks on the delete gate.
+  const teardown = hooks.event({
+    event: {
+      type: "session.error",
+      properties: { sessionID: subID, error: { name: "SomeError", data: { message: "boom" } } },
+    },
+  })
+  await deleteReached
+
+  // Mid-teardown: registry entry already removed, opencode session not yet
+  // deleted. The guard must still deny as ABORTED (not as an orchestrator
+  // primary-tool violation).
+  await assert.rejects(
+    () => hooks["tool.execute.before"]({ tool: "bash", sessionID: subID, callID: "race" }),
+    /aborted by the orchestrator/,
+  )
+
+  releaseDelete()
+  await teardown
+
+  // No unbounded growth: the marker is cleared once teardown finishes.
+  assert.equal(aborted.has(subID), false)
+  assert.equal(aborted.size, 0)
+})
+
+test("watchdog timeout teardown keeps the abort marker until deleteSession is through, then clears it", async () => {
+  // Same invariant as the session.error path, via timeoutSubagent (the
+  // inactivity watchdog). deleteSession is gated to inspect mid-teardown state.
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  const subID = created[0]
+  const entry = entryForSession(subID)
+
+  let releaseDelete
+  const deleteGate = new Promise((r) => { releaseDelete = r })
+  let deleteEntered
+  const deleteReached = new Promise((r) => { deleteEntered = r })
+  ctx.client.session.delete = async () => {
+    deleteEntered()
+    await deleteGate
+    return { data: true }
+  }
+
+  const teardown = timeoutSubagent(entry, 1000, 1000)
+  await deleteReached
+
+  await assert.rejects(
+    () => hooks["tool.execute.before"]({ tool: "bash", sessionID: subID, callID: "race" }),
+    /aborted by the orchestrator/,
+  )
+
+  releaseDelete()
+  await teardown
+
+  assert.equal(aborted.has(subID), false)
+  assert.equal(aborted.size, 0)
 })
 
 test("spawn honors the caller's permission.task allowlist", async () => {
@@ -222,7 +382,7 @@ test("tool.execute.before restricts a primary to the orchestration tools (spawn/
   // every "do it yourself" tool, including glob/grep and the TODO trio, is now denied
   for (const t of [
     "read", "edit", "write", "bash", "webfetch", "outline",
-    "glob", "grep", "todos_open", "todo_done", "todo_block",
+    "glob", "grep", "todos_open", "todo_done", "todo_add", "todo_edit",
   ]) {
     await assert.rejects(
       () => hooks["tool.execute.before"]({ tool: t, sessionID: "ses_primary", callID: `d-${t}` }),
@@ -238,6 +398,22 @@ test("tool.execute.before restricts a primary to the orchestration tools (spawn/
     () => hooks["tool.execute.before"]({ tool: "send_message", sessionID: "ses_primary", callID: "d-sm" }),
     /orchestrator/i,
   )
+})
+
+test("orchestrator permission map denies exactly the TODO tools that exist", () => {
+  const perm = AGENTS.orchestrator.permission
+  // every real TODO tool must carry an explicit deny — otherwise it stays
+  // visible in the orchestrator schema, PRIMARY_TOOLS rejects it, and the guard
+  // throws into a denial loop. This test fails the moment a TODO tool is renamed.
+  for (const t of TODO_TOOLS) {
+    assert.equal(perm[t], "deny", `orchestrator must deny TODO tool ${t}`)
+  }
+  // no stale deny entries for TODO tools that no longer exist (e.g. todo_block).
+  for (const key of Object.keys(perm)) {
+    if (/^todo(s)?_/.test(key)) {
+      assert.ok(TODO_TOOLS.has(key), `orchestrator has stale TODO deny "${key}" not in TODO_TOOLS`)
+    }
+  }
 })
 
 test("tool.execute.before denies back-to-back list calls from a primary", async () => {
@@ -496,6 +672,59 @@ test("parallel spawns in the same turn cannot bypass the concurrency cap (race)"
   assert.strictEqual(refused.length, 3, "the other three must be refused by the cap")
 })
 
+test("parallel spawns with the same task-id: exactly one wins, the other is refused as duplicate (TOCTOU race)", async () => {
+  // Raise the cap well above 2 so the ONLY thing that can refuse a spawn here
+  // is the duplicate-task guard, not the concurrency cap — a cap-only reject
+  // would mask a broken task-id reservation.
+  writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 5 }))
+  resetSettings()
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const results = await Promise.all(
+    [0, 1].map(() =>
+      hooks.tool.spawn.execute({ agent: "coder", prompt: "T5: build the thing" }, toolCtx),
+    ),
+  )
+  const spawned = results.filter((r) => /Spawned subagent/.test(r.output))
+  const refused = results.filter((r) => /already has a subagent running/.test(r.output))
+  assert.strictEqual(spawned.length, 1, "exactly one spawn for a task-id may pass")
+  assert.strictEqual(refused.length, 1, "the duplicate must be refused, not started")
+  assert.equal(pendingTaskIds.size, 0, "no task-id reservation may leak after the spawns settle")
+})
+
+test("a spawn that throws still releases its task-id reservation (finally)", async () => {
+  const { ctx } = makeCtx()
+  // Force the underlying session creation to blow up AFTER the task-id has been
+  // reserved but before upsertSession writes it onto an entry — the finally
+  // must still drop the reservation.
+  ctx.client.session.create = async () => {
+    throw new Error("boom")
+  }
+  const hooks = await plugin(ctx)
+  const res = await hooks.tool.spawn.execute({ agent: "coder", prompt: "T9: do it" }, toolCtx)
+  assert.match(res.output, /spawn failed/)
+  assert.equal(pendingTaskIds.size, 0, "the reservation must be released on the throw path")
+})
+
+test("two prefix-free spawns in the same turn do not block each other", async () => {
+  // Prefix-free spawns opt out of the task-id guard entirely; raise the cap so
+  // the concurrency limit does not interfere with what we are asserting.
+  writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 5 }))
+  resetSettings()
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const results = await Promise.all(
+    [0, 1].map((i) =>
+      hooks.tool.spawn.execute({ agent: "coder", prompt: `ad-hoc question ${i}` }, toolCtx),
+    ),
+  )
+  const spawned = results.filter((r) => /Spawned subagent/.test(r.output))
+  const refused = results.filter((r) => /already has a subagent running/.test(r.output))
+  assert.strictEqual(spawned.length, 2, "prefix-free spawns must both start")
+  assert.strictEqual(refused.length, 0, "no prefix-free spawn may be treated as a duplicate")
+  assert.equal(pendingTaskIds.size, 0, "prefix-free spawns must not touch pendingTaskIds")
+})
+
 test("spawn output reports remaining slots; the last allowed spawn says CAP REACHED", async () => {
   writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 2 }))
   resetSettings()
@@ -520,6 +749,29 @@ test("the completion notice tells the primary how many slots are now free", asyn
   assert.match(wake, /Subagent slots: 1\/2 \(global, across all sessions\) — 1 free/)
 })
 
+test("a user abort (session.error MessageAbortedError) produces exactly one abort-worded notice, not a failure", async () => {
+  const { ctx, created, notices } = makeCtx()
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "coder", prompt: "a" }, toolCtx)
+  const subID = created[0]
+  const before = notices.length
+  await hooks.event({
+    event: {
+      type: "session.error",
+      properties: { sessionID: subID, error: { name: "MessageAbortedError", data: {} } },
+    },
+  })
+  const emitted = notices.slice(before)
+  assert.equal(emitted.length, 1, "exactly one wake notice for the aborted subagent")
+  assert.match(emitted[0], /aborted by user/)
+  assert.doesNotMatch(emitted[0], /failed/)
+
+  // No second notice can fire afterwards: a stray session.idle for the same
+  // (now removed + latched) session is a no-op.
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: subID } } })
+  assert.equal(notices.length, before + 1, "no second notice from a following idle event")
+})
+
 test("the settings file overrides the subagent cap at runtime", async () => {
   writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 2 }))
   resetSettings()
@@ -529,6 +781,44 @@ test("the settings file overrides the subagent cap at runtime", async () => {
   assert.match((await hooks.tool.spawn.execute({ agent: "coder", prompt: "b" }, toolCtx)).output, /Spawned/)
   const refused = await hooks.tool.spawn.execute({ agent: "coder", prompt: "c" }, toolCtx)
   assert.match(refused.output, /Subagent limit reached \(2\/2/)
+})
+
+test("maxSubagents=0 from the file is passed through as 0 (unlimited), not raised to the default", () => {
+  // 0 is the documented "no cap" value and must survive verbatim; only invalid
+  // values fall back to the built-in default.
+  writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 0 }))
+  resetSettings()
+  assert.equal(getSettings().maxSubagents, 0)
+})
+
+test("maxSubagents from the file falls back to the default on negative/non-numeric/missing values", () => {
+  for (const bad of [-1, "3", 2.5, null]) {
+    writeFileSync(settingsFile, JSON.stringify({ maxSubagents: bad }))
+    resetSettings()
+    assert.equal(getSettings().maxSubagents, 1, `bad value ${JSON.stringify(bad)} must fall to default`)
+  }
+  // key entirely absent -> default too
+  writeFileSync(settingsFile, JSON.stringify({ maxContext: 12345 }))
+  resetSettings()
+  assert.equal(getSettings().maxSubagents, 1)
+})
+
+test("maxContext=0 from the file is passed through as 0 (budget off)", () => {
+  writeFileSync(settingsFile, JSON.stringify({ maxContext: 0 }))
+  resetSettings()
+  assert.equal(getSettings().maxContext, 0)
+})
+
+test("maxSubagents=0 disables the concurrency cap — spawns are unlimited", async () => {
+  writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 0 }))
+  resetSettings()
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  for (let i = 0; i < 12; i += 1) {
+    const r = await hooks.tool.spawn.execute({ agent: "coder", prompt: `t${i}` }, toolCtx)
+    assert.match(r.output, /Spawned subagent/, `spawn ${i} must succeed with the cap disabled`)
+    assert.doesNotMatch(r.output, /Subagent limit reached/)
+  }
 })
 
 test("searxngUrl resolves file > env > empty default", () => {
@@ -678,6 +968,28 @@ test("a subagent under the context budget gets no wrap-up instruction", async ()
   const out = { system: ["base prompt"] }
   await hooks["experimental.chat.system.transform"]({ sessionID: created[0] }, out)
   assert.doesNotMatch(out.system.join(""), /WRAP UP/)
+})
+
+test("an empty subagent snapshot is not re-fetched on every tool call (fetch timestamp advances even with no tokens)", async () => {
+  // Regression: contextLimitNotice only stamped entry.lastTokensFetchAt when the
+  // snapshot carried a token count. With a persistently empty snapshot (no
+  // assistant step yet) the timestamp stayed 0, so `cacheFresh` never held and
+  // the full-history HTTP fetch re-ran before EVERY subagent LLM call.
+  const { ctx, created } = makeCtx({ messages: [] })
+  let fetchCalls = 0
+  ctx.client.session.messages = async () => {
+    fetchCalls += 1
+    return { data: [] } // empty → fetchSnapshot yields no ctxTokens
+  }
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
+  const subID = created[0]
+
+  // Two transforms back-to-back (well within CTX_TTL_MS). The first fetches;
+  // the second must be served from the cache the timestamp now guards.
+  await hooks["experimental.chat.system.transform"]({ sessionID: subID }, { system: ["base"] })
+  await hooks["experimental.chat.system.transform"]({ sessionID: subID }, { system: ["base"] })
+  assert.equal(fetchCalls, 1, "empty snapshot was re-fetched on the second call")
 })
 
 test("a finished subagent's full result is pushed to the primary's wake notice", async () => {
@@ -890,6 +1202,64 @@ test("web_search hits the Exa MCP endpoint and unwraps the SSE result", async ()
   }
 })
 
+test("web_search sends EXA_API_KEY as an x-api-key header, never in the URL query", async () => {
+  // The key is a secret: a `?exaApiKey=<secret>` query string would land in
+  // proxy/server access logs. It must travel in a header instead. (The live
+  // endpoint honors the header — verified out-of-band.)
+  delete process.env.OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH
+  process.env.EXA_API_KEY = "sk-secret-abc123"
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+
+  const originalFetch = globalThis.fetch
+  let capturedUrl
+  let capturedHeaders
+  globalThis.fetch = async (url, init) => {
+    capturedUrl = url
+    capturedHeaders = init.headers
+    return {
+      ok: true,
+      status: 200,
+      text: async () =>
+        'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Title: X\\nURL: https://example.org"}]}}\n',
+    }
+  }
+  try {
+    await hooks.tool.web_search.execute({ query: "x" }, {})
+    assert.equal(capturedUrl, "https://mcp.exa.ai/mcp", "key must not be appended to the URL")
+    assert.doesNotMatch(String(capturedUrl), /exaApiKey/, "secret leaked into the URL query")
+    assert.equal(capturedHeaders["x-api-key"], "sk-secret-abc123", "key not sent as x-api-key header")
+  } finally {
+    globalThis.fetch = originalFetch
+    delete process.env.EXA_API_KEY
+  }
+})
+
+test("web_search omits the x-api-key header when EXA_API_KEY is unset (anonymous tier)", async () => {
+  delete process.env.OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH
+  delete process.env.EXA_API_KEY
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+
+  const originalFetch = globalThis.fetch
+  let capturedHeaders
+  globalThis.fetch = async (_url, init) => {
+    capturedHeaders = init.headers
+    return {
+      ok: true,
+      status: 200,
+      text: async () =>
+        'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Title: X\\nURL: https://example.org"}]}}\n',
+    }
+  }
+  try {
+    await hooks.tool.web_search.execute({ query: "x" }, {})
+    assert.equal(capturedHeaders["x-api-key"], undefined)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test("web_search surfaces Exa JSON-RPC errors instead of throwing", async () => {
   delete process.env.OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH
   const { ctx } = makeCtx()
@@ -976,6 +1346,65 @@ test("OPENCODE_AGENT_INTERCOM_DISABLE_OUTLINE=1 omits the outline tool", async (
   } finally {
     delete process.env.OPENCODE_AGENT_INTERCOM_DISABLE_OUTLINE
   }
+})
+
+// --- ctags binary resolution (probe order + cache) — probe injected, no real
+// ctags needed. resolveCtagsBinary tries ~/.local/bin/ctags first (the
+// installer's deterministic build), PATH `ctags` only as a fallback; each
+// candidate must pass a Universal-Ctags probe.
+const localCtags = join(homedir(), ".local", "bin", "ctags")
+
+test("ctags resolution prefers the self-built ~/.local/bin/ctags and skips PATH when it is valid", async () => {
+  const probed = []
+  setCtagsProbe((bin) => {
+    probed.push(bin)
+    return bin === localCtags
+  })
+  assert.equal(await probeCtags(), true)
+  // local build passed on the first probe → PATH `ctags` is never probed
+  assert.deepEqual(probed, [localCtags])
+})
+
+test("ctags resolution falls back to PATH when the self-built binary fails the probe", async () => {
+  const probed = []
+  setCtagsProbe((bin) => {
+    probed.push(bin)
+    return bin === "ctags"
+  })
+  // local build fails the probe, PATH candidate passes → resolution succeeds
+  assert.equal(await probeCtags(), true)
+  assert.deepEqual(probed, [localCtags, "ctags"])
+})
+
+test("ctags resolution yields the existing tool-error (no throw) when neither candidate is valid", async () => {
+  const probed = []
+  setCtagsProbe((bin) => {
+    probed.push(bin)
+    return false
+  })
+  assert.equal(await probeCtags(), false)
+  assert.deepEqual(probed, [localCtags, "ctags"])
+
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const file = join(fixtureDir, "resolve-none.js")
+  writeFileSync(file, "export function a(){}\n")
+  const res = await hooks.tool.outline.execute({ path: file }, {})
+  assert.match(res.output, /ctags not found on PATH/)
+})
+
+test("ctags resolution probes once per process and caches the result", async () => {
+  let calls = 0
+  setCtagsProbe(() => {
+    calls += 1
+    return true
+  })
+  await probeCtags()
+  await probeCtags()
+  await probeCtags()
+  // local candidate passes on the first probe; every later resolution is served
+  // from the cache → exactly one probe call total
+  assert.equal(calls, 1)
 })
 
 test("outline emits JS/TS top-level declarations without bodies", skipNoCtags, async () => {
@@ -1194,12 +1623,62 @@ test("outline truncates after the per-file declaration cap", skipNoCtags, async 
   assert.doesNotMatch(res.output, /:201: function fn200\(\)/)
 })
 
-test("outline resolves a relative path against the project directory", skipNoCtags, async () => {
-  writeFileSync(join(fixtureDir, "rel.js"), "export const Z = 1\n")
+test("outline resolves a relative path against the session directory, not the factory directory", skipNoCtags, async () => {
+  // The plugin factory runs once per process, so its captured directory is
+  // `opencode serve`'s cwd — NOT the session's directory (set per-session via
+  // ?directory=). Relative paths must anchor to the SESSION directory, which
+  // dirFor pulls from GET /session/<id> → info.directory. Set up a session
+  // directory distinct from the factory dir and plant a same-named decoy in the
+  // factory dir: correct resolution reads the session copy, never the decoy.
+  const sessionDir = mkdtempSync(join(tmpdir(), "intercom-outline-sess-"))
+  writeFileSync(join(sessionDir, "rel.js"), "export const RIGHT = 1\n")
+  writeFileSync(join(fixtureDir, "rel.js"), "export const WRONG = 2\n")
+  const { ctx } = makeCtx()
+  ctx.client.session.get = async () => ({ data: { directory: sessionDir } })
+  const hooks = await plugin(ctx)
+  const res = await hooks.tool.outline.execute(
+    { path: "rel.js" },
+    { sessionID: "ses_outline_rel" },
+  )
+  assert.match(res.output, /rel\.js:1: export const RIGHT = 1/)
+  assert.doesNotMatch(res.output, /WRONG/)
+  rmSync(sessionDir, { recursive: true, force: true })
+})
+
+test("outline rejects a relative path that escapes the session directory", async () => {
+  // `../` traversal resolves outside the session directory — refused as a plain
+  // tool-error string (not thrown), before any ctags call. No ctags needed.
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  const res = await hooks.tool.outline.execute({ path: "rel.js" }, {})
-  assert.match(res.output, /rel\.js:1: export const Z = 1/)
+  const res = await hooks.tool.outline.execute(
+    { path: "../escape.js" },
+    { sessionID: "ses_outline_escape" },
+  )
+  assert.match(res.output, /escapes the project directory/)
+})
+
+test("outline rejects an absolute path outside the session directory", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const res = await hooks.tool.outline.execute(
+    { path: "/etc/hosts" },
+    { sessionID: "ses_outline_absout" },
+  )
+  assert.match(res.output, /escapes the project directory/)
+})
+
+test("outline accepts an absolute path inside the session directory", skipNoCtags, async () => {
+  const file = join(fixtureDir, "abs-inside.js")
+  writeFileSync(file, "export const A = 1\n")
+  const { ctx } = makeCtx()
+  // Default mock session.get returns fixtureDir, so the session directory is the
+  // factory dir here; the absolute path lives inside it and must be accepted.
+  const hooks = await plugin(ctx)
+  const res = await hooks.tool.outline.execute(
+    { path: file },
+    { sessionID: "ses_outline_absin" },
+  )
+  assert.match(res.output, /abs-inside\.js:1: export const A = 1/)
 })
 
 test("the config hook disables outline for designer, gitter and orchestrator", async () => {
@@ -1212,41 +1691,6 @@ test("the config hook disables outline for designer, gitter and orchestrator", a
   assert.equal(config.agent.orchestrator.permission.outline, "deny")
   // a regular subagent leaves outline enabled (no entry in the permission map)
   assert.equal(config.agent.planner.permission?.outline, undefined)
-})
-
-// Formatter tests for bytes()
-test("bytes formatter returns raw number for values under 1 KB", () => {
-  assert.equal(bytes(0), "0")
-  assert.equal(bytes(512), "512")
-  assert.equal(bytes(1023), "1023")
-  assert.equal(bytes(100), "100")
-})
-
-test("bytes formatter returns KB for values between 1 KB and 1 MB", () => {
-  assert.equal(bytes(1024), "1.0 KB")
-  assert.equal(bytes(1536), "1.5 KB")
-  assert.equal(bytes(2048), "2.0 KB")
-  assert.equal(bytes(5120), "5.0 KB")
-  assert.equal(bytes(1024 * 1023), "1023.0 KB")
-})
-
-test("bytes formatter returns MB for values between 1 MB and 1 GB", () => {
-  assert.equal(bytes(1024 * 1024), "1.0 MB")
-  assert.equal(bytes(1572864), "1.5 MB")
-  assert.equal(bytes(1024 * 1024 * 512), "512.0 MB")
-  assert.equal(bytes(1024 * 1024 * 1023), "1023.0 MB")
-})
-
-test("bytes formatter returns GB for values 1 GB and above", () => {
-  assert.equal(bytes(1024 * 1024 * 1024), "1.0 GB")
-  assert.equal(bytes(1572864000), "1.5 GB")
-  assert.equal(bytes(1024 * 1024 * 1024 * 100), "100.0 GB")
-})
-
-test("bytes formatter returns (unknown) for null/undefined", () => {
-  assert.equal(bytes(null), "(unknown)")
-  assert.equal(bytes(undefined), "(unknown)")
-  assert.equal(bytes(NaN), "(unknown)")
 })
 
 // rewritePendingTools — see hooks.js for the full rationale (root cause of

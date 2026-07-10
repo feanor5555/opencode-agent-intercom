@@ -61,17 +61,41 @@ function writeTodo() {
   writeFileSync(join(projectDir, "TODO.md"), TODO_SEED)
 }
 
+// The session directory here is a fresh /tmp dir OUTSIDE serve-cwd. A foreign
+// directory does NOT inherit serve-cwd's providers, so opencode 1.17+ throws
+// HTTP 500 (`No providers are available`) on the FIRST prompt unless this dir
+// resolves a provider+model before that prompt. We therefore look up the
+// server's default provider/model at runtime and pin it into the written
+// opencode.json (see CLAUDE.md footgun "Session mit ?directory=<pfad> wirft
+// beim ersten Prompt HTTP 500"). The config must exist before the first prompt
+// — a later write can't heal an already "no providers"-cached directory.
+async function resolveModel() {
+  try {
+    const cfg = u(await client.config.providers())
+    const firstDefault = Object.entries(cfg?.default || {})[0]
+    if (firstDefault) return `${firstDefault[0]}/${firstDefault[1]}`
+    for (const p of cfg?.providers || []) {
+      const m = Object.keys(p.models || {})[0]
+      if (m) return `${p.id}/${m}`
+    }
+  } catch {
+    /* fall through — rely on the ambient config chain */
+  }
+  return null
+}
+
 // Headless opencode hangs on every tool that defaults to "ask" because there
 // is no one to approve — write/edit/bash/webfetch all sit in state=running
 // until a 3-minute timeout. Pre-authorise everything in the test project so
 // the coder/planner can actually do their work.
-function writePermissiveConfig() {
+function writePermissiveConfig(model) {
   writeFileSync(
     join(projectDir, "opencode.json"),
     JSON.stringify(
       {
         $schema: "https://opencode.ai/config.json",
         plugin: ["file:/home/wu/opencode-agent-intercom"],
+        ...(model ? { model } : {}),
         permission: {
           edit: "allow",
           bash: "allow",
@@ -216,8 +240,12 @@ if (!existsSync(projectDir)) {
   process.exit(2)
 }
 writeTodo()
-writePermissiveConfig()
-console.log(`seeded TODO.md (3 open tasks: T1, T2, R1) + permissive opencode.json`)
+const pinnedModel = await resolveModel()
+writePermissiveConfig(pinnedModel)
+console.log(
+  `seeded TODO.md (3 open tasks: T1, T2, R1) + permissive opencode.json` +
+    (pinnedModel ? ` (model ${pinnedModel})` : ` (no model resolved — relying on ambient config)`),
+)
 
 const primary = u(
   await client.session.create({

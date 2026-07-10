@@ -125,8 +125,8 @@ The primary never blocks. You stay in the driver's seat the entire time.
 | `spawn(agent, prompt, description?)` | Start a subagent non-blocking. Returns a handle (`researcher#1`). | Orchestrator |
 | `abort(subagent)` | Cooperatively abort and hard-deny further tool calls. User-requested stops. | Orchestrator |
 | `list()` | List active subagents. | Orchestrator |
-| `todos_open()` | List open + blocked tasks from `TODO.md` with their stable id (`T5`, `R2`) and `accept:` criterion. | All agents |
-| `todo_done(id)` / `todo_block(id, reason)` | Flip a `TODO.md` checkbox. Usually the wake-hook does this for you. | Orchestrator |
+| `todos_open()` | List open tasks from `TODO.md` with their stable id (`T5`) and `accept:` criterion. | All agents |
+| `todo_add(title, accept?)` / `todo_edit(id, …)` / `todo_done(id)` | Add / refine / remove a task in `TODO.md`. `todo_done` deletes the completed task — usually the wake-hook does it for you. | The six deliverable roles |
 | `web_search(query, numResults?)` | Anonymous web search via Exa (no key, 150/day; `EXA_API_KEY` lifts the cap). | Subagents |
 | `outline(path)` | Top-level declarations of a source file via universal-ctags. ~100 languages, ~95 % token savings vs `read`. | Subagents (except `designer`/`gitter`) |
 
@@ -136,25 +136,24 @@ status-poll tool by design — small LLMs would call it in a loop.
 
 ### Task tracking that doesn't depend on the model remembering
 
-`TODO.md` is the single source of truth for what's open vs done in the current
-milestone. The orchestrator tags every spawn with a stable task id
-(`spawn("coder", "T5: implement the export endpoint")`), the subagent ends its
-reply with a one-line marker (`DONE: T5` or `BLOCKED: T5 — needs API key`),
-and the wake-hook flips the checkbox in `TODO.md` for you — **deterministic,
-no LLM step**. Mismatched ids (`spawn for T5` but `DONE: T3` in the reply) are
-ignored as hallucinations. The format is fixed:
+`TODO.md` is the single source of truth for what's still open in the current
+milestone. A deliverable-role subagent is spawned with a stable task id
+(`spawn("coder", "T5: implement the export endpoint")`), it ends its reply with
+a one-line marker (`DONE: T5`), and the wake-hook removes that task from
+`TODO.md` for you — **deterministic, no LLM step**. A task in the file is open;
+"done" means the line is gone. Mismatched ids (`spawn for T5` but `DONE: T3` in
+the reply) are ignored as hallucinations. The format is fixed:
 
 ```
-- [ ] T5. <task title>
-    accept: <one-line, observable "done" criterion>
+- T5: <task title>
+  accept: <one-line, observable "done" criterion>
 ```
 
-The `T<n>:` / `R<n>:` prefix on a spawn prompt is opt-in: present it and the
-wake-hook auto-ticks on a matching `DONE:` / `BLOCKED:` line; leave it off
-(status checks, ad-hoc questions) and the spawn runs without tracking. The
-orchestrator can read fresh state any time via `todos_open()` without
-re-spawning, and override the auto-tick via `todo_done` / `todo_block` for
-corrections.
+The `T<n>:` prefix on a spawn prompt is opt-in: present it and the
+wake-hook auto-removes the task on a matching `DONE:` line; leave it off
+(status checks, ad-hoc questions) and the spawn runs without tracking. Any
+agent can read fresh state via `todos_open()`; the deliverable roles manage the
+list with `todo_add` / `todo_edit` / `todo_done`.
 
 ## Agent roles
 
@@ -165,7 +164,7 @@ one of the same name. Orchestrator is the default primary unless
 
 | Agent | Role | Notes |
 |---|---|---|
-| `orchestrator` | Primary. Coordinates only. | Restricted to `spawn`/`abort`/`list` + `glob`/`grep` + `todos_open`/`todo_done`/`todo_block`. |
+| `orchestrator` | Primary. Coordinates only. | Restricted to `spawn`/`abort`/`list`. |
 | `planner` | Concept/design docs in `plans/`. | No `bash`. Researches current versions first. |
 | `coder` | Implements code in thin vertical slices. | Bash, edit, build/test. Catch-all. |
 | `debugger` | Diagnoses build/test/runtime errors. | Bash for repro, no `edit`/`write` — fix goes back to `coder`. |
@@ -248,8 +247,8 @@ everything else is environment-variable-driven:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `OPENCODE_AGENT_INTERCOM_DEBUG` | on | `"0"` disables logging to `/tmp/opencode-agent-intercom/debug.log` |
-| `OPENCODE_AGENT_INTERCOM_LOG_REQUESTS` | off | `"1"` writes per-LLM-call JSONL to `/tmp/opencode-agent-intercom/requests.jsonl` (path override: `_LOG_REQUESTS_FILE`) |
+| `OPENCODE_AGENT_INTERCOM_DEBUG` | on | `"0"` disables logging to `~/.cache/opencode-agent-intercom/debug.log` |
+| `OPENCODE_AGENT_INTERCOM_LOG_REQUESTS` | off | `"1"` writes per-LLM-call JSONL to `~/.cache/opencode-agent-intercom/requests.jsonl` (path override: `_LOG_REQUESTS_FILE`) |
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS` | `1` | Concurrent subagents per primary. `"0"` disables. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` | `40000` | Subagent context budget (tokens). `"0"` disables. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_RESULT_CHARS` | `8000` | Cap on a subagent's final reply forwarded to the primary. `"0"` disables. |
@@ -266,12 +265,12 @@ Built for behaviour, not deference: the orchestration pattern is **enforced**,
 not requested.
 
 - **Primary tool-gating** — `tool.execute.before` rejects any tool call from
-  a primary session other than `spawn`/`abort`/`list`/`glob`/`grep` plus the
-  `todos_open`/`todo_done`/`todo_block` trio. The primary orchestrates; it
-  cannot read, edit, run commands or fetch the web. Subagents are
-  unrestricted. The deny is the backstop — the same gates are also expressed
-  as `permission:` rules on each agent so opencode strips the unavailable
-  tools from the LLM schema and the model never sees them as options.
+  a primary session other than `spawn`/`abort`/`list` (and denies two `list`
+  calls in a row). The primary orchestrates; it cannot read, edit, run commands
+  or fetch the web. Subagents are not restricted by this guard — their tool
+  limits come from the per-role `permission:` map in `agents.js`, which also
+  makes opencode strip the unavailable tools from the LLM schema so the model
+  never sees them as options.
 - **System-prompt injection** — `experimental.chat.system.transform` prepends
   the orchestration protocol and live subagent snapshot to primary sessions
   and a shorter discipline block to subagents.

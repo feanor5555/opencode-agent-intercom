@@ -54,7 +54,3 @@ export const SUBAGENT_OUTLINE_GUIDE =
   "function body is 20–80 lines, so size the window to the construct.\n" +
   "Config, data, and short doc files (package.json, pyproject.toml, Cargo.toml, *.yaml, *.toml, " +
   "*.json, .env, README.md, AGENTS.md, CLAUDE.md): full `read` is fine. Skip outline.\n---\n"
-
-// Backwards-compatible alias for tests/imports that still expect the merged
-// guide. New code should import the two halves directly.
-export const SUBAGENT_GUIDE = SUBAGENT_GUIDE_CORE + SUBAGENT_OUTLINE_GUIDE

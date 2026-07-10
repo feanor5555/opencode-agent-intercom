@@ -27,11 +27,30 @@ import path from "node:path"
 import os from "node:os"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { ensureChromium, chromiumExecutable } from "./chromium.js"
 
-const SOCKET = path.join(os.tmpdir(), "opencode-agent-intercom-pw.sock")
-const PID = path.join(os.tmpdir(), "opencode-agent-intercom-pw.pid")
-const LOG = path.join(os.tmpdir(), "opencode-agent-intercom-pw.log")
+// User-private runtime dir for the daemon socket/pid/log. Deliberately NOT under
+// a shared /tmp: a fixed socket path there is reachable by any local user, who
+// could then drive the browser (incl. arbitrary JS via `evaluate`). Prefer the
+// per-user XDG runtime dir, fall back to ~/.cache. Both CLI and daemon modes run
+// this same module, so the path is computed once for both.
+function runtimeDir() {
+  const base = process.env.XDG_RUNTIME_DIR || path.join(os.homedir(), ".cache")
+  return path.join(base, "opencode-agent-intercom")
+}
+
+const RUNTIME_DIR = runtimeDir()
+try { fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 }) } catch {}
+
+const SOCKET = path.join(RUNTIME_DIR, "pw.sock")
+const PID = path.join(RUNTIME_DIR, "pw.pid")
+const LOG = path.join(RUNTIME_DIR, "pw.log")
 const READY_TIMEOUT_MS = 30_000
+// Inactivity ceiling for a single daemon round-trip (sendOverSocket). A hung
+// daemon (dead event loop, deadlocked page) would otherwise block the caller's
+// Bash invocation forever. Declared here with the other module constants so it
+// is initialized before the top-level CLI dispatch runs (no TDZ).
+const SOCKET_TIMEOUT_MS = 120_000
 
 // ─── entry ──────────────────────────────────────────────────────────────────
 
@@ -88,26 +107,20 @@ async function cmdStart(headed) {
 // Verify chromium's bundled binary is on disk; run `npx playwright install
 // chromium` in the foreground (so the user sees progress) if it isn't. Runs
 // only on first `pw start` per machine — afterwards it is a fast existsSync.
+// The download deliberately happens HERE, before the daemon is spawned, so the
+// ~170 MB fetch never blocks the daemon's socket (see `runDaemon`).
 async function ensureChromiumInstalled() {
-  let chromium
   try {
-    ;({ chromium } = await import("playwright-core"))
+    await ensureChromium({
+      onDownload: () => {
+        console.log("pw: chromium binary not found — running `npx playwright install chromium`…")
+        console.log("    (one-time, ~170 MB; subsequent `pw start` is instant)")
+      },
+    })
   } catch (err) {
-    console.error("pw: `playwright-core` is not installed —", err.message)
-    process.exit(1)
-  }
-  const exe = chromium.executablePath()
-  if (exe && fs.existsSync(exe)) return
-  console.log("pw: chromium binary not found — running `npx playwright install chromium`…")
-  console.log("    (one-time, ~170 MB; subsequent `pw start` is instant)")
-  await new Promise((resolve, reject) => {
-    const p = spawn("npx", ["-y", "playwright@latest", "install", "chromium"], { stdio: "inherit" })
-    p.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`install exited ${code}`)))
-    p.on("error", reject)
-  }).catch((err) => {
     console.error("pw:", err.message)
     process.exit(1)
-  })
+  }
 }
 
 // ─── CLI: send a command to the daemon ──────────────────────────────────────
@@ -212,13 +225,32 @@ function sendOverSocket(req) {
   return new Promise((resolve, reject) => {
     const conn = net.createConnection(SOCKET)
     let buf = ""
+    let settled = false
+    const fail = (err) => {
+      if (settled) return
+      settled = true
+      conn.destroy()
+      reject(err)
+    }
+    // One inactivity timer covers both a stalled connect and a daemon that
+    // accepted the request but never replies (it resets on every byte). We only
+    // call conn.end() to half-close the WRITE side after sending the request —
+    // the read side stays open for the reply, which depends on the daemon
+    // server keeping its half open (allowHalfOpen, documented footgun); nothing
+    // here touches that.
+    conn.setTimeout(SOCKET_TIMEOUT_MS)
+    conn.on("timeout", () =>
+      fail(new Error(`daemon did not respond within ${SOCKET_TIMEOUT_MS}ms`)),
+    )
     conn.on("connect", () => conn.end(JSON.stringify(req)))
     conn.on("data", (c) => { buf += c.toString() })
     conn.on("end", () => {
+      if (settled) return
+      settled = true
       try { resolve(JSON.parse(buf)) }
       catch (err) { reject(new Error(`malformed daemon response: ${err.message}`)) }
     })
-    conn.on("error", reject)
+    conn.on("error", fail)
   })
 }
 
@@ -249,9 +281,19 @@ async function runDaemon(headed) {
     process.exit(1)
   }
 
+  // The daemon NEVER downloads chromium: a ~170 MB fetch here would block the
+  // socket the waiting CLI is polling, tripping its timeout. The download is
+  // done up front by `pw start` (foreground) or the installer. If the binary is
+  // somehow still missing, exit with a clear pointer instead of hanging.
+  const exe = chromiumExecutable(chromium)
+  if (!exe || !fs.existsSync(exe)) {
+    console.error("pw daemon: chromium binary missing — run `pw start` (which downloads it in the foreground) or the installer `npx opencode-agent-intercom-install` first")
+    process.exit(1)
+  }
+
   let browser, context, page
   try {
-    browser = await launchOrInstall(chromium, headed)
+    browser = await chromium.launch({ headless: !headed })
     context = await browser.newContext()
     page = await context.newPage()
   } catch (err) {
@@ -280,6 +322,9 @@ async function runDaemon(headed) {
     conn.on("error", () => {})
   })
   server.listen(SOCKET, () => {
+    // Tighten the socket to owner-only; the 0700 dir already blocks other users,
+    // this is defense in depth against a lax umask.
+    try { fs.chmodSync(SOCKET, 0o600) } catch {}
     fs.writeFileSync(PID, String(process.pid))
     console.log(`[${new Date().toISOString()}] pw daemon ready on ${SOCKET}`)
   })
@@ -287,21 +332,6 @@ async function runDaemon(headed) {
   // Best-effort cleanup so a kill -TERM doesn't leave a stale socket.
   for (const sig of ["SIGINT", "SIGTERM"]) {
     process.on(sig, async () => { await shutdown(browser, server); process.exit(0) })
-  }
-}
-
-async function launchOrInstall(chromium, headed) {
-  try {
-    return await chromium.launch({ headless: !headed })
-  } catch (err) {
-    if (!/Executable doesn't exist|Looks like Playwright/.test(err.message)) throw err
-    console.log("pw daemon: chromium binary missing — running `npx playwright install chromium`…")
-    await new Promise((resolve, reject) => {
-      const p = spawn("npx", ["-y", "playwright@latest", "install", "chromium"], { stdio: "inherit" })
-      p.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`install exited ${code}`)))
-      p.on("error", reject)
-    })
-    return await chromium.launch({ headless: !headed })
   }
 }
 

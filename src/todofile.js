@@ -37,20 +37,21 @@ export class TodoFileMissingError extends Error {
   }
 }
 
-// Case-insensitive scan for a `todo.md` sibling in the same directory. Returns
-// the actual filename if a non-canonical variant exists, otherwise undefined.
-// We do NOT silently use the variant — convention is uppercase TODO.md and the
-// caller decides how to surface the mismatch to the user.
-function findTodoCaseVariant(directory) {
+// Inspect directory entries so the exact on-disk casing remains observable on
+// case-insensitive filesystems. We do NOT silently use a non-canonical variant:
+// convention is uppercase TODO.md and the caller decides how to surface the
+// mismatch to the user.
+function findTodoSibling(directory) {
+  let variant
   try {
     for (const name of readdirSync(directory)) {
-      if (name === "TODO.md") continue
-      if (/^todo\.md$/i.test(name)) return name
+      if (name === "TODO.md") return { exact: true }
+      if (!variant && /^todo\.md$/i.test(name)) variant = name
     }
   } catch {
     // unreadable directory → treat as "no variant"
   }
-  return undefined
+  return { exact: false, variant }
 }
 
 // Matches the task header line. Captures: indent, id (T5), text after the colon.
@@ -67,12 +68,12 @@ export function todoFilePath(directory) {
 // offer the user a rename/migrate path instead of silently using the variant.
 export function readTodoFile(directory) {
   const path = todoFilePath(directory)
-  if (!existsSync(path)) {
-    const variant = findTodoCaseVariant(directory)
+  const sibling = findTodoSibling(directory)
+  if (!sibling.exact) {
     throw new TodoFileMissingError({
       directory,
-      kind: variant ? "wrong-case" : "missing",
-      actualName: variant,
+      kind: sibling.variant ? "wrong-case" : "missing",
+      actualName: sibling.variant,
     })
   }
   return readFileSync(path, "utf8")

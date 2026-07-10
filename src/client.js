@@ -125,12 +125,47 @@ export function forgetSessionDirectory(sessionID) {
 // We call this after our own registry reap, to keep the opencode server's
 // session list from accumulating forever. Errors are swallowed and logged — a
 // missed delete is not worth crashing the event handler over.
+//
+// NEVER use this on a session that may still have LIVE children: opencode's
+// DELETE cascades recursively over child sessions (source-verified + live on
+// 1.17.15), and if a reparented subagent is still streaming its final reply,
+// the cascade wipes its rows mid-write → `FOREIGN KEY constraint failed`,
+// `session.error` instead of `session.idle`, and the deterministic auto-tick
+// is skipped. Subagent teardown is safe here (subagents have no children); the
+// primary-handoff path must ARCHIVE the old primary instead — see
+// `archiveSession`.
 export async function deleteSession(client, sessionID) {
   try {
     await client.session.delete({ path: { id: sessionID } })
     return true
   } catch (err) {
     log("session.delete failed", errMsg(err))
+    return false
+  }
+}
+
+// Best-effort ARCHIVE of a session (PATCH /session/{id} with `time.archived`).
+// Used in place of deleteSession for the OLD primary in the orchestrator
+// handoff: archiving retires the session WITHOUT triggering opencode's
+// recursive child-delete cascade, so any subagent still reparented under the
+// old primary's DB parent keeps its rows and finishes on `session.idle`
+// instead of dying on a FK-constraint mid-write (root cause of the skipped
+// auto-tick — see the module header of handoff.js step 8).
+//
+// The pinned SDK (1.14.48) types the update body with `title` only, but the
+// opencode 1.17.15 server's UpdatePayload schema accepts
+// `time: { archived: <finite timestamp> }` and returns 200 (source- and
+// live-verified). The generated hey-api client serialises the body verbatim,
+// so the extra field passes through at runtime despite the narrower type.
+export async function archiveSession(client, sessionID) {
+  try {
+    await client.session.update({
+      path: { id: sessionID },
+      body: { time: { archived: Date.now() } },
+    })
+    return true
+  } catch (err) {
+    log("session.update (archive) failed", errMsg(err))
     return false
   }
 }

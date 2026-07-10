@@ -53,7 +53,11 @@ import { isPluginGeneratedMessage, looksLikePluginMessage } from "./pluginmsg.js
 //   7. Flush the drain (deps.flushDrain): buffered notices are delivered to
 //      the NEW session, AFTER the kickoff, in arrival order; the old→new
 //      redirect now routes any late straggler to the new session as well.
-//   8. Delete the old primary session.
+//   8. Archive the old primary session (NOT delete). A delete cascades
+//      recursively over child sessions in opencode; a subagent still
+//      reparented under the old primary's DB parent would have its rows
+//      wiped mid-write (FK-constraint failure → session.error → skipped
+//      auto-tick). Archiving retires the session without the cascade.
 //   9. Drop the old primary from the primary-tracking maps (forgetPrimary).
 //  10. Return { newSessionID, reparented, summaryMarkdown }.
 //
@@ -93,7 +97,8 @@ import { isPluginGeneratedMessage, looksLikePluginMessage } from "./pluginmsg.js
 // @property {(opts: { agent: string }) => Promise<string>} createSession
 // @property {(sessionID: string, message: string) => Promise<void>} promptAsync
 // @property {(fromID: string, toID: string) => Promise<number>} reparent
-// @property {(sessionID: string) => Promise<void>} deleteSession
+// @property {(sessionID: string) => Promise<void>} deleteSession  used ONLY for the orphaned NEW session on the failure path (a root session with no children)
+// @property {(sessionID: string) => Promise<void>} archiveSession  retires the OLD primary in step 8 without opencode's recursive child-delete cascade
 // @property {(sessionID: string) => void} forgetPrimary
 // @property {() => Promise<string>} promptOldPrimaryForDocSummaries
 //
@@ -269,11 +274,17 @@ async function performPrimaryHandoffInner(deps) {
     log("primary handoff: flushDrain failed", errMsg(err))
   }
 
-  // 8. Now — and only now — delete the old primary session.
+  // 8. Now — and only now — retire the old primary session. ARCHIVE, do NOT
+  // delete: opencode's session delete cascades recursively over child
+  // sessions, and a subagent still reparented under the old primary's DB
+  // parent would have its message/part rows wiped mid-write (FK-constraint
+  // failure → session.error instead of session.idle → the deterministic
+  // auto-tick is skipped and the TODO.md task stays wrongly open). Archiving
+  // retires the session without the cascade; the children stay untouched.
   try {
-    await deps.deleteSession(deps.primarySessionID)
+    await deps.archiveSession(deps.primarySessionID)
   } catch (err) {
-    log("primary handoff: old-primary delete failed, proceeding", errMsg(err))
+    log("primary handoff: old-primary archive failed, proceeding", errMsg(err))
   }
 
   // 9. Drop the old primary from primarySessions / primaryCtx maps.

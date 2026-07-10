@@ -86,6 +86,9 @@ function makeRealDeps(timeline, overrides = {}) {
     deleteSession: async (sessionID) => {
       timeline.push(["delete", sessionID])
     },
+    archiveSession: async (sessionID) => {
+      timeline.push(["archive", sessionID])
+    },
     forgetPrimary,
     ...overrides,
   }

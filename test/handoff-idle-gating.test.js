@@ -57,6 +57,7 @@ function makeRealDeps(overrides = {}) {
     flushDrain: async () => 0,
     abortDrain: async () => 0,
     deleteSession: async () => {},
+    archiveSession: async () => {},
     forgetPrimary, // the real one — clears pending + in-progress on success
     ...overrides,
   }

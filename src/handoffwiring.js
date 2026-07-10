@@ -29,6 +29,7 @@ import {
   postNotice,
   showToast,
   deleteSession,
+  archiveSession,
   getSessionDirectory,
   createChildSession,
   promptSession,
@@ -139,7 +140,13 @@ function buildPrimaryHandoffDeps(client, sessionID, sessionDir) {
     // primary is idle at this point, so the prompt starts immediately
     // instead of queuing behind an in-flight turn.
     promptOldPrimaryForDocSummaries: () => promptOldPrimaryForDocSummaries(client, sessionID),
+    // deleteSession is used ONLY for the orphaned NEW session on the failure
+    // path — a root session created without a parentID, so it has no children
+    // to cascade over. The OLD primary is retired via archiveSession (step 8)
+    // to avoid opencode's recursive child-delete cascade over still-live
+    // reparented subagents.
     deleteSession: (sid) => deleteSession(client, sid),
+    archiveSession: (sid) => archiveSession(client, sid),
     reparent: reparentSubagents,
     // Handoff delivery drain (registry.js): step 0 opens the buffer for the
     // old primary, step 2 binds the new session into it. While the drain is

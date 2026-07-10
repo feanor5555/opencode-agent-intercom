@@ -6,7 +6,7 @@
 // Sequence under test (src/handoff.js module header):
 //   beginDrain → gather (steps/goal) → createSession → bindDrainTarget →
 //   doc summaries → reparent → getInFlightSubagents(newID) → format/write →
-//   promptAsync (kickoff) → flushDrain → deleteSession(old) → forgetPrimary.
+//   promptAsync (kickoff) → flushDrain → archiveSession(old) → forgetPrimary.
 //
 // Run: node --test --test-timeout=2000 test/handoff.test.js
 
@@ -111,6 +111,9 @@ function makeDeps(overrides = {}) {
     deleteSession: async (sessionID) => {
       call("deleteSession", sessionID)
     },
+    archiveSession: async (sessionID) => {
+      call("archiveSession", sessionID)
+    },
     forgetPrimary: (sessionID) => {
       call("forgetPrimary", sessionID)
     },
@@ -137,7 +140,7 @@ const HAPPY_PATH_ORDER = [
   "writePrimarySummary",
   "promptAsync",
   "flushDrain",
-  "deleteSession",
+  "archiveSession",
   "forgetPrimary",
 ]
 
@@ -163,19 +166,25 @@ test("reparent is called with (primarySessionID, newID)", async () => {
   assert.deepEqual(reparentCall, ["reparent", "primary-1", "orch2"])
 })
 
-test("deleteSession and forgetPrimary run AFTER reparent, both with primarySessionID", async () => {
+test("archiveSession and forgetPrimary run AFTER reparent, both with primarySessionID", async () => {
   const deps = makeDeps()
   await performPrimaryHandoff(deps)
 
   const idx = (name) => deps._log.findIndex((e) => e[0] === name)
   const iReparent = idx("reparent")
-  const iDelete = idx("deleteSession")
+  const iArchive = idx("archiveSession")
   const iForget = idx("forgetPrimary")
 
-  assert.ok(iReparent >= 0 && iDelete > iReparent, "deleteSession must come after reparent")
+  assert.ok(iReparent >= 0 && iArchive > iReparent, "archiveSession must come after reparent")
   assert.ok(iForget > iReparent, "forgetPrimary must come after reparent")
 
-  assert.deepEqual(deps._log[iDelete], ["deleteSession", "primary-1"])
+  // The old primary is ARCHIVED, never deleted — a delete would cascade over
+  // still-live reparented children (FK-constraint failure → skipped auto-tick).
+  assert.ok(
+    !deps._log.some((e) => e[0] === "deleteSession"),
+    "old primary is archived, not deleted, on the happy path",
+  )
+  assert.deepEqual(deps._log[iArchive], ["archiveSession", "primary-1"])
   assert.deepEqual(deps._log[iForget], ["forgetPrimary", "primary-1"])
 })
 
@@ -244,17 +253,17 @@ test("(a) kickoff announces the POST-reparent in-flight state: a subagent that f
   )
 })
 
-test("flushDrain runs AFTER the kickoff promptAsync and BEFORE the old session is deleted", async () => {
+test("flushDrain runs AFTER the kickoff promptAsync and BEFORE the old session is archived", async () => {
   const deps = makeDeps()
   await performPrimaryHandoff(deps)
 
   const idx = (name) => deps._log.findIndex((e) => e[0] === name)
   const iPrompt = idx("promptAsync")
   const iFlush = idx("flushDrain")
-  const iDelete = idx("deleteSession")
+  const iArchive = idx("archiveSession")
 
   assert.ok(iPrompt >= 0 && iFlush > iPrompt, "flushDrain must come after the kickoff")
-  assert.ok(iDelete > iFlush, "old session is deleted only after the buffer was flushed")
+  assert.ok(iArchive > iFlush, "old session is archived only after the buffer was flushed")
   assert.ok(!order(deps._log).includes("abortDrain"), "success path never aborts the drain")
 })
 
@@ -368,12 +377,12 @@ test("EDGE CASE: promptOldPrimaryForDocSummaries throws -> kickoff falls back to
   }
   const result = await performPrimaryHandoff(deps)
 
-  // The handoff still completes end-to-end — reparent / flush / delete /
+  // The handoff still completes end-to-end — reparent / flush / archive /
   // forget still ran (the error in the dep must not abort the sequence).
   const names = order(deps._log)
   assert.ok(names.includes("reparent"))
   assert.ok(names.includes("flushDrain"))
-  assert.ok(names.includes("deleteSession"))
+  assert.ok(names.includes("archiveSession"))
   assert.ok(names.includes("forgetPrimary"))
   assert.ok(!names.includes("abortDrain"), "doc-summary fallback is not a handoff failure")
   assert.equal(result.newSessionID, "orch2")
@@ -438,7 +447,7 @@ test("EDGE CASE: reply WITHOUT a Session-Verlauf section -> handoff completes, b
 
   const names = deps._log.map((e) => e[0])
   assert.ok(names.includes("reparent"))
-  assert.ok(names.includes("deleteSession"))
+  assert.ok(names.includes("archiveSession"))
   assert.ok(names.includes("forgetPrimary"))
 
   const promptCall = deps._log.find((e) => e[0] === "promptAsync")
@@ -600,7 +609,7 @@ test("EDGE CASE: getLastUserGoal throws — handoff still completes end-to-end w
   assert.equal(result.newSessionID, "orch2")
 
   const names = deps._log.map((e) => e[0])
-  for (const step of ["createSession", "promptAsync", "reparent", "flushDrain", "deleteSession", "forgetPrimary"]) {
+  for (const step of ["createSession", "promptAsync", "reparent", "flushDrain", "archiveSession", "forgetPrimary"]) {
     assert.ok(names.includes(step), `${step} must still run after a failed goal lookup`)
   }
 
@@ -666,15 +675,15 @@ test("(e) createSession throws — drain aborted, nothing reparented, nothing de
   assert.ok(!names.includes("forgetPrimary"))
 })
 
-test("post-kickoff failures do NOT revert: a failing old-session delete still finishes the handoff", async () => {
+test("post-kickoff failures do NOT revert: a failing old-session archive still finishes the handoff", async () => {
   // Once the kickoff is delivered the new session is live — reverting past
   // that point (deleting #2) would be strictly worse than a zombie old
-  // session. deleteSession failure is logged and the sequence proceeds to
+  // session. archiveSession failure is logged and the sequence proceeds to
   // forgetPrimary and returns the result.
   const deps = makeDeps()
-  deps.deleteSession = async (sessionID) => {
-    deps._log.push(["deleteSession", sessionID])
-    throw new Error("delete hiccup")
+  deps.archiveSession = async (sessionID) => {
+    deps._log.push(["archiveSession", sessionID])
+    throw new Error("archive hiccup")
   }
 
   const result = await performPrimaryHandoff(deps)

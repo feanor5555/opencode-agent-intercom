@@ -386,25 +386,34 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       tasks = listOpen(directory)
     } catch (err) {
       if (err instanceof TodoFileMissingError) {
-        if (err.kind === "wrong-case") {
+        if (err.kind === "multiple") {
           return {
             output:
-              `TODO.md not found at ${todoFilePath(directory)} — but a case-variant ` +
-              `"${err.actualName}" exists in the same directory. Convention is uppercase TODO.md. ` +
-              `Report this verbatim to the user and ask which of these to do: ` +
-              `(a) rename "${err.actualName}" to TODO.md, ` +
-              `(b) create a fresh empty TODO.md and leave "${err.actualName}" alone, or ` +
-              `(c) migrate existing tasks from "${err.actualName}" into a new TODO.md. ` +
+              `Several todo files exist in ${err.directory}: ${err.names.join(", ")}. ` +
+              `Exactly one is allowed — with more than one it is undefined which file tasks are ` +
+              `read from and written to. Report this verbatim to the user and ask which single ` +
+              `file to keep; the tasks from the others are merged into it and those files deleted. ` +
               `Do NOT spawn a subagent to "check" or "investigate" — there is nothing to investigate. ` +
-              `Do NOT look in AGENTS.md or any other file for tasks; tasks live ONLY in TODO.md.`,
+              `Do NOT look in AGENTS.md or any other file for tasks; tasks live ONLY in the todo file.`,
+          }
+        }
+        if (err.kind === "not-a-file") {
+          return {
+            output:
+              `"${err.names[0]}" in ${err.directory} carries a todo-file name but is not a regular ` +
+              `file (symlink, directory or device). Nothing was read and nothing will be written to ` +
+              `it. Report this verbatim to the user and ask them to replace it with a regular ` +
+              `TODO.md. Do NOT spawn a subagent to "check" or "investigate" — there is nothing to ` +
+              `investigate.`,
           }
         }
         return {
           output:
-            `TODO.md not found at ${todoFilePath(directory)}. Tasks/TODOs live ONLY in TODO.md — ` +
-            `never AGENTS.md or any other file. Tell the user that no TODO.md exists yet and ask ` +
-            `whether to create one (spawn planner once the user agrees). Do NOT spawn a subagent ` +
-            `to "investigate" or to search other files for tasks — there is nothing to find.`,
+            `No todo file at ${todoFilePath(directory)} (todo.md / todos.md in any casing count ` +
+            `too). Tasks/TODOs live ONLY in the todo file — never AGENTS.md or any other file. Tell ` +
+            `the user that no todo file exists yet and ask whether to create one (spawn planner ` +
+            `once the user agrees). Do NOT spawn a subagent to "investigate" or to search other ` +
+            `files for tasks — there is nothing to find.`,
         }
       }
       throw err

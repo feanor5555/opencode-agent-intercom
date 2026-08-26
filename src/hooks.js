@@ -22,9 +22,8 @@ import {
 } from "./registry.js"
 import { fetchSnapshot, showToast, getSessionDirectory } from "./client.js"
 import { getSettings } from "./settings.js"
-import { removeTask, todoFilePath } from "./todofile.js"
+import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock } from "./project.js"
-import { existsSync } from "node:fs"
 import { log, errMsg } from "./log.js"
 import {
   ABORT_NOTICE,
@@ -733,7 +732,7 @@ const MARKER_RE = /^\s*DONE:\s*(T\d+)\s*$/i
 //   { kind: "no-task" }   — subagent wasn't spawned with a task id
 //   { kind: "no-marker" } — task id given but reply has no DONE line
 //   { kind: "mismatch" }  — marker present but for a different id (ignored)
-//   { kind: "no-todo" }   — TODO.md doesn't exist (greenfield)
+//   { kind: "no-todo" }   — no todo file in the directory (greenfield)
 //   { kind: "done", id }  — successfully removed
 //   { kind: "error", message } — TODO.md operation threw (id not found etc.)
 function autoMarkTask(directory, taskId, finalReply) {
@@ -743,11 +742,17 @@ function autoMarkTask(directory, taskId, finalReply) {
   if (!m) return { kind: "no-marker" }
   const markerId = m[1]
   if (markerId !== taskId) return { kind: "mismatch", expected: taskId, got: markerId }
-  if (!directory || !existsSync(todoFilePath(directory))) return { kind: "no-todo" }
+  if (!directory) return { kind: "no-todo" }
+  // The todo-file lookup itself decides whether this is greenfield: only a
+  // directory with no todo file at all is "no-todo". Several candidate files,
+  // a non-regular file or an unreadable directory are faults that surface as
+  // "error" — reporting them as greenfield would silently drop the marker for
+  // a task that is still standing in a file we merely failed to resolve.
   try {
     removeTask(directory, taskId)
     return { kind: "done", id: taskId }
   } catch (err) {
+    if (err instanceof TodoFileMissingError && err.kind === "missing") return { kind: "no-todo" }
     return { kind: "error", message: errMsg(err) }
   }
 }

@@ -8,6 +8,12 @@
 import { readdirSync, readFileSync, existsSync, statSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { log, errMsg } from "./log.js"
+import {
+  findTodoFile,
+  readTodoFile,
+  TodoFileMissingError,
+  CANONICAL_TODO_NAME,
+} from "./todofile.js"
 
 const ENABLED = process.env.OPENCODE_AGENT_INTERCOM_PROJECT_CONTEXT !== "0"
 
@@ -38,6 +44,7 @@ export function projectContext(directory) {
 export function resetProjectContext() {
   cache.clear()
   projectMdCache.clear()
+  ensureCache.clear()
 }
 
 // Injects the full PROJECT.md content into every agent's system prompt, the
@@ -50,43 +57,117 @@ export function resetProjectContext() {
 const projectMdCache = new Map()
 
 // Default PROJECT.md body written when the file is absent. Lists the two
-// load-bearing project documents (ARCHITECTURE.md, TODO.md) with the labels
-// the user wants the LLM to see — those labels also nudge subagents toward
-// the right file when they look for architecture vs. task content.
-const DEFAULT_PROJECT_MD =
-  "# Project\n" +
-  "\n" +
-  "## Documents\n" +
-  "\n" +
-  "- [ARCHITECTURE.md](ARCHITECTURE.md) — canonical file for software architecture.\n" +
-  "- [TODO.md](TODO.md) — canonical file for tasks/TODOs.\n"
+// load-bearing project documents (ARCHITECTURE.md and the todo file) with the
+// labels the user wants the LLM to see — those labels also nudge subagents
+// toward the right file when they look for architecture vs. task content.
+// `todoName` is the todo file the project actually uses, so the link stays
+// live in a project whose todo file is `todos.md` rather than `TODO.md`.
+export function defaultProjectMd(todoName = CANONICAL_TODO_NAME) {
+  return (
+    "# Project\n" +
+    "\n" +
+    "## Documents\n" +
+    "\n" +
+    "- [ARCHITECTURE.md](ARCHITECTURE.md) — canonical file for software architecture.\n" +
+    `- [${todoName}](${todoName}) — canonical file for tasks/TODOs.\n`
+  )
+}
+
+// `ensureProjectFiles` runs on every primary turn, so its cost is keyed on the
+// project directory's own mtime: creating or removing an entry in a directory
+// bumps that directory's mtime, and nothing else can change which of the three
+// documents exist or which name the todo file carries. An unchanged mtime
+// therefore means a re-run would be a no-op, and the turn pays a single stat()
+// instead of one stat per document plus — for a non-canonical todo name — a
+// readdir of the project root.
+const ensureCache = new Map()
+
+// An mtime is only cached once it is this much older than the moment we read
+// it. Timestamp granularity is coarse (Linux stamps inodes from the coarse
+// clock, some filesystems truncate to whole seconds), so a change landing in
+// the same tick as our stat would leave the mtime unchanged and the cached
+// answer wrong for as long as the process lives. Caching only timestamps that
+// are already a full second old means every later change necessarily lands in
+// a later tick and is seen. Primary turns are seconds apart, so this costs
+// the cache nothing in practice.
+const ENSURE_CACHE_MIN_AGE_MS = 1000
+
+// Which todo file the project uses, without creating anything.
+//   { name, create: false } — a todo file is there under that name.
+//   { name: CANONICAL_TODO_NAME, create: true } — the directory has none.
+//   { name: CANONICAL_TODO_NAME, create: false } — several match, or the one
+//     that matches is not a regular file. Neither is a greenfield state, so
+//     nothing is created over it; the canonical name carries the PROJECT.md
+//     link and the human sorts the directory out.
+function resolveTodoName(directory) {
+  try {
+    return { name: findTodoFile(directory).name, create: false }
+  } catch (err) {
+    if (!(err instanceof TodoFileMissingError)) throw err
+    if (err.kind === "missing") return { name: CANONICAL_TODO_NAME, create: true }
+    log("ensureProjectFiles: unusable todo file", {
+      directory,
+      kind: err.kind,
+      names: err.names,
+    })
+    return { name: CANONICAL_TODO_NAME, create: false }
+  }
+}
 
 // Bootstraps the three project documents at `directory`:
-//   - PROJECT.md   → DEFAULT_PROJECT_MD (with links to the other two)
+//   - PROJECT.md      → defaultProjectMd(), linking the other two
 //   - ARCHITECTURE.md → empty
-//   - TODO.md      → empty
+//   - the todo file   → an empty TODO.md, and ONLY where the directory has no
+//                       todo file at all. An existing `todo.md` / `todos.md`
+//                       in any casing IS the todo file; no second one is
+//                       created beside it.
 // Each is created only when absent — never overwrites the user's content.
 // Idempotent: re-running with all three present is a no-op.
+// Returns the name of the todo file the project uses.
 export function ensureProjectFiles(directory) {
-  if (!ENABLED || !directory) return
+  if (!ENABLED || !directory) return CANONICAL_TODO_NAME
   try {
+    const dirMtimeMs = statSync(directory).mtimeMs
+    const cached = ensureCache.get(directory)
+    if (cached && cached.mtimeMs === dirMtimeMs) return cached.todoName
+    const todo = resolveTodoName(directory)
+    let wrote = false
     const projectPath = join(directory, "PROJECT.md")
     if (!existsSync(projectPath)) {
-      writeFileSync(projectPath, DEFAULT_PROJECT_MD, "utf8")
-      log("ensureProjectFiles wrote PROJECT.md", { directory })
+      writeFileSync(projectPath, defaultProjectMd(todo.name), "utf8")
+      log("ensureProjectFiles wrote PROJECT.md", { directory, todoName: todo.name })
+      wrote = true
     }
     const archPath = join(directory, "ARCHITECTURE.md")
     if (!existsSync(archPath)) {
       writeFileSync(archPath, "", "utf8")
       log("ensureProjectFiles wrote ARCHITECTURE.md", { directory })
+      wrote = true
     }
-    const todoPath = join(directory, "TODO.md")
-    if (!existsSync(todoPath)) {
-      writeFileSync(todoPath, "", "utf8")
-      log("ensureProjectFiles wrote TODO.md", { directory })
+    if (todo.create) {
+      // Exclusive creation: a todo file that appeared between the lookup and
+      // this write is never truncated.
+      try {
+        writeFileSync(join(directory, todo.name), "", { flag: "wx" })
+        log("ensureProjectFiles wrote the todo file", { directory, todoName: todo.name })
+      } catch (err) {
+        if (err?.code !== "EEXIST") throw err
+      }
+      wrote = true
     }
+    // Our own writes bump the mtime again, and a timestamp from the current
+    // tick cannot be told apart from a change still to come in it — in both
+    // cases nothing is cached and the next turn records the settled state.
+    if (wrote || Date.now() - dirMtimeMs < ENSURE_CACHE_MIN_AGE_MS) {
+      ensureCache.delete(directory)
+    } else {
+      ensureCache.set(directory, { mtimeMs: dirMtimeMs, todoName: todo.name })
+    }
+    return todo.name
   } catch (err) {
     log("ensureProjectFiles failed", { directory, err: errMsg(err) })
+    ensureCache.delete(directory)
+    return CANONICAL_TODO_NAME
   }
 }
 
@@ -215,9 +296,10 @@ export function readPrimarySummary(directory) {
   }
 }
 
-// --- TODO.md: planned-step extraction for handoff ---------------------------
+// --- Planned-step extraction from the todo file, for the handoff -----------
 //
-// Reads `<directory>/TODO.md` and returns the OPEN / planned task lines as a
+// Reads the project's todo file — `todo.md` / `todos.md` in any casing,
+// resolved by `findTodoFile` — and returns the OPEN / planned task lines as a
 // flat string array. Used by `performPrimaryHandoff` (handoff.js, step 1) to
 // populate the "Geplante Schritte" section of the new orchestrator's kickoff
 // summary — the new orchestrator is a fresh session and needs to see what was
@@ -237,9 +319,12 @@ export function readPrimarySummary(directory) {
 //      This handles the canonical `todofile.js` layout (`- T5: …` lines,
 //      flat top-to-bottom) AND a loose checkbox layout (`- [ ] …`).
 //
-//   3. If the file is absent, unreadable, or empty, return `[]` — same
-//      "graceful empty" contract as `readPrimarySummary` so the handoff
-//      summary's plannedSteps section simply renders as a bare header.
+//   3. If no todo file can be resolved, or it is unreadable or empty, return
+//      `[]` — same "graceful empty" contract as `readPrimarySummary` so the
+//      handoff summary's plannedSteps section simply renders as a bare header.
+//      A directory that has several todo files, or one whose todo-file name is
+//      not a regular file, is logged: unlike the greenfield case it is a state
+//      a human has to sort out.
 //
 // The parser is intentionally NOT linked to `todofile.parseTasks`:
 // `readPlannedSteps` returns plain strings (one per planned step) suitable
@@ -247,13 +332,18 @@ export function readPrimarySummary(directory) {
 // structured `{id, text, accept, …}` records intended for the TODO tools.
 export function readPlannedSteps(directory) {
   if (!directory) return []
-  const filePath = join(directory, "TODO.md")
   let content
   try {
-    content = readFileSync(filePath, "utf8")
+    content = readTodoFile(directory)
   } catch (err) {
-    if (err && err.code !== "ENOENT") {
-      log("readPlannedSteps failed", { filePath, err: errMsg(err) })
+    if (!(err instanceof TodoFileMissingError)) {
+      log("readPlannedSteps failed", { directory, err: errMsg(err) })
+    } else if (err.kind !== "missing") {
+      log("readPlannedSteps: unusable todo file", {
+        directory,
+        kind: err.kind,
+        names: err.names,
+      })
     }
     return []
   }

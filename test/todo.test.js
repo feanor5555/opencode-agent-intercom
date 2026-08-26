@@ -4,14 +4,24 @@
 // file, exercising: spawn extracting task-id, duplicate rejection, missing-
 // optional T-prefix extraction, wake-hook auto-removing on DONE marker,
 // marker mismatch, no-marker, aborted-session, todos_open + todo_done +
-// todo_add + todo_edit tools, subagent gating. Plus a few todofile parser
-// unit tests.
+// todo_add + todo_edit tools, subagent gating. Plus todofile parser unit
+// tests and the todo-file lookup: accepted name variants, several matches,
+// creation when none exists, a non-regular file, an unreadable directory.
 //
 // Run: node --test test/todo.test.js
 
 import test, { beforeEach, before } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs"
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  existsSync,
+  symlinkSync,
+  chmodSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -29,6 +39,8 @@ import {
   nextFreeId,
   readTodoFile,
   todoFilePath,
+  findTodoFile,
+  CANONICAL_TODO_NAME,
   TodoFileMissingError,
 } from "../src/todofile.js"
 
@@ -164,25 +176,183 @@ test("listOpen: throws on missing TODO.md (greenfield hard-error)", () => {
     (err) =>
       err instanceof TodoFileMissingError &&
       err.kind === "missing" &&
-      /TODO\.md not found/.test(err.message),
+      /no todo file in/.test(err.message),
   )
 })
 
-test("listOpen: detects case-variant todo.md and throws wrong-case", () => {
-  removeTodo()
-  writeFileSync(join(projectDir, "todo.md"), "- T1: legacy lowercase task\n")
+// ---------- todo-file lookup: naming, uniqueness, non-regular files ---------
+
+// Every test below works in its own tmp directory: the shared `projectDir`
+// fixture is rewritten by beforeEach and must not gain stray name variants.
+function withTempDir(fn) {
+  const dir = mkdtempSync(join(tmpdir(), "intercom-todo-lookup-"))
   try {
-    assert.throws(
-      () => listOpen(projectDir),
-      (err) =>
-        err instanceof TodoFileMissingError &&
-        err.kind === "wrong-case" &&
-        err.actualName === "todo.md",
-    )
+    return fn(dir)
   } finally {
-    rmSync(join(projectDir, "todo.md"), { force: true })
+    chmodSync(dir, 0o755)
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+const NAME_VARIANTS = [
+  "TODO.md",
+  "todo.md",
+  "Todo.md",
+  "toDo.md",
+  "todos.md",
+  "TODOS.md",
+  "Todos.md",
+  "todo.MD",
+]
+
+test("lookup: every case variant of todo.md / todos.md is the todo file", () => {
+  for (const name of NAME_VARIANTS) {
+    withTempDir((dir) => {
+      writeFileSync(join(dir, name), "- T7: variant task\n  accept: read from the variant\n")
+      assert.equal(findTodoFile(dir).name, name, `${name} must resolve`)
+      const tasks = listOpen(dir)
+      assert.deepEqual(tasks.map((t) => t.id), ["T7"], `${name} must be read`)
+      assert.equal(tasks[0].accept, "read from the variant")
+      assert.equal(nextFreeId(dir), "T8", `${name} must feed nextFreeId`)
+    })
   }
 })
+
+test("lookup: files that only look like a todo file are ignored", () => {
+  withTempDir((dir) => {
+    for (const name of ["todo.markdown", "todo.txt", "mytodo.md", "todoes.md", "todo", "TODO.md.bak"]) {
+      writeFileSync(join(dir, name), "- T1: not a todo file\n")
+    }
+    assert.throws(
+      () => findTodoFile(dir),
+      (err) => err instanceof TodoFileMissingError && err.kind === "missing",
+    )
+  })
+})
+
+test("writes go back to the variant that was found, not to TODO.md", () => {
+  withTempDir((dir) => {
+    const variant = join(dir, "todos.md")
+    writeFileSync(variant, "- T1: first\n  accept: stays\n")
+    assert.equal(addTask(dir, { title: "second", accept: "appended" }).id, "T2")
+    assert.equal(editTask(dir, "T1", { title: "first, edited" }).changed, true)
+    assert.equal(removeTask(dir, "T2").changed, true)
+    assert.ok(!existsSync(join(dir, CANONICAL_TODO_NAME)), "no TODO.md may be created alongside")
+    const content = readFileSync(variant, "utf8")
+    assert.match(content, /- T1: first, edited/)
+    assert.doesNotMatch(content, /T2/)
+  })
+})
+
+test("lookup: several matching files are a typed error, never a pick", () => {
+  withTempDir((dir) => {
+    writeFileSync(join(dir, "todos.md"), "- T1: from todos.md\n")
+    writeFileSync(join(dir, "Todo.md"), "- T5: from Todo.md\n")
+    const isMultiple = (err) =>
+      err instanceof TodoFileMissingError &&
+      err.kind === "multiple" &&
+      // sorted, so the report never depends on the directory listing order
+      err.names.join(",") === "Todo.md,todos.md" &&
+      /exactly one/.test(err.message)
+    assert.throws(() => findTodoFile(dir), isMultiple)
+    assert.throws(() => listOpen(dir), isMultiple)
+    assert.throws(() => nextFreeId(dir), isMultiple)
+    assert.throws(() => addTask(dir, { title: "x" }), isMultiple)
+    assert.throws(() => removeTask(dir, "T1"), isMultiple)
+    // neither file was touched and no third one was created
+    assert.equal(readFileSync(join(dir, "todos.md"), "utf8"), "- T1: from todos.md\n")
+    assert.equal(readFileSync(join(dir, "Todo.md"), "utf8"), "- T5: from Todo.md\n")
+    assert.ok(!existsSync(join(dir, CANONICAL_TODO_NAME)))
+  })
+})
+
+// Pins the precedence the statSync fast path establishes: a regular canonical
+// TODO.md is the todo file without listing the directory at all, so it wins
+// over a differently-cased sibling instead of raising "multiple".
+test("lookup: canonical TODO.md takes precedence over a differently-cased sibling", () => {
+  withTempDir((dir) => {
+    writeFileSync(join(dir, CANONICAL_TODO_NAME), "- T1: canonical\n")
+    writeFileSync(join(dir, "todos.md"), "- T9: sibling\n")
+    assert.equal(findTodoFile(dir).name, CANONICAL_TODO_NAME)
+    assert.deepEqual(listOpen(dir).map((t) => t.id), ["T1"])
+  })
+})
+
+test("addTask: creates TODO.md when the directory has no todo file", () => {
+  withTempDir((dir) => {
+    assert.equal(nextFreeId(dir), "T1")
+    assert.equal(addTask(dir, { title: "first task", accept: "it exists" }).id, "T1")
+    assert.equal(findTodoFile(dir).name, CANONICAL_TODO_NAME)
+    assert.equal(
+      readFileSync(join(dir, CANONICAL_TODO_NAME), "utf8"),
+      "- T1: first task\n  accept: it exists\n",
+    )
+    // second call reuses the file it just created rather than making another
+    assert.equal(addTask(dir, { title: "second task" }).id, "T2")
+    assert.deepEqual(listOpen(dir).map((t) => t.id), ["T1", "T2"])
+  })
+})
+
+test("addTask: a missing directory is not silently created over", () => {
+  withTempDir((dir) => {
+    const gone = join(dir, "does-not-exist")
+    assert.throws(
+      () => addTask(gone, { title: "x" }),
+      (err) => err?.code === "ENOENT",
+    )
+  })
+})
+
+const isNotAFile = (err) => err instanceof TodoFileMissingError && err.kind === "not-a-file"
+
+test("lookup: a symlink named like a todo file is neither read nor written through", () => {
+  withTempDir((dir) => {
+    const target = join(dir, "elsewhere.md")
+    writeFileSync(target, "- T1: not the todo file\n")
+    symlinkSync(target, join(dir, "todo.md"))
+    assert.throws(() => listOpen(dir), isNotAFile)
+    assert.throws(() => readTodoFile(dir), isNotAFile)
+    assert.throws(() => nextFreeId(dir), isNotAFile)
+    assert.throws(() => addTask(dir, { title: "x" }), isNotAFile)
+    assert.throws(() => removeTask(dir, "T1"), isNotAFile)
+    assert.equal(readFileSync(target, "utf8"), "- T1: not the todo file\n", "target untouched")
+  })
+})
+
+test("lookup: a dangling symlink named TODO.md is the typed error, not ENOENT", () => {
+  withTempDir((dir) => {
+    symlinkSync(join(dir, "nowhere.md"), join(dir, CANONICAL_TODO_NAME))
+    assert.throws(() => readTodoFile(dir), isNotAFile)
+    assert.throws(() => addTask(dir, { title: "x" }), isNotAFile)
+    assert.ok(!existsSync(join(dir, "nowhere.md")), "the write must not create the link target")
+  })
+})
+
+test("lookup: a directory named TODO.md is the typed error, not EISDIR", () => {
+  withTempDir((dir) => {
+    mkdirSync(join(dir, CANONICAL_TODO_NAME))
+    assert.throws(() => readTodoFile(dir), isNotAFile)
+    assert.throws(() => addTask(dir, { title: "x" }), isNotAFile)
+  })
+})
+
+test("lookup: an unreadable directory fails visibly instead of reporting no todo file", (t) => {
+  if (process.getuid?.() === 0) {
+    t.skip("root bypasses directory permissions")
+    return
+  }
+  withTempDir((dir) => {
+    writeFileSync(join(dir, "todo.md"), "- T1: existing task\n")
+    chmodSync(dir, 0o111) // traversable, not listable
+    const isDenied = (err) => !(err instanceof TodoFileMissingError) && err?.code === "EACCES"
+    assert.throws(() => findTodoFile(dir), isDenied)
+    assert.throws(() => listOpen(dir), isDenied)
+    // the fatal one: T1 must not be handed out a second time
+    assert.throws(() => nextFreeId(dir), isDenied)
+    assert.throws(() => addTask(dir, { title: "x" }), isDenied)
+  })
+})
+
 
 test("nextFreeId: max+1, T1 when empty / file absent", () => {
   assert.equal(nextFreeId(projectDir), "T4")
@@ -303,6 +473,51 @@ test("wake-hook auto-removes T1 when subagent replies with `DONE: T1`", async ()
   assert.match(wake.text, /T1 removed/)
 })
 
+test("wake-hook reports no-todo when the directory has no todo file at all", async () => {
+  const { ctx, notices, setReply } = makeCtx()
+  const hooks = await plugin(ctx)
+  const spawned = await hooks.tool.spawn.execute(
+    { agent: "coder", prompt: "T1: implement the export endpoint" },
+    primaryCtx,
+  )
+  const subID = spawned.metadata.sessionID
+  setReply(subID, "DONE: T1\nimplemented the endpoint.")
+  removeTodo()
+
+  await fireIdle(hooks, subID)
+
+  const wake = notices.find((n) => n.sessionID === primaryCtx.sessionID)
+  assert.match(wake.text, /TODO\.md not present/)
+})
+
+// An unresolvable todo file is NOT greenfield: the marker must be reported as
+// a failed auto-remove, never swallowed as "no todo file" — the task is still
+// standing in a file we merely could not resolve.
+test("wake-hook reports an error when several todo files exist", async () => {
+  const { ctx, notices, setReply } = makeCtx()
+  const hooks = await plugin(ctx)
+  const spawned = await hooks.tool.spawn.execute(
+    { agent: "coder", prompt: "T1: implement the export endpoint" },
+    primaryCtx,
+  )
+  const subID = spawned.metadata.sessionID
+  setReply(subID, "DONE: T1\nimplemented the endpoint.")
+  removeTodo()
+  writeFileSync(join(projectDir, "todos.md"), TODO_SEED)
+  writeFileSync(join(projectDir, "Todo.md"), TODO_SEED)
+  try {
+    await fireIdle(hooks, subID)
+    const wake = notices.find((n) => n.sessionID === primaryCtx.sessionID)
+    assert.match(wake.text, /auto-remove failed/)
+    assert.match(wake.text, /several todo files/)
+    assert.doesNotMatch(wake.text, /not present/)
+    assert.equal(readFileSync(join(projectDir, "todos.md"), "utf8"), TODO_SEED, "nothing removed")
+  } finally {
+    rmSync(join(projectDir, "todos.md"), { force: true })
+    rmSync(join(projectDir, "Todo.md"), { force: true })
+  }
+})
+
 test("wake-hook ignores a marker whose id does NOT match the spawn id", async () => {
   const { ctx, notices, setReply } = makeCtx()
   const hooks = await plugin(ctx)
@@ -395,8 +610,37 @@ test("todos_open errors clearly when TODO.md does not exist", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   const res = await hooks.tool.todos_open.execute({}, primaryCtx)
-  assert.match(res.output, /TODO\.md not found/)
-  assert.match(res.output, /Tasks\/TODOs live ONLY in TODO\.md/)
+  assert.match(res.output, /No todo file at/)
+  assert.match(res.output, /Tasks\/TODOs live ONLY in the todo file/)
+})
+
+test("todos_open reports several todo files instead of picking one", async () => {
+  removeTodo()
+  writeFileSync(join(projectDir, "todos.md"), "- T1: from todos.md\n")
+  writeFileSync(join(projectDir, "Todo.md"), "- T2: from Todo.md\n")
+  try {
+    const { ctx } = makeCtx()
+    const hooks = await plugin(ctx)
+    const res = await hooks.tool.todos_open.execute({}, primaryCtx)
+    assert.match(res.output, /Several todo files exist/)
+    assert.match(res.output, /Todo\.md, todos\.md/)
+  } finally {
+    rmSync(join(projectDir, "todos.md"), { force: true })
+    rmSync(join(projectDir, "Todo.md"), { force: true })
+  }
+})
+
+test("todos_open reports a todo-file name that is not a regular file", async () => {
+  removeTodo()
+  mkdirSync(join(projectDir, "TODO.md"))
+  try {
+    const { ctx } = makeCtx()
+    const hooks = await plugin(ctx)
+    const res = await hooks.tool.todos_open.execute({}, primaryCtx)
+    assert.match(res.output, /is not a regular file/)
+  } finally {
+    rmSync(join(projectDir, "TODO.md"), { recursive: true, force: true })
+  }
 })
 
 test("todo_done tool removes a task; second call errors (task gone)", async () => {

@@ -46,8 +46,8 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.14.48",
+    "@opencode-ai/plugin": "^1.18.23",
     "jsonc-parser": "^3.3.1",
-    "playwright-core": "^1.60.0"
+    "playwright-core": "^1.62.1"
   }
 }

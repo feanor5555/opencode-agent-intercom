@@ -781,8 +781,8 @@ function errorName(error) {
   return error && typeof error === "object" && typeof error.name === "string" ? error.name : null
 }
 
-// Marker the subagent is taught to put on the FIRST non-empty line of its
-// final reply. `DONE: T<n>` — the wake-hook removes the matching task from
+// Marker the subagent is taught to put on the FIRST or LAST non-empty line of
+// its final reply. `DONE: T<n>` — the wake-hook removes the matching task from
 // TODO.md. No blocked state; if the work cannot finish, the subagent just
 // reports plainly and TODO.md stays unchanged.
 const MARKER_RE = /^\s*DONE:\s*(T\d+)\s*$/i
@@ -790,15 +790,20 @@ const MARKER_RE = /^\s*DONE:\s*(T\d+)\s*$/i
 // Parses the marker out of the subagent's final reply and removes the task
 // from TODO.md if it matches the spawn-assigned task id. Returns one of:
 //   { kind: "no-task" }   — subagent wasn't spawned with a task id
-//   { kind: "no-marker" } — task id given but reply has no DONE line
+//   { kind: "no-marker" } — task id given but reply has no accepted DONE line
 //   { kind: "mismatch" }  — marker present but for a different id (ignored)
 //   { kind: "no-todo" }   — no todo file in the directory (greenfield)
 //   { kind: "done", id }  — successfully removed
 //   { kind: "error", message } — TODO.md operation threw (id not found etc.)
 function autoMarkTask(directory, taskId, finalReply) {
   if (!taskId) return { kind: "no-task" }
-  const firstLine = firstNonEmptyLine(finalReply)
-  const m = firstLine ? MARKER_RE.exec(firstLine) : null
+  const lines = nonEmptyLines(finalReply)
+  const markerLines = lines.length > 1 ? [lines[0], lines[lines.length - 1]] : lines
+  let m = null
+  for (const line of markerLines) {
+    m = MARKER_RE.exec(line)
+    if (m) break
+  }
   if (!m) return { kind: "no-marker" }
   const markerId = m[1]
   if (markerId !== taskId) return { kind: "mismatch", expected: taskId, got: markerId }
@@ -817,12 +822,9 @@ function autoMarkTask(directory, taskId, finalReply) {
   }
 }
 
-function firstNonEmptyLine(text) {
-  if (!text) return ""
-  for (const line of text.split("\n")) {
-    if (line.trim()) return line
-  }
-  return ""
+function nonEmptyLines(text) {
+  if (!text) return []
+  return text.split("\n").filter((line) => line.trim())
 }
 
 // Guards tool execution before it runs:
@@ -880,7 +882,7 @@ export function createGuardToolExecute(client, permissionGuard) {
         throw new Error(
           `agent-intercom: \`${input.tool}\` is restricted to planner / coder / debugger / ` +
             "reviewer / documenter / designer. The researcher and gitter agents do not touch " +
-            "TODO.md. End your reply with `DONE: T<n>` on the FIRST line of your final message " +
+            "TODO.md. Put `DONE: T<n>` on the FIRST or LAST non-empty line of your final message " +
             "if your spawn was task-tracked and you finished the work.",
         )
       }

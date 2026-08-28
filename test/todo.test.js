@@ -538,6 +538,39 @@ test("wake-hook ignores a marker whose id does NOT match the spawn id", async ()
   assert.match(wake.text, /Marker IGNORED/)
 })
 
+test("wake-hook auto-removes T1 when marker is on the last non-empty line", async () => {
+  const { ctx, notices, setReply } = makeCtx()
+  const hooks = await plugin(ctx)
+  const spawned = await hooks.tool.spawn.execute(
+    { agent: "coder", prompt: "T1: implement the export endpoint" },
+    primaryCtx,
+  )
+  const subID = spawned.metadata.sessionID
+  setReply(subID, "implemented the endpoint.\n\nDONE: T1\n\n")
+  await fireIdle(hooks, subID)
+  const content = readTodoFile(projectDir)
+  assert.doesNotMatch(content, /T1:/, "T1 must be removed from TODO.md")
+  const wake = notices.find((n) => n.sessionID === primaryCtx.sessionID)
+  assert.match(wake.text, /T1 removed/)
+})
+
+test("wake-hook reports no-marker when the marker is only in the middle", async () => {
+  const { ctx, notices, setReply } = makeCtx()
+  const hooks = await plugin(ctx)
+  const spawned = await hooks.tool.spawn.execute(
+    { agent: "coder", prompt: "T1: implement the export endpoint" },
+    primaryCtx,
+  )
+  const subID = spawned.metadata.sessionID
+  setReply(subID, "started the endpoint.\nDONE: T1\nfinished the endpoint.")
+  await fireIdle(hooks, subID)
+  const content = readTodoFile(projectDir)
+  assert.match(content, /T1:/, "T1 must remain in TODO.md")
+  const wake = notices.find((n) => n.sessionID === primaryCtx.sessionID)
+  assert.match(wake.text, /reply did NOT put.*FIRST or LAST non-empty line/)
+  assert.match(wake.text, /NOT auto-removed/)
+})
+
 test("wake-hook reports no-marker when subagent replies without DONE line", async () => {
   const { ctx, notices, setReply } = makeCtx()
   const hooks = await plugin(ctx)
@@ -553,7 +586,7 @@ test("wake-hook reports no-marker when subagent replies without DONE line", asyn
   const content = readTodoFile(projectDir)
   assert.match(content, /T1:/, "T1 must remain in TODO.md")
   const wake = notices.find((n) => n.sessionID === primaryCtx.sessionID)
-  assert.match(wake.text, /reply did NOT start with `DONE: <id>`/)
+  assert.match(wake.text, /reply did NOT put `DONE: <id>` on its FIRST or LAST non-empty line/)
   assert.match(wake.text, /NOT auto-removed/)
 })
 

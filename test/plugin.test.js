@@ -627,11 +627,9 @@ test("list filters subagents by the caller's parentID — no cross-primary leaka
   assert.doesNotMatch(outB.output, /researcher#1/, "primary B must not see primary A's researcher")
 })
 
-test("orchestration guide exposes the three tools and stays free of TODO mechanics", async () => {
-  // The trimmed guide lists only the tool protocol + spawn-prompt format.
-  // TODO/DONE-marker mechanics are NOT documented in the orchestrator guide —
-  // the orchestrator has no TODO tools and the wake-notice self-explains when
-  // a marker is missing or mismatched.
+test("orchestration guide exposes the three tools and marker contract without TODO tools", async () => {
+  // The guide lists the tool protocol, spawn-prompt format, and marker contract.
+  // TODO tools remain absent because the wake hook handles task removal.
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   const out = { system: ["base prompt"] }
@@ -640,7 +638,8 @@ test("orchestration guide exposes the three tools and stays free of TODO mechani
   assert.match(joined, /spawn\(agent, prompt\)/, "guide must list spawn")
   assert.match(joined, /abort\(handle\)/, "guide must list abort")
   assert.match(joined, /\blist\(\)/, "guide must list list()")
-  assert.doesNotMatch(joined, /DONE:/, "guide must not mention DONE-marker mechanics anymore")
+  assert.match(joined, /DONE: T<n>.*FIRST or LAST non-empty line/i, "guide must state the marker position")
+  assert.match(joined, /marker must occupy a whole line/i, "guide must state whole-line strictness")
   assert.doesNotMatch(joined, /todo_done|todos_open|todo_add|todo_edit/, "guide must not mention TODO tools")
   assert.doesNotMatch(joined, /BLOCKED/, "the blocked feature is gone — guide must not mention it")
 })

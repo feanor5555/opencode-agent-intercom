@@ -23,8 +23,8 @@ function taskOutcomeLine(outcome) {
       return `\n📋 TODO.md: ${outcome.id} removed.`
     case "no-marker":
       return (
-        "\n⚠️ TODO.md: this subagent had a task id but its reply did NOT start with " +
-        "`DONE: <id>`. The task was NOT auto-removed. Delegate verification and TODO.md cleanup " +
+        "\n⚠️ TODO.md: this subagent had a task id but its reply did NOT put " +
+        "`DONE: <id>` on its FIRST or LAST non-empty line. The task was NOT auto-removed. Delegate verification and TODO.md cleanup " +
         "to a planner/coder."
       )
     case "mismatch":

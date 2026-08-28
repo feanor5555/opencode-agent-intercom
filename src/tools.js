@@ -182,8 +182,8 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     }
 
     // Pull an optional task id (T5) off the first line of the prompt.
-    // Present → wake-hook auto-ticks TODO.md when the subagent's reply ends
-    // with the matching `DONE:` marker. Absent → non-task spawn
+    // Present → wake-hook auto-ticks TODO.md when the subagent's reply has
+    // the matching `DONE:` marker on its first or last non-empty line. Absent → non-task spawn
     // (status check, ad-hoc question) and auto-tick is skipped. The orchestrator
     // decides per spawn; the plugin never forces a prefix.
     // Atomic duplicate-task check-and-reserve. The id is only written onto the
@@ -526,7 +526,7 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     todo_done: tool({
       description:
         "Remove a task from TODO.md. The wake-hook also calls this automatically when a subagent's " +
-        "reply starts with `DONE: T<n>` matching its spawn id. Call yourself when (a) you just " +
+        "reply has `DONE: T<n>` on its FIRST or LAST non-empty line, matching its spawn id. Call yourself when (a) you just " +
         "finished a task that was in TODO.md, (b) the wake notice said `marker IGNORED` / " +
         "`auto-tick failed`, or (c) the user asks for it.",
       args: {

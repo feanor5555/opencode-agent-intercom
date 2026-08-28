@@ -280,3 +280,15 @@ bootstrap, so a restart is required either way — both halves. The
 live-applying settings in the sidebar are runtime knobs, not code.
 
 The loop: `npm run dev` in `tui/`, edit, restart opencode.
+
+## `chat.message` overrides the model for one call, not the agent
+
+The `chat.message` hook (`src/llmmodel.js`) sets
+`output.message.model = { providerID, modelID }` for the current user
+message. A later prompt that reaches opencode without going through that
+hook re-resolves the agent definition and discards the choice. The hook
+is therefore a per-call override, not a per-session persistence. To make
+the choice survive every prompt for the lifetime of the instance, write
+`config.agent[name].model` from the `config` hook — but that hook runs at
+instance startup, so a change there only takes effect after an opencode
+restart.

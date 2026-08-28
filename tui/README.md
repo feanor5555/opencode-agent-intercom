@@ -28,7 +28,7 @@ in your opencode sidebar.
 │   top_p          [-]  0.90 [+]             │
 │   top_k          [-]    40 [+]   ★         │
 │   min_p          [-]  0.05 [+]             │
-│   repeat_penalty [-]  1.05 [+]             │
+│   rep_penalty    [-]  1.05 [+]             │
 │                                            │
 │   [reset current agent]                    │
 └────────────────────────────────────────────┘
@@ -50,7 +50,10 @@ in your opencode sidebar.
   instance has configured — a cheap one for the `documenter`, your strongest
   for the `coder`. A `not set` slot sits in front of the first entry, so `[<]`
   there hands the agent back to opencode's own model. **Applies on the next
-  message.**
+  message.** The plugin mutates `output.message.model` in the `chat.message`
+  hook — a later prompt that reaches opencode without going through that
+  hook re-resolves the agent definition, so the choice is per-call rather
+  than permanent.
 
 - **Sample your model per role.** Different temperature for the
   `orchestrator`, your `coder`, your `designer`. Plus llama.cpp specifics

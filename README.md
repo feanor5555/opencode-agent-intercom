@@ -224,8 +224,14 @@ exposes every runtime knob:
   entry that hands the agent back to opencode's own model. Writes
   `~/.config/opencode/llm-models.json` as
   `{"<agent>": {"providerID": "…", "modelID": "…"}}`; the `chat.message` hook
-  applies it. Its own file, because the sampling params file is a
-  number-valued map whose unknown keys are forwarded to the provider.
+  applies it by setting `output.message.model`. Its own file, because the
+  sampling params file is a number-valued map whose unknown keys are
+  forwarded to the provider.
+  The hook overrides the model for **the current message only** — a later
+  prompt that reaches opencode without going through the hook re-resolves
+  the agent definition. Making the choice permanent for an agent would
+  require writing `config.agent[name].model` from the `config` hook, which
+  is a different interface (instance-startup, no live effect).
 - `[reset current agent]` drops that agent's sampling overrides *and* its
   model choice, returning every row to what opencode resolves.
 

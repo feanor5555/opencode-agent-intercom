@@ -201,11 +201,51 @@ overlay the content). Two conditions must both hold for a user to see it:
 - `max subagents [-] N [+]` and `max Token(k) [-] N [+]` steppers.
 - Collapsed sections `[▸] TUI settings`, `[▸] LLM params`, `[▸] Prompts`.
 
-**Layout is not configurable.** opencode 1.18.25 offers no layout choice:
-the SDK's `layout` field is `"auto" | "stretch"` and marked deprecated with
-*"Always uses stretch layout"*; `tui.json` has only `theme`, `keybinds` and
-`cursor` blocks, with no `sidebar` block, no width, no position. The column
-takes width from the content area and that is not configurable.
+**Layout switches by terminal width, and is not configurable.** opencode
+1.18.25 (same logic in 1.18.0, 1.18.4 and 1.17.19) picks one of two layouts by
+terminal width:
+
+- **Above 120 columns** the sidebar docks beside the content and the content
+  reflows into a narrower column. Nothing is lost. Verified at 160 columns:
+  with the sidebar open, each wrapped line continues where the previous one
+  broke, and the wrap points match those of a 120-column terminal without a
+  sidebar — the sidebar takes its hard-coded 42 columns off the content
+  width. The sidebar also becomes visible automatically at this width (the
+  internal `sidebar` KV state defaults to `"auto"`).
+- **At 120 columns and below** the sidebar is drawn over the content. The
+  underlying text keeps its full width and its right-hand part is simply not
+  shown. Verified optically at 120, 100, 80 and 60 columns; the behaviour
+  does not change anywhere in that range.
+
+Practical consequence: if the sidebar covers the content, widen the terminal
+past 120 columns. PuTTY's default of 80 columns is below the threshold.
+
+**Distinguishing overlay from reflow.** Overlay and reflow are told apart by
+the line STARTS, not the line ends. A line ending earlier with the sidebar
+open proves nothing — that is what reflow looks like too. The test is whether
+the following line begins with the words that fell off the end of the
+previous one (reflow) or with the same words as in the sidebar-off capture
+(overlay, the missing words are gone from the screen).
+
+Evidence: `work/opencode-sidebar-160-{visible,hidden}.png`,
+`work/opencode-sidebar-120-{visible,hidden}.png`,
+`work/opencode-sidebar-100-{visible,hidden}.png`,
+`work/opencode-sidebar-80-{visible,hidden}.png`,
+`work/opencode-sidebar-60-{visible,hidden}.png`.
+
+There is no configuration key for sidebar visibility, width, position, overlay
+or split — neither in the official docs nor in the `tui.json` schema. The
+sidebar's width is hard-coded at 42 columns. The SDK's `layout` field is
+`"auto" | "stretch"` and marked deprecated with *"Always uses stretch
+layout"*; `tui.json` has only `theme`, `keybinds` and `cursor` blocks, with
+no `sidebar` block. The only documented sidebar setting is
+`keybinds.sidebar_toggle` (default `<leader>b`). Upstream issue #6086 and
+PR #6092 proposed a configurable overlay; neither is supported. The 1.18.0
+release notes describe a Desktop v2 layout switch, not a TUI sidebar change —
+no official 1.18.x release note describes any TUI sidebar layout change.
+
+Sources: `/home/user/opencode-agent-intercom/work/research-sidebar-layout.md`,
+`/home/user/opencode-agent-intercom/work/sidebar-layout-options.md`.
 
 Combined navigation once everything is wired:
 

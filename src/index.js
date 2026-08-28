@@ -61,6 +61,7 @@ import { installAgents } from "./agents.js"
 import { chatParamsHook } from "./llmparams.js"
 import { chatMessageHook, applyModelChoices } from "./llmmodel.js"
 import { captureSystem, captureMessages, captureParams } from "./reqlog.js"
+import { setServerUrl } from "./client.js"
 import { log } from "./log.js"
 
 // NOTE: this module must have exactly ONE export — the default factory.
@@ -70,8 +71,13 @@ import { log } from "./log.js"
 // directly — it must never be re-exported from here.
 
 export default async (ctx) => {
-  const { client, directory } = ctx
+  const { client, directory, serverUrl } = ctx
   log("agent-intercom initialized")
+
+  // The TUI view switch after a handoff posts `/tui/select-session` where the
+  // resolved SDK client carries no method for it; `serverUrl` is where it
+  // posts to and reaches the plugin only here, in the factory context.
+  setServerUrl(serverUrl)
 
   const permissionGuard = createPermissionGuard(client)
   const transformSystem = createTransformSystem(client)

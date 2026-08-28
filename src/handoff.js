@@ -49,7 +49,15 @@ import { isPluginGeneratedMessage, looksLikePluginMessage } from "./pluginmsg.js
 //      and write it under the working dir. A subagent that finished during
 //      steps 0-4 is gone from the registry (its notice sits in the drain)
 //      and is correctly NOT announced as re-parented.
-//   6. Send the kickoff to the new orchestrator.
+//   6. Send the kickoff to the new orchestrator. An endless cycle passes
+//      `deps.extraKickoffBlock` — the "work off the todo file" instruction
+//      naming the task ids it just confirmed — which is placed right after
+//      the handoff summary. Immediately after the kickoff is sent, and only
+//      then, `deps.selectTuiSession` switches the TUI to the new session:
+//      switching earlier would show the user an empty session, switching
+//      after the archive would leave a window in which the displayed session
+//      is already retired. Best-effort — a failed switch is a presentation
+//      failure and never fails the handoff.
 //   7. Flush the drain (deps.flushDrain): buffered notices are delivered to
 //      the NEW session, AFTER the kickoff, in arrival order; the old→new
 //      redirect now routes any late straggler to the new session as well.
@@ -101,6 +109,8 @@ import { isPluginGeneratedMessage, looksLikePluginMessage } from "./pluginmsg.js
 // @property {(sessionID: string) => Promise<void>} archiveSession  retires the OLD primary in step 8 without opencode's recursive child-delete cascade
 // @property {(sessionID: string) => void} forgetPrimary
 // @property {() => Promise<string>} promptOldPrimaryForDocSummaries
+// @property {string} [extraKickoffBlock]  appended to the kickoff after the handoff summary (endless mode)
+// @property {(sessionID: string) => Promise<void>} [selectTuiSession]  best-effort TUI view switch to the new session
 //
 // @param {PrimaryHandoffDeps} deps
 // @returns {Promise<{ newSessionID: string, reparented: number, summaryMarkdown: string }>}
@@ -225,9 +235,13 @@ async function performPrimaryHandoffInner(deps) {
     md = deps.formatPrimarySummary({ stand, notes, plannedSteps: steps })
     deps.writePrimarySummary(deps.directory, md)
 
-    // 6. Send the kickoff to the new orchestrator.
+    // 6. Send the kickoff to the new orchestrator. `extraKickoffBlock` is
+    // the endless cycle's work-off instruction; it sits directly after the
+    // handoff summary so the new session's first read is what it is for.
+    // Absent on the plain handoff, which composes exactly as before.
+    const extra = deps.extraKickoffBlock ? "\n\n" + deps.extraKickoffBlock : ""
     const kickoffMessage =
-      md + (historySummary ? "\n\n" + historySummary : "") + "\n\n" + docSummaries
+      md + extra + (historySummary ? "\n\n" + historySummary : "") + "\n\n" + docSummaries
     await deps.promptAsync(newID, kickoffMessage)
   } catch (err) {
     // Pre-kickoff failure: the new session never became the live primary.
@@ -264,6 +278,21 @@ async function performPrimaryHandoffInner(deps) {
   // Failures below are logged and the sequence proceeds — reverting a live
   // handoff (deleting #2 after its kickoff) would be strictly worse than a
   // zombie old session or an undelivered buffered notice.
+
+  // 6b. Point the TUI at the new session. The server-side plugin's only other
+  // reach into the TUI is showToast; without this the user keeps looking at a
+  // session that is about to be archived and has stopped answering. Ordered
+  // here on purpose: after the kickoff (so the session the user lands on
+  // already has its first message) and before the archive (so the displayed
+  // session is never a retired one). Best-effort like every other post-kickoff
+  // step — the handoff itself is done.
+  if (deps.selectTuiSession) {
+    try {
+      await deps.selectTuiSession(newID)
+    } catch (err) {
+      log("primary handoff: TUI session switch failed", errMsg(err))
+    }
+  }
 
   // 7. Flush the drain: buffered notices are delivered to #2, AFTER the
   // kickoff, in arrival order. This also installs the old→new redirect for
@@ -370,6 +399,36 @@ export const DOC_SUMMARY_PROMPT =
   "no `read`/`bash`/`glob`/`grep` tool calls, no preamble, no postscript, no markdown other than " +
   "the four `## …` headings above. Start your reply with `## PROJECT.md —` literally."
 
+// The prompt an endless cycle sends to the primary that is about to be
+// replaced: state everything still open, in the todo file's own two-line
+// shape, so the plugin can write the points itself. The orchestrator cannot
+// write files — it holds spawn / abort / list and nothing else — so the reply
+// is plain text, which is the one thing a session at its context ceiling can
+// still reliably produce. `parseOpenPoints` (src/openpoints.js) maps the reply
+// onto `addTask({ title, accept })`.
+export const OPEN_POINTS_PROMPT =
+  "You are about to be replaced by a fresh orchestrator session that will continue this work " +
+  "from the project's todo file. Before that, emit ONE final plain-text reply listing EVERY " +
+  "point that is still open: what was being worked on, what was decided and not yet carried " +
+  "out, and what a subagent reported back as unfinished.\n\n" +
+  "Use EXACTLY this shape (no extra prose, no tool calls, no code blocks):\n\n" +
+  "## OPEN POINTS\n\n" +
+  "- <one open point, imperative, max ~120 characters>\n" +
+  "  accept: <one line naming what would show it is done>\n" +
+  "- <the next one>\n" +
+  "  accept: <…>\n\n" +
+  "One point per `- ` line, its criterion on the indented `accept:` line below it. Draw them " +
+  "from your context ONLY — do NOT read files from disk and do NOT spawn anything. If nothing " +
+  "is genuinely open, emit `## OPEN POINTS` and nothing else. Start your reply with " +
+  "`## OPEN POINTS` literally."
+
+// Recognises the open-points reply: the heading the prompt demands, on its own
+// line (/m, so a model that prepends prose still matches). The counterpart of
+// looksLikeDocSummariesReply for the endless cycle's own poll.
+export function looksLikeOpenPointsReply(text) {
+  return typeof text === "string" && /^##\s+OPEN POINTS\s*$/m.test(text)
+}
+
 // Section cap on each per-file summary. Mirrors the "~400 characters" the
 // prompt instructs; used by `validateDocSummaries` to truncate runaway
 // replies so the kickoff message stays bounded even when #1 ignores the cap.
@@ -413,9 +472,14 @@ export function looksLikeDocSummariesReply(text) {
 //   4. Timeout → throw; the caller (performPrimaryHandoff step 5) catches
 //      and falls back, so the handoff itself NEVER fails on this path.
 //
+// The shape check is injected (`looksLikeReply`) so the endless cycle can reuse
+// this exact discipline for its own final turn — the same baseline / re-baseline
+// / timeout rules, keyed on `## OPEN POINTS` instead of `## PROJECT.md —`.
+//
 // @param {Object} io
 // @param {() => Promise<string|undefined>} io.fetchResult  latest final result
 // @param {() => Promise<void>} io.sendPrompt               fire the summary prompt
+// @param {(text: string) => boolean} [io.looksLikeReply]   shape check on the polled result
 // @param {(ms: number) => Promise<void>} [io.sleep]
 // @param {() => number} [io.now]
 // @param {number} [io.timeoutMs]
@@ -424,6 +488,7 @@ export function looksLikeDocSummariesReply(text) {
 export async function requestDocSummaries({
   fetchResult,
   sendPrompt,
+  looksLikeReply = looksLikeDocSummariesReply,
   sleep = defaultSleep,
   now = Date.now,
   timeoutMs = DOC_SUMMARIES_TIMEOUT_MS,
@@ -446,7 +511,7 @@ export async function requestDocSummaries({
   while (now() < deadline) {
     const result = await fetchResult()
     if (result && result !== baseline) {
-      if (looksLikeDocSummariesReply(result)) return result
+      if (looksLikeReply(result)) return result
       // A foreign reply (the in-flight turn the handoff interrupted) landed
       // first — treat it as the new baseline and keep waiting for the
       // summary turn queued behind it.
@@ -455,7 +520,7 @@ export async function requestDocSummaries({
     await sleep(pollMs)
   }
   // 4. Timed out without a summaries reply — let the handoff fall back.
-  throw new Error("requestDocSummaries: timed out waiting for the old primary's summaries reply")
+  throw new Error("requestDocSummaries: timed out waiting for the old primary's shaped reply")
 }
 
 function defaultSleep(ms) {

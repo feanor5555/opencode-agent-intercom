@@ -17,11 +17,14 @@ import {
   registryMutex,
   shouldRefreshPrimary,
   recordPrimaryContext,
+  primaryContextTokens,
   scheduleHandoffIfNeeded,
+  scheduleEndlessIfNeeded,
+  cancelPendingEndless,
   CTX_TTL_MS,
 } from "./registry.js"
 import { fetchSnapshot, showToast, getSessionDirectory } from "./client.js"
-import { getSettings } from "./settings.js"
+import { getSettings, primaryContextThreshold } from "./settings.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock } from "./project.js"
 import { log, errMsg } from "./log.js"
@@ -36,7 +39,7 @@ import { tokens as fmtTokens, ageSeconds } from "./format.js"
 import { postParentNotice, teardownSubagent } from "./teardown.js"
 import { completionNotice, errorNotice, denialLoopNotice } from "./notices.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
-import { maybeRunPendingHandoff } from "./handoffwiring.js"
+import { maybeRunPendingHandoff, maybeRunPendingEndless } from "./handoffwiring.js"
 
 // Re-exported so existing importers (test/plugin.test.js) keep resolving it
 // from hooks.js after the watchdog code moved to its own module.
@@ -173,14 +176,37 @@ export function createTransformSystem(client) {
         // the handoff — see maybeRunPendingHandoff. scheduleHandoffIfNeeded
         // is true only when the flag was NEWLY set (already-pending and
         // in-progress both gate), so the toast fires once per scheduling.
-        const { maxPrimaryContext } = getSettings()
-        if (scheduleHandoffIfNeeded(sessionID, maxPrimaryContext)) {
-          log("primary handoff scheduled (idle-gated)", { sessionID })
-          showToast(client, {
-            title: "agent-intercom",
-            message:
-              "primary context limit reached — orchestrator handoff scheduled for the end of this turn",
-          })
+        //
+        // Which threshold is armed is resolved in ONE place —
+        // primaryContextThreshold(): while endless mode is on, endlessContext
+        // DISPLACES maxPrimaryContext. Arming both would be inert, the lower
+        // one always firing first.
+        const threshold = primaryContextThreshold()
+        if (getSettings().endlessMode) {
+          if (scheduleEndlessIfNeeded(sessionID, threshold)) {
+            log("endless: scheduled", { sessionID, ctx: primaryContextTokens(sessionID), threshold })
+            showToast(client, {
+              title: "agent-intercom",
+              message:
+                "endless mode: context ceiling reached — open points are saved and the " +
+                "orchestrator is replaced at the end of this turn",
+            })
+          }
+        } else {
+          // The switch was turned off between the mark and this turn: drop a
+          // latch that has not been claimed yet, so the freeze lifts and the
+          // plain handoff owns the threshold again. A cycle already executing
+          // is not touched — it has written to the todo file and must not
+          // leave the primary half-replaced.
+          cancelPendingEndless(sessionID)
+          if (scheduleHandoffIfNeeded(sessionID, threshold)) {
+            log("primary handoff scheduled (idle-gated)", { sessionID })
+            showToast(client, {
+              title: "agent-intercom",
+              message:
+                "primary context limit reached — orchestrator handoff scheduled for the end of this turn",
+            })
+          }
         }
         limits = formatLimitsNotice()
         snapshot = formatSubagentSnapshot(sessionID) || ""
@@ -508,6 +534,11 @@ export function createEventHandler(client) {
           // poll); maybeRunPendingHandoff never rejects (runScheduledHandoff
           // swallows + releases), so `void` cannot hide an unhandled rejection.
           void maybeRunPendingHandoff(client, props?.sessionID)
+          // The endless twin, same discipline: only a primary that crossed the
+          // endless threshold has the latch, so this is a set lookup and a
+          // return for every other idle. Detached because a cycle waits for
+          // quiesce and then runs a full handoff.
+          void maybeRunPendingEndless(client, props?.sessionID)
           break
         case "session.error":
           await onSessionError(props, client)

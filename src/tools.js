@@ -25,6 +25,7 @@ import {
   reservePendingTaskId,
   releasePendingTaskId,
   isTaskIdPending,
+  isEndlessFrozen,
 } from "./registry.js"
 import { projectContext } from "./project.js"
 import { getSettings } from "./settings.js"
@@ -132,6 +133,27 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
           "agent, name it and what it should do in your final reply; the orchestrator decides " +
           "and spawns it.",
       }
+    }
+    // The endless-mode spawn freeze. From the moment the latch is set until
+    // the cycle ends, no new subagent starts: between the latch and quiesce the
+    // orchestrator is still answering its turn, and one that spawns as fast as
+    // its subagents finish would never let the cycle reach quiesce. A subagent
+    // started now would in any case be reparented onto a session that has no
+    // memory of asking for it.
+    //
+    // A THROW, not a returned refusal — the shape §3.3 of the endless-mode
+    // concept names, and the shape the primary-tool guard in hooks.js already
+    // uses. NOTE: `guard` (above) catches it and hands the model
+    // `spawn failed: <this text>`, so what the model sees is the text either
+    // way; the throw is what makes the refusal a failed tool call rather than
+    // a successful one with a refusal in it.
+    if (isEndlessFrozen(toolCtx.sessionID)) {
+      log("spawn refused: endless cycle in progress", { sessionID: toolCtx.sessionID })
+      throw new Error(
+        "Endless mode is saving this session's open points and replacing it with a fresh " +
+          "orchestrator. No new subagent will start. End your turn now — the work you would " +
+          "delegate belongs in your open points, which you are about to be asked for.",
+      )
     }
     trackPrimary(toolCtx.sessionID)
     const directory = await dirFor(toolCtx)

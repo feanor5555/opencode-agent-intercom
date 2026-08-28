@@ -2,9 +2,11 @@
 // sidebar's copy of it (tui/src/settings-file.ts).
 //
 // The TUI is a separate npm package and cannot import the plugin module, so it
-// carries its own copy of the two defaults, the two env var names and the
+// carries its own copy of the shared defaults, the env var names and the
 // file > env > default order. Nothing at runtime notices when the two drift
-// apart; these tests do, by pinning both sides at the same file and env.
+// apart; these tests do, by pinning both sides at the same file and env. The
+// endless keys are in it too: endlessMode is the file's only boolean and is the
+// one key whose validator differs from the integer rule the others share.
 //
 // Run: node --test test/settings-defaults-parity.test.js
 
@@ -15,6 +17,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import {
+  DEFAULT_ENDLESS_CONTEXT,
+  DEFAULT_ENDLESS_MODE,
   DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_SUBAGENTS,
   getSettings,
@@ -22,6 +26,8 @@ import {
   setSettingsPath,
 } from "../src/settings.js"
 import {
+  DEFAULT_ENDLESS_CONTEXT as TUI_DEFAULT_ENDLESS_CONTEXT,
+  DEFAULT_ENDLESS_MODE as TUI_DEFAULT_ENDLESS_MODE,
   DEFAULT_MAX_CONTEXT as TUI_DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_SUBAGENTS as TUI_DEFAULT_MAX_SUBAGENTS,
   readSettings,
@@ -40,16 +46,23 @@ beforeEach(() => {
   setTuiSettingsPath(file)
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_CONTEXT
+  delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE
+  delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT
 })
 
-// Both limits as each side resolves them right now. The plugin caches for
-// TTL_MS, so its cache is dropped first.
+// Every setting both sides carry, as each resolves it right now. The plugin
+// caches for TTL_MS, so its cache is dropped first.
 function bothSides() {
   resetSettings()
   const plugin = getSettings()
   const tui = readSettings()
   return [
-    { maxSubagents: plugin.maxSubagents, maxContext: plugin.maxContext },
+    {
+      maxSubagents: plugin.maxSubagents,
+      maxContext: plugin.maxContext,
+      endlessMode: plugin.endlessMode,
+      endlessContext: plugin.endlessContext,
+    },
     tui,
   ]
 }
@@ -57,6 +70,8 @@ function bothSides() {
 test("the two modules carry the same built-in defaults", () => {
   assert.equal(DEFAULT_MAX_SUBAGENTS, TUI_DEFAULT_MAX_SUBAGENTS)
   assert.equal(DEFAULT_MAX_CONTEXT, TUI_DEFAULT_MAX_CONTEXT)
+  assert.equal(DEFAULT_ENDLESS_MODE, TUI_DEFAULT_ENDLESS_MODE)
+  assert.equal(DEFAULT_ENDLESS_CONTEXT, TUI_DEFAULT_ENDLESS_CONTEXT)
 })
 
 test("with neither file nor env both resolve the built-in defaults", () => {
@@ -64,6 +79,8 @@ test("with neither file nor env both resolve the built-in defaults", () => {
   assert.deepEqual(plugin, {
     maxSubagents: DEFAULT_MAX_SUBAGENTS,
     maxContext: DEFAULT_MAX_CONTEXT,
+    endlessMode: DEFAULT_ENDLESS_MODE,
+    endlessContext: DEFAULT_ENDLESS_CONTEXT,
   })
   assert.deepEqual(tui, plugin)
 })
@@ -71,17 +88,39 @@ test("with neither file nor env both resolve the built-in defaults", () => {
 test("with env alone both resolve the env value", () => {
   process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS = "4"
   process.env.OPENCODE_AGENT_INTERCOM_MAX_CONTEXT = "70000"
+  process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE = "1"
+  process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT = "300000"
   const [plugin, tui] = bothSides()
-  assert.deepEqual(plugin, { maxSubagents: 4, maxContext: 70000 })
+  assert.deepEqual(plugin, {
+    maxSubagents: 4,
+    maxContext: 70000,
+    endlessMode: true,
+    endlessContext: 300000,
+  })
   assert.deepEqual(tui, plugin)
 })
 
 test("with file and env both let the file win", () => {
   process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS = "4"
   process.env.OPENCODE_AGENT_INTERCOM_MAX_CONTEXT = "70000"
-  writeFileSync(file, JSON.stringify({ maxSubagents: 2, maxContext: 95000 }))
+  process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE = "1"
+  process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT = "300000"
+  writeFileSync(
+    file,
+    JSON.stringify({
+      maxSubagents: 2,
+      maxContext: 95000,
+      endlessMode: false,
+      endlessContext: 120000,
+    }),
+  )
   const [plugin, tui] = bothSides()
-  assert.deepEqual(plugin, { maxSubagents: 2, maxContext: 95000 })
+  assert.deepEqual(plugin, {
+    maxSubagents: 2,
+    maxContext: 95000,
+    endlessMode: false,
+    endlessContext: 120000,
+  })
   assert.deepEqual(tui, plugin)
 })
 
@@ -89,13 +128,62 @@ test("both reject the same file values and fall back to env or default", () => {
   process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS = "4"
   writeFileSync(file, JSON.stringify({ maxSubagents: -1, maxContext: "lots" }))
   const [plugin, tui] = bothSides()
-  assert.deepEqual(plugin, { maxSubagents: 4, maxContext: DEFAULT_MAX_CONTEXT })
+  assert.deepEqual(plugin, {
+    maxSubagents: 4,
+    maxContext: DEFAULT_MAX_CONTEXT,
+    endlessMode: DEFAULT_ENDLESS_MODE,
+    endlessContext: DEFAULT_ENDLESS_CONTEXT,
+  })
   assert.deepEqual(tui, plugin)
 })
 
 test("both keep 0 as a value in its own right", () => {
-  writeFileSync(file, JSON.stringify({ maxSubagents: 0, maxContext: 0 }))
+  writeFileSync(
+    file,
+    JSON.stringify({ maxSubagents: 0, maxContext: 0, endlessContext: 0 }),
+  )
   const [plugin, tui] = bothSides()
-  assert.deepEqual(plugin, { maxSubagents: 0, maxContext: 0 })
+  assert.deepEqual(plugin, {
+    maxSubagents: 0,
+    maxContext: 0,
+    endlessMode: DEFAULT_ENDLESS_MODE,
+    endlessContext: 0,
+  })
+  assert.deepEqual(tui, plugin)
+})
+
+test("both take endlessMode from the file only as a real boolean", () => {
+  writeFileSync(file, JSON.stringify({ endlessMode: true }))
+  const [on, tuiOn] = bothSides()
+  assert.equal(on.endlessMode, true)
+  assert.deepEqual(tuiOn, on)
+
+  // "true", 1 and null are not booleans: both sides leave the env-or-default
+  // resolution standing, the way a bad number leaves a limit standing.
+  for (const bad of ["true", 1, null]) {
+    writeFileSync(file, JSON.stringify({ endlessMode: bad }))
+    const [plugin, tui] = bothSides()
+    assert.equal(plugin.endlessMode, DEFAULT_ENDLESS_MODE)
+    assert.deepEqual(tui, plugin)
+  }
+})
+
+test("both let the file's endlessMode win over the env var", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE = "0"
+  writeFileSync(file, JSON.stringify({ endlessMode: true }))
+  const [plugin, tui] = bothSides()
+  assert.equal(plugin.endlessMode, true)
+  assert.deepEqual(tui, plugin)
+})
+
+test("both read the endlessMode env var as 1/0 and ignore anything else", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE = "0"
+  const [off, tuiOff] = bothSides()
+  assert.equal(off.endlessMode, false)
+  assert.deepEqual(tuiOff, off)
+
+  process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE = "yes"
+  const [plugin, tui] = bothSides()
+  assert.equal(plugin.endlessMode, DEFAULT_ENDLESS_MODE)
   assert.deepEqual(tui, plugin)
 })

@@ -16,6 +16,10 @@ import {
   handoffDrains,
   handoffRedirects,
   lastPrimaryTool,
+  pendingEndless,
+  endlessInProgress,
+  endlessCooldowns,
+  endlessProgress,
 } from "./state.js"
 // client.js does NOT import registry.js (verified — it only imports log /
 // settings / pluginmsg), so importing forgetSessionDirectory here creates no
@@ -64,6 +68,13 @@ export function forgetPrimary(sessionID) {
   // could never be claimed again (no further idle events) but would leak.
   pendingHandoffs.delete(sessionID)
   handoffInProgress.delete(sessionID)
+  // Same for the endless latch, freeze and cooldown: the cycle that just
+  // replaced this primary is over and its id is never scheduled again. The
+  // cross-cycle progress record (endlessProgress) deliberately survives — it
+  // is what the no-progress bound compares across replacements.
+  pendingEndless.delete(sessionID)
+  endlessInProgress.delete(sessionID)
+  endlessCooldowns.delete(sessionID)
 }
 
 // Per-agent monotonic friendly handle, e.g. "researcher#1".
@@ -687,6 +698,144 @@ export function releaseHandoff(sessionID) {
 
 export function isHandoffInProgress(sessionID) {
   return handoffInProgress.has(sessionID)
+}
+
+// ----------------------------------------------------------------------------
+// Endless mode: the latch, the spawn freeze, the quiesce predicate and the two
+// bounds that need state (cooldown after an abandoned cycle, open-task
+// progress across cycles).
+//
+// The latch is the endless twin of pendingHandoffs and works the same way: the
+// transform hook MARKS while the triggering turn runs, the `session.idle`
+// event CLAIMS and executes. What it adds over the plain handoff is the
+// freeze — from the mark until the end of the cycle, `spawn` refuses, so an
+// orchestrator that spawns as fast as its subagents finish cannot keep the
+// cycle from ever reaching quiesce.
+// ----------------------------------------------------------------------------
+
+// How long after an abandoned cycle (quiesce timeout, save failure, handoff
+// failure) scheduleEndlessIfNeeded refuses to schedule again for that primary.
+// Without it a primary already over the threshold re-schedules on its next
+// turn and retries continuously — the hot loop releaseHandoff avoids by not
+// restoring the pending flag.
+export const ENDLESS_COOLDOWN_MS = 300_000
+
+// Transform-side gate: schedule an endless cycle for this primary iff the
+// threshold is reached, no cycle is pending or executing, and the primary is
+// not in the cooldown of a cycle that abandoned. Returns true only when the
+// latch was NEWLY set, so the "scheduled" log line and toast fire once per
+// crossing rather than on every over-threshold turn.
+export function scheduleEndlessIfNeeded(sessionID, endlessContext) {
+  if (!shouldTriggerPrimaryHandoff(sessionID, endlessContext)) return false
+  if (endlessCooldownActive(sessionID)) return false
+  return markEndlessPending(sessionID)
+}
+
+// Marks a primary's endless cycle as pending. False when the id is falsy, a
+// cycle is already executing for it, or the latch is already set.
+export function markEndlessPending(sessionID) {
+  if (!sessionID) return false
+  if (endlessInProgress.has(sessionID)) return false
+  if (pendingEndless.has(sessionID)) return false
+  pendingEndless.add(sessionID)
+  return true
+}
+
+export function hasEndlessPending(sessionID) {
+  return pendingEndless.has(sessionID)
+}
+
+// Idle-side gate: atomically consume the latch and latch the in-progress
+// state. True exactly once per scheduled cycle — a duplicate idle event, or an
+// idle racing the executing cycle (the old primary goes idle again after its
+// open-points turn), returns false.
+export function claimPendingEndless(sessionID) {
+  if (!sessionID) return false
+  if (!pendingEndless.has(sessionID)) return false
+  if (endlessInProgress.has(sessionID)) return false
+  pendingEndless.delete(sessionID)
+  endlessInProgress.add(sessionID)
+  return true
+}
+
+// Abandon-path release: clears the in-progress latch, which also lifts the
+// spawn freeze. The consumed pending flag is NOT restored — a retry has to go
+// through a fresh schedule, and the cooldown holds that back for five minutes.
+// The success path releases via forgetPrimary instead.
+export function releaseEndless(sessionID) {
+  if (!sessionID) return
+  endlessInProgress.delete(sessionID)
+}
+
+// The switch was turned off: drop a latch that has not been claimed yet. A
+// cycle already executing is NOT touched — it has written to the todo file and
+// must not leave the primary half-replaced.
+export function cancelPendingEndless(sessionID) {
+  if (!sessionID) return false
+  if (endlessInProgress.has(sessionID)) return false
+  return pendingEndless.delete(sessionID)
+}
+
+export function isEndlessInProgress(sessionID) {
+  return endlessInProgress.has(sessionID)
+}
+
+// The spawn freeze: true from the moment the latch is set until the cycle
+// ends, either way it ended. Read at the top of the `spawn` handler.
+export function isEndlessFrozen(sessionID) {
+  return pendingEndless.has(sessionID) || endlessInProgress.has(sessionID)
+}
+
+// Arms the post-abandon cooldown for this primary.
+export function setEndlessCooldown(sessionID, ms = ENDLESS_COOLDOWN_MS) {
+  if (!sessionID) return
+  endlessCooldowns.set(sessionID, Date.now() + ms)
+}
+
+// True while the cooldown of an abandoned cycle is still running. An expired
+// entry is dropped on read, so the map does not grow over a long process.
+export function endlessCooldownActive(sessionID) {
+  const until = endlessCooldowns.get(sessionID)
+  if (until === undefined) return false
+  if (Date.now() >= until) {
+    endlessCooldowns.delete(sessionID)
+    return false
+  }
+  return true
+}
+
+// The quiesce predicate: no subagent is running anywhere in this process and
+// no handoff drain is open for this primary. Read inside ONE registryMutex
+// section so a concurrent removeEntry / upsertSession cannot splice the count.
+//
+// The count is countActiveSubagents, i.e. PROCESS-WIDE and inclusive of
+// pendingSpawns.count — a spawn that has reserved its slot but not yet reached
+// upsertSession counts as running, which is exactly the window a naive
+// registry scan would report as zero. Process-wide is an over-approximation
+// with a second orchestrator in the same process (the endless primary waits
+// for that one's subagents too); it is kept because the alternative is a
+// second counting rule that disagrees with the cap the whole plugin is built
+// on.
+export function isQuiesced(sessionID) {
+  return registryMutex.runExclusive(
+    () => countActiveSubagents() === 0 && !hasHandoffDrain(sessionID),
+  )
+}
+
+// Records the open-task count at the end of a cycle and reports how many
+// consecutive cycles have failed to lower it. A count that fell resets the
+// streak; a count equal to or above the previous one raises it. The first
+// cycle of a process has nothing to compare against and never counts as
+// stalled. The no-progress bound switches endless mode off at 2.
+export function recordEndlessCycle(openTasks) {
+  const previous = endlessProgress.lastOpenTasks
+  if (typeof previous === "number" && openTasks >= previous) {
+    endlessProgress.stalledCycles += 1
+  } else {
+    endlessProgress.stalledCycles = 0
+  }
+  endlessProgress.lastOpenTasks = openTasks
+  return { stalledCycles: endlessProgress.stalledCycles, previousOpenTasks: previous }
 }
 
 function createEntry(sessionID, agent, prompt, parentID, taskId, directory) {

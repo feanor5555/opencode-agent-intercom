@@ -92,6 +92,38 @@ export const pendingHandoffs = new Set()
 // can gate on it and resetState() can clear it between tests.
 export const handoffInProgress = new Set()
 
+// sessionIDs of primary sessions whose context crossed the endless threshold
+// and whose endless cycle is SCHEDULED but not yet started. The endless twin
+// of pendingHandoffs, and marked by the same transform hook for the same
+// reason: prompting, aborting or replacing the active session from inside its
+// own hook is re-entrant and can hang, so the hook only MARKS and the
+// primary's next `session.idle` executes. From the moment the latch is set,
+// `spawn` refuses new subagents — a subagent started now would be reparented
+// onto a session that has no memory of asking for it. See
+// scheduleEndlessIfNeeded / claimPendingEndless in registry.js.
+export const pendingEndless = new Set()
+
+// sessionIDs with an endless cycle currently EXECUTING (between
+// claimPendingEndless and forgetPrimary on success / releaseEndless on
+// abandon). Guards against double execution by a second idle event, and holds
+// the spawn freeze for the whole cycle.
+export const endlessInProgress = new Set()
+
+// sessionID -> wall-clock ms until which scheduleEndlessIfNeeded refuses to
+// schedule again. Set when a cycle abandons (quiesce timeout, save failure,
+// handoff failure): a primary already over the threshold would otherwise
+// re-schedule on its very next turn and retry continuously.
+export const endlessCooldowns = new Map()
+
+// Cross-cycle progress bookkeeping for the no-progress bound. NOT keyed by
+// session id: each cycle replaces the primary, so the count has to survive the
+// replacement to be comparable at all. `lastOpenTasks` is the open-task count
+// at the end of the previous cycle (null before the first), `stalledCycles`
+// counts consecutive cycles whose count did not fall. Wrapped in an object for
+// the same reason as pendingSpawns (resetState reassigns the fields, importers
+// share the one live reference).
+export const endlessProgress = { lastOpenTasks: null, stalledCycles: 0 }
+
 // sessionID -> drain object { oldID, newID, notices: [] }. A drain is opened
 // at the START of an orchestrator handoff (beginHandoffDrain) and keyed under
 // the OLD primary's id; once the new session exists it is ALSO keyed under
@@ -156,4 +188,9 @@ export function resetState() {
   handoffInProgress.clear()
   handoffDrains.clear()
   handoffRedirects.clear()
+  pendingEndless.clear()
+  endlessInProgress.clear()
+  endlessCooldowns.clear()
+  endlessProgress.lastOpenTasks = null
+  endlessProgress.stalledCycles = 0
 }

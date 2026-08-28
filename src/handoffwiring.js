@@ -9,8 +9,11 @@ import {
   runScheduledHandoff,
   lastUserGoal,
   requestDocSummaries,
+  looksLikeOpenPointsReply,
   DOC_SUMMARY_PROMPT,
+  OPEN_POINTS_PROMPT,
 } from "./handoff.js"
+import { runEndlessCycle } from "./endless.js"
 import {
   claimPendingHandoff,
   releaseHandoff,
@@ -22,6 +25,13 @@ import {
   flushHandoffDrain,
   abortHandoffDrain,
   handoffGeneration,
+  hasEndlessPending,
+  claimPendingEndless,
+  releaseEndless,
+  setEndlessCooldown,
+  isQuiesced,
+  recordEndlessCycle,
+  countActiveSubagents,
 } from "./registry.js"
 import {
   fetchSnapshot,
@@ -33,7 +43,10 @@ import {
   getSessionDirectory,
   createChildSession,
   promptSession,
+  selectTuiSession,
 } from "./client.js"
+import { addTask, listOpen, findTodoFile, TodoFileMissingError } from "./todofile.js"
+import { getSettings, writeEndlessMode } from "./settings.js"
 import { readPlannedSteps, formatPrimarySummary, writePrimarySummary } from "./project.js"
 import { log, errMsg } from "./log.js"
 
@@ -134,6 +147,11 @@ function buildPrimaryHandoffDeps(client, sessionID, sessionDir) {
         agent: ORCHESTRATOR_AGENT_NAME,
         prompt: message,
       }),
+    // Point the TUI at the new session right after the kickoff (handoff step
+    // 6b). Best-effort inside client.js — it never throws into the handoff.
+    // Wired for the plain handoff too: it has the same gap, and a user left on
+    // the archived session sees an orchestrator that has stopped answering.
+    selectTuiSession: (sid) => selectTuiSession(client, sid),
     // Ask the OLD primary (#1, which still holds PROJECT.md / TODO.md /
     // ARCHITECTURE.md in its context) to emit the three per-file summaries
     // plus the Session-Verlauf history block in one final turn. The old
@@ -246,5 +264,103 @@ async function promptOldPrimaryForDocSummaries(client, primarySessionID) {
         agent: ORCHESTRATOR_AGENT_NAME,
         prompt: DOC_SUMMARY_PROMPT,
       }),
+  })
+}
+
+// Idle-gated endless cycle, execution side. Called from the `session.idle`
+// event for EVERY idle session, beside maybeRunPendingHandoff: a session with
+// no endless latch leaves here after one synchronous set lookup, before any
+// session-API call is made. The real, atomic claim happens inside
+// runEndlessCycle — the cheap pre-check only keeps the idle path free of an
+// HTTP round trip for every subagent that finishes.
+//
+// Runs detached from the event handler like the plain handoff, and for a
+// stronger reason: a cycle waits for quiesce (up to endlessQuiesceTimeoutMs),
+// then takes a final turn out of the old primary, then runs the whole handoff.
+// runEndlessCycle never throws, so `void`-calling it cannot hide a rejection.
+//
+// Success releases the in-progress latch through the handoff's forgetPrimary;
+// every abandon path releases it inside runEndlessCycle and arms the cooldown.
+export async function maybeRunPendingEndless(client, sessionID) {
+  if (!hasEndlessPending(sessionID)) return null
+  const { endlessQuiesceTimeoutMs, endlessMaxCycles } = getSettings()
+  // The session's OWN directory, not the factory closure's: sessions created
+  // with ?directory=… land in a different project but share the same factory
+  // ctx, and the todo file this cycle writes must be that project's.
+  const directory = await getSessionDirectory(client, sessionID)
+  return runEndlessCycle({
+    primarySessionID: sessionID,
+    claim: () => claimPendingEndless(sessionID),
+    release: () => releaseEndless(sessionID),
+    setCooldown: () => setEndlessCooldown(sessionID),
+    isQuiesced: () => isQuiesced(sessionID),
+    countActive: () => countActiveSubagents(),
+    requestOpenPoints: () => promptOldPrimaryForOpenPoints(client, sessionID),
+    addTask: (point) => addTask(directory, point),
+    // A directory with NO todo file at all is the greenfield state addTask
+    // creates over, so it reads as an empty list here. "several todo files"
+    // and "not a regular file" are NOT greenfield — they propagate and the
+    // cycle abandons rather than writing into a directory a human has to
+    // sort out first.
+    listOpen: () => {
+      try {
+        return listOpen(directory)
+      } catch (err) {
+        if (err instanceof TodoFileMissingError && err.kind === "missing") return []
+        throw err
+      }
+    },
+    todoFileName: () => {
+      try {
+        return findTodoFile(directory).name
+      } catch {
+        return ""
+      }
+    },
+    // The plain handoff with two dependencies replaced: the endless kickoff
+    // block, and the doc-summary turn standing down. Asking a session at its
+    // context ceiling for a second long turn is what the open-points turn
+    // already was; the text we have is handed back instead, so
+    // validateDocSummaries' fallback block lands in the kickoff and the new
+    // orchestrator reads the documents itself — it has the context to.
+    performHandoff: ({ extraKickoffBlock, openPointsText }) =>
+      performPrimaryHandoff({
+        ...buildPrimaryHandoffDeps(client, sessionID, directory),
+        extraKickoffBlock,
+        promptOldPrimaryForDocSummaries: async () => openPointsText,
+      }),
+    cycleNumber: handoffGeneration(sessionID),
+    maxCycles: endlessMaxCycles,
+    switchOff: () => writeEndlessMode(false),
+    recordCycle: recordEndlessCycle,
+    toast: ({ message, variant }) => showToast(client, { title: "agent-intercom", message, variant }),
+    quiesceTimeoutMs: endlessQuiesceTimeoutMs,
+  })
+}
+
+// Asks the primary that is about to be replaced to state everything still
+// open, in the todo file's own two-line shape. Same baseline / re-baseline /
+// timeout discipline as the doc-summary turn (requestDocSummaries), with the
+// shape check keyed on `## OPEN POINTS`: the handoff fires from an idle event,
+// but the session may still be finishing a turn, and a changed-but-foreign
+// reply must not be mistaken for the open-points answer.
+//
+// Throws on timeout or on a session that never produced a shaped reply. The
+// cycle abandons on that throw — the primary is NOT replaced, because
+// replacing it after failing to save its open points is the data loss the
+// whole mode exists to prevent.
+async function promptOldPrimaryForOpenPoints(client, primarySessionID) {
+  if (!client || !primarySessionID) {
+    throw new Error("promptOldPrimaryForOpenPoints: missing client or primarySessionID")
+  }
+  return requestDocSummaries({
+    fetchResult: async () => (await fetchSnapshot(client, primarySessionID))?.result,
+    sendPrompt: () =>
+      promptSession(client, {
+        sessionID: primarySessionID,
+        agent: ORCHESTRATOR_AGENT_NAME,
+        prompt: OPEN_POINTS_PROMPT,
+      }),
+    looksLikeReply: looksLikeOpenPointsReply,
   })
 }

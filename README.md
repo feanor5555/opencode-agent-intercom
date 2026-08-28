@@ -80,6 +80,11 @@ subagent list; `j`/`k` move, `Enter` opens a session, `x` aborts.
   orchestrator (it coordinates only — no edits, no shells), an 8 KB cap on
   subagent replies, and a live snapshot of running work injected each turn
   instead of a status-poll tool. Its context stays clean for the long haul.
+  When the orchestrator's context does approach the limit, the plugin hands
+  the session off to a fresh orchestrator — the threshold is configurable
+  (`OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT`, default 80 000 tokens), and
+  **endless mode** raises it to a much higher ceiling for a self-restarting
+  loop. Both paths share the same handoff mechanism.
 
 - **No MCP servers — and that's the *feature*.** Every MCP server permanently
   injects 1–2 KB of tool descriptions into *every* LLM call. For a 200K
@@ -318,6 +323,76 @@ also takes `"searxngUrl"` and `"exaApiKey"`, each overriding its environment var
 | `OPENCODE_AGENT_INTERCOM_SKIP_CTAGS` / `_SKIP_CHROMIUM` | off | Installer-only: skip ctags build / Chromium download |
 | `EXA_API_KEY` | — | If set, `web_search` uses Exa's paid tier. File key `exaApiKey` overrides. |
 | `POLLINATIONS_TOKEN` | — | If set, the `gen` Pollinations fallback uses your account |
+| `OPENCODE_AGENT_INTERCOM_ENDLESS_MODE` | off | `"1"` arms endless mode — replaces the orchestrator when its context reaches `endlessContext`, after saving its open points to the project's todo file. `"0"` switches it off. TUI file overrides. |
+| `OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT` | `250000` | Orchestrator context threshold (tokens) while endless mode is on. Displaces the plain handoff threshold. `"0"` disables. TUI file overrides. |
+| `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS` | `600000` | How long (ms) one endless cycle waits for the last subagent to finish before abandoning. |
+| `OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES` | `10` | Cycle ceiling per opencode process. At the ceiling endless mode writes itself off. `"0"` arms no ceiling. |
+
+## Endless mode
+
+Endless mode turns the orchestrator handoff into a self-restarting loop. With
+the switch on, the orchestrator's context is watched against
+`OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT` (default 250 000 tokens) — a higher
+ceiling than the plain handoff threshold (`OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT`,
+default 80 000 tokens), and the one in effect while endless mode is on. When
+the ceiling is reached the orchestrator is replaced by a fresh orchestrator
+session, which is told to work the project's todo file off; that fresh session
+reaches the ceiling in turn and is replaced again, and so on.
+
+A cycle runs in this order:
+
+1. **Trigger.** The orchestrator's turn-end hook sees the context cross
+   `endlessContext` and sets a pending latch. `spawn` then refuses new
+   subagents from that orchestrator until the cycle ends, so an orchestrator
+   that spawns as fast as its subagents finish can never starve the cycle.
+2. **Quiesce.** On the orchestrator's `session.idle`, the cycle waits for every
+   running subagent in the process to finish, bounded by
+   `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS` (default 10 minutes).
+   A timeout abandons the cycle rather than aborting a working subagent —
+   killing real work to save context is the loss the mode exists to prevent.
+3. **Save.** The orchestrator is asked to state its open points in plain text;
+   the plugin parses the reply and writes one task per point into the
+   project's todo file (`TODO.md` / `todos.md`), then reads the file back and
+   confirms every id it just wrote is there. The orchestrator itself has no
+   file-writing tool (`PRIMARY_TOOLS` is `spawn` / `abort` / `list`), so the
+   plugin does the writing on its behalf. Any failure here abandons the cycle
+   without replacing the session — replacing the orchestrator after failing
+   to save its open points is the data loss the mode exists to prevent.
+4. **Replace.** The plain orchestrator handoff runs with an additional kickoff
+   block naming the todo file and the confirmed task ids; the old orchestrator
+   is archived, the new one starts with the instruction to work the file off.
+5. **Work off.** The new orchestrator runs normally — it spawns subagents, the
+   wake-hook ticks tasks off via the existing `DONE: T<n>` marker path, its
+   context grows, and step 1 applies to it again.
+
+### What bounds the loop
+
+Endless mode is a loop, so it switches itself off rather than waiting for
+someone to watch it:
+
+- **Nothing left to do.** When the orchestrator reports no new open points
+  *and* the todo file has no open tasks, the mode writes itself off instead
+  of starting a session that would have nothing to work on.
+- **No progress.** If the open-task count has not fallen after
+  `ENDLESS_MAX_STALLED_CYCLES` (2) consecutive cycles, the mode writes
+  itself off — the bound against an orchestrator that saves the same points
+  every cycle and never finishes one.
+- **Cycle ceiling.** `OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES` (default
+  10) cycles per opencode process. At the ceiling the mode writes itself
+  off with a warning toast.
+- **Failed-cycle cooldown.** A cycle that abandoned (quiesce timeout, save
+  failure, handoff failure) arms a cooldown on that orchestrator so an
+  already-over-threshold turn cannot retry on its next message; the cooldown
+  lifts on its own.
+- **The switch.** Turning the toggle off in the sidebar (or
+  `OPENCODE_AGENT_INTERCOM_ENDLESS_MODE=0`) drops the latch at the next
+  settings read; a cycle already past the save step still completes, because
+  it has written to the todo file and must not leave the orchestrator
+  half-replaced.
+
+Every one of these stops writes `endlessMode: false` back to the settings
+file (or leaves it alone); none of them deletes a session, aborts a subagent
+or removes a task.
 
 ## Under the hood
 

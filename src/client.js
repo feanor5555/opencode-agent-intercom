@@ -291,6 +291,67 @@ function latestContextTokens(messages) {
   return undefined
 }
 
+// The opencode server's base URL. The plugin factory receives it in its
+// context object (`PluginInput.serverUrl`) and hands it over at init, so the
+// TUI view switch below has a target even where the resolved SDK client does
+// not carry the method. Empty until then, which only costs the fallback.
+let serverUrl = ""
+
+export function setServerUrl(url) {
+  serverUrl = url ? String(url).replace(/\/+$/, "") : ""
+}
+
+// Best-effort TUI view switch: point the interactive TUI at `sessionID`
+// (`POST /tui/select-session`, "Navigate the TUI to display the specified
+// session"). Called right after the handoff kickoff — without it the user
+// keeps looking at the session that is about to be archived.
+//
+// Two routes to the same server endpoint, for the same reason `archiveSession`
+// sends a field the pinned types do not know: the generated typed client lags
+// the server here. The v2-generated client carries `tui.selectSession`, the
+// root one does not, and which of the two a given opencode build resolves is
+// not something this plugin can decide. So: call the method where the resolved
+// client has one, and post the route directly otherwise — including when the
+// method is there but rejects the argument shape.
+//
+// UNVERIFIED: the direct post carries no authorization header. The plugin
+// runtime builds `client` with the server's auth headers; a server that
+// requires them will refuse the bare post, and the switch then degrades to
+// today's behaviour (the TUI stays on the old session).
+//
+// Best-effort throughout — a failed switch is a presentation failure, never a
+// data one, and is logged and swallowed rather than thrown into the handoff.
+export async function selectTuiSession(client, sessionID) {
+  if (!sessionID) return false
+  if (typeof client?.tui?.selectSession === "function") {
+    try {
+      await client.tui.selectSession({ body: { sessionID } })
+      return true
+    } catch (err) {
+      log("tui.selectSession failed, falling back to the direct post", errMsg(err))
+    }
+  }
+  if (!serverUrl) {
+    log("tui select-session skipped: no server URL")
+    return false
+  }
+  try {
+    const res = await fetch(`${serverUrl}/tui/select-session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionID }),
+    })
+    if (!res.ok) {
+      log("tui select-session post failed", { status: res.status })
+      return false
+    }
+    return true
+  } catch (err) {
+    log("tui select-session post failed", errMsg(err))
+    return false
+  }
+}
+
 // Best-effort TUI toast — a no-op when not running under the TUI (e.g. `serve`).
 export async function showToast(client, { title, message, variant = "info" }) {
   try {

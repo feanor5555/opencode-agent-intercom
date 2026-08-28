@@ -33,9 +33,11 @@ import {
   setLlmModel,
 } from "./llm-models-file.ts";
 import {
+  type LimitKey,
   type Settings,
   readSettings,
   stepSetting,
+  toggleEndlessMode,
 } from "./settings-file.ts";
 
 const TUI_PLUGIN_ID = "agent-intercom.tui";
@@ -295,24 +297,43 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // list — keeps "something completed" visible without cluttering the panel.
   const [completedCount, setCompletedCount] = createSignal(0);
 
-  // Runtime limits, shared with the main plugin via the settings file. The
+  // Runtime settings, shared with the main plugin via the settings file. The
   // inputs edit these and auto-save on change.
   const initialSettings = readSettings();
   const [maxSubagents, setMaxSubagents] = createSignal(initialSettings.maxSubagents);
   const [maxContext, setMaxContext] = createSignal(initialSettings.maxContext);
+  const [endlessMode, setEndlessModeSignal] = createSignal(initialSettings.endlessMode);
+  const [endlessContext, setEndlessContext] = createSignal(initialSettings.endlessContext);
+
+  // Every store call hands back the whole merged file state, so one place puts
+  // it into the signals — the panel then shows the true file state, including
+  // the keys the write did not touch.
+  const showSettings = (s: Settings): void => {
+    setMaxSubagents(s.maxSubagents);
+    setMaxContext(s.maxContext);
+    setEndlessModeSignal(s.endlessMode);
+    setEndlessContext(s.endlessContext);
+  };
 
   // Step a setting by delta and save. Deltas are in the setting's own unit:
-  // subagents ±1, context ±5000 tokens (= 5k on the display).
-  // Both settings are clamped at 0. maxSubagents=0 means "no cap" (unlimited
-  // concurrent subagents); maxContext=0 means "no budget" (lockdown disabled).
-  const adjustSetting = (key: keyof Settings, delta: number): void => {
+  // subagents ±1, context ±5000 tokens, endless context ±10000 tokens (= 5k
+  // resp. 10k on the display). All three are clamped at 0. maxSubagents=0 means
+  // "no cap" (unlimited concurrent subagents); maxContext=0 means "no budget"
+  // (lockdown disabled); endlessContext=0 arms no endless cycle.
+  const adjustSetting = (key: LimitKey, delta: number): void => {
     // Read-modify-write inside the store: the file may have been edited outside
     // the panel since the last read, so the base value comes from the file and
     // only the stepped limit goes into what disk currently holds. The merged
-    // result is what both signals show from here on.
-    const merged = stepSetting(key, delta, 0);
-    setMaxSubagents(merged.maxSubagents);
-    setMaxContext(merged.maxContext);
+    // result is what the signals show from here on.
+    showSettings(stepSetting(key, delta, 0));
+  };
+
+  // Flip endless mode and save. Same read-modify-write: the value flipped is
+  // the one on disk, not the panel's copy, which may be stale — the plugin
+  // writes this key back to false itself when one of the mode's bounds ends the
+  // loop.
+  const toggleEndless = (): void => {
+    showSettings(toggleEndlessMode());
   };
 
   // Section collapse state. Subagents-section is the workhorse and stays open
@@ -338,9 +359,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // that shows them — three small JSON reads.
   const refreshFileState = (): void => {
     if (disposed) return;
-    const settings = readSettings();
-    setMaxSubagents(settings.maxSubagents);
-    setMaxContext(settings.maxContext);
+    showSettings(readSettings());
     setLlmParams(readLlmParams());
     setLlmModels(readLlmModels());
   };
@@ -905,7 +924,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             onAbort={(id: string) => void abortSubagent(id)}
             maxSubagents={maxSubagents}
             maxContext={maxContext}
+            endlessMode={endlessMode}
+            endlessContext={endlessContext}
             onAdjust={adjustSetting}
+            onToggleEndless={toggleEndless}
             thinkingOn={thinkingOn}
             onToggleThinking={toggleThinking}
             actionsOn={actionsOn}
@@ -990,7 +1012,10 @@ function SubagentPanel(props: {
   onAbort: (id: string) => void;
   maxSubagents: () => number;
   maxContext: () => number;
-  onAdjust: (key: keyof Settings, delta: number) => void;
+  endlessMode: () => boolean;
+  endlessContext: () => number;
+  onAdjust: (key: LimitKey, delta: number) => void;
+  onToggleEndless: () => void;
   thinkingOn: () => boolean;
   onToggleThinking: () => void;
   actionsOn: () => boolean;
@@ -1250,6 +1275,25 @@ function SubagentPanel(props: {
             </text>
             <text fg={props.theme.text}>{numCell(props.maxContext() / 1000)}</text>
             <text fg={props.theme.accent} {...holdRepeat(() => props.onAdjust("maxContext", 5000))}>
+              {"[+]"}
+            </text>
+          </box>
+          <box flexDirection="row">
+            <text fg={props.theme.textMuted}>{rowLabel("endless")}</text>
+            <text
+              fg={props.endlessMode() ? props.theme.success : props.theme.textMuted}
+              onMouseDown={props.onToggleEndless}
+            >
+              {props.endlessMode() ? "[on] " : "[off]"}
+            </text>
+          </box>
+          <box flexDirection="row">
+            <text fg={props.theme.textMuted}>{rowLabel("endless (k)")}</text>
+            <text fg={props.theme.accent} {...holdRepeat(() => props.onAdjust("endlessContext", -10000))}>
+              {"[-]"}
+            </text>
+            <text fg={props.theme.text}>{numCell(props.endlessContext() / 1000)}</text>
+            <text fg={props.theme.accent} {...holdRepeat(() => props.onAdjust("endlessContext", 10000))}>
               {"[+]"}
             </text>
           </box>

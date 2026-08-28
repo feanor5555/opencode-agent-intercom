@@ -200,10 +200,25 @@ function readSettings(): Settings {
   return s;
 }
 
+// Merges the two limits into the file instead of replacing it. The file is
+// shared with the main plugin and legitimately carries keys this TUI knows
+// nothing about (searxngUrl, exaApiKey, and whatever else the user put there);
+// a whole-object write would drop them on every stepper press. A missing or
+// unparsable file starts from an empty object, so the result is the same
+// two-key file as before.
 function writeSettings(s: Settings): void {
   try {
+    let current: Record<string, unknown> = {};
+    try {
+      const raw = JSON.parse(readFileSync(SETTINGS_PATH, "utf8"));
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        current = raw as Record<string, unknown>;
+      }
+    } catch {
+      // no file / unparsable -> write a fresh one
+    }
     mkdirSync(dirname(SETTINGS_PATH), { recursive: true });
-    writeFileSync(SETTINGS_PATH, JSON.stringify(s, null, 2) + "\n");
+    writeFileSync(SETTINGS_PATH, JSON.stringify({ ...current, ...s }, null, 2) + "\n");
   } catch {
     // best-effort — a failed write just means the limit is not changed
   }

@@ -21,6 +21,7 @@ import { setSettingsPath, resetSettings, getSearxngUrl, getSettings } from "../s
 import { resetPermissionGuardCache } from "../src/config.js"
 import { rewritePendingTools, TODO_TOOLS, timeoutSubagent } from "../src/hooks.js"
 import { AGENTS } from "../src/agents.js"
+import { setParamsPath, resetCache as resetLlmParams } from "../src/llmparams.js"
 import {
   normalizeUrl,
   parseExaEntries,
@@ -1167,6 +1168,64 @@ test("the config hook installs the plugin's agent roles", async () => {
   assert.equal(config.agent.orchestrator.permission.edit, "deny")
   // and it is made the startup primary
   assert.equal(config.default_agent, "orchestrator")
+})
+
+test("no role definition carries a sampling parameter — temperature starts unset", async () => {
+  // The per-agent sampling params are the user's to set (TUI sidebar ->
+  // ~/.config/opencode/llm-params.json). A role that ships a `temperature`
+  // would make opencode resolve a value, the sidebar would show it as a
+  // pre-filled default instead of "not set", and every request would carry it.
+  for (const [name, def] of Object.entries(AGENTS)) {
+    assert.ok(!("temperature" in def), `${name} must not define a temperature`)
+    assert.ok(!("topP" in def) && !("top_p" in def), `${name} must not define top_p`)
+  }
+  // and the installed config carries none either
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const config = {}
+  await hooks.config(config)
+  for (const name of Object.keys(AGENTS)) {
+    assert.ok(
+      !("temperature" in config.agent[name]),
+      `installed ${name} must not carry a temperature`,
+    )
+  }
+})
+
+test("the wired chat.params hook: unset sends nothing, a user value goes through", async () => {
+  // End-to-end over the hook opencode actually calls, not just the module
+  // function: with the roles carrying no temperature, an agent the user has
+  // not tuned must leave the params output without a temperature field.
+  const dir = mkdtempSync(join(tmpdir(), "aic-llmparams-"))
+  const file = join(dir, "llm-params.json")
+  try {
+    const { ctx } = makeCtx()
+    const hooks = await plugin(ctx)
+
+    setParamsPath(file) // no file on disk yet
+    const untouched = { options: undefined }
+    await hooks["chat.params"]({ sessionID: "ses_primary", agent: "coder" }, untouched)
+    assert.equal("temperature" in untouched, false, "unset must send no temperature")
+
+    writeFileSync(file, JSON.stringify({ coder: { temperature: 0.42 } }))
+    resetLlmParams()
+    const tuned = { options: undefined }
+    await hooks["chat.params"]({ sessionID: "ses_primary", agent: "coder" }, tuned)
+    assert.equal(tuned.temperature, 0.42, "a user-set value must reach the request unchanged")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    setParamsPath(join(homedir(), ".config", "opencode", "llm-params.json"))
+  }
+})
+
+test("a project that sets a temperature keeps it through the config hook", async () => {
+  // The plugin sets none, but the merge must still let a project pin one.
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const config = { agent: { coder: { temperature: 0.15 } } }
+  await hooks.config(config)
+  assert.equal(config.agent.coder.temperature, 0.15)
+  assert.ok(config.agent.coder.prompt.length > 0) // plugin fields still merged in
 })
 
 test("the config hook merges non-destructively — a project agent is kept", async () => {

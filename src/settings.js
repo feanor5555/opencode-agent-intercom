@@ -7,11 +7,16 @@
 // `searxngUrl` > env OPENCODE_AGENT_INTERCOM_SEARXNG_URL > unset). Unset means
 // searxng is disabled and web_search stays Exa-only.
 //
+// The Exa API key resolves the same way (file key `exaApiKey` > env
+// EXA_API_KEY > unset). Unset is not an error: web_search then uses Exa's
+// anonymous tier. The value is a secret — it is never written to the debug log.
+//
 // Shared file path (the TUI plugin hardcodes the same path, it is a separate
 // npm package and cannot import this module):
 //   ~/.config/opencode/agent-intercom.json
 //     { "maxSubagents": N, "maxContext": N, "maxPrimaryContext": N,
 //       "maxSubagentAgeMs": N, "searxngUrl": "http://host:port",
+//       "exaApiKey": "<key>",
 //       "postNoticeRetries": N, "postNoticeRetryBackoffMs": N }
 
 import { readFileSync } from "node:fs"
@@ -36,7 +41,7 @@ const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
 // the primary session on subagent completion/timeout/error). The opencode
 // SDK can transiently fail to deliver a promptAsync; without retries a single
 // network blip costs the primary its wake. Mirrors the maxContext pattern —
-// env > file > default. 0 disables retries (single attempt). postNoticeRetries
+// file > env > default. 0 disables retries (single attempt). postNoticeRetries
 // counts RE-tries only — the first attempt is always made.
 const DEFAULT_POST_NOTICE_RETRIES = 3
 const DEFAULT_POST_NOTICE_RETRY_BACKOFF_MS = 500
@@ -62,9 +67,11 @@ function envStr(name, def) {
 }
 
 // Current settings: { maxSubagents, maxContext, maxPrimaryContext,
-// maxSubagentAgeMs, searxngUrl, postNoticeRetries, postNoticeRetryBackoffMs }.
+// maxSubagentAgeMs, searxngUrl, exaApiKey, postNoticeRetries,
+// postNoticeRetryBackoffMs }.
 // Cached for TTL_MS so the hot paths (spawn, every subagent transform) don't
 // stat the file constantly. searxngUrl is "" when unset (searxng disabled).
+// exaApiKey is "" when unset (web_search falls back to Exa's anonymous tier).
 // maxSubagentAgeMs is the inactivity watchdog window; 0 disables it.
 // maxPrimaryContext is the orchestrator primary-session context-refresh
 // threshold (tokens); 0 disables auto-handoff. postNoticeRetries counts
@@ -79,6 +86,7 @@ export function getSettings() {
     maxPrimaryContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT", DEFAULT_MAX_PRIMARY_CONTEXT),
     maxSubagentAgeMs: envNum("OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS", DEFAULT_MAX_SUBAGENT_AGE_MS),
     searxngUrl: envStr("OPENCODE_AGENT_INTERCOM_SEARXNG_URL", ""),
+    exaApiKey: envStr("EXA_API_KEY", ""),
     postNoticeRetries: envNum("OPENCODE_AGENT_INTERCOM_POST_NOTICE_RETRIES", DEFAULT_POST_NOTICE_RETRIES),
     postNoticeRetryBackoffMs: envNum("OPENCODE_AGENT_INTERCOM_POST_NOTICE_RETRY_BACKOFF_MS", DEFAULT_POST_NOTICE_RETRY_BACKOFF_MS),
   }
@@ -99,6 +107,9 @@ export function getSettings() {
     if (typeof raw?.searxngUrl === "string" && raw.searxngUrl.trim() !== "") {
       resolved.searxngUrl = raw.searxngUrl.trim()
     }
+    if (typeof raw?.exaApiKey === "string" && raw.exaApiKey.trim() !== "") {
+      resolved.exaApiKey = raw.exaApiKey.trim()
+    }
     if (Number.isInteger(raw?.postNoticeRetries) && raw.postNoticeRetries >= 0) {
       resolved.postNoticeRetries = raw.postNoticeRetries
     }
@@ -110,7 +121,8 @@ export function getSettings() {
   }
   cache = resolved
   cachedAt = now
-  log("settings resolved", resolved)
+  // exaApiKey is a secret: log only whether one is in effect, never its value.
+  log("settings resolved", { ...resolved, exaApiKey: resolved.exaApiKey ? "<set>" : "" })
   return cache
 }
 
@@ -119,6 +131,12 @@ export function getSettings() {
 export function getSearxngUrl() {
   const url = getSettings().searxngUrl
   return url ? url.replace(/\/+$/, "") : ""
+}
+
+// The resolved Exa API key (file > env > ""). Empty string means no key is
+// configured — web_search then uses Exa's anonymous tier, which is not an error.
+export function getExaApiKey() {
+  return getSettings().exaApiKey
 }
 
 // Test-only: point at a different file and drop the cache.

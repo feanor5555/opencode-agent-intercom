@@ -10,10 +10,10 @@
 //      ends up exposing neither. We pick `web_search` (snake case) to dodge
 //      that.
 //
-// Exa: anonymous use 150 calls/day, 3 QPS, no auth. Set EXA_API_KEY in the
-// environment to use a paid Exa tier (the key is sent as an `x-api-key`
-// header, never in the URL query — a query string leaks the secret into
-// proxy/server access logs).
+// Exa: anonymous use 150 calls/day, 3 QPS, no auth. A key for a paid Exa tier
+// is resolved via settings (file `exaApiKey` > env EXA_API_KEY > unset) and
+// sent as an `x-api-key` header, never in the URL query — a query string leaks
+// the secret into proxy/server access logs.
 // searxng: enabled only when a base URL is configured (no token), resolved via
 // settings (file `searxngUrl` > env OPENCODE_AGENT_INTERCOM_SEARXNG_URL).
 // Unset → Exa-only, the historic behaviour.
@@ -21,7 +21,7 @@
 
 import { tool } from "@opencode-ai/plugin"
 import { log, errMsg } from "./log.js"
-import { getSearxngUrl } from "./settings.js"
+import { getSearxngUrl, getExaApiKey } from "./settings.js"
 
 const z = tool.schema
 
@@ -29,17 +29,19 @@ const EXA_MCP_URL = "https://mcp.exa.ai/mcp"
 const EXA_TIMEOUT_MS = 30_000
 const SEARXNG_TIMEOUT_MS = 12_000
 
-// Build the Exa request headers. When EXA_API_KEY is set it goes in the
+// Build the Exa request headers. When a key is configured it goes in the
 // `x-api-key` header — NOT the URL query. A `?exaApiKey=<secret>` query string
 // lands in proxy/server access logs; a header does not. Verified against the
 // live endpoint: a bad key in the `x-api-key` header returns the same
 // `401 Invalid API key` as the query form, i.e. the endpoint honors the header.
-function exaHeaders() {
+// No key configured is normal: Exa's anonymous tier answers without one.
+export function exaHeaders() {
   const headers = {
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
   }
-  const key = process.env.EXA_API_KEY
+  // Resolved via settings: file `exaApiKey` > env EXA_API_KEY > "".
+  const key = getExaApiKey()
   if (key) headers["x-api-key"] = key
   return headers
 }

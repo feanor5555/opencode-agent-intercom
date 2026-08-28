@@ -48,9 +48,11 @@ in your opencode sidebar.
 - **Sample your model per role.** Different temperature for the
   `orchestrator`, your `coder`, your `designer`. Plus llama.cpp specifics
   (`min_p`, `repeat_penalty`, `chat_template_kwargs`) routed through
-  `output.options`. A `★` marks an override; `[reset current agent]` drops
-  back to the role's default. **Applies on the next LLM call.** Find the
-  sweet spot for *your* model without leaving opencode.
+  `output.options`. Every parameter starts at `not set` and nothing is sent
+  for it until you set one. A `★` marks an override; `[reset current agent]`
+  drops the override and puts that agent back to `not set`.
+  **Applies on the next LLM call.** Find the sweet spot for *your* model
+  without leaving opencode.
 
 - **Stay oriented.** When a subagent finishes and its session vanishes, the
   panel drops you back into the orchestrator chat — not the home page.

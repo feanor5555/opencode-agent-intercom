@@ -5,8 +5,10 @@
 //
 // Resolution chain for each key:
 //   file[agent].<key>  (explicit per-role override)  > unset
-// "Unset" means: leave opencode's resolved value alone (typically the
-// AgentConfig.temperature baked into src/agents.js). No global fallback —
+// "Unset" means: the hook writes nothing for that key, so opencode's own
+// resolved value stands — and where opencode has none either (the plugin's
+// role definitions in src/agents.js set no sampling parameters), the request
+// carries no such field at all rather than a 0 or a null. No global fallback —
 // each agent is configured individually.
 
 import { readFileSync, statSync } from "node:fs"
@@ -14,7 +16,14 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { log, errMsg } from "./log.js"
 
-const PARAMS_FILE = join(homedir(), ".config", "opencode", "llm-params.json")
+let paramsFile = join(homedir(), ".config", "opencode", "llm-params.json")
+
+// Test seam: point the reader at another file. Drops the cache so the next
+// read hits the new path.
+export function setParamsPath(p) {
+  paramsFile = p
+  resetCache()
+}
 
 // Keys that go on the output object directly (opencode-recognised).
 const TOP_LEVEL_KEYS = {
@@ -34,9 +43,9 @@ let cache = { mtime: 0, data: {} }
 // stat() call. A missing/unparseable file is treated as empty (passthrough).
 export function readParams() {
   try {
-    const m = statSync(PARAMS_FILE).mtimeMs
+    const m = statSync(paramsFile).mtimeMs
     if (m !== cache.mtime) {
-      const raw = JSON.parse(readFileSync(PARAMS_FILE, "utf8"))
+      const raw = JSON.parse(readFileSync(paramsFile, "utf8"))
       cache = { mtime: m, data: raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {} }
     }
   } catch (err) {

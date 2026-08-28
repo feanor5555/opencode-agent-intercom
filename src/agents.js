@@ -136,7 +136,6 @@ export const AGENTS = {
     description:
       "Main agent. Orchestrates only, performs no file or shell operations itself. Delegates to subagents.",
     mode: "primary",
-    temperature: 0.3,
     permission: {
       read: "deny", edit: "deny", bash: "deny",
       webfetch: "deny", websearch: "deny", web_search: "deny",
@@ -150,7 +149,6 @@ export const AGENTS = {
     description:
       "Writes concept/design documents. Plans but does not implement. Researches current versions before every concept.",
     mode: "subagent",
-    temperature: 0.3,
     permission: { ...SUBAGENT_NO_DELEGATION, bash: "deny" },
     prompt: PLANNER_PROMPT,
   },
@@ -158,7 +156,6 @@ export const AGENTS = {
     description:
       "Implements code changes in thin vertical slices, runs build/test commands, verifies before reporting back.",
     mode: "subagent",
-    temperature: 0.2,
     permission: { ...SUBAGENT_NO_DELEGATION },
     prompt: CODER_PROMPT,
   },
@@ -166,7 +163,6 @@ export const AGENTS = {
     description:
       "Diagnoses build/test/runtime errors. Finds the root cause but does not fix it itself.",
     mode: "subagent",
-    temperature: 0.2,
     permission: { ...SUBAGENT_NO_DELEGATION, edit: "deny", write: "deny" },
     prompt: DEBUGGER_PROMPT,
   },
@@ -174,7 +170,6 @@ export const AGENTS = {
     description:
       "Critical developer. Reviews code against best practices, clean code, performance. Writes a review document in reviews/, changes no source code.",
     mode: "subagent",
-    temperature: 0.2,
     permission: { ...SUBAGENT_NO_DELEGATION, bash: "deny" },
     prompt: REVIEWER_PROMPT,
   },
@@ -182,7 +177,6 @@ export const AGENTS = {
     description:
       "Writes user/API documentation (README, usage, changelog). Reads the actual code, invents nothing.",
     mode: "subagent",
-    temperature: 0.3,
     permission: { ...SUBAGENT_NO_DELEGATION, bash: "deny" },
     prompt: DOCUMENTER_PROMPT,
   },
@@ -190,7 +184,6 @@ export const AGENTS = {
     description:
       "Web research. Searches via the custom `web_search` tool (Exa AI backend, wired by this plugin), never curl/wget. Never recalls URLs from memory.",
     mode: "subagent",
-    temperature: 0.3,
     permission: {
       ...SUBAGENT_NO_DELEGATION,
       read: "deny", edit: "deny", write: "deny", bash: "deny",
@@ -204,7 +197,6 @@ export const AGENTS = {
     description:
       "Generates images (UI mockups, screen designs, icons, illustrations, hero graphics) from a written brief. Saves files to disk; does not write source code. Can research visual references on the web.",
     mode: "subagent",
-    temperature: 0.4,
     permission: { ...SUBAGENT_NO_DELEGATION, websearch: "deny", outline: "deny" },
     prompt: DESIGNER_PROMPT,
   },
@@ -212,7 +204,6 @@ export const AGENTS = {
     description:
       "Handles repository operations (commits, branches, rebases, tags, PR descriptions) matching the project's existing git style. Does not edit source code.",
     mode: "subagent",
-    temperature: 0.2,
     permission: {
       ...SUBAGENT_NO_DELEGATION,
       edit: "deny", write: "deny", webfetch: "deny", websearch: "deny", web_search: "deny", outline: "deny",
@@ -226,7 +217,7 @@ export const AGENTS = {
 // orchestrator the default primary. Non-destructive field-wise merge: the
 // plugin role is the base, and any top-level key the project already set on the
 // same agent name wins — so a project that only sets `model` keeps the plugin's
-// `prompt`/`tools`/`temperature`/`permission`, while a project that also sets
+// `prompt`/`permission`, while a project that also sets
 // `prompt` overrides just that. An explicit `default_agent` the project set is
 // respected. `default_agent` is the opencode config key that picks the startup
 // primary (falls back to "build" when unset). Mutates `config` in place.

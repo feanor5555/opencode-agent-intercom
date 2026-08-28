@@ -155,7 +155,7 @@ The primary never blocks. You stay in the driver's seat the entire time.
 | `list()` | List active subagents. | Orchestrator |
 | `todos_open()` | List open tasks from `TODO.md` with their stable id (`T5`) and `accept:` criterion. | All agents |
 | `todo_add(title, accept?)` / `todo_edit(id, …)` / `todo_done(id)` | Add / refine / remove a task in `TODO.md`. `todo_done` deletes the completed task — usually the wake-hook does it for you. | The six deliverable roles |
-| `web_search(query, numResults?)` | Anonymous web search via Exa (no key, 150/day; `EXA_API_KEY` lifts the cap). | Subagents |
+| `web_search(query, numResults?)` | Anonymous web search via Exa (no key, 150/day; an Exa key lifts the cap). | Subagents |
 | `outline(path)` | Top-level declarations of a source file via universal-ctags. ~100 languages, ~95 % token savings vs `read`. | Subagents (except `designer`/`gitter`) |
 
 Subagents are one-shot: **spawn → run → reply → destroyed.** The primary is
@@ -216,7 +216,9 @@ exposes every runtime knob:
 - **Per-agent LLM sampling** — temperature, top-p/top-k, max-tokens, plus
   llama.cpp keys (`min_p`, `repeat_penalty`, `chat_template_kwargs`) routed
   through `output.options`. Writes `~/.config/opencode/llm-params.json`.
-  `[reset]` per agent falls back to the role's default.
+  Every parameter starts out unset (`not set` in the sidebar) — the plugin's
+  roles set none, so nothing is sent until you set it. `[reset]` per agent
+  drops the override and returns that agent to unset.
 
 Every change applies on the next LLM call. No opencode restart.
 
@@ -270,8 +272,9 @@ embed legibility-critical text in images (the model garbles letters).
 ## Configuration
 
 All optional. The subagent and context caps usually live in
-`~/.config/opencode/agent-intercom.json` (written by the TUI panel);
-everything else is environment-variable-driven:
+`~/.config/opencode/agent-intercom.json` (written by the TUI panel); that file
+also takes `"searxngUrl"` and `"exaApiKey"`, each overriding its environment
+variable. Everything else is environment-variable-driven:
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -284,7 +287,7 @@ everything else is environment-variable-driven:
 | `OPENCODE_AGENT_INTERCOM_RESPECT_TASK_PERMS` | on | `"0"` ignores `permission.task` allowlist in `spawn` |
 | `OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH` / `_DISABLE_OUTLINE` | off | `"1"` skips that tool |
 | `OPENCODE_AGENT_INTERCOM_SKIP_CTAGS` / `_SKIP_CHROMIUM` | off | Installer-only: skip ctags build / Chromium download |
-| `EXA_API_KEY` | — | If set, `web_search` uses Exa's paid tier |
+| `EXA_API_KEY` | — | If set, `web_search` uses Exa's paid tier. File key `exaApiKey` overrides. |
 | `POLLINATIONS_TOKEN` | — | If set, the `gen` Pollinations fallback uses your account |
 
 ## Under the hood

@@ -217,8 +217,10 @@ export function parseExaEntries(text) {
 }
 
 // Map raw searxng result rows to the shared entry shape. `score` is searxng's
-// own cross-engine relevance figure, kept for callers that rank inside the
-// searxng leg (`forum_search`); rows without one score 0. It is not rendered.
+// reciprocal-rank figure and `engine` the engine that returned the row; both
+// are kept for callers that rank and cap inside the searxng leg
+// (`forum_search`). A row without a score scores 0, one without an engine name
+// gets "". Neither field is rendered.
 export function searxToEntries(results) {
   const entries = []
   for (const r of results ?? []) {
@@ -230,6 +232,7 @@ export function searxToEntries(results) {
       author: "",
       content: (r.content ?? "").trim(),
       score: Number(r.score) || 0,
+      engine: (r.engine ?? "").trim(),
       source: "searxng",
     })
   }

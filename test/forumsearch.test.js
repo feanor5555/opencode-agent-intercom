@@ -1,5 +1,6 @@
 // Unit tests for the `forum_search` route: the two legs, the bang chain, the
-// relative score cut inside the searxng leg and the round-robin merge.
+// keyword reduction, the thread shape, the per-engine cap inside the searxng
+// lane and the quota-plus-fill merge.
 //
 // No live network — `globalThis.fetch` is stubbed and dispatches on the URL,
 // so both legs are driven from canned Exa SSE and searxng JSON.
@@ -19,12 +20,14 @@ import {
   DEFAULT_FORUM_BANGS,
 } from "../src/settings.js"
 import { searxToEntries, renderEntries } from "../src/searchcore.js"
+import { isThreadUrl } from "../src/threadshape.js"
 import {
   forumEnvelope,
+  reduceToKeywords,
   bangQuery,
-  cutByScore,
-  cutSearxLeg,
-  interleave,
+  searxLane,
+  partitionByShape,
+  pickFromLanes,
   isForumSearchEnabled,
   createForumSearchTool,
 } from "../src/forumsearch.js"
@@ -65,10 +68,10 @@ function exaBlocks(count, host = "exa.example") {
   return blocks.join("\n---\n")
 }
 
-function searxRows(count, score = 1, host = "searx.example") {
+function searxRows(count, score = 1, host = "searx.example", engine = "") {
   const rows = []
   for (let i = 1; i <= count; i++) {
-    rows.push({ url: `https://${host}/${i}`, title: `searx ${i}`, content: `row ${i}`, score })
+    rows.push({ url: `https://${host}/${i}`, title: `searx ${i}`, content: `row ${i}`, score, engine })
   }
   return rows
 }
@@ -97,10 +100,13 @@ const urlsOf = (output) => [...output.matchAll(/^URL: (.+)$/gm)].map((m) => m[1]
 
 // ── the bang set ──────────────────────────────────────────────────────────
 
-test("getForumBangs: no settings file → the six built-in bangs", () => {
+test("getForumBangs: no settings file → the five built-in bangs, !gh not among them", () => {
   const { dir } = isolate()
   try {
-    assert.deepEqual(getForumBangs(), ["!hn", "!lo", "!st", "!ubuntu", "!su", "!gh"])
+    assert.deepEqual(getForumBangs(), ["!st", "!ubuntu", "!su", "!hn", "!lo"])
+    // !gh returns repository roots — 0 of 30 with an issue or discussion path —
+    // and a repository is not what this route's output contract offers.
+    assert.ok(!getForumBangs().includes("!gh"))
     assert.deepEqual(getForumBangs(), DEFAULT_FORUM_BANGS)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -168,7 +174,7 @@ test("forum_search sends the envelope to Exa and the bare bang query to searxng"
     assert.equal(stub.calls.exa.length, 1, "exactly one Exa call per invocation")
 
     const q = stub.calls.searx[0].query
-    assert.equal(q, "!hn !lo !st !ubuntu !su !gh zfs special vdev")
+    assert.equal(q, "!st !ubuntu !su !hn !lo zfs special vdev")
     assert.doesNotMatch(q, /forum threads where people report/, "envelope prose must stay off searxng")
   } finally {
     stub.restore()
@@ -221,71 +227,234 @@ test("the configured bang set is what goes out on the wire", async () => {
   }
 })
 
-// ── the searxng-side score cut ────────────────────────────────────────────
+// ── the keyword form of the searxng query ─────────────────────────────────
 
-test("searxToEntries carries searxng's score and defaults it to 0", () => {
-  const entries = searxToEntries([
-    { url: "https://a.example/1", title: "a", content: "x", score: 4.5 },
-    { url: "https://b.example/2", title: "b", content: "y" },
-    { url: "https://c.example/3", title: "c", content: "z", score: "2" },
-  ])
-  assert.deepEqual(entries.map((e) => e.score), [4.5, 0, 2])
+test("reduceToKeywords strips the question frame and the route's own experience words", () => {
+  assert.equal(
+    reduceToKeywords("What is it like running Kubernetes on Raspberry Pi in practice, and what breaks?"),
+    "Kubernetes Raspberry Pi",
+    "the interrogative frame and running/practice/breaks go; case and order stay",
+  )
 })
 
-test("renderEntries does not print the score — web_search's output shape is untouched", () => {
-  const entries = searxToEntries([{ url: "https://a.example/1", title: "a", content: "x", score: 9 }])
+test("reduceToKeywords keeps at most four tokens, in their original order", () => {
+  assert.equal(
+    reduceToKeywords("kubernetes raspberry pi cluster networking storage"),
+    "kubernetes raspberry pi cluster",
+  )
+})
+
+test("reduceToKeywords passes an already-short keyword string through unchanged", () => {
+  assert.equal(reduceToKeywords("zfs special vdev"), "zfs special vdev")
+})
+
+test("reduceToKeywords on nothing but stopwords falls back to the query, never to empty", () => {
+  // an empty searxng query would cost the leg every row; a bad one costs it some
+  assert.equal(reduceToKeywords("What is it like in practice?"), "What is it like in practice?")
+  assert.equal(reduceToKeywords(""), "")
+})
+
+test("the searxng leg is sent `keywords` when supplied, and the derivation when not", async () => {
+  const { dir } = isolate({ searxngUrl: SEARXNG_BASE, forumBangs: ["!st"] })
+  for (const [args, expected] of [
+    [{ query: "does zfs special vdev hold up in practice", keywords: "zfs special vdev" },
+      "!st zfs special vdev"],
+    [{ query: "does zfs special vdev hold up in practice" }, "!st zfs special vdev hold"],
+    [{ query: "does zfs special vdev hold up in practice", keywords: "   " }, "!st zfs special vdev hold"],
+  ]) {
+    const stub = stubFetch({ exa: () => exaSse(exaBlocks(2)), searx: () => searxJson(searxRows(2)) })
+    try {
+      await createForumSearchTool().execute(args, {})
+      assert.equal(stub.calls.searx[0].query, expected)
+      // the Exa leg keeps the prose either way
+      assert.match(stub.calls.exa[0].body.params.arguments.query, /experience with does zfs special vdev/)
+    } finally {
+      stub.restore()
+    }
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+// ── the thread shape ──────────────────────────────────────────────────────
+
+test("isThreadUrl is true for the shapes any host may carry", () => {
+  for (const url of [
+    "https://forums.example.com/viewtopic.php?t=1",
+    "https://example.com/showthread.php?tid=3",
+    "https://example.com/questions/12/x",
+    "https://example.com/q/12",
+    "https://discuss.example.org/t/topic/9",
+    "https://example.com/r/x/comments/abc",
+    "https://news.ycombinator.com/item?id=1",
+    "https://github.com/o/r/issues/7",
+    "https://github.com/o/r/discussions/7",
+    "https://community.example.net/topic/4",
+    "https://board.example.net/threads/5",
+    "https://answers.example.net/a/12",
+  ]) {
+    assert.equal(isThreadUrl(url), true, url)
+  }
+})
+
+test("isThreadUrl is false for a page that is not a discussion", () => {
+  for (const url of [
+    "https://example.com/blog/post",
+    "https://github.com/o/r",
+    "https://github.com/o/r/issues",
+    "https://medium.com/@a/b",
+    "https://example.com/docs/api",
+    // a lobste.rs row is the SUBMITTED page — the discussion is one hop away
+    "https://gaultier.github.io/blog/x.html",
+    "",
+    null,
+    "not a url at all %%",
+  ]) {
+    assert.equal(isThreadUrl(url), false, String(url))
+  }
+})
+
+// ── the searxng lane ──────────────────────────────────────────────────────
+
+test("searxToEntries carries searxng's score and engine and defaults both", () => {
+  const entries = searxToEntries([
+    { url: "https://a.example/1", title: "a", content: "x", score: 4.5, engine: "stackoverflow" },
+    { url: "https://b.example/2", title: "b", content: "y" },
+    { url: "https://c.example/3", title: "c", content: "z", score: "2", engine: "  hackernews " },
+  ])
+  assert.deepEqual(entries.map((e) => e.score), [4.5, 0, 2])
+  assert.deepEqual(entries.map((e) => e.engine), ["stackoverflow", "", "hackernews"])
+})
+
+test("renderEntries prints neither score nor engine — web_search's output shape is untouched", () => {
+  const entries = searxToEntries([
+    { url: "https://a.example/1", title: "a", content: "x", score: 9, engine: "lobste.rs" },
+  ])
   assert.equal(
     renderEntries(entries),
     "Title: a\nURL: https://a.example/1\nPublished: N/A\nAuthor: N/A\nHighlights:\nx",
   )
 })
 
-test("cutByScore drops below one tenth of the top score and keeps a row exactly at it", () => {
-  const entries = [
-    { url: "a", score: 1 },
-    { url: "b", score: 10 },
-    { url: "c", score: 0.99 },
-    { url: "d", score: 5 },
-  ]
-  const kept = cutByScore(entries)
-  assert.deepEqual(kept.map((e) => e.url), ["b", "d", "a"], "sorted by score, the 0.99 row dropped")
+test("searxLane caps each engine at two rows and represents every engine that answered", () => {
+  // 80 rows: the loud engine holds 30, the four thread engines the rest. Scores
+  // are searxng's reciprocal rank, so each engine's own rank-1 row scores 1.
+  const entries = []
+  const engines = { loud: 30, so: 20, su: 15, ubuntu: 10, hn: 5 }
+  for (const [engine, count] of Object.entries(engines)) {
+    for (let i = 1; i <= count; i++) {
+      entries.push({ url: `https://${engine}.example/${i}`, score: 1 / i, engine })
+    }
+  }
+  const lane = searxLane(entries, 16)
+  const perEngine = {}
+  for (const e of lane) perEngine[e.engine] = (perEngine[e.engine] ?? 0) + 1
+  assert.deepEqual(perEngine, { loud: 2, so: 2, su: 2, ubuntu: 2, hn: 2 })
+  assert.equal(lane.length, 10, "two per engine is the whole lane here")
+  // each engine's own highest-ranked rows, not an arbitrary two
+  assert.deepEqual(
+    lane.filter((e) => e.engine === "loud").map((e) => e.url),
+    ["https://loud.example/1", "https://loud.example/2"],
+  )
 })
 
-test("cutByScore on an all-zero response keeps everything and does not throw", () => {
-  const entries = [{ url: "a", score: 0 }, { url: "b" }, { url: "c", score: 0 }]
-  assert.equal(cutByScore(entries).length, 3)
-  assert.deepEqual(cutByScore([]), [])
-})
-
-test("cutSearxLeg bounds the lane to `limit` after the score cut", () => {
-  // 60 rows, descending scores, none low enough for the score cut to reach.
+test("searxLane truncates the lane to `limit`", () => {
   const entries = []
   for (let i = 1; i <= 60; i++) {
-    entries.push({ url: `https://searx.example/${i}`, score: 61 - i })
+    entries.push({ url: `https://searx.example/${i}`, score: 61 - i, engine: `e${i}` })
   }
-  const lane = cutSearxLeg(entries, 16)
-  assert.equal(lane.length, 16, "numResults * 2 rows at most")
-  assert.equal(lane[0].url, "https://searx.example/1", "the cut's ranking is kept")
-  assert.ok(
-    !lane.some((e) => e.url === "https://searx.example/17"),
-    "the 17th-ranked row cannot reach the merge",
-  )
-  // the score cut runs first, so the lane can be shorter than the bound
-  assert.equal(cutSearxLeg([{ url: "a", score: 10 }, { url: "b", score: 0.5 }], 16).length, 1)
+  const lane = searxLane(entries, 8)
+  assert.equal(lane.length, 8)
+  assert.equal(lane[0].url, "https://searx.example/1", "the score ordering is kept")
+  assert.ok(!lane.some((e) => e.url === "https://searx.example/9"))
+})
+
+test("searxLane on an all-zero-score response keeps its rows and does not throw", () => {
+  const entries = [{ url: "a", score: 0 }, { url: "b" }, { url: "c", score: 0 }]
+  assert.equal(searxLane(entries, 8).length, 3, "a row naming no engine takes no shared bucket")
+  assert.deepEqual(searxLane([], 8), [])
 })
 
 // ── the merge ─────────────────────────────────────────────────────────────
 
-test("interleave takes the primary leg first, starves neither and honours the cap", () => {
-  const a = [1, 2, 3].map((n) => ({ url: `a${n}` }))
-  const b = [1, 2, 3, 4, 5, 6].map((n) => ({ url: `b${n}` }))
-  assert.deepEqual(interleave(a, b, 6).map((e) => e.url), ["a1", "b1", "a2", "b2", "a3", "b3"])
-  assert.deepEqual(interleave(a, b, 3).map((e) => e.url), ["a1", "b1", "a2"])
-  assert.deepEqual(interleave([], b, 2).map((e) => e.url), ["b1", "b2"])
-  assert.deepEqual(interleave(a, [], 5).map((e) => e.url), ["a1", "a2", "a3"])
+test("partitionByShape puts a lane's threads first and removes nothing", () => {
+  const lane = [
+    { url: "https://example.com/blog/post" },
+    { url: "https://example.com/q/12" },
+    { url: "https://medium.com/@a/b" },
+    { url: "https://news.ycombinator.com/item?id=7" },
+  ]
+  assert.deepEqual(partitionByShape(lane).map((e) => e.url), [
+    "https://example.com/q/12",
+    "https://news.ycombinator.com/item?id=7",
+    "https://example.com/blog/post",
+    "https://medium.com/@a/b",
+  ])
 })
 
-test("a lopsided merge (20 Exa, 60 searxng) starts with Exa and represents both legs", async () => {
+// merged-list builders for the lane merge
+const exaEntry = (url) => ({ url, source: "exa" })
+const searxEntry = (url) => ({ url, source: "searxng" })
+
+test("a searxng lane of no threads spends at most floor(numResults / 4) slots", () => {
+  const merged = []
+  for (let i = 1; i <= 16; i++) merged.push(exaEntry(`https://exa.example/q/${i}`))
+  for (let i = 1; i <= 4; i++) merged.push(searxEntry(`https://searx.example/blog/${i}`))
+  const picked = pickFromLanes(merged, 8)
+  assert.equal(picked.length, 8)
+  assert.equal(picked.filter((e) => e.source === "searxng").length, 2, "floor(8 / 4)")
+  assert.equal(picked.filter((e) => e.source === "exa").length, 6, "the rest goes to the Exa lane")
+})
+
+test("with both lanes thread-shaped the output alternates, Exa first", () => {
+  const merged = []
+  for (let i = 1; i <= 4; i++) merged.push(exaEntry(`https://exa.example/t/${i}`))
+  for (let i = 1; i <= 4; i++) merged.push(searxEntry(`https://searx.example/q/${i}`))
+  assert.deepEqual(pickFromLanes(merged, 6).map((e) => e.url), [
+    "https://exa.example/t/1",
+    "https://searx.example/q/1",
+    "https://exa.example/t/2",
+    "https://searx.example/q/2",
+    "https://exa.example/t/3",
+    "https://searx.example/q/3",
+  ])
+})
+
+test("the quota bounds a weak leg's share, never the yield: skipped rows fill the output", () => {
+  // two Exa rows and ten non-thread searxng rows at numResults 8: the quota
+  // hands out 2 searxng slots, and the fill step has to carry the other 4.
+  const merged = [exaEntry("https://exa.example/t/1"), exaEntry("https://exa.example/t/2")]
+  for (let i = 1; i <= 10; i++) merged.push(searxEntry(`https://searx.example/blog/${i}`))
+  const picked = pickFromLanes(merged, 8)
+  assert.equal(picked.length, 8, "never shorter than min(numResults, merged.length)")
+  assert.deepEqual(picked.slice(0, 4).map((e) => e.url), [
+    "https://exa.example/t/1",
+    "https://searx.example/blog/1",
+    "https://exa.example/t/2",
+    "https://searx.example/blog/2",
+  ])
+  // the fill appends in merged order, and repeats nothing
+  assert.equal(new Set(picked.map((e) => e.url)).size, 8)
+  assert.deepEqual(picked.slice(4).map((e) => e.url), [
+    "https://searx.example/blog/3",
+    "https://searx.example/blog/4",
+    "https://searx.example/blog/5",
+    "https://searx.example/blog/6",
+  ])
+})
+
+test("a shape the rule does not know costs order, never presence", () => {
+  const merged = [
+    exaEntry("https://lemmy.example/post/9"),
+    exaEntry("https://exa.example/t/1"),
+    searxEntry("https://searx.example/q/1"),
+  ]
+  const picked = pickFromLanes(merged, 8)
+  assert.equal(picked.length, 3)
+  assert.ok(picked.some((e) => e.url === "https://lemmy.example/post/9"))
+  assert.equal(picked[0].url, "https://exa.example/t/1", "the known shape leads its lane")
+})
+
+test("a lopsided merge (20 Exa, 60 searxng) starts with Exa and bounds the weak lane", async () => {
   const { dir } = isolate({ searxngUrl: SEARXNG_BASE })
   const stub = stubFetch({
     exa: () => exaSse(exaBlocks(20)),
@@ -296,8 +465,36 @@ test("a lopsided merge (20 Exa, 60 searxng) starts with Exa and represents both 
     const urls = urlsOf(out.output)
     assert.equal(urls.length, 8, "capped at numResults (default 8)")
     assert.match(urls[0], /exa\.example/, "the Exa leg leads — its ordering is the measured one")
-    assert.equal(urls.filter((u) => u.includes("exa.example")).length, 4)
-    assert.equal(urls.filter((u) => u.includes("searx.example")).length, 4)
+    // neither lane is thread-shaped here, so the searxng lane gets its quota
+    assert.equal(urls.filter((u) => u.includes("searx.example")).length, 2, "floor(8 / 4)")
+    assert.equal(urls.filter((u) => u.includes("exa.example")).length, 6)
+  } finally {
+    stub.restore()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a thread-shaped searxng row is not touched by the non-thread quota", async () => {
+  const { dir } = isolate({ searxngUrl: SEARXNG_BASE })
+  const stub = stubFetch({
+    exa: () => exaSse(exaBlocks(20)),
+    searx: () =>
+      searxJson(
+        [1, 2, 3, 4, 5, 6].map((i) => ({
+          url: `https://superuser.example/q/${i}`,
+          title: `su ${i}`,
+          content: `row ${i}`,
+          score: 1 / i,
+          engine: `engine${i}`,
+        })),
+      ),
+  })
+  try {
+    const out = await createForumSearchTool().execute({ query: "k3s on raspberry pi" }, {})
+    const urls = urlsOf(out.output)
+    assert.equal(urls.filter((u) => u.includes("superuser.example")).length, 4, "round-robin, unquotaed")
+    assert.equal(urls[0], "https://exa.example/1")
+    assert.equal(urls[1], "https://superuser.example/q/1")
   } finally {
     stub.restore()
     rmSync(dir, { recursive: true, force: true })
@@ -320,6 +517,7 @@ test("nothing is filtered out by host: a plain article URL is returned like any 
     const urls = urlsOf(out.output)
     assert.ok(urls.includes("https://some-blog.example/post"), "no whitelist, no host matching")
     assert.ok(urls.includes("https://forums.raspberrypi.com/t/1"))
+    assert.equal(urls[0], "https://forums.raspberrypi.com/t/1", "shape orders, it does not gate")
   } finally {
     stub.restore()
     rmSync(dir, { recursive: true, force: true })

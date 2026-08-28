@@ -156,7 +156,7 @@ The primary never blocks. You stay in the driver's seat the entire time.
 | `todos_open()` | List open tasks from `TODO.md` with their stable id (`T5`) and `accept:` criterion. | All agents |
 | `todo_add(title, accept?)` / `todo_edit(id, …)` / `todo_done(id)` | Add / refine / remove a task in `TODO.md`. `todo_done` deletes the completed task — usually the wake-hook does it for you. | The six deliverable roles |
 | `web_search(query, numResults?)` | Anonymous web search via Exa (no key, 150/day; an Exa key lifts the cap). | Subagents |
-| `forum_search(query, numResults?)` | Discussion-forum search (Exa + searxng with forum-only engine bangs). Use for lived user experience; `web_search` for docs/releases/official facts. | Subagents (except `gitter`) |
+| `forum_search(query, keywords?, numResults?)` | Discussion-forum search (Exa + searxng with forum-only engine bangs). Use for lived user experience; `web_search` for docs/releases/official facts. | Subagents (except `gitter`) |
 | `outline(path)` | Top-level declarations of a source file via universal-ctags. ~100 languages, ~95 % token savings vs `read`. | Subagents (except `designer`/`gitter`) |
 
 Subagents are one-shot: **spawn → run → reply → destroyed.** The primary is
@@ -303,7 +303,7 @@ All optional. The subagent and context caps usually live in
 `~/.config/opencode/agent-intercom.json` (written by the TUI panel); that file
 also takes `"searxngUrl"` and `"exaApiKey"`, each overriding its environment variable, and `"forumBangs"` (no env var — the array REPLACES the built-in set rather than extending it). Everything else is environment-variable-driven:
 
-`forumBangs` defaults to `["!hn", "!lo", "!st", "!ubuntu", "!su", "!gh"]` — Hacker News, lobste.rs, Stack Overflow, Ask Ubuntu, Super User, GitHub. A non-empty `"forumBangs"` array in the file replaces this set entirely; an empty, missing, or non-array value leaves the defaults in effect.
+`forumBangs` defaults to `["!st", "!ubuntu", "!su", "!hn", "!lo"]` — Stack Overflow, Ask Ubuntu, Super User, Hacker News, lobste.rs. A non-empty `"forumBangs"` array in the file replaces this set entirely; an empty, missing, or non-array value leaves the defaults in effect. The key exists so a project whose topic lives on a product Discourse instance — `!dpy`, `!caddy`, `!pi` and the like — can list those engines once for the plugin to use.
 
 | Variable | Default | Effect |
 |---|---|---|

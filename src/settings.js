@@ -50,9 +50,13 @@ const DEFAULT_MAX_PRIMARY_CONTEXT = 80000
 // LLM call doesn't silently pin a slot for the life of the process.
 const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
 // Built-in searxng bang set for `forum_search`, each engine verified to answer
-// on its bang: hackernews, lobste.rs, stackoverflow, askubuntu, superuser,
-// github. Replaced (never extended) by the `forumBangs` file key.
-export const DEFAULT_FORUM_BANGS = ["!hn", "!lo", "!st", "!ubuntu", "!su", "!gh"]
+// on its bang. Four of the five return thread URLs on their own site —
+// stackoverflow, askubuntu, superuser, hackernews; lobste.rs is carried as a
+// discovery engine whose rows are the SUBMITTED page rather than the
+// discussion, so they sink under the route's own order and quota. No github: it
+// returns repository roots, and a repository is not what this route offers.
+// Replaced (never extended) by the `forumBangs` file key.
+export const DEFAULT_FORUM_BANGS = ["!st", "!ubuntu", "!su", "!hn", "!lo"]
 // Retry policy for the postNotice transport call (pushes a wake notice into
 // the primary session on subagent completion/timeout/error). The opencode
 // SDK can transiently fail to deliver a promptAsync; without retries a single

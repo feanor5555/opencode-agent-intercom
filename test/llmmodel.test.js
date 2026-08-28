@@ -1,8 +1,9 @@
-// Unit tests for the `chat.message` hook (src/llmmodel.js).
+// Unit tests for the two hooks in src/llmmodel.js: `chat.message`
+// (chatMessageHook) and the `config` half (applyModelChoices).
 //
-// The hook is the only place a user-chosen model enters a request. An agent
-// the user has not chosen a model for must come out of the hook with exactly
-// the model opencode resolved — the hook may never invent, blank or reshape it.
+// Together they are the only places a user-chosen model enters a request. An
+// agent the user has not chosen a model for must come out of either untouched
+// — neither may invent, blank or reshape the model opencode resolved.
 //
 // Run: node --test test/llmmodel.test.js
 
@@ -13,6 +14,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   chatMessageHook,
+  applyModelChoices,
   resolveModelForAgent,
   setModelsPath,
   resetCache,
@@ -134,4 +136,115 @@ test("a message-less output does not throw", () => {
   writeModels({ coder: { providerID: "anthropic", modelID: "claude-x" } })
   assert.doesNotThrow(() => chatMessageHook({ agent: "coder" }, {}))
   assert.doesNotThrow(() => chatMessageHook({ agent: "coder" }, undefined))
+})
+
+// --- the `config` hook half ----------------------------------------------
+//
+// Same store, the other interface: `config.agent[name].model` takes the string
+// form "providerID/modelID" and holds for every prompt of the instance. What
+// the message hook must never do — invent a model for an agent the user did
+// not choose one for — this one must not do either.
+
+// A resolved config as the plugin's own `installAgents` leaves it: the agent
+// keys exist, none of them carries a `model`.
+function freshConfig() {
+  return {
+    agent: {
+      coder: { prompt: "P", permission: {} },
+      planner: { prompt: "P", permission: {} },
+      orchestrator: { prompt: "P", permission: {}, mode: "primary" },
+    },
+    default_agent: "orchestrator",
+  }
+}
+
+test("a stored choice becomes config.agent[name].model in provider/model form", () => {
+  writeModels({ coder: { providerID: "anthropic", modelID: "claude-sonnet-4-5" } })
+  const config = freshConfig()
+  applyModelChoices(config)
+  assert.equal(config.agent.coder.model, "anthropic/claude-sonnet-4-5")
+})
+
+test("an agent without a choice gets no model key at all", () => {
+  writeModels({ coder: { providerID: "anthropic", modelID: "claude-x" } })
+  const config = freshConfig()
+  applyModelChoices(config)
+  assert.equal("model" in config.agent.planner, false, "planner must stay untouched")
+  assert.equal("model" in config.agent.orchestrator, false)
+})
+
+test("no models file: every agent stays untouched", () => {
+  const config = freshConfig()
+  applyModelChoices(config)
+  for (const name of Object.keys(config.agent)) {
+    assert.equal("model" in config.agent[name], false, `${name} must stay untouched`)
+  }
+})
+
+test("an unparseable models file leaves the config as it stands", () => {
+  writeFileSync(file, "{ not json")
+  resetCache()
+  const config = freshConfig()
+  config.agent.coder.model = "project/pinned"
+  applyModelChoices(config)
+  assert.equal(config.agent.coder.model, "project/pinned")
+  assert.equal("model" in config.agent.planner, false)
+})
+
+test("a choice for an agent that does not exist creates no agent", () => {
+  writeModels({ nosuchagent: { providerID: "anthropic", modelID: "claude-x" } })
+  const config = freshConfig()
+  applyModelChoices(config)
+  assert.equal(config.agent.nosuchagent, undefined)
+  assert.deepEqual(Object.keys(config.agent), ["coder", "planner", "orchestrator"])
+})
+
+test("a half-written entry writes nothing rather than a half model string", () => {
+  writeModels({
+    coder: { providerID: "anthropic" },
+    planner: { modelID: "claude-x" },
+    orchestrator: "anthropic/claude-x",
+  })
+  const config = freshConfig()
+  applyModelChoices(config)
+  for (const name of Object.keys(config.agent)) {
+    assert.equal("model" in config.agent[name], false, `${name} must stay untouched`)
+  }
+})
+
+test("the user's choice overrides a model the project pinned on that agent", () => {
+  // The message hook overrides a project model too; both halves have to agree
+  // on the same stored choice, so this one does as well.
+  writeModels({ coder: { providerID: "openai", modelID: "gpt-5" } })
+  const config = freshConfig()
+  config.agent.coder.model = "project/pinned"
+  applyModelChoices(config)
+  assert.equal(config.agent.coder.model, "openai/gpt-5")
+})
+
+test("a __proto__ entry in the file does not reach Object.prototype", () => {
+  writeModels({ __proto__: { providerID: "evil", modelID: "m" } })
+  const config = freshConfig()
+  applyModelChoices(config)
+  assert.equal({}.model, undefined)
+  assert.equal(Object.prototype.model, undefined)
+})
+
+test("a config without an agent map does not throw", () => {
+  writeModels({ coder: { providerID: "anthropic", modelID: "claude-x" } })
+  assert.doesNotThrow(() => applyModelChoices({}))
+  assert.doesNotThrow(() => applyModelChoices(undefined))
+  assert.doesNotThrow(() => applyModelChoices({ agent: null }))
+})
+
+test("both halves apply the same stored choice", () => {
+  writeModels({ coder: { providerID: "anthropic", modelID: "claude-sonnet-4-5" } })
+  const config = freshConfig()
+  applyModelChoices(config)
+  const output = freshOutput("coder")
+  chatMessageHook({ agent: "coder" }, output)
+  assert.equal(
+    config.agent.coder.model,
+    `${output.message.model.providerID}/${output.message.model.modelID}`,
+  )
 })

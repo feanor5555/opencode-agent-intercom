@@ -156,6 +156,7 @@ The primary never blocks. You stay in the driver's seat the entire time.
 | `todos_open()` | List open tasks from `TODO.md` with their stable id (`T5`) and `accept:` criterion. | All agents |
 | `todo_add(title, accept?)` / `todo_edit(id, …)` / `todo_done(id)` | Add / refine / remove a task in `TODO.md`. `todo_done` deletes the completed task — usually the wake-hook does it for you. | The six deliverable roles |
 | `web_search(query, numResults?)` | Anonymous web search via Exa (no key, 150/day; an Exa key lifts the cap). | Subagents |
+| `forum_search(query, numResults?)` | Discussion-forum search (Exa + searxng with forum-only engine bangs). Use for lived user experience; `web_search` for docs/releases/official facts. | Subagents (except `gitter`) |
 | `outline(path)` | Top-level declarations of a source file via universal-ctags. ~100 languages, ~95 % token savings vs `read`. | Subagents (except `designer`/`gitter`) |
 
 Subagents are one-shot: **spawn → run → reply → destroyed.** The primary is
@@ -198,9 +199,9 @@ one of the same name. Orchestrator is the default primary unless
 | `debugger` | Diagnoses build/test/runtime errors. | Bash for repro, no `edit`/`write` — fix goes back to `coder`. |
 | `reviewer` | Reviews staged work into `reviews/`, iterates on it. | No `bash`. Convention: no source-code edits. |
 | `documenter` | Writes/iterates user docs in place (README, `docs/`, changelog). | No `bash`. Convention: no source-code edits. |
-| `researcher` | Web research via `web_search` + `webfetch`. | No `edit`/`write`/`bash`. |
+| `researcher` | Web research via `web_search` + `forum_search` + `webfetch`. | No `edit`/`write`/`bash`. |
 | `designer` | Generates images via [`gen`](#gen--image-generation-no-api-key), researches visual refs on the web. | No `outline`. Convention: no source-code edits. |
-| `gitter` | Repo operations matching project's git style. | No `edit`/`write`/`webfetch`/`web_search`. |
+| `gitter` | Repo operations matching project's git style. | No `edit`/`write`/`webfetch`/`web_search`/`forum_search`. |
 
 ## The TUI sidebar (companion plugin)
 
@@ -227,11 +228,17 @@ exposes every runtime knob:
   applies it by setting `output.message.model`. Its own file, because the
   sampling params file is a number-valued map whose unknown keys are
   forwarded to the provider.
-  The hook overrides the model for **the current message only** — a later
-  prompt that reaches opencode without going through the hook re-resolves
-  the agent definition. Making the choice permanent for an agent would
-  require writing `config.agent[name].model` from the `config` hook, which
-  is a different interface (instance-startup, no live effect).
+  The choice is applied by two hooks that share the same stored pair. The
+  `config` hook writes it into `config.agent[<name>].model` (the
+  `providerID/modelID` form opencode resolves an agent's model from), so
+  it holds for every prompt of the instance — including ones the message
+  hook never sees. That hook runs once at instance bootstrap, so a file
+  change lands on the next opencode start. The `chat.message` hook still
+  applies the same pair live by setting `output.message.model`, so an
+  edit to the file takes effect on the next message without a restart.
+  A choice stored for an opencode built-in agent that the project does
+  not list in its `opencode.json` `agent` map is applied by the
+  `chat.message` hook only — the `config` hook never creates an agent key.
 - `[reset current agent]` drops that agent's sampling overrides *and* its
   model choice, returning every row to what opencode resolves.
 
@@ -288,8 +295,9 @@ embed legibility-critical text in images (the model garbles letters).
 
 All optional. The subagent and context caps usually live in
 `~/.config/opencode/agent-intercom.json` (written by the TUI panel); that file
-also takes `"searxngUrl"` and `"exaApiKey"`, each overriding its environment
-variable. Everything else is environment-variable-driven:
+also takes `"searxngUrl"` and `"exaApiKey"`, each overriding its environment variable, and `"forumBangs"` (no env var — the array REPLACES the built-in set rather than extending it). Everything else is environment-variable-driven:
+
+`forumBangs` defaults to `["!hn", "!lo", "!st", "!ubuntu", "!su", "!gh"]` — Hacker News, lobste.rs, Stack Overflow, Ask Ubuntu, Super User, GitHub. A non-empty `"forumBangs"` array in the file replaces this set entirely; an empty, missing, or non-array value leaves the defaults in effect.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -300,7 +308,7 @@ variable. Everything else is environment-variable-driven:
 | `OPENCODE_AGENT_INTERCOM_RESULT_CHARS` | `8000` | Cap on a subagent's final reply forwarded to the primary. `"0"` disables. |
 | `OPENCODE_AGENT_INTERCOM_PROJECT_CONTEXT` | on | `"0"` skips the project snapshot prepended to spawn prompts |
 | `OPENCODE_AGENT_INTERCOM_RESPECT_TASK_PERMS` | on | `"0"` ignores `permission.task` allowlist in `spawn` |
-| `OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH` / `_DISABLE_OUTLINE` | off | `"1"` skips that tool |
+| `OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH` / `_DISABLE_OUTLINE` / `_DISABLE_FORUM_SEARCH` | off | `"1"` skips that tool |
 | `OPENCODE_AGENT_INTERCOM_SKIP_CTAGS` / `_SKIP_CHROMIUM` | off | Installer-only: skip ctags build / Chromium download |
 | `EXA_API_KEY` | — | If set, `web_search` uses Exa's paid tier. File key `exaApiKey` overrides. |
 | `POLLINATIONS_TOKEN` | — | If set, the `gen` Pollinations fallback uses your account |
@@ -370,6 +378,11 @@ With the plugin wired into a test project by path (see
 - **No hot reload for plugin code.** opencode resolves plugins once at
   instance bootstrap, so a restart is required either way. The live-applying
   settings in the sidebar are runtime knobs, not code.
+
+Before debugging a load or visibility problem, read
+[learnings.md](learnings.md) — durable findings about running this plugin
+under opencode (plugin resolution at bootstrap, the accepted spec forms,
+how to prove a plugin actually loaded, why the TUI half may be missing).
 
 The loop: `npm run dev` in `tui/`, edit, restart opencode.
 

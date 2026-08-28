@@ -59,7 +59,7 @@ import {
 } from "./hooks.js"
 import { installAgents } from "./agents.js"
 import { chatParamsHook } from "./llmparams.js"
-import { chatMessageHook } from "./llmmodel.js"
+import { chatMessageHook, applyModelChoices } from "./llmmodel.js"
 import { captureSystem, captureMessages, captureParams } from "./reqlog.js"
 import { log } from "./log.js"
 
@@ -86,6 +86,17 @@ export default async (ctx) => {
         installAgents(config)
       } catch (err) {
         log("config hook error", err?.message ?? String(err))
+      }
+      // Make the per-agent model choice from ~/.config/opencode/llm-models.json
+      // permanent: written into `config.agent[name].model` it also holds for
+      // prompts that never reach the `chat.message` hook below. Bootstrap-only
+      // — a change to the file lands on the next opencode start, the message
+      // hook is what applies it live. An agent with no choice keeps whatever
+      // model opencode resolves for it.
+      try {
+        applyModelChoices(config)
+      } catch (err) {
+        log("config model hook error", err?.message ?? String(err))
       }
     },
     tool: createTools({ client, directory, permissionGuard }),

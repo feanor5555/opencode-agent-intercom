@@ -14,9 +14,26 @@ import {
   createRoot,
   createSignal,
 } from "solid-js";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, utimesSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { existsSync, utimesSync } from "node:fs";
+import { join } from "node:path";
+import {
+  type LlmParams,
+  clearLlmParamsAgent,
+  readLlmParams,
+  setLlmParam,
+} from "./llm-params-file.js";
+import {
+  type LlmModels,
+  type ModelRef,
+  isModelRef,
+  readLlmModels,
+  setLlmModel,
+} from "./llm-models-file.js";
+import {
+  type Settings,
+  readSettings,
+  setSetting,
+} from "./settings-file.js";
 
 const TUI_PLUGIN_ID = "agent-intercom.tui";
 const ELAPSED_TICK_MS = 1000;
@@ -34,26 +51,6 @@ const HOLD_REPEAT_DELAY_MS = 350;
 const HOLD_REPEAT_INTERVAL_MS = 60;
 const FOCUS_LIST_COMMAND = "agent-intercom.focus-sidebar-list";
 const ABORT_COMMAND = "agent-intercom.abort-selected";
-
-// Shared with the main agent-intercom plugin: it reads this file (file > env >
-// default) for the subagent cap and context budget. Writing it here changes
-// those limits live, no opencode restart needed.
-const SETTINGS_PATH = join(homedir(), ".config", "opencode", "agent-intercom.json");
-const DEFAULT_MAX_SUBAGENTS = 1;
-const DEFAULT_MAX_CONTEXT = 40000;
-
-// Shared with the main plugin's chat.params hook: per-agent LLM parameter
-// overrides. Each agent is configured individually (no "*" global fallback;
-// legacy "*" blocks are dropped on read). Writing this file makes the next
-// LLM request pick up the new values — no opencode restart.
-const LLM_PARAMS_PATH = join(homedir(), ".config", "opencode", "llm-params.json");
-
-// Shared with the main plugin's chat.message hook: the per-agent model choice.
-// Its own file rather than a key in LLM_PARAMS_PATH, because that file is typed
-// `Record<agent, Record<key, number>>` and the params hook forwards every key it
-// does not recognise into `output.options`, i.e. straight into the provider
-// request body — a `model` key there would be sent as a sampling option.
-const LLM_MODELS_PATH = join(homedir(), ".config", "opencode", "llm-models.json");
 
 // Per-project, per-agent prompt overrides. The main plugin reads each file at
 // every LLM call (mtime-cached) — touching them via `utimesSync` busts that
@@ -119,55 +116,11 @@ const numCell = (n: number | string, w = NUM_W): string =>
 const fitCell = (s: string, w: number): string =>
   ` ${(s.length > w ? s.slice(0, w - 1) + "…" : s).padEnd(w)} `;
 
-type LlmParams = Record<string, Record<string, number>>;
-
-function readLlmParams(): LlmParams {
-  try {
-    const raw = JSON.parse(readFileSync(LLM_PARAMS_PATH, "utf8"));
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      // Drop any legacy "*" global block — each agent is configured
-      // individually now. Next write will persist the cleanup.
-      const { ["*"]: _drop, ...rest } = raw as LlmParams;
-      return rest;
-    }
-  } catch {
-    // no file -> empty
-  }
-  return {};
-}
-
-function writeLlmParams(p: LlmParams): void {
-  try {
-    mkdirSync(dirname(LLM_PARAMS_PATH), { recursive: true });
-    writeFileSync(LLM_PARAMS_PATH, JSON.stringify(p, null, 2) + "\n");
-  } catch {
-    // best-effort
-  }
-}
-
-// The per-agent model choice, shared with the main plugin's chat.message hook.
-// An agent with no entry keeps whatever opencode resolved for it.
-interface ModelRef {
-  providerID: string;
-  modelID: string;
-}
-type LlmModels = Record<string, ModelRef>;
-
 // One entry of the flat pick list built from `client.config.providers()`:
 // the model reference plus the label the row shows for it.
 interface ModelChoice extends ModelRef {
   label: string;
 }
-
-const isModelRef = (v: unknown): v is ModelRef => {
-  const r = v as ModelRef | undefined;
-  return (
-    typeof r?.providerID === "string" &&
-    r.providerID.length > 0 &&
-    typeof r.modelID === "string" &&
-    r.modelID.length > 0
-  );
-};
 
 // Normalise what an agent record carries as its model. The runtime `Agent` type
 // gives the pair; the config form of the same field is the string
@@ -185,33 +138,6 @@ function toModelRef(v: unknown): ModelRef | null {
 
 const sameModel = (a: ModelRef | null, b: ModelRef | null): boolean =>
   a !== null && b !== null && a.providerID === b.providerID && a.modelID === b.modelID;
-
-function readLlmModels(): LlmModels {
-  try {
-    const raw = JSON.parse(readFileSync(LLM_MODELS_PATH, "utf8"));
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      const out: LlmModels = {};
-      for (const [agent, ref] of Object.entries(raw as Record<string, unknown>)) {
-        // Skip anything that is not a usable pair, so a hand-edited file cannot
-        // put a half-entry on screen that the plugin then ignores.
-        if (isModelRef(ref)) out[agent] = { providerID: ref.providerID, modelID: ref.modelID };
-      }
-      return out;
-    }
-  } catch {
-    // no file -> empty
-  }
-  return {};
-}
-
-function writeLlmModels(m: LlmModels): void {
-  try {
-    mkdirSync(dirname(LLM_MODELS_PATH), { recursive: true });
-    writeFileSync(LLM_MODELS_PATH, JSON.stringify(m, null, 2) + "\n");
-  } catch {
-    // best-effort
-  }
-}
 
 // Opencode's resolved per-agent defaults, fetched from `client.app.agents()`.
 // Lets the UI fall back to whatever opencode has merged from opencode.json +
@@ -270,63 +196,6 @@ function formatLlmValue(value: number | null, decimals: number): string {
   if (value === null) return "not set";
   if (decimals === 0) return String(Math.round(value));
   return value.toFixed(decimals);
-}
-
-interface Settings {
-  maxSubagents: number;
-  maxContext: number;
-}
-
-function envNum(name: string, def: number): number {
-  const env = process.env[name];
-  if (env === undefined || env === "") return def;
-  const n = Number(env);
-  return Number.isInteger(n) && n >= 0 ? n : def;
-}
-
-// Resolve current limits the same way the main plugin does: file > env var >
-// default, so the inputs show whatever is actually in effect.
-function readSettings(): Settings {
-  const s: Settings = {
-    maxSubagents: envNum("OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS", DEFAULT_MAX_SUBAGENTS),
-    maxContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_CONTEXT", DEFAULT_MAX_CONTEXT),
-  };
-  try {
-    const raw = JSON.parse(readFileSync(SETTINGS_PATH, "utf8"));
-    if (Number.isInteger(raw?.maxSubagents) && raw.maxSubagents >= 0) {
-      s.maxSubagents = raw.maxSubagents;
-    }
-    if (Number.isInteger(raw?.maxContext) && raw.maxContext >= 0) {
-      s.maxContext = raw.maxContext;
-    }
-  } catch {
-    // no file -> env/defaults
-  }
-  return s;
-}
-
-// Merges the two limits into the file instead of replacing it. The file is
-// shared with the main plugin and legitimately carries keys this TUI knows
-// nothing about (searxngUrl, exaApiKey, and whatever else the user put there);
-// a whole-object write would drop them on every stepper press. A missing or
-// unparsable file starts from an empty object, so the result is the same
-// two-key file as before.
-function writeSettings(s: Settings): void {
-  try {
-    let current: Record<string, unknown> = {};
-    try {
-      const raw = JSON.parse(readFileSync(SETTINGS_PATH, "utf8"));
-      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-        current = raw as Record<string, unknown>;
-      }
-    } catch {
-      // no file / unparsable -> write a fresh one
-    }
-    mkdirSync(dirname(SETTINGS_PATH), { recursive: true });
-    writeFileSync(SETTINGS_PATH, JSON.stringify({ ...current, ...s }, null, 2) + "\n");
-  } catch {
-    // best-effort — a failed write just means the limit is not changed
-  }
 }
 
 type SubagentStatus = "busy" | "idle" | "retry" | "aborted" | "error";
@@ -435,8 +304,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // list — keeps "something completed" visible without cluttering the panel.
   const [completedCount, setCompletedCount] = createSignal(0);
 
-  // Runtime limits, shared with the main plugin via SETTINGS_PATH. The inputs
-  // edit these and auto-save on change.
+  // Runtime limits, shared with the main plugin via the settings file. The
+  // inputs edit these and auto-save on change.
   const initialSettings = readSettings();
   const [maxSubagents, setMaxSubagents] = createSignal(initialSettings.maxSubagents);
   const [maxContext, setMaxContext] = createSignal(initialSettings.maxContext);
@@ -446,9 +315,13 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // Both settings are clamped at 0. maxSubagents=0 means "no cap" (unlimited
   // concurrent subagents); maxContext=0 means "no budget" (lockdown disabled).
   const adjustSetting = (key: keyof Settings, delta: number): void => {
-    if (key === "maxSubagents") setMaxSubagents((v) => Math.max(0, v + delta));
-    else setMaxContext((v) => Math.max(0, v + delta));
-    writeSettings({ maxSubagents: maxSubagents(), maxContext: maxContext() });
+    const shown = key === "maxSubagents" ? maxSubagents() : maxContext();
+    // Read-modify-write: the file may have been edited outside the panel since
+    // mount, so only the stepped limit goes into what disk currently holds, and
+    // the merged result is what both signals show from here on.
+    const merged = setSetting(key, Math.max(0, shown + delta));
+    setMaxSubagents(merged.maxSubagents);
+    setMaxContext(merged.maxContext);
   };
 
   // Section collapse state. Subagents-section is the workhorse and stays open
@@ -574,14 +447,11 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       : 0;
     const slots = choices.length + 1;
     const next = (at + delta + slots) % slots;
-    const updated: LlmModels = { ...models };
-    if (next === 0) delete updated[agent];
-    else {
-      const pick = choices[next - 1];
-      updated[agent] = { providerID: pick.providerID, modelID: pick.modelID };
-    }
-    setLlmModels(updated);
-    writeLlmModels(updated);
+    const pick = next === 0 ? null : choices[next - 1];
+    // Read-modify-write: the file may have been edited outside the panel since
+    // mount, so only this one agent goes into what disk currently holds, and
+    // the merged result is what the signal shows from here on.
+    setLlmModels(setLlmModel(agent, pick));
   };
 
   const adjustLlmParam = (def: LlmParamDef, delta: number): void => {
@@ -608,20 +478,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       const raw = Math.min(def.max, Math.max(def.min, resolved.value + delta));
       next = roundToStep(raw, def.step, def.decimals);
     }
-    const updated: LlmParams = { ...params };
-    const bucket: Record<string, number> = { ...(updated[agent] ?? {}) };
-    if (next === null) {
-      delete bucket[def.key];
-    } else {
-      bucket[def.key] = next;
-    }
-    if (Object.keys(bucket).length === 0) {
-      delete updated[agent];
-    } else {
-      updated[agent] = bucket;
-    }
-    setLlmParams(updated);
-    writeLlmParams(updated);
+    // Read-modify-write: the file may have been edited outside the panel since
+    // mount, so only this one parameter goes into what disk currently holds,
+    // and the merged result is what the signal shows from here on.
+    setLlmParams(setLlmParam(agent, def.key, next));
   };
 
   // Clears everything the panel shows with a ★ for this agent — the sampling
@@ -629,20 +489,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // opencode resolved.
   const resetLlmAgent = (): void => {
     const agent = currentLlmAgent();
-    const params = llmParams();
-    if (params[agent]) {
-      const updated: LlmParams = { ...params };
-      delete updated[agent];
-      setLlmParams(updated);
-      writeLlmParams(updated);
-    }
-    const models = llmModels();
-    if (models[agent]) {
-      const updated: LlmModels = { ...models };
-      delete updated[agent];
-      setLlmModels(updated);
-      writeLlmModels(updated);
-    }
+    // Same read-modify-write as a single parameter change: only this agent's
+    // block goes away, whatever else the file has gained meanwhile stays.
+    setLlmParams(clearLlmParamsAgent(agent));
+    setLlmModels(setLlmModel(agent, null));
   };
 
   // Toggles for opencode's "thinking blocks" and "tool details" visibility. The

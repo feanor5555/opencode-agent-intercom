@@ -28,7 +28,7 @@ import {
   parseExaEntries,
   searxToEntries,
   mergeAndDedup,
-} from "../src/websearch.js"
+} from "../src/searchcore.js"
 import { setCtagsProbe, probeCtags } from "../src/outline.js"
 
 // outline tests need a working `universal-ctags` binary on PATH or in
@@ -1259,6 +1259,64 @@ test("the wired chat.message hook: unset keeps opencode's model, a choice overri
   }
 })
 
+test("the wired config hook: a stored choice persists as agent.model, others stay bare", async () => {
+  // The other half of the same store: what `chat.message` applies per call, the
+  // `config` hook writes into the agent definition, so it also holds for a
+  // prompt that never reaches the message hook. Bootstrap-only by nature — this
+  // drives the hook opencode calls at instance start.
+  const dir = mkdtempSync(join(tmpdir(), "aic-configmodels-"))
+  const file = join(dir, "llm-models.json")
+  try {
+    const { ctx } = makeCtx()
+    const hooks = await plugin(ctx)
+
+    setModelsPath(file) // no file on disk yet
+    const untouched = {}
+    await hooks.config(untouched)
+    assert.ok(untouched.agent.coder.prompt.length > 0) // roles still installed
+    for (const name of Object.keys(untouched.agent)) {
+      assert.equal("model" in untouched.agent[name], false, `${name} must carry no model`)
+    }
+
+    writeFileSync(
+      file,
+      JSON.stringify({
+        coder: { providerID: "anthropic", modelID: "claude-x" },
+        nosuchagent: { providerID: "anthropic", modelID: "claude-x" },
+      }),
+    )
+    resetLlmModels()
+    const chosen = {}
+    await hooks.config(chosen)
+    assert.equal(chosen.agent.coder.model, "anthropic/claude-x")
+    assert.equal("model" in chosen.agent.reviewer, false, "an unchosen role stays bare")
+    assert.equal(chosen.agent.nosuchagent, undefined, "a stale name creates no agent")
+
+    // and the two halves agree on that same choice
+    const message = {
+      message: { id: "msg_1", sessionID: "ses_primary", role: "user", agent: "coder",
+        model: { providerID: "opencode", modelID: "resolved-default" } },
+      parts: [],
+    }
+    await hooks["chat.message"]({ sessionID: "ses_primary", agent: "coder" }, message)
+    assert.equal(
+      chosen.agent.coder.model,
+      `${message.message.model.providerID}/${message.message.model.modelID}`,
+    )
+
+    // an unparseable store leaves the roles exactly as installAgents left them
+    writeFileSync(file, "{ not json")
+    resetLlmModels()
+    const broken = {}
+    await hooks.config(broken)
+    assert.equal("model" in broken.agent.coder, false)
+    assert.ok(broken.agent.orchestrator.prompt.length > 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    setModelsPath(join(homedir(), ".config", "opencode", "llm-models.json"))
+  }
+})
+
 test("a project that sets a temperature keeps it through the config hook", async () => {
   // The plugin sets none, but the merge must still let a project pin one.
   const { ctx } = makeCtx()
@@ -1409,6 +1467,28 @@ test("web_search surfaces Exa JSON-RPC errors instead of throwing", async () => 
   try {
     const out = await hooks.tool.web_search.execute({ query: "x" }, {})
     assert.match(out.output, /rate limited/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test("web_search names the reason on an Exa isError reply", async () => {
+  // HTTP 200 with `isError: true` and the limit text as content is how Exa's
+  // free tier answers a rate limit: a failed leg with a reason, never content.
+  delete process.env.OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () =>
+      'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":' +
+      '[{"type":"text","text":"You\'ve hit Exa\'s free MCP rate limit."}]}}\n',
+  })
+  try {
+    const out = await hooks.tool.web_search.execute({ query: "x" }, {})
+    assert.match(out.output, /^websearch failed: exa: You've hit Exa's free MCP rate limit/)
   } finally {
     globalThis.fetch = originalFetch
   }

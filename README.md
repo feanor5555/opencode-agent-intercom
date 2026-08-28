@@ -242,7 +242,13 @@ exposes every runtime knob:
 - `[reset current agent]` drops that agent's sampling overrides *and* its
   model choice, returning every row to what opencode resolves.
 
-Every change applies on the next LLM call. No opencode restart.
+Every change applies on the next LLM call. No opencode restart — with one
+exception on the way back out. Once the `config` hook has pinned a model at
+bootstrap, that string is what opencode resolves for the agent, so dropping
+the choice again cannot simply fall through to it: the `chat.message` hook
+puts back the `model` the pin displaced. For an agent that carried no model
+before the pin there is nothing to put back, and dropping its choice takes
+effect at the next opencode start.
 
 ## CLIs the subagents use
 
@@ -364,6 +370,13 @@ removing every "do it yourself" tool from the primary is the enforcement lever.
 npm run check   # syntax check (node --check)
 npm test        # unit tests (node --test)
 ```
+
+`npm test` needs Node 22.18 or newer (`devEngines.runtime` in
+`package.json`): part of the suite imports the TUI stores from
+`tui/src/*.ts` directly, and Node strips those types without a flag only
+from that version on. The published package itself is plain ESM and runs on
+Node 18 (`engines.node`); the TUI ships as a `node20` bundle under
+`tui/dist`.
 
 ### Local development loop
 

@@ -3,6 +3,10 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    // Relative imports inside src/ carry the .ts extension: the root test suite
+    // loads these modules directly through node's type stripping, which does not
+    // resolve a .js specifier to its .ts file. tsup rewrites them when bundling.
+    "allowImportingTsExtensions": true,
     "lib": ["ES2022"],
     "types": ["node"],
     "jsx": "react-jsx",

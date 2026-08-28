@@ -45,7 +45,14 @@
   },
   "homepage": "https://github.com/feanor5555/opencode-agent-intercom#readme",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=18"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": ">=22.18.0",
+      "onFail": "warn"
+    }
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.18.23",

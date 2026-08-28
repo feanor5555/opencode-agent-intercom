@@ -248,3 +248,98 @@ test("both halves apply the same stored choice", () => {
     `${output.message.model.providerID}/${output.message.model.modelID}`,
   )
 })
+
+// --- removing a choice after the config hook has pinned one ---------------
+//
+// The one sequence that needs both halves: the config hook writes
+// `config.agent[name].model` at bootstrap, so from then on that string is what
+// opencode resolves for the agent. Dropping the choice in the panel therefore
+// cannot fall through to it — the message hook has to put back what the pin
+// displaced.
+
+// The message opencode builds once the config hook has pinned `ref` on the
+// agent: it carries the pinned pair, not the pre-bootstrap one.
+function outputWithModel(agent, providerID, modelID) {
+  const output = freshOutput(agent)
+  output.message.model = { providerID, modelID }
+  return output
+}
+
+test("a choice removed after the pin returns the model the pin displaced", () => {
+  writeModels({ coder: { providerID: "openai", modelID: "gpt-5" } })
+  const config = freshConfig()
+  config.agent.coder.model = "project/pinned"
+  applyModelChoices(config)
+  assert.equal(config.agent.coder.model, "openai/gpt-5")
+
+  writeModels({}) // what `[reset current agent]` leaves behind
+  const output = outputWithModel("coder", "openai", "gpt-5")
+  chatMessageHook({ agent: "coder" }, output)
+  assert.deepEqual(output.message.model, { providerID: "project", modelID: "pinned" })
+})
+
+test("the displaced model is split at the first slash only", () => {
+  writeModels({ coder: { providerID: "openai", modelID: "gpt-5" } })
+  const config = freshConfig()
+  config.agent.coder.model = "openrouter/openai/gpt-oss-120b"
+  applyModelChoices(config)
+
+  writeModels({})
+  const output = outputWithModel("coder", "openai", "gpt-5")
+  chatMessageHook({ agent: "coder" }, output)
+  assert.deepEqual(output.message.model, {
+    providerID: "openrouter",
+    modelID: "openai/gpt-oss-120b",
+  })
+})
+
+test("a second run of the config hook keeps the displaced model, not its own", () => {
+  writeModels({ coder: { providerID: "openai", modelID: "gpt-5" } })
+  const config = freshConfig()
+  config.agent.coder.model = "project/pinned"
+  applyModelChoices(config)
+  writeModels({ coder: { providerID: "anthropic", modelID: "claude-x" } })
+  applyModelChoices(config)
+  assert.equal(config.agent.coder.model, "anthropic/claude-x")
+
+  writeModels({})
+  const output = outputWithModel("coder", "anthropic", "claude-x")
+  chatMessageHook({ agent: "coder" }, output)
+  assert.deepEqual(output.message.model, { providerID: "project", modelID: "pinned" })
+})
+
+test("an agent the pin found without a model keeps it until the next start", () => {
+  writeModels({ coder: { providerID: "openai", modelID: "gpt-5" } })
+  const config = freshConfig()
+  applyModelChoices(config)
+  assert.equal(config.agent.coder.model, "openai/gpt-5")
+
+  writeModels({})
+  const output = outputWithModel("coder", "openai", "gpt-5")
+  chatMessageHook({ agent: "coder" }, output)
+  assert.deepEqual(output.message.model, { providerID: "openai", modelID: "gpt-5" })
+})
+
+test("an agent the config hook never pinned is left untouched", () => {
+  writeModels({ coder: { providerID: "openai", modelID: "gpt-5" } })
+  const config = freshConfig()
+  config.agent.planner.model = "project/pinned"
+  applyModelChoices(config)
+
+  writeModels({})
+  const output = outputWithModel("planner", "project", "pinned")
+  chatMessageHook({ agent: "planner" }, output)
+  assert.deepEqual(output.message.model, { providerID: "project", modelID: "pinned" })
+})
+
+test("a malformed displaced value is not put back as a half pair", () => {
+  writeModels({ coder: { providerID: "openai", modelID: "gpt-5" } })
+  const config = freshConfig()
+  config.agent.coder.model = "bare-model-name"
+  applyModelChoices(config)
+
+  writeModels({})
+  const output = outputWithModel("coder", "openai", "gpt-5")
+  chatMessageHook({ agent: "coder" }, output)
+  assert.deepEqual(output.message.model, { providerID: "openai", modelID: "gpt-5" })
+})

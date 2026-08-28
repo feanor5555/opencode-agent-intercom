@@ -16,9 +16,14 @@
 //
 // Resolution chain, the same for both:
 //   file[agent]  ({ providerID, modelID })  > unset
-// "Unset" means: neither hook writes anything for that agent, so opencode's own
-// resolution (agent definition > session model) stands and no choice here can
-// ever force a model the user did not pick.
+// "Unset" means: no hook ever forces a model the user did not pick. For an
+// agent the `config` hook has already pinned, the message hook puts back the
+// value that stood in `config.agent[<name>].model` before the pin — from
+// bootstrap on, that pinned string *is* opencode's resolution, so a choice
+// removed in the panel would otherwise keep running to the end of the instance.
+// Where the agent carried no model before the pin, the earlier resolution
+// cannot be reconstructed and removing the choice takes effect at the next
+// opencode start.
 //
 // This is deliberately a separate file from llm-params.json: that one is typed
 // `Record<agent, Record<key, number>>` and `chatParamsHook` forwards every key
@@ -33,11 +38,13 @@ import { log, errMsg } from "./log.js"
 
 let modelsFile = join(homedir(), ".config", "opencode", "llm-models.json")
 
-// Test seam: point the reader at another file. Drops the cache so the next
-// read hits the new path.
+// Test seam: point the reader at another file. Drops the cache and the record
+// of what the `config` hook overwrote, so the next read hits the new path with
+// no state from the previous one.
 export function setModelsPath(p) {
   modelsFile = p
   resetCache()
+  pinnedBefore.clear()
 }
 
 let cache = { mtime: 0, data: {} }
@@ -75,6 +82,16 @@ export function resolveModelForAgent(agent) {
   return { providerID, modelID }
 }
 
+// Splits the `providerID/modelID` string form `config.agent[<name>].model`
+// carries into the pair a message carries, at the first `/`. Null for anything
+// that is not both halves.
+function splitModelRef(ref) {
+  if (!nonEmptyString(ref)) return null
+  const slash = ref.indexOf("/")
+  if (slash < 1 || slash === ref.length - 1) return null
+  return { providerID: ref.slice(0, slash), modelID: ref.slice(slash + 1) }
+}
+
 // The hook itself. opencode calls it with input.{sessionID, agent, model, ...}
 // and a mutable output.{message, parts}; `output.message.model` is the pair the
 // request will run with.
@@ -83,9 +100,23 @@ export function chatMessageHook(input, output) {
   if (!message) return
   const agent = nonEmptyString(input?.agent) ? input.agent : message.agent
   const chosen = resolveModelForAgent(agent)
-  if (!chosen) return
-  message.model = chosen
+  if (chosen) {
+    message.model = chosen
+    return
+  }
+  // No choice stored. For an agent the `config` hook pinned at bootstrap, the
+  // model opencode now resolves is that pin, so removing the choice has to put
+  // the pre-bootstrap value back on the message. An agent that carried no model
+  // before the pin has nothing to put back — see the header.
+  const previous = splitModelRef(pinnedBefore.get(agent))
+  if (previous) message.model = previous
 }
+
+// What the `config` hook displaced, per agent name: the `providerID/modelID`
+// string that stood in `config.agent[<name>].model` before the pin, or
+// undefined where the agent carried none. Lives for the instance, like the
+// bootstrap config itself.
+const pinnedBefore = new Map()
 
 // The `config` hook half. opencode calls the hook with the resolved config;
 // this writes each stored choice into `config.agent[<name>].model`, which is
@@ -94,7 +125,7 @@ export function chatMessageHook(input, output) {
 //
 // Only agents already present in `config.agent` are touched — a stored name
 // that matches none must not bring a bare `{ model }` agent into being, and
-// the own-property check keeps a `__proto__` key in the file off
+// iterating the config side keeps a `__proto__` key in the file off
 // Object.prototype. Runs after installAgents(), so the plugin's own roles and
 // the project's are both there; a choice the user made in the panel overrides
 // a `model` the project set on that agent, exactly as the message hook does.
@@ -102,12 +133,17 @@ export function chatMessageHook(input, output) {
 export function applyModelChoices(config) {
   const agents = config?.agent
   if (!agents || typeof agents !== "object") return
-  for (const name of Object.keys(readModels())) {
-    if (!Object.prototype.hasOwnProperty.call(agents, name)) continue
+  const stored = readModels()
+  for (const name of Object.keys(agents)) {
+    if (!Object.hasOwn(stored, name)) continue
     const agent = agents[name]
     if (!agent || typeof agent !== "object") continue
     const chosen = resolveModelForAgent(name)
     if (!chosen) continue
+    // Record what the pin displaces, once per agent, so a second run of the
+    // hook cannot overwrite the value with the plugin's own. The message hook
+    // reads it back when the choice is later removed.
+    if (!pinnedBefore.has(name)) pinnedBefore.set(name, agent.model)
     agent.model = `${chosen.providerID}/${chosen.modelID}`
   }
 }

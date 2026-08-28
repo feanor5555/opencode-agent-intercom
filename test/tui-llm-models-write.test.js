@@ -9,10 +9,11 @@
 
 import test, { beforeEach, after } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs"
+import { chmodSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  cycleLlmModel,
   readLlmModels,
   setLlmModel,
   setLlmModelsPath,
@@ -29,6 +30,18 @@ beforeEach(() => {
 })
 
 const onDisk = () => JSON.parse(readFileSync(file, "utf8"))
+
+// The pick list the sidebar builds from the configured providers, in the order
+// [<]/[>] walks it.
+const CHOICES = [
+  { providerID: "anthropic", modelID: "opus", label: "Claude Opus" },
+  { providerID: "anthropic", modelID: "sonnet", label: "Claude Sonnet" },
+  { providerID: "openai", modelID: "gpt-5", label: "GPT-5" },
+]
+
+// A read-only file is still writable for root, so the failed-write case only
+// says anything as an unprivileged user.
+const rootSkip = process.getuid?.() === 0 ? "root writes read-only files" : false
 
 test("an external edit between mount and a sidebar write survives that write", () => {
   // Mount: the panel reads the file once and keeps that copy in its signal.
@@ -118,13 +131,75 @@ test("a missing file is treated as empty and written fresh", () => {
   assert.deepEqual(onDisk(), merged)
 })
 
-test("an unparsable file is treated as empty and replaced", () => {
-  writeFileSync(file, "{ not json")
+test("an unparsable file is left alone rather than replaced", () => {
+  writeFileSync(file, '{ "coder": { "providerID": "anthropic" },')
+  const before = readFileSync(file, "utf8")
 
   const merged = setLlmModel("coder", { providerID: "anthropic", modelID: "opus" })
 
-  assert.deepEqual(merged, { coder: { providerID: "anthropic", modelID: "opus" } })
+  assert.equal(readFileSync(file, "utf8"), before)
+  assert.deepEqual(merged, {})
+})
+
+test("a cycle steps from the model the file holds, not from the panel's copy", () => {
+  // Mount: the panel reads "opus" into its signal.
+  writeFileSync(file, JSON.stringify({ coder: { providerID: "anthropic", modelID: "opus" } }))
+  assert.deepEqual(readLlmModels(), {
+    coder: { providerID: "anthropic", modelID: "opus" },
+  })
+
+  // Changed outside the panel while the sidebar still shows "opus".
+  writeFileSync(file, JSON.stringify({ coder: { providerID: "anthropic", modelID: "sonnet" } }))
+
+  const merged = cycleLlmModel("coder", 1, CHOICES)
+
+  assert.deepEqual(merged, { coder: { providerID: "openai", modelID: "gpt-5" } })
   assert.deepEqual(onDisk(), merged)
+})
+
+test("cycling off the front of the list drops the agent's choice", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({
+      coder: { providerID: "anthropic", modelID: "opus" },
+      reviewer: { providerID: "openai", modelID: "gpt-5" },
+    }),
+  )
+
+  const merged = cycleLlmModel("coder", -1, CHOICES)
+
+  assert.equal("coder" in merged, false)
+  assert.deepEqual(merged, { reviewer: { providerID: "openai", modelID: "gpt-5" } })
+  assert.deepEqual(onDisk(), merged)
+})
+
+test("only the pair is stored when the cycle lands on a pick-list entry", () => {
+  const merged = cycleLlmModel("coder", 1, CHOICES)
+
+  assert.deepEqual(merged.coder, { providerID: "anthropic", modelID: "opus" })
+  assert.equal("label" in merged.coder, false)
+  assert.deepEqual(onDisk(), merged)
+})
+
+test("an empty pick list leaves the file untouched", () => {
+  writeFileSync(file, JSON.stringify({ coder: { providerID: "anthropic", modelID: "opus" } }))
+  const before = readFileSync(file, "utf8")
+
+  const merged = cycleLlmModel("coder", 1, [])
+
+  assert.deepEqual(merged, { coder: { providerID: "anthropic", modelID: "opus" } })
+  assert.equal(readFileSync(file, "utf8"), before)
+})
+
+test("a write that cannot reach the disk leaves the panel on the file's state", { skip: rootSkip }, () => {
+  writeFileSync(file, JSON.stringify({ coder: { providerID: "anthropic", modelID: "opus" } }))
+  chmodSync(file, 0o444)
+
+  const merged = setLlmModel("coder", { providerID: "openai", modelID: "gpt-5" })
+
+  assert.deepEqual(onDisk(), { coder: { providerID: "anthropic", modelID: "opus" } })
+  assert.deepEqual(merged, { coder: { providerID: "anthropic", modelID: "opus" } })
+  chmodSync(file, 0o644)
 })
 
 test("dropping an agent that has nothing on disk leaves the file untouched", () => {

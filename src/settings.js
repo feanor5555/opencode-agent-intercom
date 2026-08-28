@@ -31,8 +31,13 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { log } from "./log.js"
 
-const DEFAULT_MAX_SUBAGENTS = 1
-const DEFAULT_MAX_CONTEXT = 40000
+// The subagent cap and context budget in effect when neither the file nor the
+// env var says otherwise. Exported because the TUI plugin hardcodes the same
+// two numbers and cannot import this module at runtime (separate npm package):
+// test/settings-defaults-parity.test.js imports both sides and fails on a
+// divergence.
+export const DEFAULT_MAX_SUBAGENTS = 1
+export const DEFAULT_MAX_CONTEXT = 40000
 // Threshold (in tokens) at which the orchestrator primary session triggers a
 // context-refresh handoff. Independent of maxContext (which gates subagents).
 // 0 disables auto-handoff entirely.

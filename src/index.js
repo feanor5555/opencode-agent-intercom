@@ -92,7 +92,8 @@ export default async (ctx) => {
       // prompts that never reach the `chat.message` hook below. Bootstrap-only
       // — a change to the file lands on the next opencode start, the message
       // hook is what applies it live. An agent with no choice keeps whatever
-      // model opencode resolves for it.
+      // model opencode resolves for it, and what a pin displaces is kept so
+      // the message hook can put it back once the choice is removed.
       try {
         applyModelChoices(config)
       } catch (err) {
@@ -124,7 +125,10 @@ export default async (ctx) => {
     // `chat.params` cannot do this — its output carries only sampling fields —
     // so the model is set on the outgoing user message instead. Companion TUI
     // panel writes that file; a choice takes effect on the next message without
-    // an opencode restart, and an agent with no choice keeps opencode's own.
+    // an opencode restart. An agent with no choice keeps opencode's own model,
+    // except where the `config` hook pinned one at bootstrap — then the value
+    // that pin displaced is put back, so a removed choice stops running at the
+    // next message instead of at the next opencode start.
     "chat.message": async (input, output) => {
       try {
         chatMessageHook(input, output)

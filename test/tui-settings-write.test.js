@@ -9,7 +9,7 @@
 
 import test, { beforeEach, after } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs"
+import { chmodSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -18,6 +18,7 @@ import {
   readSettings,
   setSetting,
   setSettingsPath,
+  stepSetting,
 } from "../tui/src/settings-file.ts"
 
 const dir = mkdtempSync(join(tmpdir(), "tui-settings-"))
@@ -35,6 +36,10 @@ beforeEach(() => {
 })
 
 const onDisk = () => JSON.parse(readFileSync(file, "utf8"))
+
+// A read-only file is still writable for root, so the failed-write case only
+// says anything as an unprivileged user.
+const rootSkip = process.getuid?.() === 0 ? "root writes read-only files" : false
 
 test("an external edit between mount and a sidebar write survives that write", () => {
   // Mount: the panel reads the file once and keeps that copy in its signals.
@@ -91,20 +96,63 @@ test("a missing file is treated as empty and written fresh", () => {
   assert.deepEqual(merged, { maxSubagents: 3, maxContext: DEFAULT_MAX_CONTEXT })
 })
 
-test("an unparsable file is treated as empty and replaced", () => {
-  writeFileSync(file, "{ not json")
+test("an unparsable file is left alone rather than replaced", () => {
+  // The file is hand-edited and the only home of keys this TUI never displays;
+  // one stray character must not cost the user those keys.
+  writeFileSync(file, '{ "maxContext": 50000, "exaApiKey": "secret",')
+  const before = readFileSync(file, "utf8")
 
   const merged = setSetting("maxContext", 50000)
 
-  assert.deepEqual(onDisk(), { maxContext: 50000 })
-  assert.deepEqual(merged, { maxSubagents: DEFAULT_MAX_SUBAGENTS, maxContext: 50000 })
+  assert.equal(readFileSync(file, "utf8"), before)
+  // The panel keeps showing what the plugin runs on for such a file.
+  assert.deepEqual(merged, {
+    maxSubagents: DEFAULT_MAX_SUBAGENTS,
+    maxContext: DEFAULT_MAX_CONTEXT,
+  })
 })
 
-test("an invalid value in the file falls back to env/default and stays on disk", () => {
+test("a step starts from the value the file holds, not from the panel's copy", () => {
+  // Mount: the panel reads 40000 into its signal.
+  writeFileSync(file, JSON.stringify({ maxContext: 40000 }))
+  assert.equal(readSettings().maxContext, 40000)
+
+  // Raised outside the panel while the sidebar still shows 40000.
+  writeFileSync(file, JSON.stringify({ maxContext: 90000 }))
+
+  const merged = stepSetting("maxContext", 5000)
+
+  assert.equal(merged.maxContext, 95000)
+  assert.deepEqual(onDisk(), { maxContext: 95000 })
+})
+
+test("a step clamps at the floor it is given", () => {
+  writeFileSync(file, JSON.stringify({ maxSubagents: 0 }))
+
+  const merged = stepSetting("maxSubagents", -1, 0)
+
+  assert.equal(merged.maxSubagents, 0)
+  assert.deepEqual(onDisk(), { maxSubagents: 0 })
+})
+
+test("a write that cannot reach the disk leaves the panel on the file's state", { skip: rootSkip }, () => {
+  writeFileSync(file, JSON.stringify({ maxSubagents: 2, maxContext: 90000 }))
+  chmodSync(file, 0o444)
+
+  const merged = setSetting("maxSubagents", 5)
+
+  assert.deepEqual(onDisk(), { maxSubagents: 2, maxContext: 90000 })
+  assert.deepEqual(merged, { maxSubagents: 2, maxContext: 90000 })
+  chmodSync(file, 0o644)
+})
+
+test("an invalid value in the file is dropped by the next write", () => {
   writeFileSync(file, JSON.stringify({ maxSubagents: -1, maxContext: "lots" }))
 
   const merged = setSetting("maxSubagents", 0)
 
   assert.deepEqual(merged, { maxSubagents: 0, maxContext: DEFAULT_MAX_CONTEXT })
-  assert.deepEqual(onDisk(), { maxSubagents: 0, maxContext: "lots" })
+  // A value the plugin rejects would otherwise sit in the file for good while
+  // the panel shows the env-or-default one instead.
+  assert.deepEqual(onDisk(), { maxSubagents: 0 })
 })

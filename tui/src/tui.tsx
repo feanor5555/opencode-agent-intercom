@@ -18,22 +18,25 @@ import { existsSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import {
   type LlmParams,
+  type LlmParamStep,
   clearLlmParamsAgent,
   readLlmParams,
-  setLlmParam,
-} from "./llm-params-file.js";
+  stepLlmParam,
+} from "./llm-params-file.ts";
 import {
   type LlmModels,
   type ModelRef,
+  cycleLlmModel,
   isModelRef,
   readLlmModels,
+  sameModel,
   setLlmModel,
-} from "./llm-models-file.js";
+} from "./llm-models-file.ts";
 import {
   type Settings,
   readSettings,
-  setSetting,
-} from "./settings-file.js";
+  stepSetting,
+} from "./settings-file.ts";
 
 const TUI_PLUGIN_ID = "agent-intercom.tui";
 const ELAPSED_TICK_MS = 1000;
@@ -81,13 +84,10 @@ const LLM_AGENTS = [
   "designer",
   "gitter",
 ];
-interface LlmParamDef {
-  key: string;
+// The stepping rule of one parameter row plus the label it carries; the rule
+// itself is the store's, which applies it inside its read-modify-write.
+interface LlmParamDef extends LlmParamStep {
   label: string;
-  step: number;
-  min: number;
-  max: number;
-  decimals: number;
 }
 const LLM_PARAM_DEFS: LlmParamDef[] = [
   { key: "temperature",    label: "temperature", step: 0.05, min: 0,   max: 2,    decimals: 2 },
@@ -136,9 +136,6 @@ function toModelRef(v: unknown): ModelRef | null {
   return null;
 }
 
-const sameModel = (a: ModelRef | null, b: ModelRef | null): boolean =>
-  a !== null && b !== null && a.providerID === b.providerID && a.modelID === b.modelID;
-
 // Opencode's resolved per-agent defaults, fetched from `client.app.agents()`.
 // Lets the UI fall back to whatever opencode has merged from opencode.json +
 // AGENTS.md + plugin agents — so the user sees what each agent actually runs
@@ -184,12 +181,6 @@ function resolveLlmModel(
 function formatLlmModel(value: ModelRef | null, choices: ModelChoice[]): string {
   if (value === null) return "not set";
   return choices.find((c) => sameModel(c, value))?.label ?? value.modelID;
-}
-
-function roundToStep(value: number, step: number, decimals: number): number {
-  const stepped = Math.round(value / step) * step;
-  const f = Math.pow(10, decimals);
-  return Math.round(stepped * f) / f;
 }
 
 function formatLlmValue(value: number | null, decimals: number): string {
@@ -315,11 +306,11 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // Both settings are clamped at 0. maxSubagents=0 means "no cap" (unlimited
   // concurrent subagents); maxContext=0 means "no budget" (lockdown disabled).
   const adjustSetting = (key: keyof Settings, delta: number): void => {
-    const shown = key === "maxSubagents" ? maxSubagents() : maxContext();
-    // Read-modify-write: the file may have been edited outside the panel since
-    // mount, so only the stepped limit goes into what disk currently holds, and
-    // the merged result is what both signals show from here on.
-    const merged = setSetting(key, Math.max(0, shown + delta));
+    // Read-modify-write inside the store: the file may have been edited outside
+    // the panel since the last read, so the base value comes from the file and
+    // only the stepped limit goes into what disk currently holds. The merged
+    // result is what both signals show from here on.
+    const merged = stepSetting(key, delta, 0);
     setMaxSubagents(merged.maxSubagents);
     setMaxContext(merged.maxContext);
   };
@@ -340,6 +331,30 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const [llmExpanded, setLlmExpanded] = createSignal(false);
   const [llmAgentIdx, setLlmAgentIdx] = createSignal(0);
   const currentLlmAgent = (): string => LLM_AGENTS[llmAgentIdx()];
+
+  // The three files are shared with the main plugin and are hand-edited, so the
+  // copies seeded at mount go stale. Re-read them on the same timer that
+  // refreshes opencode's own defaults, and whenever the user turns to a view
+  // that shows them — three small JSON reads.
+  const refreshFileState = (): void => {
+    if (disposed) return;
+    const settings = readSettings();
+    setMaxSubagents(settings.maxSubagents);
+    setMaxContext(settings.maxContext);
+    setLlmParams(readLlmParams());
+    setLlmModels(readLlmModels());
+  };
+
+  // Opening a section that shows file-backed values re-reads them first, so what
+  // appears is the current file state rather than the copy from the last read.
+  const toggleTuiSettings = (): void => {
+    if (!tuiSettingsExpanded()) refreshFileState();
+    setTuiSettingsExpanded((v) => !v);
+  };
+  const toggleLlm = (): void => {
+    if (!llmExpanded()) refreshFileState();
+    setLlmExpanded((v) => !v);
+  };
 
   // Opencode's resolved per-agent defaults — fetched async, refreshed on a
   // timer and on agent cycle. Empty until the first successful fetch (opencode
@@ -388,7 +403,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     }
   };
   void refreshOpencodeDefaults();
-  const opencodeDefaultsTimer = setInterval(refreshOpencodeDefaults, 30_000);
+  const opencodeDefaultsTimer = setInterval(() => {
+    refreshFileState();
+    void refreshOpencodeDefaults();
+  }, 30_000);
 
   // The models the user has configured, as the running opencode instance
   // resolves them (config + auth + opencode.json overrides) — not the raw
@@ -428,60 +446,25 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
 
   const cycleLlmAgent = (delta: number): void => {
     setLlmAgentIdx((i) => (i + delta + LLM_AGENTS.length) % LLM_AGENTS.length);
+    refreshFileState();
     void refreshOpencodeDefaults();
   };
 
-  // Walk the pick list by one. The cycle carries a virtual "not set" slot in
-  // front of the first model, so [<] off the first entry drops the override and
-  // hands the agent back to opencode's own model without a full reset.
-  const cycleLlmModel = (delta: number): void => {
-    const choices = modelChoices();
-    if (choices.length === 0) return;
-    const agent = currentLlmAgent();
-    const models = llmModels();
-    const own = models[agent];
-    // Position in [not set, choice 0 .. choice n-1]; an override that is no
-    // longer in the list counts as "not set" so the next step lands in the list.
-    const at = isModelRef(own)
-      ? choices.findIndex((c) => sameModel(c, own)) + 1
-      : 0;
-    const slots = choices.length + 1;
-    const next = (at + delta + slots) % slots;
-    const pick = next === 0 ? null : choices[next - 1];
-    // Read-modify-write: the file may have been edited outside the panel since
-    // mount, so only this one agent goes into what disk currently holds, and
-    // the merged result is what the signal shows from here on.
-    setLlmModels(setLlmModel(agent, pick));
+  // Walk the pick list by one. Position and write are one read-modify-write in
+  // the store, so a choice made outside the panel is stepped from rather than
+  // overwritten, and the merged result is what the signal shows from here on.
+  const cycleModel = (delta: number): void => {
+    setLlmModels(cycleLlmModel(currentLlmAgent(), delta, modelChoices()));
   };
 
   const adjustLlmParam = (def: LlmParamDef, delta: number): void => {
     const agent = currentLlmAgent();
-    const params = llmParams();
-    const resolved = resolveLlmValue(params, opencodeDefaults(), agent, def);
-    let next: number | null;
-    if (resolved.value === null) {
-      // Nothing anywhere — emerge at the bottom of the range on +. Pressing -
-      // while already "not set" is a no-op.
-      if (delta <= 0) return;
-      next = def.min;
-    } else if (
-      resolved.source === "agent" &&
-      delta < 0 &&
-      resolved.value <= def.min + 1e-9
-    ) {
-      // User-set on this agent and already at the floor → drop the override.
-      // What's underneath (opencode default or null) becomes visible again.
-      next = null;
-    } else {
-      // Start from whatever the user currently sees, even if it's inherited
-      // from "*" or opencode — that becomes the new agent-specific value.
-      const raw = Math.min(def.max, Math.max(def.min, resolved.value + delta));
-      next = roundToStep(raw, def.step, def.decimals);
-    }
-    // Read-modify-write: the file may have been edited outside the panel since
-    // mount, so only this one parameter goes into what disk currently holds,
-    // and the merged result is what the signal shows from here on.
-    setLlmParams(setLlmParam(agent, def.key, next));
+    // Only what is not in the file comes from the panel's own state: the value
+    // opencode resolved for this agent, which the step falls back to when the
+    // file holds none. Base value and write are one read-modify-write in the
+    // store.
+    const inherited = opencodeDefaults()[agent]?.[def.key] ?? null;
+    setLlmParams(stepLlmParam(agent, def, delta, inherited));
   };
 
   // Clears everything the panel shows with a ★ for this agent — the sampling
@@ -930,7 +913,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             subagentsExpanded={subagentsExpanded}
             onToggleSubagents={() => setSubagentsExpanded((v) => !v)}
             tuiSettingsExpanded={tuiSettingsExpanded}
-            onToggleTuiSettings={() => setTuiSettingsExpanded((v) => !v)}
+            onToggleTuiSettings={toggleTuiSettings}
             promptsExpanded={promptsExpanded}
             onTogglePrompts={() => setPromptsExpanded((v) => !v)}
             promptsFileCount={countPromptFiles}
@@ -940,9 +923,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             llmModels={llmModels}
             opencodeModels={opencodeModels}
             modelChoices={modelChoices}
-            onCycleLlmModel={cycleLlmModel}
+            onCycleLlmModel={cycleModel}
             llmExpanded={llmExpanded}
-            onToggleLlm={() => setLlmExpanded((v) => !v)}
+            onToggleLlm={toggleLlm}
             llmAgent={currentLlmAgent}
             onCycleLlmAgent={cycleLlmAgent}
             onAdjustLlmParam={adjustLlmParam}

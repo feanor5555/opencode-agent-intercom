@@ -22,6 +22,16 @@
 // parse starts after the heading.
 const HEADING_RE = /^##\s+OPEN POINTS\s*$/m
 
+// The heading test, exported because two stages of one cycle depend on it
+// agreeing with the parse: `looksLikeOpenPointsReply` (src/handoff.js) gates
+// the poll that waits for the reply, `parseOpenPoints` below gates what is
+// made of it. A poll that accepted a reply this parse rejects would abandon
+// every cycle at `save`, five minutes of cooldown apart, so both read this one
+// expression.
+export function hasOpenPointsHeading(text) {
+  return typeof text === "string" && HEADING_RE.test(text)
+}
+
 // `- <title>` at the start of a line, with optional leading indent.
 const POINT_LINE_RE = /^\s*-\s+(.*)$/
 

@@ -153,3 +153,63 @@ test("writeEndlessMode: refuses to write over a present but unparsable file", ()
   assert.equal(writeEndlessMode(true), false)
   assert.equal(readFileSync(file, "utf8"), "{ this is not json")
 })
+
+test("writeEndlessMode: refuses a file that parses but is not a JSON object", () => {
+  // Content the write cannot merge into is content it must not replace — the
+  // same rule as an unparsable file, and the same rule the sidebar's own
+  // writer follows (createJsonObjectFile, tui/src/json-object-file.ts).
+  for (const content of ["[1, 2, 3]", '"text"', "42", "null"]) {
+    const dir = mkdtempSync(join(tmpdir(), "agent-intercom-endless-"))
+    const file = join(dir, "agent-intercom.json")
+    writeFileSync(file, content)
+    setSettingsPath(file)
+    assert.equal(writeEndlessMode(false), false, `${content} reported a successful write`)
+    assert.equal(readFileSync(file, "utf8"), content, `${content} was written over`)
+    // The stop still stands in this process, as it does on an unparsable file.
+    assert.equal(getSettings().endlessMode, false)
+  }
+})
+
+// Every one of endless mode's five stops is a `writeEndlessMode(false)`. If a
+// failed write left the mode armed, the stop would be no stop at all: the
+// primary's next turn re-arms the cycle from the file, and endlessMaxCycles
+// cannot catch it (no handoff runs on a toast-only stop, so the generation
+// never advances).
+test("a failed write still switches the mode off in this process", () => {
+  const file = isolate({ endlessMode: true })
+  assert.equal(getSettings().endlessMode, true)
+  // Present but unparsable: the write is refused so the user's file survives.
+  writeFileSync(file, "{ this is not json")
+  resetSettings()
+  assert.equal(writeEndlessMode(false), false, "the value did not reach the disk")
+  assert.equal(
+    getSettings().endlessMode,
+    false,
+    "the mode is off all the same — the stop does not depend on the write succeeding",
+  )
+})
+
+test("the file wins again as soon as it changes, so the sidebar can re-arm the mode", () => {
+  const file = isolate({ endlessMode: true })
+  writeFileSync(file, "{ this is not json")
+  resetSettings()
+  writeEndlessMode(false)
+  assert.equal(getSettings().endlessMode, false)
+
+  // The user repairs the file (or the sidebar toggles the row back on): the
+  // plugin's own switch-off must not outlive the file it was written against.
+  writeFileSync(file, JSON.stringify({ endlessMode: true, maxSubagents: 2 }))
+  resetSettings()
+  const s = getSettings()
+  assert.equal(s.endlessMode, true, "a changed file drops the process-local hold")
+  assert.equal(s.maxSubagents, 2)
+})
+
+test("a successful write is not overridden by a stale hold either", () => {
+  const file = isolate({ endlessMode: true })
+  assert.equal(writeEndlessMode(false), true)
+  assert.equal(getSettings().endlessMode, false)
+  writeFileSync(file, JSON.stringify({ endlessMode: true }))
+  resetSettings()
+  assert.equal(getSettings().endlessMode, true)
+})

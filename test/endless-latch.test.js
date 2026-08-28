@@ -16,6 +16,8 @@ import {
   pendingEndless,
   endlessInProgress,
   pendingSpawns,
+  pendingDeliveries,
+  pendingHandoffs,
   aborted,
   endlessProgress,
 } from "../src/state.js"
@@ -27,12 +29,20 @@ import {
   claimPendingEndless,
   releaseEndless,
   cancelPendingEndless,
+  cancelPendingHandoff,
+  markHandoffPending,
+  claimPendingHandoff,
+  hasHandoffPending,
+  isHandoffInProgress,
   isEndlessInProgress,
   isEndlessFrozen,
   setEndlessCooldown,
   endlessCooldownActive,
   isQuiesced,
   recordEndlessCycle,
+  resetEndlessProgress,
+  reservePendingDelivery,
+  releasePendingDelivery,
   upsertSession,
   forgetPrimary,
   beginHandoffDrain,
@@ -123,6 +133,30 @@ test("cancelPendingEndless drops an unclaimed latch but never an executing cycle
   assert.equal(isEndlessInProgress(SID), true)
 })
 
+test("cancelPendingHandoff drops an unclaimed plain-handoff latch but never an executing one", () => {
+  markHandoffPending(SID)
+  assert.equal(cancelPendingHandoff(SID), true)
+  assert.equal(hasHandoffPending(SID), false)
+  assert.equal(cancelPendingHandoff(SID), false, "nothing left to cancel")
+  assert.equal(cancelPendingHandoff(undefined), false)
+
+  markHandoffPending(SID)
+  claimPendingHandoff(SID)
+  assert.equal(cancelPendingHandoff(SID), false, "a handoff past its claim cannot be undone")
+  assert.equal(isHandoffInProgress(SID), true)
+})
+
+test("the two latches cannot both stand: cancelling the plain one leaves only the endless cycle", () => {
+  // The sequence the sidebar toggle makes possible: over maxPrimaryContext
+  // with the mode off, then over endlessContext with it on.
+  markHandoffPending(SID)
+  markEndlessPending(SID)
+  assert.equal(pendingHandoffs.size, 1)
+  cancelPendingHandoff(SID)
+  assert.equal(hasHandoffPending(SID), false, "only one executor may fire on this primary")
+  assert.equal(hasEndlessPending(SID), true)
+})
+
 // ---------------------------------------------------------------------------
 // The spawn freeze predicate
 // ---------------------------------------------------------------------------
@@ -157,6 +191,27 @@ test("quiesce: zero entries with pendingSpawns.count === 1 is NOT quiesced", asy
     false,
     "the reservation window is exactly what a naive registry scan reports as zero",
   )
+})
+
+test("quiesce: zero entries with a delivery in flight is NOT quiesced", async () => {
+  reservePendingDelivery()
+  assert.equal(
+    await isQuiesced(SID),
+    false,
+    "the wake path removes the entry before it posts the notice — that window is not quiesce",
+  )
+  releasePendingDelivery()
+  assert.equal(await isQuiesced(SID), true, "the delivery is over, the primary is quiesce")
+})
+
+test("the delivery counter never goes negative and resetState clears it", async () => {
+  releasePendingDelivery()
+  assert.equal(pendingDeliveries.count, 0)
+  reservePendingDelivery()
+  reservePendingDelivery()
+  assert.equal(pendingDeliveries.count, 2, "the counter nests: the wake path reserves around the teardown's own")
+  resetState()
+  assert.equal(pendingDeliveries.count, 0)
 })
 
 test("quiesce: an entry that is dispatched but still in the registry is not quiesced", async () => {
@@ -213,6 +268,19 @@ test("recordEndlessCycle: a count that does not fall raises the streak, a fallin
   assert.equal(recordEndlessCycle(6).stalledCycles, 2, "a rising count is no progress either")
   assert.equal(recordEndlessCycle(4).stalledCycles, 0)
   assert.equal(endlessProgress.lastOpenTasks, 4)
+})
+
+test("resetEndlessProgress clears the streak, so re-arming the mode starts from scratch", () => {
+  recordEndlessCycle(5)
+  assert.equal(recordEndlessCycle(5).stalledCycles, 1)
+  resetEndlessProgress()
+  assert.equal(endlessProgress.lastOpenTasks, null)
+  assert.equal(endlessProgress.stalledCycles, 0)
+  assert.deepEqual(
+    recordEndlessCycle(5),
+    { stalledCycles: 0, previousOpenTasks: null },
+    "the cycle after a re-arm has nothing to compare against, as the first one had",
+  )
 })
 
 test("recordEndlessCycle: the progress record survives forgetPrimary (each cycle replaces the primary)", () => {

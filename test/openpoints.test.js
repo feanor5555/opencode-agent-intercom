@@ -9,7 +9,13 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 
-import { parseOpenPoints, OPEN_POINT_MAX_CHARS, OPEN_POINTS_MAX } from "../src/openpoints.js"
+import {
+  parseOpenPoints,
+  hasOpenPointsHeading,
+  OPEN_POINT_MAX_CHARS,
+  OPEN_POINTS_MAX,
+} from "../src/openpoints.js"
+import { looksLikeOpenPointsReply } from "../src/handoff.js"
 
 test("parseOpenPoints: a well-formed reply yields title+accept pairs in order", () => {
   const reply = [
@@ -78,4 +84,40 @@ test("parseOpenPoints: more than 40 points are cut to 40", () => {
 
 test("parseOpenPoints: an empty bullet is not a point", () => {
   assert.deepEqual(parseOpenPoints("## OPEN POINTS\n\n-   \n- real one\n"), [{ title: "real one" }])
+})
+
+// ---------------------------------------------------------------------------
+// The poll's shape check and the parse read the same heading
+// ---------------------------------------------------------------------------
+
+test("the endless cycle's poll gate and its parse agree on every reply shape", () => {
+  // Two stages of one cycle: `looksLikeOpenPointsReply` decides that the reply
+  // has arrived, `parseOpenPoints` decides what it says. A reply the first
+  // accepts and the second rejects abandons the cycle at `save` with "reply
+  // carried no `## OPEN POINTS` heading" — so they must never disagree.
+  const replies = [
+    "## OPEN POINTS",
+    "## OPEN POINTS\n\n- a point\n  accept: it lands\n",
+    "##   OPEN POINTS   \n\n- a point\n",
+    "prose first\n\n## OPEN POINTS\n\n- a point\n",
+    "## Open Points\n\n- a point\n",
+    "## OPEN POINTS extra\n",
+    "no heading at all",
+    "",
+  ]
+  for (const reply of replies) {
+    assert.equal(
+      looksLikeOpenPointsReply(reply),
+      parseOpenPoints(reply) !== null,
+      `poll gate and parse disagree on ${JSON.stringify(reply)}`,
+    )
+    assert.equal(looksLikeOpenPointsReply(reply), hasOpenPointsHeading(reply))
+  }
+})
+
+test("hasOpenPointsHeading takes a non-string without throwing", () => {
+  for (const value of [undefined, null, 42, {}, ["## OPEN POINTS"]]) {
+    assert.equal(hasOpenPointsHeading(value), false)
+    assert.equal(looksLikeOpenPointsReply(value), false)
+  }
 })

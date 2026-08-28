@@ -1,7 +1,7 @@
 # Concept: endless mode — a self-restarting orchestrator that works off its own TODO.md
 
-Status: designed, not built. Boundary: the plugin at `/home/user/opencode-agent-intercom`,
-both halves — the server-side plugin under `src/` and the sidebar plugin under `tui/`.
+Boundary: the plugin at `/home/user/opencode-agent-intercom`, both halves — the
+server-side plugin under `src/` and the sidebar plugin under `tui/`.
 
 Endless mode is a switch in the sidebar. While it is on, the orchestrator's context is
 watched against a configurable ceiling (250 000 tokens by default). When the ceiling is
@@ -10,156 +10,168 @@ the plugin writes them into the project's todo file, the session is replaced by 
 orchestrator session, and that new session is started with the instruction to work the todo
 file off. Then the same thing happens again.
 
-## 1. What the code does today (read, with the lines behind it)
+## 1. What the code does today
 
 ### 1.1 The primary already measures its own context and already hands itself off
 
-- Context size of any session is `latestContextTokens` (`src/client.js:280`), summing
+- Context size of any session is `latestContextTokens` (`src/client.js:283`), summing
   `input + output + cache.read + cache.write` of the newest assistant message that has a
   non-zero token sum. Reasoning tokens are excluded on purpose — the comment at
-  `src/client.js:271-276` states that including them "made the orchestrator handoff
+  `src/client.js:268-276` states that including them "made the orchestrator handoff
   (`maxPrimaryContext`) fire far too early, right after a reasoning-heavy turn". It is
-  reached through `fetchSnapshot` (`src/client.js:229`), one `session.messages` call capped
-  at `SNAPSHOT_TIMEOUT_MS = 5000` (`:175`).
+  reached through `fetchSnapshot` (`src/client.js:230`), one `session.messages` call capped
+  at `SNAPSHOT_TIMEOUT_MS = 5000` (`src/client.js:176`).
 - On every primary turn the system-transform hook refreshes that measurement, TTL-guarded:
   `if (shouldRefreshPrimary(sessionID)) { const snap = await fetchSnapshot(...);
-  recordPrimaryContext(sessionID, snap?.ctxTokens) }` (`src/hooks.js:162-165`). The store is
-  `primaryCtx` (`src/state.js:75`), the TTL `CTX_TTL_MS = 3000` (`src/registry.js:583`).
+  recordPrimaryContext(sessionID, snap?.ctxTokens) }` (`src/hooks.js:167-169`). The store is
+  `primaryCtx` (`src/state.js:90`), the TTL `CTX_TTL_MS = 3000` (`src/registry.js:614`).
 - The threshold comparison is a pure predicate, `shouldTriggerPrimaryHandoff(sessionID,
-  maxPrimaryContext)` (`src/registry.js:615`), true when the cached count is `>=` the
+  maxPrimaryContext)` (`src/registry.js:645`), true when the cached count is `>=` the
   threshold and the threshold is a positive finite number.
 - The trigger is **two-phase and idle-gated**: the transform hook only marks
-  (`scheduleHandoffIfNeeded`, `src/hooks.js:177`, `src/registry.js:645`), because "starting
-  the handoff here would delete the old session mid-turn, so the triggering user message
-  would never be answered" (`src/hooks.js:167-172`); the `session.idle` event executes it
-  (`src/hooks.js:510` → `maybeRunPendingHandoff`, `src/handoffwiring.js:65`). The claim
-  (`claimPendingHandoff`, `src/registry.js:668`) is synchronous, so duplicate idle events
-  cannot start two handoffs.
-- The handoff sequence itself is `performPrimaryHandoff` (`src/handoff.js:107`), ten
-  numbered steps: open a delivery drain, create the new session, ask the old primary for doc
-  summaries, reparent in-flight subagents, write a summary file, send the kickoff, flush the
-  drain, **archive** (not delete) the old session, forget it. The archive-not-delete rule is
-  load-bearing: "opencode's session delete cascades recursively over child sessions"
-  (`src/handoff.js:277-283`, `src/client.js:130-136`).
-- The three session operations it needs already exist and are already used against a live
-  opencode: `createChildSession` (`src/client.js:73`) with `parentID` **omitted** so the new
-  orchestrator is a root session (`src/handoffwiring.js:110-120`), `promptSession`
-  (`src/client.js:85`), `archiveSession` (`src/client.js:160`, a `PATCH` with
-  `time: { archived }`, "source- and live-verified" on opencode 1.17.15, `:155-159`).
+  (`scheduleEndlessIfNeeded` / `scheduleHandoffIfNeeded`, `src/hooks.js:196-225`,
+  `src/registry.js:761`, `src/registry.js:675`), because "starting the handoff here would
+  delete the old session mid-turn, so the triggering user message would never be answered"
+  (`src/hooks.js:178-183`); the `session.idle` event executes it
+  (`src/hooks.js:542-554` -> `maybeRunPendingHandoff`, `src/handoffwiring.js:80`,
+  `maybeRunPendingEndless`, `src/handoffwiring.js:298`). The claims
+  (`claimPendingHandoff`, `src/registry.js:698`; `claimPendingEndless`,
+  `src/registry.js:785`) are synchronous, so duplicate idle events cannot start two
+  handoffs or two endless cycles.
+- The handoff sequence itself is `performPrimaryHandoff` (`src/handoff.js:121`), ten
+  numbered steps: open a delivery drain, create the new session, ask the old primary for
+  doc summaries, reparent in-flight subagents, write a summary file, send the kickoff,
+  flush the drain, **archive** (not delete) the old session, forget it. The
+  archive-not-delete rule is load-bearing: "opencode's session delete cascades
+  recursively over child sessions" (`src/handoff.js:297-301`, `src/client.js:134-137`).
+- The three session operations it needs already exist and are already used against a
+  live opencode: `createChildSession` (`src/client.js:72`) with `parentID` **omitted**
+  so the new orchestrator is a root session (`src/handoffwiring.js:110-125`),
+  `promptSession` (`src/client.js:88`), `archiveSession` (`src/client.js:158`, a `PATCH`
+  with `time: { archived }`, "source- and live-verified" on opencode 1.17.15,
+  `src/client.js:144-152`).
 
 **So a plugin can end its primary session and open a new one with a starting prompt. That
-is not an open question in this repository — it is running code.** What is open is stated in
-§4.3.
+is not an open question in this repository — it is running code.** What is open is stated
+in section 4.3.
 
 ### 1.2 How the plugin knows a subagent is running, and when the last one has finished
 
-- Every spawned subagent is a registry entry keyed by handle, with a reverse map by session
-  id (`src/state.js:21-24`, `createEntry` at `src/registry.js:692`). Entries are created by
-  `spawn` and by the `session.created` event (`src/hooks.js:527`).
-- The count is `countActiveSubagents` (`src/registry.js:174`): every non-aborted registry
+- Every spawned subagent is a registry entry keyed by handle, with a reverse map by
+  session id (`src/state.js:18-26`, `createEntry` at `src/registry.js:904`). Entries are
+  created by `spawn` and by the `session.created` event (`src/hooks.js:543`).
+- The count is `countActiveSubagents` (`src/registry.js:186`): every non-aborted registry
   entry **plus** `pendingSpawns.count`, the reservation counter for spawns that have passed
-  the cap check but not yet reached `upsertSession` (`src/state.js:35-50`). The comment at
-  `src/registry.js:164-173` states the count is **global across every primary in the
+  the cap check but not yet reached `upsertSession` (`src/state.js:40-50`). The comment at
+  `src/registry.js:178-186` states the count is **global across every primary in the
   process**, and the `primaryID` argument is ignored.
 - The lifecycle is one-shot: on `session.idle` the wake path removes the entry from the
   registry inside one `registryMutex.runExclusive` critical section, latching
-  `e.dispatched = true` before removal (`src/hooks.js:562-588`). "Finished subagents are not
-  in the registry at all" (`src/registry.js:167`).
-- The error path (`onSessionError`, `src/hooks.js:645`) and the inactivity watchdog both end
-  in `teardownSubagent`, which also removes the entry. The watchdog window is
-  `maxSubagentAgeMs`, default 90 000 ms (`src/settings.js:45-51`), armed once per process
-  from the event-handler factory (`src/hooks.js:38`, `:477`).
-- `inFlightSubagentsFor(parentID)` (`src/registry.js:385`) is the per-primary read the
+  `e.dispatched = true` before removal (`src/hooks.js:597-660`). "Finished subagents are
+  not in the registry at all" (`src/registry.js:184`).
+- The error path (`onSessionError`, `src/hooks.js:660-740`) and the inactivity watchdog
+  both end in `teardownSubagent` (`src/teardown.js:65-101`), which also removes the
+  entry. The watchdog window is `maxSubagentAgeMs`, default 90 000 ms
+  (`src/settings.js:50-57`), armed once per process from the event-handler factory
+  (`src/hooks.js:519`).
+- `inFlightSubagentsFor(parentID)` (`src/registry.js:415`) is the per-primary read the
   handoff uses, filtering `!dispatched`.
 
 **So "no subagent is running" has an exact expression already: `countActiveSubagents() === 0`
-read under `registryMutex`.** It is process-wide rather than per-primary — §3.3 keeps that
-and says why.
+read under `registryMutex`.** It is process-wide rather than per-primary. Section 3.3
+keeps that and says why.
 
 ### 1.3 The orchestrator cannot write the todo file itself
 
-- `PRIMARY_TOOLS = new Set(["spawn", "abort", "list"])` (`src/hooks.js:49-53`) and the guard
-  throws for anything else from a primary session: "this is an orchestrator session — it
-  delegates work, it does not run `${input.tool}` itself" (`src/hooks.js:887-898`).
+- `PRIMARY_TOOLS = new Set(["spawn", "abort", "list"])` (`src/hooks.js:56-60`) and the
+  guard throws for anything else from a primary session: "this is an orchestrator session
+  — it delegates work, it does not run `${input.tool}` itself" (`src/hooks.js:947-960`).
 - The todo tools are `TODO_TOOLS = new Set(["todos_open", "todo_done", "todo_add",
-  "todo_edit"])` (`src/hooks.js:61`), restricted to `TODO_AGENTS` — planner, coder,
-  debugger, reviewer, documenter, designer (`:62-64`) — and denied to every other subagent
-  (`:814-826`). The orchestrator is in neither set.
-- The plugin's own todo-file layer is `src/todofile.js`: `findTodoFile` (`:130`) accepts
-  `todo.md` / `todos.md` in any casing and treats several matches as a hard error
-  (`TodoFileMissingError`, kinds `missing` / `multiple` / `not-a-file`, `:67`); `addTask`
-  (`:279`) appends `- T<n>: <title>` with an optional `  accept:` line and creates the
-  canonical `TODO.md` when the directory has none (`ensureTodoFile`, `:261`); `listOpen`
-  (`:226`) parses the file; every read and write goes through an `O_NOFOLLOW` descriptor
-  confirmed by `fstat` to be a regular file (`:143-188`).
+  "todo_edit"])` (`src/hooks.js:68`), restricted to `TODO_AGENTS` — planner, coder,
+  debugger, reviewer, documenter, designer (`src/hooks.js:69-71`) — and denied to every
+  other subagent (`src/hooks.js:874`). The orchestrator is in neither set.
+- The plugin's own todo-file layer is `src/todofile.js`: `findTodoFile` (`src/todofile.js:130`)
+  accepts `todo.md` / `todos.md` in any casing and treats several matches as a hard error
+  (`TodoFileMissingError`, kinds `missing` / `multiple` / `not-a-file`,
+  `src/todofile.js:62-77`); `addTask` (`src/todofile.js:279`) appends `- T<n>: <title>`
+  with an optional `  accept:` line and creates the canonical `TODO.md` when the directory
+  has none (`ensureTodoFile`, `src/todofile.js:261`); `listOpen` (`src/todofile.js:226`)
+  parses the file; every read and write goes through an `O_NOFOLLOW` descriptor confirmed
+  by `fstat` to be a regular file (`src/todofile.js:142-167`).
 - The plugin already writes that file on its own initiative: the wake path calls
-  `autoMarkTask` → `removeTask` when a subagent's reply opens with `DONE: T<n>`
-  (`src/hooks.js:596`, `:738`).
+  `autoMarkTask` -> `removeTask` when a subagent's reply opens with `DONE: T<n>`
+  (`src/hooks.js:663`, `src/hooks.js:738`).
 
 **So telling the orchestrator "write todos.md" cannot work as stated: the orchestrator has
-no tool that writes files.** §3.4 turns this constraint into the design's strongest part.
+no tool that writes files.** Section 3.4 turns this constraint into the design's
+strongest part.
 
 ### 1.4 How the old primary is asked for a final statement, and how the answer is confirmed
 
-`requestDocSummaries` (`src/handoff.js:424`) is the existing pattern for "get one more
+`requestDocSummaries` (`src/handoff.js:521`) is the existing pattern for "get one more
 answer out of the session that is about to be replaced", and its discipline is the product
-of a live-verified bug (`:401-414`):
+of a live-verified bug (`src/handoff.js:466-484`):
 
-1. snapshot the current final result **before** sending the prompt (without the baseline the
-   first poll returns the previous answer as if it were the reply),
+1. snapshot the current final result **before** sending the prompt (without the baseline
+   the first poll returns the previous answer as if it were the reply),
 2. send the prompt non-blocking through `promptSession`,
 3. poll `fetchSnapshot(...).result` until it has **changed from the baseline** *and* matches
-   a shape check (`looksLikeDocSummariesReply`, `src/handoff.js:392`); a changed-but-foreign
+   a shape check (`looksLikeDocSummariesReply`, `src/handoff.js:488`); a changed-but-foreign
    reply becomes the new baseline and the poll continues,
 4. time out after `DOC_SUMMARIES_TIMEOUT_MS = 120_000` at `DOC_SUMMARIES_POLL_MS = 500`
-   (`:385-386`) and throw, so the caller can fall back.
+   (`src/handoff.js:484-485`) and throw, so the caller can fall back.
 
-The reply is then normalised defensively — `validateDocSummaries` (`:489`) re-emits the
-recognised sections in canonical order and falls back to a placeholder block for any missing
-one; `capChars` bounds each section at 400 characters (`:376`, `:550`).
+The reply is then normalised defensively — `validateDocSummaries`
+(`src/handoff.js:605-657`) re-emits the recognised sections in canonical order and falls
+back to a placeholder block for any missing one; `capChars` bounds each section at
+`DOC_SUMMARY_MAX_CHARS = 400` characters (`src/handoff.js:486`, `src/handoff.js:691`).
 
 ### 1.5 Settings, and how the sidebar writes them
 
-- `getSettings()` (`src/settings.js:101`) resolves **file > env > default**, cached for
-  `TTL_MS = 2000` (`:68`), from `~/.config/opencode/agent-intercom.json`. Every key is
-  validated individually and an invalid value silently leaves the resolved default standing
-  (`:117-149`). There is no boolean key today — every numeric key goes through
-  `Number.isInteger(raw?.x) && raw.x >= 0`.
+- `getSettings()` (`src/settings.js:165`) resolves **file > env > default**, cached for
+  `TTL_MS = 2000` (`src/settings.js:91`), from `~/.config/opencode/agent-intercom.json`.
+  Every key is validated individually and an invalid value silently leaves the resolved
+  default standing (`src/settings.js:192-235`). The boolean key `endlessMode` is
+  validated by `typeof raw?.endlessMode === "boolean"` (`src/settings.js:225-227`); every
+  numeric key goes through `Number.isInteger(raw?.x) && raw.x >= 0`.
 - The sidebar's store writes through a read-modify-write: `applySetting` reads
   `file.readRaw()`, computes the next value from **that** read, merges and writes
-  (`tui/src/settings-file.ts:92-105`). Keys the panel does not know stay untouched
-  (`:5-16`), and "a key absent from the file stays absent: its env-or-default resolution is
-  displayed, never written back" (`:13-15`).
+  (`tui/src/settings-file.ts:117-127`). Keys the panel does not know stay untouched,
+  and "a key absent from the file stays absent: its env-or-default resolution is
+  displayed, never written back" (`tui/src/settings-file.ts:5-22`).
 - `createJsonObjectFile` (`tui/src/json-object-file.ts:33`) is the shared disk half: an
   absent file reads as `{}` so the first write creates it, an unreadable or unparsable one
-  **throws** so the caller refuses to write over content it could not read (`:8-13`,
-  `:39-51`).
-- The sidebar knows only `maxSubagents` and `maxContext`
-  (`tui/src/settings-file.ts:24-32`), and `isLimit` (`:42`) accepts integers only —
-  `mergeSetting` (`:77`) deletes any key of `SETTING_KEYS` that fails it. A boolean key needs
-  its own validator; it must **not** be added to `SETTING_KEYS`, or the merge would delete it
-  on the next numeric step.
+  **throws** so the caller refuses to write over content it could not read.
+- The sidebar's `Settings` are `maxSubagents`, `maxContext`, `endlessMode` and
+  `endlessContext` (`tui/src/settings-file.ts:24-29`). `isLimit` (`tui/src/settings-file.ts:50`)
+  accepts whole numbers >= 0 and `isFlag` (`tui/src/settings-file.ts:53`) real booleans;
+  `SETTING_VALIDATORS` (`tui/src/settings-file.ts:56-61`) is a mapped type over `Settings`
+  pairing each key with its own check, so a key added to the panel cannot be left without
+  one. `mergeSetting` (`tui/src/settings-file.ts:117`) drops from the write only the keys
+  failing THEIR OWN validator — stepping a limit cannot delete the boolean.
 - Row shapes in the panel: the two numeric limits sit under the Subagents section with
-  `[-] value [+]` and `holdRepeat` (`tui/src/tui.tsx:1236-1255`); the two boolean toggles sit
-  under TUI settings as a single `[on] ` / `[off]` cell coloured `success` or `textMuted`
-  (`:1274-1291`). Fixed column widths keep the buttons from shifting (`:100-117`).
+  `[-] value [+]` and `holdRepeat` (`tui/src/tui.tsx:1263-1279`); the two boolean toggles
+  sit under TUI settings as a single `[on] ` / `[off]` cell coloured `success` or
+  `textMuted` (`tui/src/tui.tsx:1282-1300`). Fixed column widths keep the buttons from
+  shifting (`tui/src/tui.tsx:102-118`).
 - The panel re-reads the file on a 30 s timer and whenever a file-backed section is opened
-  (`refreshFileState`, `:339-357`, `:406-409`).
-- `test/settings-defaults-parity.test.js` imports both sides and fails on a divergence of the
-  shared defaults (`src/settings.js:36-38`).
+  (`refreshFileState`, `tui/src/tui.tsx:339-358`, `tui/src/tui.tsx:362-365`).
+- `test/settings-defaults-parity.test.js` imports both sides and fails on a divergence of
+  the shared defaults (`src/settings.js:78-80`).
 
 ### 1.6 What the sidebar can do that the server-side plugin cannot
 
 The sidebar plugin navigates the TUI's own view: `api.route.navigate("session", { sessionID
-})` in `openSubagent` (`tui/src/tui.tsx:709`) and, when the session the user is watching is
-about to be deleted, back to its parent — "otherwise the route points at a now-missing
-session and the TUI falls back to the start page, losing the orchestrator chat"
-(`:838-847`). It subscribes to `session.created`, `session.updated`, `session.idle`,
-`session.error`, `session.status`, `message.updated` (`:860-867`).
+})` in `openSubagent` (`tui/src/tui.tsx:727-728`) and, when the session the user is
+watching is about to be deleted, back to its parent — "otherwise the route points at a
+now-missing session and the TUI falls back to the start page, losing the orchestrator chat"
+(`tui/src/tui.tsx:860-867`). It subscribes to `session.created`, `session.updated`,
+`session.idle`, `session.error`, `session.status`, `message.updated`
+(`tui/src/tui.tsx:880-887`).
 
 The server-side plugin's only reach into the TUI is `showToast`
-(`client.tui.showToast`, `src/client.js:295`), and it is explicitly a no-op outside the TUI
-(`:294`).
+(`client.tui.showToast`, `src/client.js:375`), and it is explicitly a no-op outside the TUI
+(`src/client.js:374`).
 
 ## 2. What is decided, and what it costs
 
@@ -277,7 +289,7 @@ argument because the concurrency cap is global (`src/registry.js:164-173`). Endl
 inherits that: with a second orchestrator session in the same opencode process, the endless
 primary waits for that one's subagents too. This is an over-approximation — it waits longer
 than it strictly must — chosen because the alternative is a second counting rule that
-disagrees with the cap the whole plugin is built on. It is named in §6 as an assumption with
+disagrees with the cap the whole plugin is built on. It is named in §5 as an assumption with
 its own falsification.
 
 **A subagent that starts after the trigger fired.** Between the latch and quiesce the
@@ -454,10 +466,17 @@ Persistence goes through `settings-file.ts` on its existing read-modify-write
 - `Settings` gains `endlessMode: boolean` and `endlessContext: number`, and
   `resolveSettings` resolves both on the file > env > default rule the numeric ones use
   (`:54-62`).
-- `SETTING_KEYS` gains `endlessContext` but **not** `endlessMode`: `mergeSetting` deletes any
-  member of that list failing `isLimit` (`:83-85`), and a boolean fails it. The boolean is
-  merged by its own writer, `setEndlessMode(value: boolean)`, which reads, merges
-  `{ ...raw, endlessMode: value }` and writes.
+- Each key is checked against its OWN validator: `SETTING_VALIDATORS`
+  (`tui/src/settings-file.ts:57-62`) maps every member of `Settings` to `isLimit` or, for
+  `endlessMode` alone, `isFlag`, and `mergeSetting` (`:110`) drops only the keys that fail
+  their own check. So stepping a limit cannot delete the boolean and toggling the boolean
+  cannot delete a limit. `LimitKey` (`:33`) is the narrower list the `[-]`/`[+]` rows step —
+  `endlessContext` is in it, `endlessMode` is not.
+- The boolean has its own writers beside `stepSetting`: `toggleEndlessMode()` (`:167`), which
+  the panel row calls (`tui/src/tui.tsx:336`), and `setEndlessMode(value)` (`:159`). The
+  toggle flips the value the file holds at that moment rather than writing the panel's copy,
+  so a switch thrown outside the panel — by hand, or by the plugin's own bounds writing
+  `endlessMode` back to false — is toggled from rather than overwritten.
 - A key absent from the file stays absent (`:13-15`): toggling writes `endlessMode` because
   the user asked for it; stepping the threshold writes `endlessContext` for the same reason.
   Neither write materialises the other, and neither touches `maxSubagents`, `maxContext`,
@@ -477,7 +496,7 @@ One line per cycle transition, on the existing `log` helper (`src/log.js`):
 
 ```
 endless: scheduled sessionID=<id> ctx=<n> threshold=<n>
-endless: quiesced after <ms>ms, subagents drained=<n>
+endless: quiesced after <ms>ms, activeAtStart=<n>
 endless: saved <n> point(s) as T<a>,T<b>,… confirmed=<n> file=<name>
 endless: cycle <k>/<max> complete, new session <id>, open tasks <before>→<after>
 endless: abandoned at <stage> — <reason>
@@ -545,59 +564,7 @@ plain handoff — which has the same gap — without the sidebar changing at all
 Related, and deliberately not used: `POST /session/{id}/summarize` (`{ providerID, modelID,
 auto? }`) compacts a session in place. §2.1 says why that is not this feature.
 
-## 5. Steps
-
-Each step leaves the tree building (`npm run check`) and the suite green (`npm test`), and
-each can be handed out alone.
-
-**Step 1 — the settings keys.** `endlessMode`, `endlessContext`, `endlessQuiesceTimeoutMs`,
-`endlessMaxCycles` in `getSettings()` (`src/settings.js:101`) with the boolean validator of
-§3.2, their defaults exported, plus `primaryContextThreshold()`. Nothing reads them yet.
-Depends on: nothing.
-
-**Step 2 — the sidebar store.** `endlessMode` and `endlessContext` in
-`tui/src/settings-file.ts` per §3.7, `setEndlessMode` beside `stepSetting`, `endlessContext`
-in `SETTING_KEYS` and `endlessMode` deliberately not. Depends on: step 1 (the shared defaults
-the parity test compares).
-
-**Step 3 — the sidebar rows.** The two rows under the Subagents section, the signals and
-their refresh in `refreshFileState`. After this step the switch is visible and writes the
-file; the plugin still ignores it. Depends on: step 2.
-
-**Step 4 — `parseOpenPoints`.** The pure parser in its own module with its unit tests. No
-network, no plugin runtime. Depends on: nothing; can run parallel to steps 1–3.
-
-**Step 5 — the endless latch and the quiesce predicate.** `pendingEndless` in `state.js`
-beside `pendingHandoffs`, `scheduleEndlessIfNeeded` / `claimEndless` / `releaseEndless` and
-`isQuiesced()` in `registry.js`, all pure over shared state, with tests. The transform hook
-compares against `primaryContextThreshold()` instead of `maxPrimaryContext`. Nothing executes
-a cycle yet. Depends on: step 1.
-
-**Step 6 — the spawn freeze.** The refusal at the top of the `spawn` handler while the latch
-is set (§3.3). Depends on: step 5.
-
-**Step 7 — the save.** The open-points prompt constant, the `requestDocSummaries` call with
-the new shape check, `addTask` per point and the `listOpen` read-back confirmation (§3.4),
-wired as an injectable function in the handoff-wiring layer. Depends on: steps 4 and 5.
-
-**Step 8 — the cycle.** The idle-side executor: claim, quiesce-wait with its timeout, save,
-`performPrimaryHandoff` with the endless kickoff dependency, the log lines of §3.8. Depends
-on: steps 5, 6 and 7.
-
-**Step 9 — the bounds.** The five stops of §3.6, including the plugin-side write of
-`endlessMode: false`. Ship them with step 8 rather than after it if the live check of §8 is
-run before this step — an unbounded loop must not be exercised live. Depends on: step 8.
-
-**Step 10 — the view switch.** `selectTuiSession` in `src/client.js` per §4.3, called from
-the handoff's step 6 for both the endless and the plain path. Independently shippable: it
-improves the existing handoff on its own. Depends on: nothing in this list, but only
-observable together with step 8.
-
-**Step 11 — documentation.** The README settings table gains the four keys with their
-defaults and what each bounds; `learnings.md` gains nothing until the live check produces a
-finding. Depends on: steps 1–9.
-
-## 6. Assumptions, and what would show them wrong
+## 5. Assumptions, and what would show them wrong
 
 - **`ctxTokens` tracks the primary's real context at 250 000 tokens.** The measurement is
   validated at the 80 000 scale by the existing handoff and excludes reasoning tokens
@@ -624,7 +591,7 @@ finding. Depends on: steps 1–9.
   distinguishes `missing` (greenfield, create) from `multiple` and `not-a-file` (a human has
   to sort it out) (`src/todofile.js:63-66`). Wrong if a cycle creates a second todo file in a
   project that already had one under a different name — which the `multiple` error exists to
-  prevent and which §8 tests.
+  prevent and which §7 tests.
 - **Ten cycles is a ceiling nobody hits by accident.** Unmeasured. Wrong when the ceiling
   toast appears in a session the user considered healthy; the number is a constant and cheap
   to raise.
@@ -632,7 +599,7 @@ finding. Depends on: steps 1–9.
   TUI.** Read from opencode `1.18.25`; the resolved plugin dependency is `^1.18.23`
   (`package.json:58`), and the typed client is known to lag the server on at least one other
   route (`src/client.js:155-159`). Wrong when a cycle completes, the new session answers, and
-  the TUI still displays the archived one — the live check of §8 (g) is exactly this
+  the TUI still displays the archived one — the live check of §7 (g) is exactly this
   observation. It degrades to the behaviour of today's handoff, which is a presentation
   failure, not a data one.
 - **Archiving keeps the old sessions readable.** The handoff archives rather than deletes
@@ -640,7 +607,7 @@ finding. Depends on: steps 1–9.
   long endless run makes the session list unusable — at which point the ceiling of §3.6.3 is
   the lever, not a delete.
 
-## 7. Open, and outside this boundary
+## 6. Open, and outside this boundary
 
 - Whether an endless cycle should also carry the `PROJECT.md` / `ARCHITECTURE.md` summaries
   the plain handoff obtains. §3.5 drops them to avoid a third long turn on an exhausted
@@ -650,7 +617,7 @@ finding. Depends on: steps 1–9.
   handoff hardcodes `ORCHESTRATOR_AGENT_NAME = "orchestrator"` and flags the override as
   unverified (`src/handoffwiring.js:40-44`). Endless mode inherits that flag unchanged.
 
-## 8. What must be tested
+## 7. What must be tested
 
 Unit, in the existing `node --test` style under `test/`:
 
@@ -687,15 +654,15 @@ Unit, in the existing `node --test` style under `test/`:
 - Quiesce timeout: with a permanently busy fake registry, the cycle abandons after
   `endlessQuiesceTimeoutMs` of virtual time, the latch is released, the freeze is lifted and
   no session was created.
-- Sidebar store: `setEndlessMode(true)` writes only `endlessMode` and leaves `maxSubagents`,
+- Sidebar store: `toggleEndlessMode()` writes only `endlessMode` and leaves `maxSubagents`,
   `maxContext`, `searxngUrl` and unknown keys byte-identical; a following
-  `stepSetting("maxContext", 5000)` does **not** delete `endlessMode` (the `SETTING_KEYS`
-  trap of §3.7); an unreadable file leaves the file untouched and returns the disk state; a
-  file without `endlessMode` still reads `false` and the key stays absent until toggled.
+  `stepSetting("maxContext", 5000)` does **not** delete `endlessMode` (the per-key validators
+  of §3.7); an unreadable file leaves the file untouched and returns the disk state; a file
+  without `endlessMode` still reads `false` and the key stays absent until toggled.
 - Defaults parity: `DEFAULT_ENDLESS_CONTEXT` and `DEFAULT_ENDLESS_MODE` agree across
   `src/settings.js` and `tui/src/settings-file.ts`.
 
-Live, once, after step 9 — no series, no averaging. One endless cycle against a real
+Live, once — no series, no averaging. One endless cycle against a real
 `opencode serve` with `endlessContext` lowered to a reachable value (5 000–10 000) and one
 subagent deliberately in flight when the threshold is crossed:
 

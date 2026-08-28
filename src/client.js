@@ -314,6 +314,21 @@ export function setServerUrl(url) {
 // client has one, and post the route directly otherwise — including when the
 // method is there but rejects the argument shape.
 //
+// The call carries the session id in BOTH shapes and asks for a rejection in
+// both ways, because the two clients disagree on all of it (read off the
+// resolved @opencode-ai/sdk 1.18.23):
+//   - the v2 client's signature is `selectSession({ sessionID }, options)` and
+//     it maps the flat key into the request body itself, dropping every key it
+//     does not know (`dist/v2/gen/core/params.gen.js`) — so a lone
+//     `{ body: { sessionID } }` would post an EMPTY body;
+//   - a root-style client takes one options object with `body` and
+//     `throwOnError`, and its `Tui` class carries no `selectSession` at all on
+//     this version (`dist/gen/sdk.gen.d.ts`), so that branch is inert here.
+// Without `throwOnError` a 4xx comes back as `{ data, error }` rather than
+// throwing (`dist/error-interceptor.js`), which is why `res.error` is checked
+// as well: either shape has to reach the fallback below, and a reported
+// success has to mean the server accepted it.
+//
 // UNVERIFIED: the direct post carries no authorization header. The plugin
 // runtime builds `client` with the server's auth headers; a server that
 // requires them will refuse the bare post, and the switch then degrades to
@@ -325,7 +340,11 @@ export async function selectTuiSession(client, sessionID) {
   if (!sessionID) return false
   if (typeof client?.tui?.selectSession === "function") {
     try {
-      await client.tui.selectSession({ body: { sessionID } })
+      const res = await client.tui.selectSession(
+        { sessionID, body: { sessionID }, throwOnError: true },
+        { throwOnError: true },
+      )
+      if (res?.error) throw new Error(errMsg(res.error))
       return true
     } catch (err) {
       log("tui.selectSession failed, falling back to the direct post", errMsg(err))

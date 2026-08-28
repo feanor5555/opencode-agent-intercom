@@ -14,6 +14,8 @@ import {
   isPrimary,
   effectiveState,
   removeEntryLocked,
+  reservePendingDelivery,
+  releasePendingDelivery,
   registryMutex,
   shouldRefreshPrimary,
   recordPrimaryContext,
@@ -21,6 +23,8 @@ import {
   scheduleHandoffIfNeeded,
   scheduleEndlessIfNeeded,
   cancelPendingEndless,
+  cancelPendingHandoff,
+  resetEndlessProgress,
   CTX_TTL_MS,
 } from "./registry.js"
 import { fetchSnapshot, showToast, getSessionDirectory } from "./client.js"
@@ -183,6 +187,12 @@ export function createTransformSystem(client) {
         // one always firing first.
         const threshold = primaryContextThreshold()
         if (getSettings().endlessMode) {
+          // The switch was turned on between the mark and this turn: drop an
+          // unclaimed PLAIN-handoff latch, the mirror of the off-branch below.
+          // Both latches live at once otherwise — the primary crossed
+          // maxPrimaryContext with the mode off and endlessContext with it on —
+          // and the idle handler fires both executors on the same primary.
+          cancelPendingHandoff(sessionID)
           if (scheduleEndlessIfNeeded(sessionID, threshold)) {
             log("endless: scheduled", { sessionID, ctx: primaryContextTokens(sessionID), threshold })
             showToast(client, {
@@ -199,6 +209,12 @@ export function createTransformSystem(client) {
           // is not touched — it has written to the todo file and must not
           // leave the primary half-replaced.
           cancelPendingEndless(sessionID)
+          // The cross-cycle progress record belongs to a run of the mode, not
+          // to the process: with the mode off it has nothing to measure, and
+          // carrying its streak into the next arming would spend the user's
+          // re-arm on a single cycle before the no-progress bound — the very
+          // bound that switched the mode off — fired again.
+          resetEndlessProgress()
           if (scheduleHandoffIfNeeded(sessionID, threshold)) {
             log("primary handoff scheduled (idle-gated)", { sessionID })
             showToast(client, {
@@ -609,13 +625,22 @@ async function onSessionIdle({ sessionID }, client) {
     // correct (a missing entry now actually returns null instead of leaking
     // a truthy Promise object — that was the regression slice 1a introduced).
     const removed = removeEntryLocked(sessionID)
-    return removed ? {
+    if (!removed) return null
+    // The entry is out of the registry from here on, so countActiveSubagents
+    // no longer sees this subagent — but its result has not been delivered
+    // yet. Reserve the delivery window in the SAME critical section, so the
+    // quiesce predicate never observes the gap between the two: an endless
+    // cycle that fired its open-points prompt in that gap would replace the
+    // primary while this very result was still on its way to it. Released in
+    // the `finally` below, after the teardown.
+    reservePendingDelivery()
+    return {
       handle: e.handle,
       parentID: e.parentID,
       agent: e.agent,
       taskId: e.taskId,
       directory: e.directory,
-    } : null
+    }
   })
   if (!wake) return
   const { handle, parentID, agent, taskId, directory } = wake
@@ -646,11 +671,15 @@ async function onSessionIdle({ sessionID }, client) {
     // around would only leak: a one-shot subagent gets exactly one wake
     // attempt. If it failed, the user can re-prompt via the primary.
   }
-  await teardownSubagent(
-    client,
-    { sessionID, handle, parentID },
-    { entryRemoved: true, label: "" },
-  )
+  try {
+    await teardownSubagent(
+      client,
+      { sessionID, handle, parentID },
+      { entryRemoved: true, label: "" },
+    )
+  } finally {
+    releasePendingDelivery()
+  }
 }
 
 // A tracked subagent's LLM call failed (provider auth error, API error,

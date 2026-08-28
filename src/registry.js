@@ -8,6 +8,7 @@ import {
   counters,
   aborted,
   pendingSpawns,
+  pendingDeliveries,
   pendingTaskIds,
   registryMutex,
   primaryCtx,
@@ -203,6 +204,24 @@ export function reservePendingSpawn(primaryID) {
 
 export function releasePendingSpawn(primaryID) {
   if (pendingSpawns.count > 0) pendingSpawns.count -= 1
+}
+
+// Reserve/release the delivery window of ONE subagent result: from the moment
+// its registry entry stops being counted (the wake path removes it inside the
+// mutex, the error and watchdog paths mark it aborted) until its wake notice
+// has been posted and the subagent has been torn down. Synchronous and
+// counter-shaped like reservePendingSpawn, so it can be called from inside a
+// registryMutex section without nesting a second lock.
+//
+// Every reserve MUST be paired with exactly one release, in a `finally` — a
+// leaked reservation would keep isQuiesced false for the life of the process
+// and no endless cycle could ever start.
+export function reservePendingDelivery() {
+  pendingDeliveries.count += 1
+}
+
+export function releasePendingDelivery() {
+  if (pendingDeliveries.count > 0) pendingDeliveries.count -= 1
 }
 
 // Task-id reservation, the pendingSpawns analogue for the duplicate-task guard.
@@ -696,6 +715,20 @@ export function releaseHandoff(sessionID) {
   handoffInProgress.delete(sessionID)
 }
 
+// Endless mode took this primary over: drop a plain-handoff latch that has not
+// been claimed yet, the mirror of cancelPendingEndless on the other branch. A
+// handoff already executing is NOT touched — it is past the point where it can
+// be undone. Without this, a primary that crossed maxPrimaryContext with the
+// mode off and then crossed endlessContext with it on carries BOTH latches,
+// and the idle handler fires both executors back to back: two session
+// replacements on one primary, two kickoffs, one shared drain, and one of the
+// two new orchestrators left with no successor.
+export function cancelPendingHandoff(sessionID) {
+  if (!sessionID) return false
+  if (handoffInProgress.has(sessionID)) return false
+  return pendingHandoffs.delete(sessionID)
+}
+
 export function isHandoffInProgress(sessionID) {
   return handoffInProgress.has(sessionID)
 }
@@ -804,9 +837,10 @@ export function endlessCooldownActive(sessionID) {
   return true
 }
 
-// The quiesce predicate: no subagent is running anywhere in this process and
-// no handoff drain is open for this primary. Read inside ONE registryMutex
-// section so a concurrent removeEntry / upsertSession cannot splice the count.
+// The quiesce predicate: no subagent is running anywhere in this process, no
+// result is still being delivered, and no handoff drain is open for this
+// primary. Read inside ONE registryMutex section so a concurrent removeEntry /
+// upsertSession cannot splice the count.
 //
 // The count is countActiveSubagents, i.e. PROCESS-WIDE and inclusive of
 // pendingSpawns.count — a spawn that has reserved its slot but not yet reached
@@ -816,17 +850,34 @@ export function endlessCooldownActive(sessionID) {
 // for that one's subagents too); it is kept because the alternative is a
 // second counting rule that disagrees with the cap the whole plugin is built
 // on.
+//
+// pendingDeliveries.count closes the window at the OTHER end of a subagent's
+// life: its entry leaves the registry (or is marked aborted) before the wake
+// notice is posted, so without this term the cycle would see quiesce while the
+// last result is still on its way into the very session it is about to replace
+// — and that result would never reach the saved open points.
 export function isQuiesced(sessionID) {
   return registryMutex.runExclusive(
-    () => countActiveSubagents() === 0 && !hasHandoffDrain(sessionID),
+    () =>
+      countActiveSubagents() === 0 &&
+      pendingDeliveries.count === 0 &&
+      !hasHandoffDrain(sessionID),
   )
 }
 
-// Records the open-task count at the end of a cycle and reports how many
-// consecutive cycles have failed to lower it. A count that fell resets the
-// streak; a count equal to or above the previous one raises it. The first
-// cycle of a process has nothing to compare against and never counts as
-// stalled. The no-progress bound switches endless mode off at 2.
+// Records the open-task count a cycle FOUND in the todo file — the file as the
+// previous cycle's orchestrator left it, before this cycle wrote its own
+// points into it — and reports how many consecutive cycles have failed to
+// lower it. A count that fell resets the streak; a count equal to or above the
+// previous one raises it. The first cycle of a process has nothing to compare
+// against and never counts as stalled. The no-progress bound switches endless
+// mode off at 2.
+//
+// It has to be the count BEFORE the write: the count after it includes the
+// points this cycle just saved and is taken before the new orchestrator has
+// done anything, so a productive loop that finishes what it inherited and
+// saves a comparable number of fresh points would show a flat count and stop
+// itself at the third cycle.
 export function recordEndlessCycle(openTasks) {
   const previous = endlessProgress.lastOpenTasks
   if (typeof previous === "number" && openTasks >= previous) {
@@ -836,6 +887,18 @@ export function recordEndlessCycle(openTasks) {
   }
   endlessProgress.lastOpenTasks = openTasks
   return { stalledCycles: endlessProgress.stalledCycles, previousOpenTasks: previous }
+}
+
+// Clears the cross-cycle progress record. Called on every primary turn that
+// observes endless mode switched off: the record measures one RUN of the mode,
+// and the streak that ended the previous run must not be inherited by the next
+// arming — a user who turns the toggle back on would otherwise get exactly one
+// cycle before the no-progress bound fired again, with nothing on screen
+// saying why. The record is process-global, so any primary observing the mode
+// off clears it.
+export function resetEndlessProgress() {
+  endlessProgress.lastOpenTasks = null
+  endlessProgress.stalledCycles = 0
 }
 
 function createEntry(sessionID, agent, prompt, parentID, taskId, directory) {

@@ -49,6 +49,21 @@ export const counters = new Map()
 // importer).
 export const pendingSpawns = { count: 0 }
 
+// GLOBAL count of subagent results currently BEING DELIVERED to a primary,
+// across ALL primaries in this opencode process: the window between the
+// registry entry being claimed for delivery (or marked aborted, which drops it
+// from the count just as effectively) and the wake notice having been posted
+// and the subagent torn down. The entry is gone from the registry for that
+// whole window, so countActiveSubagents alone reports zero while the last
+// subagent's result is still on its way — and an endless cycle polling for
+// quiesce would fire its open-points prompt into a session that is about to be
+// replaced, losing exactly the result the mode exists to preserve. isQuiesced
+// therefore reads this counter too.
+//
+// Wrapped in an object for the same reason as pendingSpawns (resetState
+// reassigns the field, importers share the one live reference).
+export const pendingDeliveries = { count: 0 }
+
 // GLOBAL set of task-ids (T<n>) currently reserved by an in-flight spawn()
 // call that passed the duplicate-task check but has not yet written the id onto
 // its registry entry via upsertSession. Mirrors pendingSpawns for the task-id
@@ -118,10 +133,19 @@ export const endlessCooldowns = new Map()
 // Cross-cycle progress bookkeeping for the no-progress bound. NOT keyed by
 // session id: each cycle replaces the primary, so the count has to survive the
 // replacement to be comparable at all. `lastOpenTasks` is the open-task count
-// at the end of the previous cycle (null before the first), `stalledCycles`
-// counts consecutive cycles whose count did not fall. Wrapped in an object for
-// the same reason as pendingSpawns (resetState reassigns the fields, importers
-// share the one live reference).
+// the cycle FOUND in the todo file, before it wrote its own points (null
+// before the first cycle), `stalledCycles` counts consecutive cycles whose
+// count did not fall. Wrapped in an object for the same reason as
+// pendingSpawns (resetState reassigns the fields, importers share the one live
+// reference).
+//
+// The record is PROCESS-GLOBAL, not per orchestrator chain: two orchestrators
+// running endless cycles in one process interleave their counts into one
+// streak. That is the same over-approximation the process-wide subagent count
+// makes, and it is bounded by resetEndlessProgress, which clears the record on
+// every primary turn that observes the mode switched off — so re-arming the
+// mode always starts from a fresh streak rather than inheriting the one that
+// switched it off.
 export const endlessProgress = { lastOpenTasks: null, stalledCycles: 0 }
 
 // sessionID -> drain object { oldID, newID, notices: [] }. A drain is opened
@@ -181,6 +205,7 @@ export function resetState() {
   aborted.clear()
   counters.clear()
   pendingSpawns.count = 0
+  pendingDeliveries.count = 0
   pendingTaskIds.clear()
   lastPrimaryTool.clear()
   primaryCtx.clear()

@@ -3,7 +3,12 @@
 // watchdog (watchdog.js) — kept here, importing neither, so the two callers do
 // not form an import cycle through this shared plumbing.
 
-import { routeParentNotice, removeEntry } from "./registry.js"
+import {
+  routeParentNotice,
+  removeEntry,
+  reservePendingDelivery,
+  releasePendingDelivery,
+} from "./registry.js"
 import { postNotice, showToast, deleteSession, forgetSessionDirectory } from "./client.js"
 import { aborted } from "./state.js"
 import { log, errMsg } from "./log.js"
@@ -53,12 +58,21 @@ export async function postParentNotice(client, parentID, notice) {
 // `toast` are optional; the idle path posts its own completion notice inline
 // (it needs the fetched snapshot + task outcome), the errored/timeout paths let
 // the helper post theirs.
+//
+// The whole body runs inside a delivery reservation. `markAborted` drops the
+// entry out of countActiveSubagents before the notice is posted, and the idle
+// path has already removed it entirely, so without the reservation the quiesce
+// predicate would report zero while this subagent's result or error is still
+// being delivered. The idle path reserves earlier still (inside its wake
+// mutex) and releases after this call — the counter nests, both halves are
+// balanced.
 export async function teardownSubagent(
   client,
   { sessionID, handle, parentID },
   { notice = null, toast = null, markAborted = false, entryRemoved = false, label = "" } = {},
 ) {
   const tag = label ? `${label}: ` : ""
+  reservePendingDelivery()
   if (markAborted) aborted.add(sessionID)
   try {
     if (notice != null && parentID) {
@@ -83,5 +97,6 @@ export async function teardownSubagent(
     forgetSessionDirectory(sessionID)
   } finally {
     if (markAborted) aborted.delete(sessionID)
+    releasePendingDelivery()
   }
 }

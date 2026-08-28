@@ -6,7 +6,7 @@
 // `deps`, which makes the whole sequence testable in isolation against
 // recording fakes — no opencode runtime, no I/O, no SDK calls.
 //
-// Two exceptions, both pure leaves with no plugin runtime dependencies:
+// Three exceptions, all pure leaves with no plugin runtime dependencies:
 //   - `src/log.js` (debug-logging only, appends to
 //     `~/.cache/opencode-agent-intercom/debug.log`), imported so the outer
 //     try/catch in `performPrimaryHandoff` can surface uncaught throws with
@@ -14,8 +14,12 @@
 //   - `src/pluginmsg.js` (constants + pure predicates), imported so
 //     `lastUserGoal` can skip plugin-generated messages (wake notices,
 //     kickoffs, DOC_SUMMARY prompts) when scanning for the real user goal.
+//   - `src/openpoints.js` (a pure parser that itself imports nothing),
+//     imported so `looksLikeOpenPointsReply` tests the heading with the same
+//     expression the parse uses.
 import { log, errMsg } from "./log.js"
 import { isPluginGeneratedMessage, looksLikePluginMessage } from "./pluginmsg.js"
+import { hasOpenPointsHeading } from "./openpoints.js"
 //
 // Sequence (do NOT reorder):
 //   0. Open the delivery drain for the old primary (deps.beginDrain). From
@@ -422,11 +426,13 @@ export const OPEN_POINTS_PROMPT =
   "is genuinely open, emit `## OPEN POINTS` and nothing else. Start your reply with " +
   "`## OPEN POINTS` literally."
 
-// Recognises the open-points reply: the heading the prompt demands, on its own
-// line (/m, so a model that prepends prose still matches). The counterpart of
-// looksLikeDocSummariesReply for the endless cycle's own poll.
+// Recognises the open-points reply: the counterpart of
+// looksLikeDocSummariesReply for the endless cycle's own poll. The heading
+// expression itself lives with the parser that consumes the reply
+// (`hasOpenPointsHeading`, src/openpoints.js), so the poll cannot come to
+// accept a reply the parse would reject.
 export function looksLikeOpenPointsReply(text) {
-  return typeof text === "string" && /^##\s+OPEN POINTS\s*$/m.test(text)
+  return hasOpenPointsHeading(text)
 }
 
 // Section cap on each per-file summary. Mirrors the "~400 characters" the

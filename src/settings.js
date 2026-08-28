@@ -35,7 +35,7 @@
 //       "endlessMode": true|false, "endlessContext": N,
 //       "endlessQuiesceTimeoutMs": N, "endlessMaxCycles": N }
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { log, errMsg } from "./log.js"
@@ -94,6 +94,33 @@ const TTL_MS = 2000
 let settingsPath = join(homedir(), ".config", "opencode", "agent-intercom.json")
 let cache = null
 let cachedAt = 0
+
+// Process-local override of `endlessMode`, set by EVERY writeEndlessMode call
+// whether or not the value reached the disk. All five of endless mode's stops
+// depend on the mode actually going off; a settings file that is present but
+// unparsable, or that cannot be written, would otherwise leave `endlessMode`
+// true on disk and the cycle would re-arm on the primary's very next turn —
+// a loop with no bound left, since endlessMaxCycles counts handoff generations
+// and no handoff runs on a toast-only stop.
+//
+// It is not permanent: `stamp` records what the settings file looked like when
+// the override was set, and the override is dropped as soon as the file
+// changes. That keeps the switch working in the direction the user owns — the
+// sidebar writes the file directly (it is a separate npm package and cannot
+// reach this module), so a hand edit or a toggle re-arming the mode wins over
+// the plugin's own switch-off.
+let endlessOverride = null
+
+// Identity of the settings file as it stands right now: mtime and size, or
+// null when there is no file. Only read while an override is live.
+function settingsFileStamp() {
+  try {
+    const st = statSync(settingsPath)
+    return `${st.mtimeMs}:${st.size}`
+  } catch {
+    return null
+  }
+}
 
 // Reads a non-negative integer env var, falling back to `def` when unset/invalid.
 function envNum(name, def) {
@@ -210,6 +237,15 @@ export function getSettings() {
   } catch {
     // no file / unreadable -> env + defaults; not an error
   }
+  // The plugin's own switch-off wins over the file until the file itself
+  // changes — see endlessOverride.
+  if (endlessOverride) {
+    if (endlessOverride.stamp === settingsFileStamp()) {
+      resolved.endlessMode = endlessOverride.value
+    } else {
+      endlessOverride = null
+    }
+  }
   cache = resolved
   cachedAt = now
   // exaApiKey is a secret: log only whether one is in effect, never its value.
@@ -253,9 +289,14 @@ export function primaryContextThreshold() {
 // switch, used by the bounds that end the loop (nothing left to do, no
 // progress, cycle ceiling). Read-modify-write over what is on disk right now,
 // mirroring the sidebar's writer: every other key, known or not, is carried
-// over untouched. A file that is present but unreadable or unparsable is NOT
-// written over — one stray character from a hand edit must not cost the user
-// the rest of the file. Returns whether the value reached the disk.
+// over untouched. A file that is present but unreadable, unparsable or not a
+// JSON object is NOT written over — one stray character from a hand edit must
+// not cost the user the rest of the file. Returns whether the value reached
+// the disk.
+//
+// The value takes effect either way: it is also held in `endlessOverride`, so
+// a stop is a stop even when the write failed, and getSettings reports the
+// value this call asked for until the file itself changes.
 export function writeEndlessMode(enabled) {
   let raw
   try {
@@ -263,28 +304,48 @@ export function writeEndlessMode(enabled) {
   } catch (err) {
     if (err?.code !== "ENOENT") {
       log("settings: endlessMode write skipped, file unreadable", errMsg(err))
+      holdEndlessMode(enabled)
       return false
     }
-    // Absent file: the write creates it.
+    // Absent file: the write creates it. The ONLY path on which `raw` is
+    // synthesised rather than read.
     raw = {}
   }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) raw = {}
+  // A file that parses but holds `[1,2,3]` or `"text"` is content we cannot
+  // merge into, so it is treated like an unparsable one: refused, not replaced.
+  // The sidebar's half refuses the same case (createJsonObjectFile,
+  // tui/src/json-object-file.ts).
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    log("settings: endlessMode write skipped, file is not a JSON object")
+    holdEndlessMode(enabled)
+    return false
+  }
   try {
     mkdirSync(dirname(settingsPath), { recursive: true })
     writeFileSync(settingsPath, JSON.stringify({ ...raw, endlessMode: enabled }, null, 2) + "\n")
   } catch (err) {
     log("settings: endlessMode write failed", errMsg(err))
+    holdEndlessMode(enabled)
     return false
   }
   // Drop the cache so the next getSettings() sees the value we just wrote
   // instead of serving the old one for the rest of the TTL.
-  resetSettings()
+  holdEndlessMode(enabled)
   return true
 }
 
-// Test-only: point at a different file and drop the cache.
+// Pins `enabled` as the resolved endlessMode until the settings file changes,
+// and drops the settings cache so the next getSettings() sees it.
+function holdEndlessMode(enabled) {
+  endlessOverride = { value: enabled, stamp: settingsFileStamp() }
+  resetSettings()
+}
+
+// Test-only: point at a different file and drop the cache. The endlessMode
+// override belongs to the file it was written against, so it goes with it.
 export function setSettingsPath(p) {
   settingsPath = p
+  endlessOverride = null
   resetSettings()
 }
 

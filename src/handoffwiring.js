@@ -9,6 +9,7 @@ import {
   runScheduledHandoff,
   lastUserGoal,
   requestDocSummaries,
+  looksLikeDocSummariesReply,
   looksLikeOpenPointsReply,
   DOC_SUMMARY_PROMPT,
   OPEN_POINTS_PROMPT,
@@ -26,6 +27,7 @@ import {
   abortHandoffDrain,
   handoffGeneration,
   hasEndlessPending,
+  cancelPendingEndless,
   claimPendingEndless,
   releaseEndless,
   setEndlessCooldown,
@@ -157,7 +159,11 @@ function buildPrimaryHandoffDeps(client, sessionID, sessionDir) {
     // plus the Session-Verlauf history block in one final turn. The old
     // primary is idle at this point, so the prompt starts immediately
     // instead of queuing behind an in-flight turn.
-    promptOldPrimaryForDocSummaries: () => promptOldPrimaryForDocSummaries(client, sessionID),
+    promptOldPrimaryForDocSummaries: () =>
+      promptOldPrimaryFor(client, sessionID, {
+        prompt: DOC_SUMMARY_PROMPT,
+        looksLikeReply: looksLikeDocSummariesReply,
+      }),
     // deleteSession is used ONLY for the orphaned NEW session on the failure
     // path — a root session created without a parentID, so it has no children
     // to cascade over. The OLD primary is retired via archiveSession (step 8)
@@ -216,45 +222,52 @@ function buildPrimaryHandoffDeps(client, sessionID, sessionDir) {
   }
 }
 
-// Asks the OLD primary (#1) — which still holds PROJECT.md / TODO.md /
-// ARCHITECTURE.md in its context from its original kickoff — to emit three
-// short per-file summaries plus a session-history summary (Session-Verlauf)
-// in one final turn. The new orchestrator (#2) embeds those blocks into its
-// kickoff message and starts its life with full context WITHOUT having to
-// re-read the docs from disk.
+// Asks the primary that is about to be replaced for ONE more shaped turn, and
+// waits for it. Both final turns the plugin takes out of a dying primary go
+// through here, differing only in the prompt and the shape check:
+//
+//   - DOC_SUMMARY_PROMPT / looksLikeDocSummariesReply — the plain handoff.
+//     #1 still holds PROJECT.md / TODO.md / ARCHITECTURE.md in its context
+//     from its original kickoff and emits three short per-file summaries plus
+//     a session-history summary (Session-Verlauf). The new orchestrator (#2)
+//     embeds those blocks into its kickoff message and starts its life with
+//     full context WITHOUT having to re-read the docs from disk.
+//   - OPEN_POINTS_PROMPT / looksLikeOpenPointsReply — the endless cycle.
+//     Everything still open, in the todo file's own two-line shape, so the
+//     plugin can write the points itself.
 //
 // Flow (implemented by `requestDocSummaries` in handoff.js — injectable
 // core, so the baseline/poll discipline is unit-testable without a runtime):
 //   1. BASELINE: read the old primary's CURRENT final result BEFORE sending
 //      the prompt. Without it the first poll returns the primary's PREVIOUS
-//      answer as if it were the summaries (live-verified bug — the summary
-//      prompt never reached an LLM and the kickoff fell back).
-//   2. `promptSession` the OLD primary with `DOC_SUMMARY_PROMPT`. Non-blocking
-//      (the SDK returns once the request is queued, 204-style). The handoff
-//      fires mid-turn, so this queues BEHIND the in-flight user turn.
+//      answer as if it were the reply (live-verified bug — the summary prompt
+//      never reached an LLM and the kickoff fell back).
+//   2. `promptSession` the OLD primary with `prompt`. Non-blocking (the SDK
+//      returns once the request is queued, 204-style). The plain handoff fires
+//      mid-turn, so this queues BEHIND the in-flight user turn.
 //   3. Poll `fetchSnapshot` until the final result has CHANGED from the
-//      baseline AND looks like the summaries reply (`## PROJECT.md —`). A
-//      changed-but-foreign result is the interrupted in-flight turn's reply —
-//      re-baseline and keep waiting for the summary turn behind it.
-//   4. Return the raw text. `performPrimaryHandoff` runs it through
-//      `validateDocSummaries` so the kickoff stays well-formed even if the
-//      LLM gave us a malformed / partial reply.
+//      baseline AND passes `looksLikeReply`. A changed-but-foreign result is
+//      the interrupted in-flight turn's reply — re-baseline and keep waiting
+//      for the turn queued behind it.
+//   4. Return the raw text.
 //
-// Failure modes (all re-thrown so the handoff can fall back):
+// Failure modes (all re-thrown so the caller can fall back):
 //   - The session was already deleted (opencode returns 404) → snapshot
 //     returns {} → no result ever changes → timeout → we throw.
 //   - The LLM is slow / the provider is down → polling times out after
 //     DOC_SUMMARIES_TIMEOUT_MS (handoff.js, 120 s — sized for a measured
 //     42 s in-flight turn plus the summary turn itself) → we throw.
-//   - The session never produced a summaries-shaped reply in the window
-//     (e.g. the prompt was rejected) → timeout → we throw.
+//   - The session never produced a shaped reply in the window (e.g. the
+//     prompt was rejected) → timeout → we throw.
 //
-// In every failure case the handoff's `try/catch` replaces the
-// `docSummaries` block with `FALLBACK_DOC_SUMMARIES` so the kickoff still
-// lands. The handoff itself never throws out.
-async function promptOldPrimaryForDocSummaries(client, primarySessionID) {
+// What the two callers do with a throw differs, and that is the whole
+// asymmetry between them: the handoff's own `try/catch` replaces the
+// `docSummaries` block with `FALLBACK_DOC_SUMMARIES` and the kickoff still
+// lands, while the endless cycle ABANDONS — replacing a primary after failing
+// to save its open points is the data loss the mode exists to prevent.
+async function promptOldPrimaryFor(client, primarySessionID, { prompt, looksLikeReply }) {
   if (!client || !primarySessionID) {
-    throw new Error("promptOldPrimaryForDocSummaries: missing client or primarySessionID")
+    throw new Error("promptOldPrimaryFor: missing client or primarySessionID")
   }
   return requestDocSummaries({
     fetchResult: async () => (await fetchSnapshot(client, primarySessionID))?.result,
@@ -262,8 +275,9 @@ async function promptOldPrimaryForDocSummaries(client, primarySessionID) {
       promptSession(client, {
         sessionID: primarySessionID,
         agent: ORCHESTRATOR_AGENT_NAME,
-        prompt: DOC_SUMMARY_PROMPT,
+        prompt,
       }),
+    looksLikeReply,
   })
 }
 
@@ -283,7 +297,17 @@ async function promptOldPrimaryForDocSummaries(client, primarySessionID) {
 // every abandon path releases it inside runEndlessCycle and arms the cooldown.
 export async function maybeRunPendingEndless(client, sessionID) {
   if (!hasEndlessPending(sessionID)) return null
-  const { endlessQuiesceTimeoutMs, endlessMaxCycles } = getSettings()
+  const { endlessMode, endlessQuiesceTimeoutMs, endlessMaxCycles } = getSettings()
+  // Stop #5, the switch: the latch is usually set during the very turn that
+  // crosses the ceiling and this idle follows it immediately, so the transform
+  // hook's off-branch — which needs ANOTHER turn from the primary — is not a
+  // reachable stop for a user who sees the toast and turns the row off. Read
+  // here, before the claim, so a cycle already executing is untouched.
+  if (!endlessMode) {
+    cancelPendingEndless(sessionID)
+    log("endless: latch dropped — the mode was switched off before the cycle started", { sessionID })
+    return null
+  }
   // The session's OWN directory, not the factory closure's: sessions created
   // with ?directory=… land in a different project but share the same factory
   // ctx, and the todo file this cycle writes must be that project's.
@@ -295,7 +319,11 @@ export async function maybeRunPendingEndless(client, sessionID) {
     setCooldown: () => setEndlessCooldown(sessionID),
     isQuiesced: () => isQuiesced(sessionID),
     countActive: () => countActiveSubagents(),
-    requestOpenPoints: () => promptOldPrimaryForOpenPoints(client, sessionID),
+    requestOpenPoints: () =>
+      promptOldPrimaryFor(client, sessionID, {
+        prompt: OPEN_POINTS_PROMPT,
+        looksLikeReply: looksLikeOpenPointsReply,
+      }),
     addTask: (point) => addTask(directory, point),
     // A directory with NO todo file at all is the greenfield state addTask
     // creates over, so it reads as an empty list here. "several todo files"
@@ -338,29 +366,3 @@ export async function maybeRunPendingEndless(client, sessionID) {
   })
 }
 
-// Asks the primary that is about to be replaced to state everything still
-// open, in the todo file's own two-line shape. Same baseline / re-baseline /
-// timeout discipline as the doc-summary turn (requestDocSummaries), with the
-// shape check keyed on `## OPEN POINTS`: the handoff fires from an idle event,
-// but the session may still be finishing a turn, and a changed-but-foreign
-// reply must not be mistaken for the open-points answer.
-//
-// Throws on timeout or on a session that never produced a shaped reply. The
-// cycle abandons on that throw — the primary is NOT replaced, because
-// replacing it after failing to save its open points is the data loss the
-// whole mode exists to prevent.
-async function promptOldPrimaryForOpenPoints(client, primarySessionID) {
-  if (!client || !primarySessionID) {
-    throw new Error("promptOldPrimaryForOpenPoints: missing client or primarySessionID")
-  }
-  return requestDocSummaries({
-    fetchResult: async () => (await fetchSnapshot(client, primarySessionID))?.result,
-    sendPrompt: () =>
-      promptSession(client, {
-        sessionID: primarySessionID,
-        agent: ORCHESTRATOR_AGENT_NAME,
-        prompt: OPEN_POINTS_PROMPT,
-      }),
-    looksLikeReply: looksLikeOpenPointsReply,
-  })
-}

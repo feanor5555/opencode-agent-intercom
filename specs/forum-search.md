@@ -3,12 +3,6 @@
 Status: proposed, not implemented. Boundary: the plugin at `/home/user/opencode-agent-intercom`.
 Model: the forum route in `~/.claude/agents/researcher.md` (lines 52–66).
 
-**Direction that fixes the shape of this design: no provider-side domain restriction is
-wanted.** The route therefore takes its forum orientation from three things only — the query
-the plugin builds, what searxng offers natively, and the prompt rule for the `researcher`
-role. `includeDomains`, Exa's REST endpoint and the paid advanced MCP tool are out of scope,
-and §2.1 records only what was measured about them so the question is not reopened.
-
 ## 1. What the code does today (read, with the lines behind it)
 
 - `web_search` is declared in `src/websearch.js:227-318`, args `query` and `numResults`
@@ -19,22 +13,24 @@ and §2.1 records only what was measured about them so the question is not reope
   (`:268-271`); both dead returns `websearch failed: ${why || "no results"}` (`:303`).
 - The Exa transport is `callExa(toolName, args, signal)` (`:79-96`), posting JSON-RPC
   `tools/call` to `const EXA_MCP_URL = "https://mcp.exa.ai/mcp"` (`:28`), tool name
-  `"web_search_exa"` (`:253-257`), key via `x-api-key` from `getExaApiKey()` (`:38-47`).
+  `"web_search_exa"` (`:253-257`), headers from `exaHeaders()` (`:38-47`), which sets
+  `x-api-key` only when `getExaApiKey()` returns a non-empty value (`:44-46`).
 - The searxng transport is `callSearxng(query, signal)` (`:98-108`), building
   `` `${base}/search?q=${encodeURIComponent(query)}&format=json` `` (`:100`) — one plain
   query, no `categories`, no bang, no `site:`.
 - Pure and already exported: `normalizeUrl` (`:115`), `parseExaEntries` (`:128`),
   `searxToEntries` (`:155`), `mergeAndDedup` (`:174`), `renderEntries` (`:207`).
   `searxToEntries` keeps `title/url/publishedDate/content` and **drops searxng's `score`**
-  (`:159-166`). `mergeAndDedup` is already variadic (`...lists`, `:174`).
+  (`:155-169`). `mergeAndDedup` is already variadic (`...lists`, `:174`).
   `callExa` and `callSearxng` are module-private.
 - The tool is registered conditionally: `...(isWebsearchEnabled() ? { web_search: createWebsearchTool() } : {})`
   (`src/tools.js:540`), gated by `OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH` (`src/websearch.js:223-225`).
-- `RESEARCHER_PROMPT` is `src/agents.js:93-99`; the `researcher` role is `src/agents.js:189-202`.
+- `RESEARCHER_PROMPT` is `src/agents.js:93-99`; the `researcher` role is `src/agents.js:183-195`.
   Two roles deny the tool by name: orchestrator `web_search: "deny"` (`src/agents.js:141`)
-  and gitter `web_search: "deny"` (`src/agents.js:219`).
-- Settings resolve file > env > default in `getSettings()` (`src/settings.js`), and every
-  validated key today is either an integer or a string — **there is no array key yet**.
+  and gitter `web_search: "deny"` (`src/agents.js:209`).
+- Settings resolve file > env > default in `getSettings()` (`src/settings.js:80-129`), and every
+  validated key today is either an integer (`Number.isInteger(raw?.maxSubagents) && …`, `:95`)
+  or a string (`typeof raw?.searxngUrl === "string" && …`, `:107`) — **there is no array key yet**.
 - The stated reason for the custom tool is prompt size: "MCP-server-supplied tool
   descriptions (~1.5 KB) would land in every LLM call's system prompt; we control a short
   description here instead" (`src/websearch.js:5-8`). The shape decision in §3.1 is measured
@@ -44,7 +40,7 @@ and §2.1 records only what was measured about them so the question is not reope
 
 Every figure below comes from a call made while writing this concept, once each.
 
-### 2.1 Domain restriction: closed, and recorded so it stays closed
+### 2.1 Exa over MCP: the tool takes a query and a count, and nothing else
 
 `tools/list` against `https://mcp.exa.ai/mcp` — the URL the plugin already calls — returns
 exactly two tools: `web_search_exa` (`query`, `numResults`; required `query`) and
@@ -55,23 +51,16 @@ Sending one anyway is **silently ignored, not rejected**: `web_search_exa` with
 `query: "rust async runtime comparison"` and `includeDomains: ["forums.truenas.com"]` answered
 HTTP 200 with five SEO blog posts (`toolsku.com`, `abrarqasim.com`, `corrode.dev`,
 `generalistprogrammer.com`, `reintech.io`) and nothing from truenas. A restriction that is
-accepted and ignored is worse than one that errors — never send it.
+accepted and ignored is worse than one that errors — never send it, and §7 keeps a test on
+that, since an ignored parameter leaves no trace at runtime.
 
-The two paths that do offer `includeDomains` are both shut for this plugin:
-`web_search_advanced_exa` is reachable only by appending `?tools=web_search_advanced_exa` to
-the URL (on the plain URL a call fails `MCP error -32602: Tool … not found`) and answers 401
-without auth; `POST https://api.exa.ai/search` answers HTTP 402 with an x402 payment
-challenge unauthenticated. Both are out of scope by direction and neither appears in the
-design below.
-
-Two by-products of that probing do carry into the design:
+Two further properties of this tool carry into the design:
 
 - `numResults: 20` on `web_search_exa` is accepted and returns 20 entries — the `max(10)` in
   `src/websearch.js:243` is the plugin's own cap, not the provider's. Above 20 is untested.
 - Exa's free MCP tier is rate limited tightly enough that this concept's own verification hit
-  it: `"You've hit Exa's free MCP rate limit."` The route must therefore make **one** Exa call
-  per invocation, never two, and must treat that message as a failed leg rather than as an
-  empty result set.
+  it: `"You've hit Exa's free MCP rate limit."` The route therefore makes **one** Exa call per
+  invocation and treats that message as a failed leg rather than as an empty result set.
 
 ### 2.2 What Exa is good at here: the query itself
 
@@ -84,7 +73,7 @@ returned 20 URLs of which **17 were genuine forums or discussion threads**:
 Lemmy instances, `forum.linuxfoundation.org`, `linux.org/threads`, `dev.to`, plus three
 articles. Exa's neural ranking reads "forum threads where people report their real
 experience" and finds forum-shaped pages by itself. **This is the whole mechanism the Exa leg
-rests on**, and with no domain parameter available it is also the only one.
+rests on**, and with no domain parameter on the tool it is also the only one.
 
 A second call confirms the steer is real rather than luck: the query
 `"forum thread discussion on reddit.com or forum.proxmox.com about running zfs special vdev in
@@ -92,11 +81,13 @@ practice"` returned 6 of 6 hits from `forum.proxmox.com`. Naming domains inside 
 prose steers hard — which is why §3.3 does *not* do it: naming a couple of communities biases
 every question toward them, and naming twenty dilutes the semantic vector the steer depends on.
 
-The same measurement kills the idea of a curated domain list used client-side. Of those 20
-hits, **exactly 1 was on the 22-domain list** of `~/.claude/agents/researcher.md:64`. Filtering
-the leg by that list would have discarded 16 of 17 good threads, because the right forums for
-that question — `forums.raspberrypi.com`, `discuss.kubernetes.io` — were never on the list and
-could not be: the list is finite and the tail of vendor forums is not.
+The same measurement bounds what a curated domain list is worth here. Of those 20 hits,
+**exactly 1 was on the 22-domain list** of `~/.claude/agents/researcher.md:64`. Matching the
+leg against that list works against 16 of 17 good threads, whether the match filters them out
+or merely ranks them down, because the right forums for that question —
+`forums.raspberrypi.com`, `discuss.kubernetes.io` — were never on the list and could not be:
+the list is finite and the tail of vendor forums is not. No domain list is matched anywhere in
+this route.
 
 ### 2.3 What searxng contributes: engine bangs, not `site:`
 
@@ -168,7 +159,7 @@ Recommended. Three shapes were weighed:
 |---|---|---|---|
 | **separate `forum_search` tool** (recommended) | one extra tool description (~330 B) in every subagent system prompt | nothing | a second small tool module; the name must be added to the two `deny` lists |
 | a `forums: boolean` on `web_search` | no extra tool, but `web_search`'s description must grow to explain when to set it — realistically past 330 B, so no saving | one tool with two query shapes, two `numResults` ceilings and two backend call shapes inside one `execute` | a branchy `execute`, and the model must remember an optional flag it can silently omit |
-| prompt rule only, no tool change | free | **impossible**: the envelope and the bang chain are provider-call changes, and the researcher has `bash: "deny"` (`src/agents.js:194`) so it cannot make them itself | — |
+| prompt rule only, no tool change | free | **impossible**: the envelope and the bang chain are provider-call changes, and the researcher has `bash: "deny"` (`src/agents.js:189`) so it cannot make them itself | — |
 
 The deciding argument is the one the file already makes for itself (`src/websearch.js:5-11`):
 this plugin buys short tool descriptions. A tool *name* is the strongest route signal a small
@@ -176,10 +167,9 @@ model has; an optional boolean on an existing tool is the weakest, and when the 
 it the run silently takes the wrong route leaving no trace. Two short descriptions beat one
 long one carrying a mode switch.
 
-The middle option deserves one more word, because with the domain filter gone it looks cheaper
-than before: the two routes now differ in the query string sent to *both* backends, in the
-`numResults` ceiling, and in what the results are for (triage vs. answer). That is not a flag,
-it is a second tool wearing one.
+The middle option deserves one more word, because it looks cheap: the two routes differ in the
+query string sent to *both* backends, in the `numResults` ceiling, and in what the results are
+for (triage vs. answer). That is not a flag, it is a second tool wearing one.
 
 ### 3.2 Argument schema
 
@@ -281,12 +271,10 @@ No page is fetched. Excerpts are triage material and the model is told so in bot
 description and the prompt; threads worth reading go through `webfetch`, which the researcher
 already has (`src/agents.js:95`).
 
-### 3.7 Where the configurable list lives: the bangs, not domains
+### 3.7 Where the configurable list lives: the searxng bangs
 
-There is **no domain list in this design** — not in a provider call (§2.1) and not client-side
-(§2.2). The question "where does the domain list live" therefore has an answer with one moving
-part left, and it is the searxng bang set, because on this route the bangs *are* the domain
-restriction: each bang binds one engine that searches one site.
+The one list this route carries is the searxng bang set, and on this route the bangs *are* the
+domain restriction: each bang binds one engine that searches one site.
 
 - `FORUM_BANGS = ["!hn", "!lo", "!st", "!ubuntu", "!su", "!gh"]`, a `const` in the new module,
   each verified to answer (§2.3).
@@ -295,8 +283,8 @@ restriction: each bang binds one engine that searches one site.
   else; `getForumBangs()` returns the configured array when it is non-empty, otherwise the
   default.
 
-**Replacement, not union** — the opposite of what a curated domain list would want, and for a
-concrete reason: the set is a property of *one searxng instance*. Another user's instance may
+**Replacement, not union**, for a concrete reason: the set is a property of *one searxng
+instance*. Another user's instance may
 lack `lobste.rs`, may have `reddit` restored, may name a shortcut differently. A union would
 leave them unable to drop a bang that does nothing on their instance, and replacement lets
 them state their instance's reality in one line. The default is documented in the README so
@@ -327,17 +315,17 @@ Forum excerpts are triage: pick the threads worth reading and `webfetch` them; a
 own documentation outranks a third-party page about that project.
 ```
 
-With the domain filter gone the prompt carries more of the design's weight than it did, so the
-wording is deliberate:
+The prompt carries real weight in this design — it is what decides which of two tools a run
+takes — so the wording is deliberate:
 
 - "**FIRST**" and "never a fallback for one that came back empty" encode the model's central
   point (`~/.claude/agents/researcher.md:52`): the decision is read off the question before any
   query goes out, so a general search run first "to see whether forums are needed" is the exact
   ordering this forbids.
 - The second line is the guard against over-triggering and names the failure directly — "would
-  keep exactly those answers out" — rather than listing categories. The claim is true even
-  without a domain filter, because the envelope in §3.3 steers Exa toward threads and the bangs
-  bind searxng to six forums: a version number is genuinely not in what comes back. A model
+  keep exactly those answers out" — rather than listing categories. The claim holds, because
+  the envelope in §3.3 steers Exa toward threads and the bangs bind searxng to six forums: a
+  version number is genuinely not in what comes back. A model
   that knows *why* the route is wrong for a documentation question does not take it.
 - "**A question carrying both**" is included because it is the common case in this plugin's own
   work — "does library X support Y, and does it hold up in production" — and without it the
@@ -348,7 +336,7 @@ wording is deliberate:
   matched on. That alignment is deliberate and is the closest thing this design has to a
   guarantee that the right route produces forum-shaped results.
 
-The `researcher` role description (`src/agents.js:190-191`) gains a clause naming
+The `researcher` role description (`src/agents.js:184-185`) gains a clause naming
 `forum_search` beside `web_search`, since that string is what the orchestrator reads when
 choosing an agent.
 
@@ -361,8 +349,8 @@ and the suite green (`npm test`), and each can be handed out alone.
 `EXA_TIMEOUT_MS`, `SEARXNG_TIMEOUT_MS`, `exaHeaders`, `parseSseResult`, `callExa`,
 `callSearxng`, `normalizeUrl`, `parseExaEntries`, `searxToEntries`, `mergeAndDedup`,
 `renderEntries`, moved verbatim. `src/websearch.js` keeps only `isWebsearchEnabled` and
-`createWebsearchTool` and imports the rest. Update `test/exa-api-key.test.js:17` to import
-`exaHeaders` from `../src/searchcore.js`.
+`createWebsearchTool` and imports the rest. Update `test/exa-api-key.test.js:17`
+(`import { exaHeaders } from "../src/websearch.js"`) to import from `../src/searchcore.js`.
 Depends on: nothing. Rationale: `forum_search` needs `callExa` and `callSearxng`, which are
 module-private today (`src/websearch.js:79`, `:98`); the alternative — exporting them from
 `websearch.js` and importing sideways — makes the `web_search` tool module the owner of the
@@ -374,7 +362,7 @@ Depends on: step 1.
 
 **Step 3 — the `forumBangs` setting.** `FORUM_BANGS` const, array validation in
 `getSettings()`, `getForumBangs()` (§3.7), plus the header comment block in
-`src/settings.js:1-21` that documents every key.
+`src/settings.js:1-20` that documents every key.
 Depends on: nothing; can run parallel to steps 1 and 2.
 
 **Step 4 — `src/forumsearch.js`.** The tool: envelope, bang chain, relative-score cut,
@@ -383,7 +371,7 @@ round-robin, render, failure text (§3.3–§3.5), plus `isForumSearchEnabled()`
 Depends on: steps 1, 2, 3.
 
 **Step 5 — wiring.** Register in `src/tools.js` beside line 540; add `forum_search: "deny"` to
-the orchestrator (`src/agents.js:141`) and gitter (`src/agents.js:219`) permission blocks —
+the orchestrator (`src/agents.js:141`) and gitter (`src/agents.js:209`) permission blocks —
 without this the orchestrator can search and the delegation pattern the plugin exists to
 enforce leaks.
 Depends on: step 4.
@@ -393,10 +381,11 @@ Depends on: step 4.
 Depends on: step 5, so the tool the prompt names exists when the prompt ships.
 
 **Step 7 — documentation.** A `forum_search` row in the README tool table (`README.md:158`),
-the `forumBangs` key with its default in the configuration section (`README.md:272-274`),
-`OPENCODE_AGENT_INTERCOM_DISABLE_FORUM_SEARCH` in the variable table (`README.md:284`), the
-`researcher` row (`README.md:201`), and a `specs/` line in the Documents list of `CLAUDE.md` —
-that list names `work/` and `concepts/` and this file sits in neither.
+the `forumBangs` key with its default in the configuration section (`README.md:283-286`),
+`OPENCODE_AGENT_INTERCOM_DISABLE_FORUM_SEARCH` in the variable table beside the
+`_DISABLE_WEBSEARCH` row (`README.md:297`), the `researcher` row (`README.md:201`), and a
+`specs/` line in the Documents list of `CLAUDE.md` — that list names `work/` (`CLAUDE.md:9`)
+and `concepts/` (`:10`) and this file sits in neither.
 Depends on: step 6.
 
 ## 5. Assumptions, and what would show them wrong
@@ -406,8 +395,8 @@ Depends on: step 6.
   model that can change under us without notice. Wrong when a `forum_search` on a plainly
   experience-shaped question returns mostly articles and vendor pages; the observation is the
   live check in §7. If it fails, the Exa leg is worth less than the searxng leg and the honest
-  response is to weight the interleave toward searxng, not to add a whitelist — §2.2 measured
-  what that costs.
+  response is to weight the interleave toward searxng; §2.2 measured what matching on a domain
+  list would cost instead.
 - **`numResults: 20` is within the endpoint's ceiling.** Verified at exactly 20; 21 and above
   untested. Wrong if a request for 20 returns fewer on a query with ample hits, or errors.
 - **Exa's free MCP rate limit is per endpoint and shared with `web_search`'s calls**, not per
@@ -431,16 +420,13 @@ Depends on: step 6.
 
 ## 6. Open, and outside this boundary
 
-- Whether the plugin should ever gain a paid Exa path (advanced MCP tool or REST, §2.1). Closed
-  by direction for this design, and nothing here has to be undone if it is ever reopened: it
-  would be a third leg beside these two, not a replacement for either.
 - Whether `forum_search` should be offered to roles beyond `researcher` — the planner chooses
   libraries (`src/agents.js:53`) and would plausibly want it. Left as it falls out: every role
   except orchestrator and gitter gets it, the same as `web_search`.
 
 ## 7. What must be tested
 
-Unit, in the existing `node --test` style under `test/`:
+Unit, in the existing `node --test` style under `test/` (`npm test` runs `test/*.test.js`):
 
 - `searxToEntries` carries `score` and defaults it to 0 on a row that has none; `renderEntries`
   output for the same entries is unchanged from before step 2.

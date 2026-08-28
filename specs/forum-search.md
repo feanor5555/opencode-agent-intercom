@@ -1,6 +1,6 @@
 # Concept: `forum_search` — a forum route for the plugin's web search
 
-Status: proposed, not implemented. Boundary: the plugin at `/home/user/opencode-agent-intercom`.
+Status: implemented and wired. Boundary: the plugin at `/home/user/opencode-agent-intercom`.
 Model: the forum route in `~/.claude/agents/researcher.md` (lines 52–66).
 
 ## 1. What the code does today (read, with the lines behind it)
@@ -276,12 +276,13 @@ already has (`src/agents.js:95`).
 The one list this route carries is the searxng bang set, and on this route the bangs *are* the
 domain restriction: each bang binds one engine that searches one site.
 
-- `FORUM_BANGS = ["!hn", "!lo", "!st", "!ubuntu", "!su", "!gh"]`, a `const` in the new module,
-  each verified to answer (§2.3).
+- `DEFAULT_FORUM_BANGS = ["!hn", "!lo", "!st", "!ubuntu", "!su", "!gh"]`, a `const` in
+  `src/settings.js` beside the other defaults, each engine verified to answer (§2.3).
 - `~/.config/opencode/agent-intercom.json` gains `"forumBangs": ["!hn", "!lo", "!se"]`.
   `getSettings()` validates it as an array of non-empty strings, trims each and drops anything
-  else; `getForumBangs()` returns the configured array when it is non-empty, otherwise the
-  default.
+  else, and resolves the key to `DEFAULT_FORUM_BANGS` when nothing usable is left, so the object
+  it returns always carries the set in effect. `getForumBangs()` reads it, beside
+  `getSearxngUrl()` and `getExaApiKey()`.
 
 **Replacement, not union**, for a concrete reason: the set is a property of *one searxng
 instance*. Another user's instance may
@@ -345,22 +346,25 @@ choosing an agent.
 Behaviour-neutral first, then additive. Each step leaves the tree building (`npm run check`)
 and the suite green (`npm test`), and each can be handed out alone.
 
-**Step 1 — extract the shared search core.** New `src/searchcore.js` holding `EXA_MCP_URL`,
-`EXA_TIMEOUT_MS`, `SEARXNG_TIMEOUT_MS`, `exaHeaders`, `parseSseResult`, `callExa`,
-`callSearxng`, `normalizeUrl`, `parseExaEntries`, `searxToEntries`, `mergeAndDedup`,
-`renderEntries`, moved verbatim. `src/websearch.js` keeps only `isWebsearchEnabled` and
-`createWebsearchTool` and imports the rest. Update `test/exa-api-key.test.js:17`
+**Step 1 — extract the shared search core.** New `src/searchcore.js` holding a module-private
+`EXA_MCP_URL`, `EXA_TIMEOUT_MS`, `SEARXNG_TIMEOUT_MS`, `exaHeaders`, `parseSseResult`,
+`callExa`, `callSearxng`, the concurrent two-leg run `runSearchLegs` with the failure line
+`legFailureText` beside it (§3.3: both tools run the same two legs under the same timeouts and
+differ only in the queries they send and the tool name in the failure text), `normalizeUrl`,
+`parseExaEntries`, `searxToEntries`, `mergeAndDedup`, `renderEntries`. `src/websearch.js` keeps
+only `isWebsearchEnabled` and `createWebsearchTool` and imports the rest. Update `test/exa-api-key.test.js:17`
 (`import { exaHeaders } from "../src/websearch.js"`) to import from `../src/searchcore.js`.
 Depends on: nothing. Rationale: `forum_search` needs `callExa` and `callSearxng`, which are
 module-private today (`src/websearch.js:79`, `:98`); the alternative — exporting them from
 `websearch.js` and importing sideways — makes the `web_search` tool module the owner of the
 transports a sibling tool depends on, and that coupling is what a review flags first. About
-120 lines moved, no logic changed.
+120 lines moved. Behaviour-neutral for `web_search` except on an Exa reply carrying
+`isError: true` (§3.5.6), where the failure text now names the reason.
 
 **Step 2 — `score` on searxng entries.** One field in `searxToEntries` (§3.4). Additive.
 Depends on: step 1.
 
-**Step 3 — the `forumBangs` setting.** `FORUM_BANGS` const, array validation in
+**Step 3 — the `forumBangs` setting.** `DEFAULT_FORUM_BANGS` const, array validation in
 `getSettings()`, `getForumBangs()` (§3.7), plus the header comment block in
 `src/settings.js:1-20` that documents every key.
 Depends on: nothing; can run parallel to steps 1 and 2.
@@ -457,7 +461,10 @@ Live, once each, after step 5 — no series, no averaging:
   returned URLs are threads rather than articles**. This is the standing check on the §5
   envelope assumption and the only evidence that the route works at all.
 - One `web_search` on the same question, confirming its output is identical to what it produced
-  before step 1 — proof that the extraction was behaviour-neutral, and the side-by-side that
+  before step 1 — the extraction is behaviour-neutral for `web_search` on every reply except an
+  Exa `isError` one, where the failure text names the reason (`websearch failed: exa: …`) instead
+  of the `no results` line the parsed-away error message used to produce; that one reply is
+  pinned by a unit test in `test/plugin.test.js`, not live. It is also the side-by-side that
   shows the two routes actually differ.
 - If and only if someone wants the longer envelope tail (§3.3): the same question through both
   envelope forms, comparing how many of 20 hits are threads. One comparison, then the string is

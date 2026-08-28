@@ -29,6 +29,7 @@ import {
 import { projectContext } from "./project.js"
 import { getSettings } from "./settings.js"
 import { createWebsearchTool, isWebsearchEnabled } from "./websearch.js"
+import { createForumSearchTool, isForumSearchEnabled } from "./forumsearch.js"
 import { createOutlineTool, isOutlineEnabled } from "./outline.js"
 import {
   listOpen,
@@ -538,6 +539,7 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     }),
 
     ...(isWebsearchEnabled() ? { web_search: createWebsearchTool() } : {}),
+    ...(isForumSearchEnabled() ? { forum_search: createForumSearchTool() } : {}),
     ...(isOutlineEnabled() ? { outline: createOutlineTool({ dirFor }) } : {}),
   }
 }

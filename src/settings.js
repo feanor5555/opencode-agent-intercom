@@ -11,12 +11,19 @@
 // EXA_API_KEY > unset). Unset is not an error: web_search then uses Exa's
 // anonymous tier. The value is a secret — it is never written to the debug log.
 //
+// The searxng engine bangs `forum_search` chains resolve from the file key
+// `forumBangs` alone (no env var). It is the only array-valued key and it
+// REPLACES the built-in set rather than extending it: the set describes one
+// searxng instance's engines, so a user must be able to drop a bang their
+// instance does not know. An empty, non-array or all-invalid value leaves
+// DEFAULT_FORUM_BANGS in effect.
+//
 // Shared file path (the TUI plugin hardcodes the same path, it is a separate
 // npm package and cannot import this module):
 //   ~/.config/opencode/agent-intercom.json
 //     { "maxSubagents": N, "maxContext": N, "maxPrimaryContext": N,
 //       "maxSubagentAgeMs": N, "searxngUrl": "http://host:port",
-//       "exaApiKey": "<key>",
+//       "exaApiKey": "<key>", "forumBangs": ["!hn", "!lo"],
 //       "postNoticeRetries": N, "postNoticeRetryBackoffMs": N }
 
 import { readFileSync } from "node:fs"
@@ -37,6 +44,10 @@ const DEFAULT_MAX_PRIMARY_CONTEXT = 80000
 // (which keeps emitting events) is never tripped, short enough that a hung
 // LLM call doesn't silently pin a slot for the life of the process.
 const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
+// Built-in searxng bang set for `forum_search`, each engine verified to answer
+// on its bang: hackernews, lobste.rs, stackoverflow, askubuntu, superuser,
+// github. Replaced (never extended) by the `forumBangs` file key.
+export const DEFAULT_FORUM_BANGS = ["!hn", "!lo", "!st", "!ubuntu", "!su", "!gh"]
 // Retry policy for the postNotice transport call (pushes a wake notice into
 // the primary session on subagent completion/timeout/error). The opencode
 // SDK can transiently fail to deliver a promptAsync; without retries a single
@@ -67,16 +78,17 @@ function envStr(name, def) {
 }
 
 // Current settings: { maxSubagents, maxContext, maxPrimaryContext,
-// maxSubagentAgeMs, searxngUrl, exaApiKey, postNoticeRetries,
+// maxSubagentAgeMs, searxngUrl, exaApiKey, forumBangs, postNoticeRetries,
 // postNoticeRetryBackoffMs }.
 // Cached for TTL_MS so the hot paths (spawn, every subagent transform) don't
 // stat the file constantly. searxngUrl is "" when unset (searxng disabled).
 // exaApiKey is "" when unset (web_search falls back to Exa's anonymous tier).
 // maxSubagentAgeMs is the inactivity watchdog window; 0 disables it.
 // maxPrimaryContext is the orchestrator primary-session context-refresh
-// threshold (tokens); 0 disables auto-handoff. postNoticeRetries counts
-// RE-tries (0 = single attempt, no retry). postNoticeRetryBackoffMs is the
-// base delay between attempts (linear, with a small jitter).
+// threshold (tokens); 0 disables auto-handoff. forumBangs is the bang set in
+// effect: DEFAULT_FORUM_BANGS unless the file replaces it. postNoticeRetries
+// counts RE-tries (0 = single attempt, no retry). postNoticeRetryBackoffMs is
+// the base delay between attempts (linear, with a small jitter).
 export function getSettings() {
   const now = Date.now()
   if (cache && now - cachedAt < TTL_MS) return cache
@@ -87,6 +99,7 @@ export function getSettings() {
     maxSubagentAgeMs: envNum("OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS", DEFAULT_MAX_SUBAGENT_AGE_MS),
     searxngUrl: envStr("OPENCODE_AGENT_INTERCOM_SEARXNG_URL", ""),
     exaApiKey: envStr("EXA_API_KEY", ""),
+    forumBangs: [...DEFAULT_FORUM_BANGS],
     postNoticeRetries: envNum("OPENCODE_AGENT_INTERCOM_POST_NOTICE_RETRIES", DEFAULT_POST_NOTICE_RETRIES),
     postNoticeRetryBackoffMs: envNum("OPENCODE_AGENT_INTERCOM_POST_NOTICE_RETRY_BACKOFF_MS", DEFAULT_POST_NOTICE_RETRY_BACKOFF_MS),
   }
@@ -109,6 +122,15 @@ export function getSettings() {
     }
     if (typeof raw?.exaApiKey === "string" && raw.exaApiKey.trim() !== "") {
       resolved.exaApiKey = raw.exaApiKey.trim()
+    }
+    if (Array.isArray(raw?.forumBangs)) {
+      // Keep the non-empty strings, trimmed; drop everything else silently —
+      // a garbage entry must not cost the caller the whole configured set.
+      // Nothing usable left means the built-in set stays in effect.
+      const bangs = raw.forumBangs
+        .filter((b) => typeof b === "string" && b.trim() !== "")
+        .map((b) => b.trim())
+      if (bangs.length > 0) resolved.forumBangs = bangs
     }
     if (Number.isInteger(raw?.postNoticeRetries) && raw.postNoticeRetries >= 0) {
       resolved.postNoticeRetries = raw.postNoticeRetries
@@ -137,6 +159,14 @@ export function getSearxngUrl() {
 // configured — web_search then uses Exa's anonymous tier, which is not an error.
 export function getExaApiKey() {
   return getSettings().exaApiKey
+}
+
+// The searxng bang set `forum_search` chains (file `forumBangs` > built-in).
+// Replacement, not union — the set is a property of one searxng instance, and a
+// user whose instance lacks an engine (or names its shortcut differently) has
+// to be able to drop a bang, not only add one.
+export function getForumBangs() {
+  return getSettings().forumBangs
 }
 
 // Test-only: point at a different file and drop the cache.

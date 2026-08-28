@@ -3,8 +3,9 @@
 // the async-orchestration pattern works in any project WITHOUT per-project
 // `.opencode/agents/*.md` files — "everything comes from the plugin".
 //
-// Tool gating uses opencode's per-agent `tools` map (enable/disable); the
-// runtime guard in hooks.js is the hard enforcement layer on top of it.
+// Tool gating uses opencode's per-agent `permission` map: entries map tool
+// names to `deny`; the runtime guard in hooks.js is the hard enforcement layer
+// on top of it.
 //
 // `installAgents` merges NON-destructively: a project that defines an agent of
 // the same name in its own config keeps its definition — the plugin only fills
@@ -92,7 +93,10 @@ Final reply: one short paragraph naming the file path and the kind of update (cr
 
 const RESEARCHER_PROMPT = `# Role: Researcher (Subagent)
 
-You do web research — searches via the \`web_search\` tool, fetches via \`webfetch\`; never curl/wget, never recall URLs from memory.
+You do web research — searches via the \`web_search\` and \`forum_search\` tools, fetches via \`webfetch\`; never curl/wget, never recall URLs from memory.
+For a question about lived experience — whether something works in practice, which settings people actually run, what breaks on them, what others hit before you — call \`forum_search\` FIRST; it replaces the general search for that question and is never a fallback for one that came back empty.
+For documentation, a release, an announcement, a version or an official fact use \`web_search\` — \`forum_search\` would keep exactly those answers out. A question carrying both takes \`forum_search\` first and \`web_search\` after it for the documented part.
+Forum excerpts are triage: pick the threads worth reading and \`webfetch\` them; a project's own documentation outranks a third-party page about that project.
 Use ONLY URLs the search returned; pick 5–10 of the results.
 For version questions, check the source date and treat hits older than a year with skepticism; for conflicting sources name both.
 For zero hits, try different terms and report honestly if nothing reliable was found.
@@ -128,8 +132,8 @@ const SUBAGENT_NO_DELEGATION = {
   spawn: "deny", task: "deny", abort: "deny", list: "deny",
 }
 
-// The 9 roles. `tools` disables the tools a role must not have; everything else
-// stays enabled by default (incl. the intercom tools and any MCP tools). The
+// The 9 roles. `permission` maps tools a role must not have to `deny`; everything
+// else stays enabled by default (incl. the intercom tools and any MCP tools). The
 // runtime guard in hooks.js still hard-enforces the primary-only restriction.
 export const AGENTS = {
   orchestrator: {
@@ -138,7 +142,7 @@ export const AGENTS = {
     mode: "primary",
     permission: {
       read: "deny", edit: "deny", bash: "deny",
-      webfetch: "deny", websearch: "deny", web_search: "deny",
+      webfetch: "deny", websearch: "deny", web_search: "deny", forum_search: "deny",
       outline: "deny", task: "deny",
       glob: "deny", grep: "deny",
       todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
@@ -182,7 +186,7 @@ export const AGENTS = {
   },
   researcher: {
     description:
-      "Web research. Searches via the custom `web_search` tool (Exa AI backend, wired by this plugin), never curl/wget. Never recalls URLs from memory.",
+      "Web research. Searches via the custom `web_search` tool (Exa AI backend, wired by this plugin) and, for lived user experience from forums and Q&A sites, the custom `forum_search` tool, never curl/wget. Never recalls URLs from memory.",
     mode: "subagent",
     permission: {
       ...SUBAGENT_NO_DELEGATION,
@@ -206,7 +210,8 @@ export const AGENTS = {
     mode: "subagent",
     permission: {
       ...SUBAGENT_NO_DELEGATION,
-      edit: "deny", write: "deny", webfetch: "deny", websearch: "deny", web_search: "deny", outline: "deny",
+      edit: "deny", write: "deny", webfetch: "deny", websearch: "deny", web_search: "deny",
+      forum_search: "deny", outline: "deny",
       todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
     },
     prompt: GITTER_PROMPT,

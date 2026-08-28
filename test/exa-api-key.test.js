@@ -14,7 +14,7 @@ import { tmpdir, homedir } from "node:os"
 import { join } from "node:path"
 
 import { getExaApiKey, getSettings, setSettingsPath, resetSettings } from "../src/settings.js"
-import { exaHeaders } from "../src/websearch.js"
+import { exaHeaders } from "../src/searchcore.js"
 
 const ENV_NAME = "EXA_API_KEY"
 

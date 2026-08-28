@@ -6,7 +6,7 @@
 #
 # Env (optional):
 #   OPENCODE_URL    default http://localhost:4567
-#   PROJECT_DIR     default /home/user/opencode-agent-intercom
+#   PROJECT_DIR     default /home/user/testopencode
 #   OUT_DIR         default ./out
 #
 # Expected golden output: see ./golden/10-multi.full.json — 90+ messages,
@@ -15,7 +15,7 @@
 # commit performed.
 set -e
 BASE=${OPENCODE_URL:-http://localhost:4567}
-PROJECT=${PROJECT_DIR:-/home/user/opencode-agent-intercom}
+PROJECT=${PROJECT_DIR:-/home/user/testopencode}
 OUTDIR=${OUT_DIR:-$(dirname "$0")/out}
 PREFIX=10-multi
 mkdir -p "$OUTDIR"

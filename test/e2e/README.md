@@ -15,25 +15,35 @@ that opencode upgrades don't shift the system-prompt composition.
 - `endless-task.sh` — endless-mode harness. Drives one full endless cycle and
   asserts its steps in order; see "Endless mode" below.
 - `run-all.sh` — runs the 8 single-agent tests, the multi-agent test and the
-  endless-mode cycle.
+  endless-mode cycle. Owns the server the first ten use: builds the TUI, starts
+  a fresh `opencode serve` in the configured project (default
+  `/home/user/testopencode`), and stops it again on the way out.
+- `server-lifecycle.sh` — sourced library, not a driver. Holds the four server
+  steps `run-all.sh` and `endless-task.sh` share: `e2e_build_tui`,
+  `e2e_server_start`, `e2e_server_wait_ready`, `e2e_server_stop`, plus
+  `e2e_plugin_wired`, `e2e_server_alive` and `e2e_server_url`. Covered by
+  `test/e2e-server-lifecycle.test.js`, which drives it against a stub server.
 - `golden/` — reference captures from 2026-05-16 (opencode 1.15.0, omnicoder
   Qwen3.5-9B). Diff fresh `out/*.full*.json` against these to detect drift.
 - `out/` — created at runtime; `.gitignore` covers it.
 
 ## How to run
 
-```bash
-# 1. Start opencode serve from this repo's root (so it picks up the plugin):
-cd /home/user/opencode-agent-intercom
-setsid env OPENCODE_AGENT_INTERCOM_DEBUG=1 \
-           OPENCODE_AGENT_INTERCOM_LOG_REQUESTS=1 \
-  opencode serve --port 4567 > /tmp/opencode-e2e.log 2>&1 < /dev/null & disown
+`run-all.sh` needs no server of its own started by hand. It builds
+`tui/dist/tui.js` — the sidebar is served from that bundle, so a restart alone
+would keep the previous one — then starts `opencode serve` on `RUN_ALL_PORT`
+(4567) in `PROJECT_DIR` (default `/home/user/testopencode`), waits for
+`/global/health`, exports `OPENCODE_URL` for the drivers, and stops the server's
+process group again on the way out, including on a failing driver and on
+Ctrl-C. Every run therefore uses the plugin code in the working tree against the
+wired test project.
 
-# 2. Wait for it to come up, then run the suite:
-until curl -fsS http://localhost:4567/app >/dev/null; do sleep 1; done
+```bash
+# 1. Run the suite:
+cd /home/user/opencode-agent-intercom
 bash test/e2e/run-all.sh
 
-# 3. Diff against the golden reference (loose — message IDs and timestamps
+# 2. Diff against the golden reference (loose — message IDs and timestamps
 #    change every run; the interesting bits are subagent picks, tool calls
 #    and final orchestrator text):
 python3 - <<'PY'
@@ -49,9 +59,35 @@ for f in sorted(Path("test/e2e/golden").glob("*.json")):
 PY
 ```
 
+`run-task.sh` and `multi-task.sh` keep their own env contract — `OPENCODE_URL`,
+`PROJECT_DIR`, `OUT_DIR` — and stay usable on their own against a server that is
+already running:
+
+```bash
+OPENCODE_URL=http://127.0.0.1:4567 \
+  bash test/e2e/run-task.sh coder "What does src/log.js do?" 03-coder
+```
+
+`run-all.sh` refuses to start when something already answers on its port; give
+it a free one with `RUN_ALL_PORT` or stop the other server. Its own server log,
+pid file and health capture land in `out/00-suite.*`.
+
+**The project the server runs in has to wire the plugin.** opencode loads the
+server half only from the project's own `opencode.json` `plugin` array or a
+drop-in under `.opencode/plugin/`; an unwired project yields a server with no
+`spawn` tool and no diagnostic saying so. `run-all.sh` therefore checks its
+`PROJECT_DIR` — `/home/user/testopencode` by default — before it starts anything, and exits
+`2` with the remedy if the wiring is absent:
+
+```json
+{ "plugin": ["/home/user/opencode-agent-intercom"] }
+```
+
+`endless-task.sh` makes the same check against `ENDLESS_PROJECT_DIR`.
+
 Settings used for the golden references:
 - `~/.config/opencode/agent-intercom.json` → `maxSubagents: 8, maxContext: 130000`
-- `opencode serve` started in `/home/user/opencode-agent-intercom`
+- `opencode serve` started in `/home/user/testopencode`
 - llama-server: omnicoder (`Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf`)
   with reasoning on, the params from `start-qwen.sh`
 - Multi-agent test: 4 subagent spawns (planner / coder / reviewer / gitter), all
@@ -60,10 +96,11 @@ Settings used for the golden references:
 
 ## Endless mode
 
-`endless-task.sh` is the one driver that does **not** use the server from step 1
-above. A cycle needs endless mode armed with a threshold low enough to be
-crossed in one turn, and it is read off the plugin's debug log, so the driver
-starts its own server on its own port and tears it down again:
+`endless-task.sh` is the one driver that does **not** use the server
+`run-all.sh` starts. A cycle needs endless mode armed with a threshold low
+enough to be crossed in one turn, and it is read off the plugin's debug log, so
+the driver starts its own server on its own port and tears it down again,
+through the same `server-lifecycle.sh`:
 
 ```bash
 bash test/e2e/endless-task.sh                       # defaults, ~3-5 min
@@ -100,16 +137,20 @@ Parameters are env vars with cheap defaults — `ENDLESS_PROJECT_DIR`,
 `ENDLESS_PORT`, `ENDLESS_CONTEXT` (8000), `ENDLESS_MAX_CYCLES` (1),
 `ENDLESS_QUIESCE_TIMEOUT_MS`, `SPAWN_AGENT`, `SUBAGENT_SLEEP_S`,
 `TURN_TIMEOUT_S`, `STEP_TIMEOUT_S`, `SERVER_START_TIMEOUT_S`, `POLL_S`,
-`OUT_DIR`, `KEEP_SERVER`. The resolved setup is printed at the top of every run
-and again into `out/11-endless.report.txt`, so a run can be reproduced from its
-own output.
+`OUT_DIR`, `KEEP_SERVER`, `E2E_TUI_BUILT`. The resolved setup is printed at the
+top of every run and again into `out/11-endless.report.txt`, so a run can be
+reproduced from its own output.
 
-Two things the driver is deliberate about:
+Run on its own it builds the TUI first, like `run-all.sh`; started *by*
+`run-all.sh` it skips that build, because `E2E_TUI_BUILT=1` is exported once the
+suite has built.
+
+Two things the lifecycle library is deliberate about:
 
 - **The readiness probe watches the server, not a wrapper.** It starts the
-  server as `setsid bash -c 'echo $$ > pidfile; exec opencode serve …'`, so the
-  recorded pid *is* the opencode process — a wrapper pid would exit while the
-  child kept running and the probe would report a false failure. After the
+  server as `setsid bash -c 'cd …; echo $$ > pidfile; exec opencode serve …'`,
+  so the recorded pid *is* the opencode process — a wrapper pid would exit while
+  the child kept running and the probe would report a false failure. After the
   health check it confirms `/proc/<pid>/cmdline` is an opencode.
 - **A step that does not happen fails loudly.** Every wait ends on the expected
   log line, on an `endless: abandoned at …` line, on the server dying, or on its

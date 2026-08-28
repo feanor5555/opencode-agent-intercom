@@ -7,7 +7,7 @@
 # Usage: run-task.sh <agent> <task-text> <out-prefix>
 # Env (optional):
 #   OPENCODE_URL    default http://localhost:4567
-#   PROJECT_DIR     default /home/user/opencode-agent-intercom — passed as
+#   PROJECT_DIR     default /home/user/testopencode — passed as
 #                   ?directory= so subagent `read` calls land on a real path
 #                   inside the session's project (opencode 1.15 stalls reads
 #                   outside the session directory on a permission prompt).
@@ -18,7 +18,7 @@ TASK="$2"
 PREFIX="$3"
 [ -z "$PREFIX" ] && { echo "usage: $0 <agent> <task> <prefix>" >&2; exit 2; }
 BASE=${OPENCODE_URL:-http://localhost:4567}
-PROJECT=${PROJECT_DIR:-/home/user/opencode-agent-intercom}
+PROJECT=${PROJECT_DIR:-/home/user/testopencode}
 OUTDIR=${OUT_DIR:-$(dirname "$0")/out}
 mkdir -p "$OUTDIR"
 

@@ -17,9 +17,11 @@
 #              exactly the ids of (c)
 #   order      the five evidence lines appear in that order in the debug log
 #
-# Unlike run-task.sh / multi-task.sh this driver owns the server: it starts one
-# on its own port, waits for it, and tears it down again — a cycle needs its own
-# settings (endless mode on, a low threshold) and a known debug-log offset.
+# This driver owns its server: it builds the TUI, starts one on its own port,
+# waits for it, and tears it down again — a cycle needs its own settings (endless
+# mode on, a low threshold) and a known debug-log offset, so it never shares the
+# server run-all.sh starts for run-task.sh and multi-task.sh. The four lifecycle
+# steps come from ./server-lifecycle.sh.
 #
 # Opt-in, exactly like the other drivers in this directory: it talks to a real
 # opencode, spends real model tokens, and is never run by `npm test`.
@@ -47,6 +49,8 @@
 #   POLL_S             2                       log poll cadence
 #   OUT_DIR            ./out                   captures and backups
 #   KEEP_SERVER        0                       1 leaves the server running
+#   E2E_TUI_BUILT      0                       1 skips the TUI build; run-all.sh
+#                      exports it after building once for the whole suite
 #
 # Exit codes:
 #   0  every asserted criterion passed
@@ -58,7 +62,7 @@
 # the plugin writes back itself when the cycle ceiling ends the loop), the todo
 # file of the driven project, the two sessions of the cycle, and the server.
 #
-# Prerequisites: curl, python3, setsid, an `opencode` on PATH, and a model
+# Prerequisites: curl, python3, setsid, npm, an `opencode` on PATH, and a model
 # provider that the project resolves.
 #
 # NOT `set -e`: a failed criterion must be reported with its evidence and the
@@ -67,9 +71,14 @@ set -uo pipefail
 
 PREFIX=11-endless
 HERE=$(cd "$(dirname "$0")" && pwd)
+
+# Building the TUI, starting the server, waiting for it and stopping it again
+# are shared with run-all.sh.
+. "$HERE/server-lifecycle.sh"
+
 PROJECT_DIR=${ENDLESS_PROJECT_DIR:-/home/user/testopencode}
 PORT=${ENDLESS_PORT:-4599}
-BASE="http://127.0.0.1:$PORT"
+BASE=$(e2e_server_url "$PORT")
 ENDLESS_CONTEXT=${ENDLESS_CONTEXT:-8000}
 ENDLESS_MAX_CYCLES=${ENDLESS_MAX_CYCLES:-1}
 ENDLESS_QUIESCE_TIMEOUT_MS=${ENDLESS_QUIESCE_TIMEOUT_MS:-120000}
@@ -86,7 +95,8 @@ SETTINGS_FILE="$HOME/.config/opencode/agent-intercom.json"
 DEBUG_LOG="$HOME/.cache/opencode-agent-intercom/debug.log"
 
 mkdir -p "$OUT_DIR"
-# Absolute from here on: the driver cds into the project to start the server.
+# Absolute from here on: the server is started with the project directory as its
+# working directory, so every path handed to it has to stand on its own.
 OUT_DIR=$(cd "$OUT_DIR" && pwd)
 SERVER_LOG="$OUT_DIR/$PREFIX.server.log"
 SLICE_FILE="$OUT_DIR/$PREFIX.debug-slice.log"
@@ -95,8 +105,6 @@ TODO_BAK="$OUT_DIR/$PREFIX.todo.bak"
 REPORT_FILE="$OUT_DIR/$PREFIX.report.txt"
 PID_FILE="$OUT_DIR/$PREFIX.serverpid"
 
-SERVER_PID=""
-SERVER_PGID=""
 SID=""
 NEWSID=""
 LOG_OFFSET=0
@@ -156,10 +164,6 @@ refresh_slice() {
   tail -c "+$((LOG_OFFSET + 1))" "$DEBUG_LOG" > "$SLICE_FILE" 2>/dev/null || : > "$SLICE_FILE"
 }
 
-server_alive() {
-  [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null
-}
-
 # Waits for one line in the slice. Returns 0 with WAIT_LINE / WAIT_LINENO set,
 # or 1 with WAIT_REASON set. Never returns 0 on a timeout, and gives up early
 # when the cycle abandoned, when the optional 4th pattern shows the cycle has
@@ -190,8 +194,8 @@ wait_for_pattern() {
         return 1
       fi
     fi
-    if ! server_alive; then
-      WAIT_REASON="opencode (pid $SERVER_PID) is gone while waiting for \"$label\"; server log: $SERVER_LOG"
+    if ! e2e_server_alive; then
+      WAIT_REASON="opencode (pid $E2E_SERVER_PID) is gone while waiting for \"$label\"; server log: $SERVER_LOG"
       return 1
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -213,7 +217,7 @@ cleanup() {
   # Sessions first: the server has to be alive to delete them.
   for s in "$SID" "$NEWSID"; do
     [ -z "$s" ] && continue
-    if server_alive; then
+    if e2e_server_alive; then
       local http
       http=$(curl -s -m 15 -o /dev/null -w '%{http_code}' -X DELETE "$BASE/session/$s")
       say "session delete $s -> HTTP $http"
@@ -232,36 +236,11 @@ cleanup() {
     fi
   fi
 
-  # The server: killed as a process group, because setsid made the opencode
-  # process its own session and group leader. The group kill is skipped if that
-  # group is this script's own — killing it would take the driver with it.
-  local own_pgid target
-  own_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+  # The server.
   if [ "$KEEP_SERVER" = 1 ]; then
-    say "KEEP_SERVER=1 — leaving pid $SERVER_PID (pgid $SERVER_PGID) running on $BASE"
-  elif [ -n "$SERVER_PID" ]; then
-    target="$SERVER_PID"
-    if [ -n "$SERVER_PGID" ] && [ "$SERVER_PGID" != "$own_pgid" ]; then
-      target="-$SERVER_PGID"
-    fi
-    kill -TERM -- "$target" 2>/dev/null
-    local waited=0
-    while kill -0 "$SERVER_PID" 2>/dev/null && [ "$waited" -lt 10 ]; do
-      sleep 1
-      waited=$((waited + 1))
-    done
-    if kill -0 "$SERVER_PID" 2>/dev/null; then
-      kill -KILL -- "$target" 2>/dev/null
-      sleep 1
-    fi
-    if kill -0 "$SERVER_PID" 2>/dev/null; then
-      say "WARNING: pid $SERVER_PID survived SIGKILL — kill it by hand"
-    else
-      say "server stopped (signalled $target)"
-    fi
-    if curl -fsS -m 3 "$BASE/global/health" >/dev/null 2>&1; then
-      say "WARNING: something still answers on $BASE"
-    fi
+    say "KEEP_SERVER=1 — leaving pid $E2E_SERVER_PID (pgid $E2E_SERVER_PGID) running on $BASE"
+  else
+    e2e_server_stop
   fi
 
   # Settings last: the plugin writes `endlessMode: false` back itself when a
@@ -289,19 +268,15 @@ trap 'exit 130' INT TERM
 
 : > "$REPORT_FILE"
 
-for tool in curl python3 setsid stat; do
+for tool in curl python3 setsid stat npm; do
   command -v "$tool" >/dev/null || die "$tool is not on PATH"
 done
 command -v opencode >/dev/null || die "opencode is not on PATH"
 [ -d "$PROJECT_DIR" ] || die "PROJECT_DIR does not exist: $PROJECT_DIR"
 
 PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
-if [ -f "$PROJECT_DIR/opencode.json" ]; then
-  grep -qF "$PLUGIN_ROOT" "$PROJECT_DIR/opencode.json" ||
-    die "$PROJECT_DIR/opencode.json does not name $PLUGIN_ROOT in its plugin array — the run would observe a server without this plugin"
-else
-  die "$PROJECT_DIR/opencode.json is missing — the plugin is wired by an absolute path in that file"
-fi
+e2e_plugin_wired "$PLUGIN_ROOT" "$PROJECT_DIR" ||
+  die "$PROJECT_DIR wires neither $PLUGIN_ROOT in its opencode.json plugin array nor a drop-in under .opencode/plugin/ — the run would observe a server without this plugin"
 
 if curl -fsS -m 3 "$BASE/global/health" >/dev/null 2>&1; then
   die "something already answers on $BASE — choose another PORT"
@@ -381,50 +356,17 @@ TODO_GUARDED=1
 
 # ---------- server ---------------------------------------------------------
 
+# The sidebar is served from tui/dist/tui.js, so the build has to happen before
+# the server starts. Skipped when the caller (run-all.sh) already built.
+e2e_build_tui "$PLUGIN_ROOT" || die "the TUI build failed — see the npm output above"
+
 LOG_OFFSET=$(stat -c %s "$DEBUG_LOG" 2>/dev/null || echo 0)
-: > "$SERVER_LOG"
-rm -f "$PID_FILE"
 
-# `setsid bash -c 'echo $$ …; exec opencode …'` writes the PID of the shell that
-# then EXECs opencode: the recorded pid is the server process itself, not a
-# wrapper that exits while its child keeps running. The readiness probe below
-# watches that pid.
-cd "$PROJECT_DIR" || die "cannot cd into $PROJECT_DIR"
-setsid bash -c "echo \$\$ > '$PID_FILE'; exec opencode serve --port $PORT --hostname 127.0.0.1" \
-  >> "$SERVER_LOG" 2>&1 < /dev/null &
+e2e_server_start "$PORT" "$PROJECT_DIR" "$SERVER_LOG" "$PID_FILE" ||
+  die "could not start opencode on $BASE — see $SERVER_LOG"
+e2e_server_wait_ready "$SERVER_START_TIMEOUT_S" "$OUT_DIR/$PREFIX.health.json" ||
+  die "opencode on $BASE did not become ready — see $SERVER_LOG"
 
-for _ in $(seq 1 50); do
-  [ -s "$PID_FILE" ] && break
-  sleep 0.2
-done
-[ -s "$PID_FILE" ] || die "the server wrapper never wrote its pid to $PID_FILE"
-SERVER_PID=$(cat "$PID_FILE")
-SERVER_PGID=$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')
-[ -n "$SERVER_PGID" ] || die "could not read the process group of pid $SERVER_PID"
-
-READY=0
-DEADLINE=$(( $(date +%s) + SERVER_START_TIMEOUT_S ))
-while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    say "--- last 30 lines of $SERVER_LOG ---"
-    tail -n 30 "$SERVER_LOG"
-    die "opencode (pid $SERVER_PID) exited during startup"
-  fi
-  if curl -fsS -m 3 "$BASE/global/health" > "$OUT_DIR/$PREFIX.health.json" 2>/dev/null; then
-    READY=1
-    break
-  fi
-  sleep 1
-done
-[ "$READY" = 1 ] || die "no HTTP 200 from $BASE/global/health within ${SERVER_START_TIMEOUT_S}s (pid $SERVER_PID is still alive — see $SERVER_LOG)"
-
-# The pid we hold must really be the server: a wrapper that handed off to a
-# child would leave us watching the wrong process.
-CMDLINE=$(tr '\0' ' ' < "/proc/$SERVER_PID/cmdline" 2>/dev/null)
-case "$CMDLINE" in
-  *opencode*) : ;;
-  *) die "pid $SERVER_PID is not an opencode process (cmdline: $CMDLINE) — the readiness probe would be watching a wrapper" ;;
-esac
 SERVER_VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","(no version field)"))' "$OUT_DIR/$PREFIX.health.json" 2>/dev/null || echo "(unparsed)")
 RESOLVED_MODEL=$(curl -fsS -m 10 "$BASE/config/providers" 2>/dev/null |
   python3 -c 'import json,sys; d=json.load(sys.stdin); dflt=d.get("default") or {}; print(next((f"{k}/{v}" for k,v in dflt.items()), "(no default)"))' 2>/dev/null || echo "(unresolved)")
@@ -438,7 +380,7 @@ driver              $HERE/$(basename "$0")
 plugin root         $PLUGIN_ROOT
 project dir         $PROJECT_DIR   (opencode.json names the plugin by absolute path)
 server              opencode serve --port $PORT --hostname 127.0.0.1   (cwd = project dir)
-server pid / pgid   $SERVER_PID / $SERVER_PGID
+server pid / pgid   $E2E_SERVER_PID / $E2E_SERVER_PGID
 opencode version    $SERVER_VERSION
 default model       $RESOLVED_MODEL
 settings file       $SETTINGS_FILE   (backup: $SETTINGS_BAK, existed=$SETTINGS_EXISTED)
@@ -664,7 +606,7 @@ PY
     case "$KICK_RESULT" in
       pass\|*|fail\|*) break ;;
     esac
-    if [ "$(date +%s)" -ge "$KICKOFF_DEADLINE" ] || ! server_alive; then break; fi
+    if [ "$(date +%s)" -ge "$KICKOFF_DEADLINE" ] || ! e2e_server_alive; then break; fi
     sleep "$POLL_S"
   done
   case "$KICK_RESULT" in

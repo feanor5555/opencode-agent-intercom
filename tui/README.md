@@ -23,6 +23,7 @@ in your opencode sidebar.
 │   tool details    [on]                     │
 └────────────────────────────────────────────┘
 ┌─ ▼ LLM params    [<] orchestrator  [>] ────┐
+│   model          [<] gpt-oss-120b [>]  ★   │
 │   temperature    [-]  0.70 [+]   ★         │
 │   top_p          [-]  0.90 [+]             │
 │   top_k          [-]    40 [+]   ★         │
@@ -45,12 +46,18 @@ in your opencode sidebar.
   tool-details visibility — change them, the running plugin picks it up in
   ~2 seconds. **No opencode restart.**
 
+- **Pick the model per role.** `[<] model [>]` walks the models this opencode
+  instance has configured — a cheap one for the `documenter`, your strongest
+  for the `coder`. A `not set` slot sits in front of the first entry, so `[<]`
+  there hands the agent back to opencode's own model. **Applies on the next
+  message.**
+
 - **Sample your model per role.** Different temperature for the
   `orchestrator`, your `coder`, your `designer`. Plus llama.cpp specifics
   (`min_p`, `repeat_penalty`, `chat_template_kwargs`) routed through
   `output.options`. Every parameter starts at `not set` and nothing is sent
   for it until you set one. A `★` marks an override; `[reset current agent]`
-  drops the override and puts that agent back to `not set`.
+  drops that agent's sampling overrides and its model choice.
   **Applies on the next LLM call.** Find the sweet spot for *your* model
   without leaving opencode.
 

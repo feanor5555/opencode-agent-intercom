@@ -217,8 +217,17 @@ exposes every runtime knob:
   llama.cpp keys (`min_p`, `repeat_penalty`, `chat_template_kwargs`) routed
   through `output.options`. Writes `~/.config/opencode/llm-params.json`.
   Every parameter starts out unset (`not set` in the sidebar) — the plugin's
-  roles set none, so nothing is sent until you set it. `[reset]` per agent
-  drops the override and returns that agent to unset.
+  roles set none, so nothing is sent until you set it.
+- **Per-agent model** — `model [<name>]` cycles the models this opencode
+  instance has configured (`/config/providers`, i.e. config + auth +
+  `opencode.json` overrides), with a `not set` slot in front of the first
+  entry that hands the agent back to opencode's own model. Writes
+  `~/.config/opencode/llm-models.json` as
+  `{"<agent>": {"providerID": "…", "modelID": "…"}}`; the `chat.message` hook
+  applies it. Its own file, because the sampling params file is a
+  number-valued map whose unknown keys are forwarded to the provider.
+- `[reset current agent]` drops that agent's sampling overrides *and* its
+  model choice, returning every row to what opencode resolves.
 
 Every change applies on the next LLM call. No opencode restart.
 
@@ -306,8 +315,10 @@ not requested.
   the orchestration protocol and live subagent snapshot to primary sessions
   and a shorter discipline block to subagents.
 - **Per-agent LLM overrides** — the `chat.params` hook merges
-  `~/.config/opencode/llm-params.json` live into every request (TUI panel
-  writes this file).
+  `~/.config/opencode/llm-params.json` live into every request, and the
+  `chat.message` hook sets `message.model` from
+  `~/.config/opencode/llm-models.json` (TUI panel writes both files).
+  `chat.params` cannot carry a model — its output holds only sampling fields.
 - **Async spawn** — `spawn` owns subagent session creation (`session.create`
   + `promptAsync`) and returns immediately. The primary stays alive.
 - **Wake** — opencode never re-activates an idle primary on its own. The

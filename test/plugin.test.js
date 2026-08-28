@@ -22,6 +22,7 @@ import { resetPermissionGuardCache } from "../src/config.js"
 import { rewritePendingTools, TODO_TOOLS, timeoutSubagent } from "../src/hooks.js"
 import { AGENTS } from "../src/agents.js"
 import { setParamsPath, resetCache as resetLlmParams } from "../src/llmparams.js"
+import { setModelsPath, resetCache as resetLlmModels } from "../src/llmmodel.js"
 import {
   normalizeUrl,
   parseExaEntries,
@@ -1215,6 +1216,46 @@ test("the wired chat.params hook: unset sends nothing, a user value goes through
   } finally {
     rmSync(dir, { recursive: true, force: true })
     setParamsPath(join(homedir(), ".config", "opencode", "llm-params.json"))
+  }
+})
+
+test("the wired chat.message hook: unset keeps opencode's model, a choice overrides it", async () => {
+  // End-to-end over the hook opencode actually calls. `chat.params` cannot
+  // carry a model (its output has only sampling fields), so the per-agent model
+  // choice lands on the outgoing user message instead.
+  const dir = mkdtempSync(join(tmpdir(), "aic-llmmodels-"))
+  const file = join(dir, "llm-models.json")
+  const outputFor = (agent) => ({
+    message: { id: "msg_1", sessionID: "ses_primary", role: "user", agent,
+      model: { providerID: "opencode", modelID: "resolved-default" } },
+    parts: [],
+  })
+  try {
+    const { ctx } = makeCtx()
+    const hooks = await plugin(ctx)
+
+    setModelsPath(file) // no file on disk yet
+    const untouched = outputFor("coder")
+    await hooks["chat.message"]({ sessionID: "ses_primary", agent: "coder" }, untouched)
+    assert.deepEqual(
+      untouched.message.model,
+      { providerID: "opencode", modelID: "resolved-default" },
+      "unset must leave opencode's resolved model in place",
+    )
+
+    writeFileSync(file, JSON.stringify({ coder: { providerID: "anthropic", modelID: "claude-x" } }))
+    resetLlmModels()
+    const chosen = outputFor("coder")
+    await hooks["chat.message"]({ sessionID: "ses_primary", agent: "coder" }, chosen)
+    assert.deepEqual(chosen.message.model, { providerID: "anthropic", modelID: "claude-x" })
+
+    // a different agent in the same run is unaffected
+    const other = outputFor("reviewer")
+    await hooks["chat.message"]({ sessionID: "ses_primary", agent: "reviewer" }, other)
+    assert.equal(other.message.model.modelID, "resolved-default")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    setModelsPath(join(homedir(), ".config", "opencode", "llm-models.json"))
   }
 })
 

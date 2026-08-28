@@ -48,6 +48,13 @@ const DEFAULT_MAX_CONTEXT = 40000;
 // LLM request pick up the new values — no opencode restart.
 const LLM_PARAMS_PATH = join(homedir(), ".config", "opencode", "llm-params.json");
 
+// Shared with the main plugin's chat.message hook: the per-agent model choice.
+// Its own file rather than a key in LLM_PARAMS_PATH, because that file is typed
+// `Record<agent, Record<key, number>>` and the params hook forwards every key it
+// does not recognise into `output.options`, i.e. straight into the provider
+// request body — a `model` key there would be sent as a sampling option.
+const LLM_MODELS_PATH = join(homedir(), ".config", "opencode", "llm-models.json");
+
 // Per-project, per-agent prompt overrides. The main plugin reads each file at
 // every LLM call (mtime-cached) — touching them via `utimesSync` busts that
 // cache without editing the body. Directory resolved against `process.cwd()`:
@@ -84,14 +91,13 @@ interface LlmParamDef {
   min: number;
   max: number;
   decimals: number;
-  fallback: number;
 }
 const LLM_PARAM_DEFS: LlmParamDef[] = [
-  { key: "temperature",    label: "temperature", step: 0.05, min: 0,   max: 2,    decimals: 2, fallback: 0.3 },
-  { key: "top_p",          label: "top_p",       step: 0.05, min: 0,   max: 1,    decimals: 2, fallback: 0.95 },
-  { key: "top_k",          label: "top_k",       step: 5,    min: 0,   max: 200,  decimals: 0, fallback: 20 },
-  { key: "min_p",          label: "min_p",       step: 0.01, min: 0,   max: 0.5,  decimals: 2, fallback: 0.05 },
-  { key: "repeat_penalty", label: "rep_penalty", step: 0.05, min: 0.5, max: 1.5,  decimals: 2, fallback: 1.0 },
+  { key: "temperature",    label: "temperature", step: 0.05, min: 0,   max: 2,    decimals: 2 },
+  { key: "top_p",          label: "top_p",       step: 0.05, min: 0,   max: 1,    decimals: 2 },
+  { key: "top_k",          label: "top_k",       step: 5,    min: 0,   max: 200,  decimals: 0 },
+  { key: "min_p",          label: "min_p",       step: 0.01, min: 0,   max: 0.5,  decimals: 2 },
+  { key: "repeat_penalty", label: "rep_penalty", step: 0.05, min: 0.5, max: 1.5,  decimals: 2 },
 ];
 
 // Column widths used by every settings/limits/LLM row. Keep label + value
@@ -101,10 +107,17 @@ const ROW_LABEL_W = 15;     // label field, after the 2-space indent
 const NUM_W = 3;            // fits up to 999 (max subagents, max Token(k))
 const LLM_VAL_W = 7;        // fits "not set" and every numeric format
 const AGENT_NAME_W = 12;    // fits "orchestrator", the longest agent name
+// Model names are unbounded; same width as the agent cell so the two cycler
+// rows line their [<]/[>] buttons up, longer names are cut.
+const MODEL_NAME_W = AGENT_NAME_W;
 
 const rowLabel = (s: string): string => "  " + s.padEnd(ROW_LABEL_W);
 const numCell = (n: number | string, w = NUM_W): string =>
   ` ${String(n).padStart(w)} `;
+// Fixed-width left-aligned cell; anything longer is cut with a trailing "…" so
+// a long model name cannot push the [>] button off the sidebar.
+const fitCell = (s: string, w: number): string =>
+  ` ${(s.length > w ? s.slice(0, w - 1) + "…" : s).padEnd(w)} `;
 
 type LlmParams = Record<string, Record<string, number>>;
 
@@ -132,6 +145,74 @@ function writeLlmParams(p: LlmParams): void {
   }
 }
 
+// The per-agent model choice, shared with the main plugin's chat.message hook.
+// An agent with no entry keeps whatever opencode resolved for it.
+interface ModelRef {
+  providerID: string;
+  modelID: string;
+}
+type LlmModels = Record<string, ModelRef>;
+
+// One entry of the flat pick list built from `client.config.providers()`:
+// the model reference plus the label the row shows for it.
+interface ModelChoice extends ModelRef {
+  label: string;
+}
+
+const isModelRef = (v: unknown): v is ModelRef => {
+  const r = v as ModelRef | undefined;
+  return (
+    typeof r?.providerID === "string" &&
+    r.providerID.length > 0 &&
+    typeof r.modelID === "string" &&
+    r.modelID.length > 0
+  );
+};
+
+// Normalise what an agent record carries as its model. The runtime `Agent` type
+// gives the pair; the config form of the same field is the string
+// "providerID/modelID", so both are accepted and anything else is dropped.
+function toModelRef(v: unknown): ModelRef | null {
+  if (isModelRef(v)) return { providerID: v.providerID, modelID: v.modelID };
+  if (typeof v === "string") {
+    const slash = v.indexOf("/");
+    if (slash > 0 && slash < v.length - 1) {
+      return { providerID: v.slice(0, slash), modelID: v.slice(slash + 1) };
+    }
+  }
+  return null;
+}
+
+const sameModel = (a: ModelRef | null, b: ModelRef | null): boolean =>
+  a !== null && b !== null && a.providerID === b.providerID && a.modelID === b.modelID;
+
+function readLlmModels(): LlmModels {
+  try {
+    const raw = JSON.parse(readFileSync(LLM_MODELS_PATH, "utf8"));
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      const out: LlmModels = {};
+      for (const [agent, ref] of Object.entries(raw as Record<string, unknown>)) {
+        // Skip anything that is not a usable pair, so a hand-edited file cannot
+        // put a half-entry on screen that the plugin then ignores.
+        if (isModelRef(ref)) out[agent] = { providerID: ref.providerID, modelID: ref.modelID };
+      }
+      return out;
+    }
+  } catch {
+    // no file -> empty
+  }
+  return {};
+}
+
+function writeLlmModels(m: LlmModels): void {
+  try {
+    mkdirSync(dirname(LLM_MODELS_PATH), { recursive: true });
+    writeFileSync(LLM_MODELS_PATH, JSON.stringify(m, null, 2) + "\n");
+  } catch {
+    // best-effort
+  }
+}
+
 // Opencode's resolved per-agent defaults, fetched from `client.app.agents()`.
 // Lets the UI fall back to whatever opencode has merged from opencode.json +
 // AGENTS.md + plugin agents — so the user sees what each agent actually runs
@@ -153,6 +234,30 @@ function resolveLlmValue(
   const oc = defaults[agent]?.[def.key];
   if (typeof oc === "number") return { value: oc, source: "opencode" };
   return { value: null, source: null };
+}
+
+// Resolve the model for an agent, on the same priority the numeric rows use:
+//   1. models file[agent]  — user's choice (shows ★)
+//   2. opencode's resolved agent model
+//   3. null                — "not set"
+function resolveLlmModel(
+  models: LlmModels,
+  defaults: Record<string, ModelRef>,
+  agent: string,
+): { value: ModelRef | null; source: "agent" | "opencode" | null } {
+  const own = models[agent];
+  if (isModelRef(own)) return { value: own, source: "agent" };
+  const oc = defaults[agent];
+  if (isModelRef(oc)) return { value: oc, source: "opencode" };
+  return { value: null, source: null };
+}
+
+// Label for a resolved model: the display name from the provider list where the
+// model is still in it, otherwise its bare id — a choice whose provider is no
+// longer configured must stay visible rather than turn into "not set".
+function formatLlmModel(value: ModelRef | null, choices: ModelChoice[]): string {
+  if (value === null) return "not set";
+  return choices.find((c) => sameModel(c, value))?.label ?? value.modelID;
 }
 
 function roundToStep(value: number, step: number, decimals: number): number {
@@ -357,6 +462,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // Cycling through LLM_AGENTS lets the user tune one role at a time without
   // inflating the UI to a grid.
   const [llmParams, setLlmParams] = createSignal<LlmParams>(readLlmParams());
+  // Per-agent model choice, shared with the main plugin's chat.message hook.
+  const [llmModels, setLlmModels] = createSignal<LlmModels>(readLlmModels());
   const [llmExpanded, setLlmExpanded] = createSignal(false);
   const [llmAgentIdx, setLlmAgentIdx] = createSignal(0);
   const currentLlmAgent = (): string => LLM_AGENTS[llmAgentIdx()];
@@ -365,6 +472,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // timer and on agent cycle. Empty until the first successful fetch (opencode
   // may not have read its config + AGENTS.md yet at TUI init).
   const [opencodeDefaults, setOpencodeDefaults] = createSignal<OpencodeDefaults>({});
+  // The model side of the same fetch: what opencode resolved as each agent's
+  // model, shown when the user has chosen none.
+  const [opencodeModels, setOpencodeModels] = createSignal<Record<string, ModelRef>>({});
   const refreshOpencodeDefaults = async (): Promise<void> => {
     try {
       const res = await api.client.app.agents({});
@@ -372,11 +482,15 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         name?: string;
         temperature?: number;
         topP?: number;
+        model?: unknown;
         options?: Record<string, unknown>;
       }>;
       const map: OpencodeDefaults = {};
+      const models: Record<string, ModelRef> = {};
       for (const a of list) {
         if (!a || typeof a.name !== "string") continue;
+        const resolvedModel = toModelRef(a.model);
+        if (resolvedModel) models[a.name] = resolvedModel;
         const entry: Record<string, number> = {};
         if (typeof a.temperature === "number") entry.temperature = a.temperature;
         if (typeof a.topP === "number") entry.top_p = a.topP;
@@ -392,7 +506,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         pick("repeat_penalty", "repeat_penalty");
         map[a.name] = entry;
       }
-      if (!disposed) setOpencodeDefaults(map);
+      if (!disposed) {
+        setOpencodeDefaults(map);
+        setOpencodeModels(models);
+      }
     } catch {
       // best-effort — leave previous defaults in place
     }
@@ -400,9 +517,71 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   void refreshOpencodeDefaults();
   const opencodeDefaultsTimer = setInterval(refreshOpencodeDefaults, 30_000);
 
+  // The models the user has configured, as the running opencode instance
+  // resolves them (config + auth + opencode.json overrides) — not the raw
+  // catalogue. Flattened across providers and sorted, so [<]/[>] walks a stable
+  // order. Empty until the first successful fetch; the row then shows the
+  // stored/resolved model by its bare id and cycling does nothing.
+  const [modelChoices, setModelChoices] = createSignal<ModelChoice[]>([]);
+  const refreshModelChoices = async (): Promise<void> => {
+    try {
+      const res = await api.client.config.providers();
+      const providers = ((res as { data?: { providers?: unknown[] } })?.data?.providers ??
+        []) as Array<{
+        id?: string;
+        models?: Record<string, { id?: string; providerID?: string; name?: string }>;
+      }>;
+      const list: ModelChoice[] = [];
+      for (const p of providers) {
+        for (const m of Object.values(p?.models ?? {})) {
+          const providerID = m?.providerID ?? p?.id;
+          const modelID = m?.id;
+          if (typeof providerID !== "string" || typeof modelID !== "string") continue;
+          if (providerID === "" || modelID === "") continue;
+          list.push({ providerID, modelID, label: m?.name || modelID });
+        }
+      }
+      list.sort(
+        (a, b) =>
+          a.providerID.localeCompare(b.providerID) || a.label.localeCompare(b.label),
+      );
+      if (!disposed) setModelChoices(list);
+    } catch {
+      // best-effort — leave the previous list in place
+    }
+  };
+  void refreshModelChoices();
+  const modelChoicesTimer = setInterval(refreshModelChoices, 60_000);
+
   const cycleLlmAgent = (delta: number): void => {
     setLlmAgentIdx((i) => (i + delta + LLM_AGENTS.length) % LLM_AGENTS.length);
     void refreshOpencodeDefaults();
+  };
+
+  // Walk the pick list by one. The cycle carries a virtual "not set" slot in
+  // front of the first model, so [<] off the first entry drops the override and
+  // hands the agent back to opencode's own model without a full reset.
+  const cycleLlmModel = (delta: number): void => {
+    const choices = modelChoices();
+    if (choices.length === 0) return;
+    const agent = currentLlmAgent();
+    const models = llmModels();
+    const own = models[agent];
+    // Position in [not set, choice 0 .. choice n-1]; an override that is no
+    // longer in the list counts as "not set" so the next step lands in the list.
+    const at = isModelRef(own)
+      ? choices.findIndex((c) => sameModel(c, own)) + 1
+      : 0;
+    const slots = choices.length + 1;
+    const next = (at + delta + slots) % slots;
+    const updated: LlmModels = { ...models };
+    if (next === 0) delete updated[agent];
+    else {
+      const pick = choices[next - 1];
+      updated[agent] = { providerID: pick.providerID, modelID: pick.modelID };
+    }
+    setLlmModels(updated);
+    writeLlmModels(updated);
   };
 
   const adjustLlmParam = (def: LlmParamDef, delta: number): void => {
@@ -445,14 +624,25 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     writeLlmParams(updated);
   };
 
+  // Clears everything the panel shows with a ★ for this agent — the sampling
+  // overrides and the model choice — so the row values fall back to what
+  // opencode resolved.
   const resetLlmAgent = (): void => {
     const agent = currentLlmAgent();
     const params = llmParams();
-    if (!params[agent]) return;
-    const updated: LlmParams = { ...params };
-    delete updated[agent];
-    setLlmParams(updated);
-    writeLlmParams(updated);
+    if (params[agent]) {
+      const updated: LlmParams = { ...params };
+      delete updated[agent];
+      setLlmParams(updated);
+      writeLlmParams(updated);
+    }
+    const models = llmModels();
+    if (models[agent]) {
+      const updated: LlmModels = { ...models };
+      delete updated[agent];
+      setLlmModels(updated);
+      writeLlmModels(updated);
+    }
   };
 
   // Toggles for opencode's "thinking blocks" and "tool details" visibility. The
@@ -849,6 +1039,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     clearInterval(pulse);
     clearInterval(poll);
     clearInterval(opencodeDefaultsTimer);
+    clearInterval(modelChoicesTimer);
     if (refreshTimer) clearTimeout(refreshTimer);
     commandDispose();
     for (const dispose of disposers) dispose();
@@ -896,6 +1087,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             onReloadPrompts={reloadPrompts}
             llmParams={llmParams}
             opencodeDefaults={opencodeDefaults}
+            llmModels={llmModels}
+            opencodeModels={opencodeModels}
+            modelChoices={modelChoices}
+            onCycleLlmModel={cycleLlmModel}
             llmExpanded={llmExpanded}
             onToggleLlm={() => setLlmExpanded((v) => !v)}
             llmAgent={currentLlmAgent}
@@ -977,6 +1172,10 @@ function SubagentPanel(props: {
   onReloadPrompts: () => void;
   llmParams: () => LlmParams;
   opencodeDefaults: () => OpencodeDefaults;
+  llmModels: () => LlmModels;
+  opencodeModels: () => Record<string, ModelRef>;
+  modelChoices: () => ModelChoice[];
+  onCycleLlmModel: (delta: number) => void;
   llmExpanded: () => boolean;
   onToggleLlm: () => void;
   llmAgent: () => string;
@@ -1285,6 +1484,41 @@ function SubagentPanel(props: {
               {"[>]"}
             </text>
           </box>
+          {/* Model for the selected agent. Same [<]/[>] cycler as the agent row
+              above it, over the models this opencode instance has configured,
+              with a "not set" slot in front of the first entry — [<] there
+              hands the agent back to opencode's own model. */}
+          {(() => {
+            const resolvedModel = createMemo(() =>
+              resolveLlmModel(props.llmModels(), props.opencodeModels(), props.llmAgent()),
+            );
+            return (
+              <box flexDirection="row">
+                <text fg={props.theme.textMuted}>{rowLabel("model")}</text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat(() => props.onCycleLlmModel(-1))}
+                >
+                  {"[<]"}
+                </text>
+                <text fg={props.theme.text}>
+                  {fitCell(
+                    formatLlmModel(resolvedModel().value, props.modelChoices()),
+                    MODEL_NAME_W,
+                  )}
+                </text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat(() => props.onCycleLlmModel(1))}
+                >
+                  {"[>]"}
+                </text>
+                <Show when={resolvedModel().source === "agent"}>
+                  <text fg={props.theme.success}>{" ★"}</text>
+                </Show>
+              </box>
+            );
+          })()}
           <box flexDirection="row">
             <text fg={props.theme.textMuted}>{rowLabel("")}</text>
             <text fg={props.theme.accent} onMouseDown={props.onResetLlmAgent}>

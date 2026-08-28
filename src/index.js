@@ -59,6 +59,7 @@ import {
 } from "./hooks.js"
 import { installAgents } from "./agents.js"
 import { chatParamsHook } from "./llmparams.js"
+import { chatMessageHook } from "./llmmodel.js"
 import { captureSystem, captureMessages, captureParams } from "./reqlog.js"
 import { log } from "./log.js"
 
@@ -106,6 +107,18 @@ export default async (ctx) => {
         captureMessages(input, output)
       } catch (err) {
         log("reqlog messages error", err?.message ?? String(err))
+      }
+    },
+    // Apply the per-agent model choice from ~/.config/opencode/llm-models.json.
+    // `chat.params` cannot do this — its output carries only sampling fields —
+    // so the model is set on the outgoing user message instead. Companion TUI
+    // panel writes that file; a choice takes effect on the next message without
+    // an opencode restart, and an agent with no choice keeps opencode's own.
+    "chat.message": async (input, output) => {
+      try {
+        chatMessageHook(input, output)
+      } catch (err) {
+        log("chat.message hook error", err?.message ?? String(err))
       }
     },
     // Apply per-agent LLM parameter overrides from ~/.config/opencode/llm-params.json

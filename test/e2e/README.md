@@ -12,7 +12,10 @@ that opencode upgrades don't shift the system-prompt composition.
   polls until the orchestrator session settles, dumps the full message tree.
 - `multi-task.sh` — multi-agent harness. Drives a planner → coder → reviewer
   → gitter pipeline that adds `bytes(n)` to `src/format.js`.
-- `run-all.sh` — runs the 8 single-agent tests + the multi-agent test.
+- `endless-task.sh` — endless-mode harness. Drives one full endless cycle and
+  asserts its steps in order; see "Endless mode" below.
+- `run-all.sh` — runs the 8 single-agent tests, the multi-agent test and the
+  endless-mode cycle.
 - `golden/` — reference captures from 2026-05-16 (opencode 1.15.0, omnicoder
   Qwen3.5-9B). Diff fresh `out/*.full*.json` against these to detect drift.
 - `out/` — created at runtime; `.gitignore` covers it.
@@ -54,6 +57,70 @@ Settings used for the golden references:
 - Multi-agent test: 4 subagent spawns (planner / coder / reviewer / gitter), all
   status=completed, ~6:26 min wall-clock, 92 messages, produces `bytes()` in
   `src/format.js` plus 5 unit tests in `test/plugin.test.js`
+
+## Endless mode
+
+`endless-task.sh` is the one driver that does **not** use the server from step 1
+above. A cycle needs endless mode armed with a threshold low enough to be
+crossed in one turn, and it is read off the plugin's debug log, so the driver
+starts its own server on its own port and tears it down again:
+
+```bash
+bash test/e2e/endless-task.sh                       # defaults, ~3-5 min
+ENDLESS_CONTEXT=6000 SUBAGENT_SLEEP_S=20 \
+  bash test/e2e/endless-task.sh                     # cheaper still
+ENDLESS_PROJECT_DIR=/home/user/testopencode \
+ENDLESS_PORT=4599 KEEP_SERVER=1 \
+  bash test/e2e/endless-task.sh                     # leave the server up
+```
+
+Exit `0` = every asserted criterion passed, `1` = at least one failed, `2` =
+preflight/setup error (nothing was asserted). Each criterion is reported as
+`PASS`/`FAIL` with the evidence line that decided it; the run's captures,
+backups and report land in `out/11-endless.*`.
+
+What it asserts, in this order, against `specs/endless-mode.md` §3.1 and its
+live criteria §7:
+
+| criterion | evidence |
+|---|---|
+| trigger | `endless: scheduled` for the primary, with `ctx` and `threshold` |
+| (a) freeze | `spawn refused: endless cycle in progress` after a post-trigger `spawn` |
+| (b) quiesce | `notified primary of completion` appears **before** `endless: quiesced …, activeAtStart>=1` |
+| (c) save | `endless: saved N point(s) as T…`, every id present as `- T<n>:` in the todo file, exactly one todo file in the directory |
+| (d) replacement | `endless: cycle K/M complete, new session …`; the new session is readable, the old one is readable **and** archived |
+| kickoff | the new session carries `## Endless mode — work off the todo file` naming exactly the ids of (c) |
+| order | the five log lines appear in that order in the debug-log slice |
+
+Not asserted, and reported as such rather than silently passed: §7 (e) work-off
+(`test/e2e/todo-driver.mjs` covers the `DONE: T<n>` path on its own), and §7
+(f) view switch and (g) sidebar, which need a screenshot of the rendered TUI.
+
+Parameters are env vars with cheap defaults — `ENDLESS_PROJECT_DIR`,
+`ENDLESS_PORT`, `ENDLESS_CONTEXT` (8000), `ENDLESS_MAX_CYCLES` (1),
+`ENDLESS_QUIESCE_TIMEOUT_MS`, `SPAWN_AGENT`, `SUBAGENT_SLEEP_S`,
+`TURN_TIMEOUT_S`, `STEP_TIMEOUT_S`, `SERVER_START_TIMEOUT_S`, `POLL_S`,
+`OUT_DIR`, `KEEP_SERVER`. The resolved setup is printed at the top of every run
+and again into `out/11-endless.report.txt`, so a run can be reproduced from its
+own output.
+
+Two things the driver is deliberate about:
+
+- **The readiness probe watches the server, not a wrapper.** It starts the
+  server as `setsid bash -c 'echo $$ > pidfile; exec opencode serve …'`, so the
+  recorded pid *is* the opencode process — a wrapper pid would exit while the
+  child kept running and the probe would report a false failure. After the
+  health check it confirms `/proc/<pid>/cmdline` is an opencode.
+- **A step that does not happen fails loudly.** Every wait ends on the expected
+  log line, on an `endless: abandoned at …` line, on the server dying, or on its
+  timeout — the last two are `FAIL` with the reason, never a silent pass.
+
+`ENDLESS_MAX_CYCLES=1` is what keeps the loop from running on: the cycle the
+driver asserts completes, and the next one stops at the ceiling and switches
+endless mode off. The driver backs up and restores
+`~/.config/opencode/agent-intercom.json` (the plugin writes `endlessMode: false`
+into it itself when a bound fires) and the driven project's todo file, deletes
+the two sessions of the cycle, and stops the server's process group.
 
 ## Why the harness polls instead of streaming
 

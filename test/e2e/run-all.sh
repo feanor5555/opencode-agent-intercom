@@ -1,6 +1,6 @@
 #!/bin/bash
-# Runs all 8 single-agent end-to-end tests + the multi-agent test, writes
-# captures under ./out for diffing against ./golden.
+# Runs all 8 single-agent end-to-end tests, the multi-agent test and the
+# endless-mode cycle, writes captures under ./out for diffing against ./golden.
 #
 # Prerequisites:
 #   1. `opencode serve --port 4567` running with this plugin and LOG_REQUESTS=1
@@ -11,6 +11,12 @@
 #
 # Env (passed through to run-task.sh / multi-task.sh):
 #   OPENCODE_URL, PROJECT_DIR, OUT_DIR
+#
+# endless-task.sh runs last and is the one driver that does NOT use the server
+# from prerequisite 1: it starts and stops its own on PORT (default 4599),
+# because a cycle needs endless mode armed with a low threshold. It backs up
+# and restores ~/.config/opencode/agent-intercom.json and the todo file of the
+# project it drives. See its header for its own parameters.
 set -e
 HERE=$(dirname "$0")
 "$HERE/run-task.sh" planner    "Reconstruct briefly what src/state.js does. Reply in 5 short lines, no preamble." 02-planner
@@ -22,3 +28,4 @@ HERE=$(dirname "$0")
 "$HERE/run-task.sh" designer   "Generate a flat icon for a CLI orchestration tool — modern, minimal, dark theme. Save to designs/test-orchestrator-icon.jpg, 512x512." 08-designer
 "$HERE/run-task.sh" gitter     "Show me the style of the last 5 commits in this repo. Report subject style, language, and whether bodies are used. Do NOT make any new commit." 09-gitter
 "$HERE/multi-task.sh"
+"$HERE/endless-task.sh"

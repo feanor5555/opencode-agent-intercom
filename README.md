@@ -41,6 +41,34 @@ plugin does **not** resolve from a directory path — for a local checkout,
 point at the built file directly (`/path/to/.../tui/dist/tui.js`, after
 `npm run build` in `tui/`).
 
+### How you actually see it
+
+After restarting opencode, two things still have to happen before the
+`Subagents` panel paints:
+
+1. **Turn on the sidebar.** opencode ships the sidebar hidden. The toggle is
+   the opencode command `session.sidebar.toggle` (palette entries `Show
+   sidebar` / `Hide sidebar`, default keybind `<leader>b` — i.e. `Ctrl+X`
+   then `b`). Without this step the plugin loads but you see nothing of it.
+   Note: when the sidebar is already open the palette offers `Hide sidebar`,
+   so a literal search for `show sidebar` returns no result — that is the
+   command doing the right thing, not a missing entry.
+2. **Enter or create a session.** The panel only renders on a session
+   route — the home screen has no sidebar slot. Open or start a session
+   and the right sidebar (its own column beside the content, not an
+   overlay) shows `Subagents (N)` with `● N running · ✓ M done` counters,
+   agent rows with an `x` abort control and an age, plus `max subagents`
+   and `max Token(k)` steppers, and collapsed `TUI settings` / `LLM params`
+   / `Prompts` sections. opencode 1.18.25 offers no layout choice — the
+   SDK's `layout` field is `"auto" | "stretch"` and marked deprecated with
+   "Always uses stretch layout", and `tui.json` has no `sidebar` block,
+   no width, no position. The column takes its width from the content
+   area and that is not configurable.
+
+The plugin manager (toggle the plugin on/off, install updates) lives at
+`Ctrl+P` → `Plugins` → `Enter`. Inside the panel, `Alt+A` focuses the
+subagent list; `j`/`k` move, `Enter` opens a session, `x` aborts.
+
 ## What this gives you that stock opencode doesn't
 
 - **The primary never blocks. Ever.** opencode's native `task` is blocking —

@@ -168,3 +168,58 @@ Three working forms; choose one per project.
    implementation).
 
 Source: `/home/user/opencode-agent-intercom/work/research-opencode-plugin-scope.md`.
+
+## Seeing the TUI half of the plugin
+
+The TUI half renders as a right-side sidebar section titled `Subagents (N)`,
+where `N` is the running subagent count. The sidebar is its own column beside
+the content area (chat occupies the left two thirds; the sidebar does not
+overlay the content). Two conditions must both hold for a user to see it:
+
+1. **The sidebar must be activated.** The sidebar is NOT visible by default —
+   it ships hidden. The toggle is the opencode command `session.sidebar.toggle`
+   (palette entries `"Show sidebar"` / `"Hide sidebar"`, default keybind
+   `<leader>b` — i.e. `Ctrl+X` then `b`, description *"in a session to show or
+   hide the sidebar panel"*). When the sidebar is already open the palette
+   offers only `Hide sidebar`, so a literal search for `show sidebar` returns no
+   result — that is expected, not a missing command. Until the user runs the
+   toggle the plugin loads successfully but the `Subagents` section never
+   paints. Verified in the installed opencode 1.18.25 binary at
+   `/home/user/.opencode/bin/opencode`.
+
+2. **A session route must be active.** The `sidebar_content` slot is rendered
+   inside the session view (the slot's `session_id` is bound to the active
+   session). The home screen has no `sidebar_content` slot, so the section is
+   empty on the home screen regardless of the toggle state. Enter or create a
+   session first; only then does `Subagents (N)` appear.
+
+**What the section renders** (from the right sidebar at runtime):
+
+- Header `Subagents (N)`, counters `● N running · ✓ M done`.
+- Agent rows such as `luna#1` with an `x` abort control and an age below
+  (e.g. `4.0s`).
+- `max subagents [-] N [+]` and `max Token(k) [-] N [+]` steppers.
+- Collapsed sections `[▸] TUI settings`, `[▸] LLM params`, `[▸] Prompts`.
+
+**Layout is not configurable.** opencode 1.18.25 offers no layout choice:
+the SDK's `layout` field is `"auto" | "stretch"` and marked deprecated with
+*"Always uses stretch layout"*; `tui.json` has only `theme`, `keybinds` and
+`cursor` blocks, with no `sidebar` block, no width, no position. The column
+takes width from the content area and that is not configurable.
+
+Combined navigation once everything is wired:
+
+- **Plugin manager** — `Ctrl+P` → `Plugins` → `Enter` (palette registry
+  `plugins.list`, `namespace: "palette"`; there is NO slash command for it).
+  In the dialog `Space` toggles, `Shift+I` installs.
+- **Subagents panel** — `Alt+A` focuses it (palette entry *"Focus the
+  subagent sidebar panel for keyboard navigation"*). Inside the panel:
+  `j`/`k` navigate, `Enter` opens a subagent session, `x` aborts, `Esc`
+  unfocuses.
+- **Plugin enable state** — `Space` in the Plugins dialog persists to
+  `~/.local/state/opencode/kv.json` under key `plugin_enabled`. A cleared
+  value here suppresses plugin loading on the next start; unsetting it
+  restores the plugin.
+
+Source: `/home/user/opencode-agent-intercom/work/diagnosis-plugin-visibility.md`
+(verified against the installed opencode 1.18.25 binary).

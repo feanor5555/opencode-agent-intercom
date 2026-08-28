@@ -9,4 +9,4 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- Acceptance criterion (f) of `specs/endless-mode.md` is unmet: that the TUI follows to the new session after the cycle replaces it. It needs a capture taken after the kickoff. The mechanism is established and works — `Xvfb`, Zutty at `/usr/bin/zutty`, and `ffmpeg` with `x11grab` writing a PNG; the two sidebar screenshots under `work/screenshots/` were made that way. Criteria (a) to (e) and (g) are met.
+No pending work.

@@ -5,7 +5,8 @@
   "type": "module",
   "main": "src/index.js",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./tui": "./tui/dist/tui.js"
   },
   "bin": {
     "opencode-agent-intercom-install": "./bin/install.js",
@@ -17,7 +18,8 @@
     "src",
     "bin",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "tui/dist"
   ],
   "scripts": {
     "check": "for f in src/*.js; do node --check \"$f\" || exit 1; done",

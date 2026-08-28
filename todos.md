@@ -9,4 +9,4 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- Run the live end-to-end check of `forum_search` named in `specs/forum-search.md` §7 — one real `forum_search` call and one `web_search` call side by side against a running opencode instance — because the implementation runs had no network.
+Nothing pending.

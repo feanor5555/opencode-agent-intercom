@@ -263,3 +263,20 @@ Combined navigation once everything is wired:
 
 Source: `/home/user/opencode-agent-intercom/work/diagnosis-plugin-visibility.md`
 (verified against the installed opencode 1.18.25 binary).
+
+## Local development loop with a path-wired test project
+
+Two halves, different reload rules.
+
+- **Server (`src/*.js`)** has no build step. Save the file, restart opencode,
+  the change is live.
+- **TUI (`tui/src/tui.tsx`)** runs from `tui/dist/tui.js`, so it needs a build.
+  `npm run dev` in `tui/` is `tsup --watch` (entry `tui: src/tui.tsx`,
+  `format: ["esm"]`, `outDir: "dist"`) and rebuilds on every change. Run it
+  in a separate terminal while working.
+
+**No hot reload for plugin code.** opencode resolves plugins once at instance
+bootstrap, so a restart is required either way — both halves. The
+live-applying settings in the sidebar are runtime knobs, not code.
+
+The loop: `npm run dev` in `tui/`, edit, restart opencode.

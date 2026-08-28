@@ -337,6 +337,22 @@ npm run check   # syntax check (node --check)
 npm test        # unit tests (node --test)
 ```
 
+### Local development loop
+
+With the plugin wired into a test project by path (see
+[Project-scoped registration](#project-scoped-registration-that-works)):
+
+- **Server (`src/*.js`)** has no build step. Save the file and restart
+  opencode; the change is live.
+- **TUI (`tui/src/tui.tsx`)** runs from `tui/dist/tui.js` and needs a build.
+  `npm run dev` in `tui/` is `tsup --watch` and rebuilds on every change —
+  run it in a separate terminal while working.
+- **No hot reload for plugin code.** opencode resolves plugins once at
+  instance bootstrap, so a restart is required either way. The live-applying
+  settings in the sidebar are runtime knobs, not code.
+
+The loop: `npm run dev` in `tui/`, edit, restart opencode.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

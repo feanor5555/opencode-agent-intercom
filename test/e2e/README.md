@@ -14,6 +14,9 @@ that opencode upgrades don't shift the system-prompt composition.
   → gitter pipeline that adds `bytes(n)` to `src/format.js`.
 - `endless-task.sh` — endless-mode harness. Drives one full endless cycle and
   asserts its steps in order; see "Endless mode" below.
+- `nested-task.sh` — nested-delegation harness. Drives one nested spawn
+  (orchestrator → coder → researcher) and asserts it; see "Nested delegation"
+  below.
 - `run-all.sh` — runs the 8 single-agent tests, the multi-agent test and the
   endless-mode cycle. Owns the server the first ten use: builds the TUI, starts
   a fresh `opencode serve` in the configured project (default
@@ -173,6 +176,49 @@ endless mode off. The driver backs up and restores
 `~/.config/opencode/agent-intercom.json` (the plugin writes `endlessMode: false`
 into it itself when a bound fires) and the driven project's todo file, deletes
 the two sessions of the cycle, and stops the server's process group.
+
+## Nested delegation
+
+`nested-task.sh` is the live proof of the delegation rule
+(`concepts/role-delegation-and-web-access.md`, step S7): a granted role spawns a
+`researcher`, blocks, and gets the child's reply as the result of its own
+`spawn` call. Like `endless-task.sh` it owns its server — its own port
+(`NESTED_PORT`, default 4602) and its own debug-log offset — but unlike it, it
+writes no settings key and so has nothing to restore.
+
+```bash
+bash test/e2e/nested-task.sh                            # defaults, ~3-5 min
+OUT_DIR=/somewhere/kept bash test/e2e/nested-task.sh    # keep the captures
+NESTED_CALLER=planner NESTED_DENIED_ROLE=researcher \
+  bash test/e2e/nested-task.sh                          # other roles
+```
+
+Exit `0` = every asserted criterion passed, `1` = at least one failed, `2` =
+preflight/setup error. Captures and report land in `out/12-nested.*`.
+
+| criterion | evidence |
+|---|---|
+| grant | `GET /agent` carries no `spawn` deny rule on the five delegating roles and one on the other three |
+| admitted | `nested spawn: caller blocks until its child ends` with `callerAgent` = the caller's role |
+| survives | orchestrator, blocked caller and child all answer `200` on `GET /session/<id>` in every probe round of the wait |
+| result | the caller's own `spawn` tool result reads `<handle> (researcher) finished and is gone. Its reply:` and holds the marker line the child was told to reply with |
+| not-a-wake | zero `🔔 agent-intercom: your subagent` in the caller's transcript |
+| target | the caller's spawn of a non-researcher returns `Spawn refused: a subagent may spawn a "researcher" and nothing else` |
+| woken | `🔔 agent-intercom: your subagent "<handle>" (<role>) has finished and been destroyed.` in the primary |
+| nested-line | `⤷ nested: 1 run, …(not counted in the figure above).` in that same notice |
+| denied | a role that may not delegate has no child session under it, and the run names which of the three layers refused it |
+| gone | both subagent sessions answer `404` afterwards |
+| clean | no `subagent timed out (inactivity)`, no `subagent llm error`, no `FOREIGN KEY` in the server log |
+| todo | the project's todo file is byte-identical — a nested spawn carries no task id |
+
+Not asserted, and reported as such: the nested quota's own refusal (it needs a
+caller that exhausts `maxNestedSpawns`; `test/nested-delegation.test.js` covers
+it), and the sidebar's grandchild row, which needs a screenshot.
+
+**Both subagent sessions are deleted the instant they finish**, so the driver
+snapshots their message trees in a loop while they are alive and keeps the last
+non-empty snapshot. A transcript taken after the run is empty — a `404` — and
+every assertion made on it would pass vacuously.
 
 ## Why the harness polls instead of streaming
 

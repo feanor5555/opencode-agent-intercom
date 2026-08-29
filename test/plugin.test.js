@@ -1065,6 +1065,28 @@ test("the orchestrator limits block lists the context budget of every spawnable 
   assert.doesNotMatch(joined, /maxContext = /)
 })
 
+test("the limits block tells the orchestrator its notices are hidden, only while hideChatter is on", async () => {
+  // With the switch on, a subagent's completion notice is the only copy of
+  // its result and nothing renders it, so the orchestrator is told it is the
+  // channel to the user.
+  writeFileSync(settingsFile, JSON.stringify({ hideChatter: true }))
+  resetSettings()
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const out = { system: ["base prompt"] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, out)
+  assert.match(out.system.join(""), /hidden from the user's screen/)
+  assert.match(out.system.join(""), /Relay the substance of a subagent's result/)
+
+  // Off — the default — the block is exactly what it was.
+  writeFileSync(settingsFile, JSON.stringify({ hideChatter: false }))
+  resetSettings()
+  const offOut = { system: ["base prompt"] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, offOut)
+  assert.match(offOut.system.join(""), /current limits — maxSubagents = /)
+  assert.doesNotMatch(offOut.system.join(""), /hidden from the user's screen/)
+})
+
 test("a subagent under the context budget gets no wrap-up instruction", async () => {
   const messages = [
     {

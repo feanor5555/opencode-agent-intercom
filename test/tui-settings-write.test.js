@@ -4,8 +4,8 @@
 // The sidebar seeds its signals once at mount. Every write therefore re-reads
 // the file and merges in only the setting the user just touched, so an edit made
 // outside the panel meanwhile is not overwritten with stale state. That holds
-// for the endless toggle as much as for a stepped limit: the value it flips is
-// the one on disk at that moment.
+// for the two toggles — endless mode and the chatter switch — as much as for a
+// stepped limit: the value each flips is the one on disk at that moment.
 //
 // The context ceiling is the one write that materialises keys: it is a value per
 // agent type, so the first edit freezes the budget every listed type has in
@@ -23,15 +23,18 @@ import {
   DEFAULT_AGENT_CONTEXT,
   DEFAULT_ENDLESS_CONTEXT,
   DEFAULT_ENDLESS_MODE,
+  DEFAULT_HIDE_CHATTER,
   DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_SUBAGENTS,
   readSettings,
   setEndlessMode,
+  setHideChatter,
   setSetting,
   setSettingsPath,
   stepAgentContext,
   stepSetting,
   toggleEndlessMode,
+  toggleHideChatter,
 } from "../tui/src/settings-file.ts"
 
 const dir = mkdtempSync(join(tmpdir(), "tui-settings-"))
@@ -48,6 +51,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT
+  delete process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER
 })
 
 const onDisk = () => JSON.parse(readFileSync(file, "utf8"))
@@ -62,6 +66,7 @@ const state = (over = {}) => ({
   agentContext: {},
   endlessMode: DEFAULT_ENDLESS_MODE,
   endlessContext: DEFAULT_ENDLESS_CONTEXT,
+  hideChatter: DEFAULT_HIDE_CHATTER,
   ...over,
 })
 
@@ -278,6 +283,103 @@ test("an endlessMode the plugin rejects is dropped by the next write", () => {
 
   assert.deepEqual(merged, state({ maxSubagents: 3 }))
   assert.deepEqual(onDisk(), { maxSubagents: 3 })
+})
+
+test("setHideChatter writes only its own key and leaves the rest as it found it", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({
+      maxSubagents: 2,
+      endlessMode: true,
+      searxngUrl: "http://host:8080",
+    }),
+  )
+
+  const merged = setHideChatter(true)
+
+  assert.deepEqual(
+    merged,
+    state({ maxSubagents: 2, endlessMode: true, hideChatter: true }),
+  )
+  assert.deepEqual(onDisk(), {
+    maxSubagents: 2,
+    endlessMode: true,
+    searxngUrl: "http://host:8080",
+    hideChatter: true,
+  })
+})
+
+test("a file without hideChatter reads false and keeps the key absent until toggled", () => {
+  writeFileSync(file, JSON.stringify({ maxContext: 90000 }))
+  assert.equal(readSettings().hideChatter, false)
+  assert.equal("hideChatter" in onDisk(), false)
+
+  const merged = toggleHideChatter()
+
+  assert.equal(merged.hideChatter, true)
+  assert.deepEqual(onDisk(), { maxContext: 90000, hideChatter: true })
+})
+
+test("the chatter toggle flips the value the file holds, not the panel's copy", () => {
+  // Mount: the panel reads "on" into its signal.
+  writeFileSync(file, JSON.stringify({ hideChatter: true }))
+  assert.equal(readSettings().hideChatter, true)
+
+  // Switched off outside the panel, by hand.
+  writeFileSync(file, JSON.stringify({ hideChatter: false }))
+
+  const merged = toggleHideChatter()
+
+  // A flip of the panel's stale copy would have written false a second time.
+  assert.equal(merged.hideChatter, true)
+  assert.deepEqual(onDisk(), { hideChatter: true })
+})
+
+test("each toggle leaves the other boolean and the limits alone", () => {
+  setEndlessMode(true)
+  const withBoth = toggleHideChatter()
+
+  assert.deepEqual(withBoth, state({ endlessMode: true, hideChatter: true }))
+  assert.deepEqual(onDisk(), { endlessMode: true, hideChatter: true })
+
+  // A stepped limit must not drop either boolean.
+  const stepped = stepSetting("maxSubagents", 1)
+
+  assert.deepEqual(
+    stepped,
+    state({
+      maxSubagents: DEFAULT_MAX_SUBAGENTS + 1,
+      endlessMode: true,
+      hideChatter: true,
+    }),
+  )
+  assert.deepEqual(onDisk(), {
+    endlessMode: true,
+    hideChatter: true,
+    maxSubagents: DEFAULT_MAX_SUBAGENTS + 1,
+  })
+})
+
+test("a hideChatter the plugin rejects is dropped without costing the other keys", () => {
+  // 1 is not a boolean: the plugin leaves the default standing, so the key goes
+  // rather than staying in the file as a setting that is not in effect.
+  writeFileSync(file, JSON.stringify({ hideChatter: 1, endlessMode: true, maxSubagents: 2 }))
+
+  const merged = setSetting("maxSubagents", 3)
+
+  assert.deepEqual(merged, state({ maxSubagents: 3, endlessMode: true }))
+  assert.deepEqual(onDisk(), { endlessMode: true, maxSubagents: 3 })
+})
+
+test("a chatter toggle that cannot reach the disk leaves the panel on the file's state", { skip: rootSkip }, () => {
+  writeFileSync(file, JSON.stringify({ hideChatter: false, maxContext: 90000 }))
+  chmodSync(file, 0o444)
+
+  const merged = toggleHideChatter()
+
+  assert.deepEqual(onDisk(), { hideChatter: false, maxContext: 90000 })
+  assert.deepEqual(merged, state({ hideChatter: false, maxContext: 90000 }))
+  chmodSync(file, 0o644)
 })
 
 test("a toggle that cannot reach the disk leaves the panel on the file's state", { skip: rootSkip }, () => {

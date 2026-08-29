@@ -1,6 +1,7 @@
 // The runtime settings on disk, shared with the main plugin: it reads this file
-// (file > env > default) for the subagent cap, the context budget and endless
-// mode. Writing it here changes them live, no opencode restart needed.
+// (file > env > default) for the subagent cap, the context budget, endless mode
+// and the chatter switch. Writing it here changes them live, no opencode
+// restart needed.
 //
 // The context budget is a value PER AGENT TYPE, held in the `agentContext` map.
 // There is no single user-facing ceiling: a type with no entry of its own falls
@@ -51,12 +52,14 @@ export interface Settings {
   agentContext: AgentContext;
   endlessMode: boolean;
   endlessContext: number;
+  hideChatter: boolean;
 }
 
 // The scalar keys that hold a limit, i.e. the ones a [-]/[+] row steps.
-// endlessMode is not one of them: it is the file's only boolean and has its own
-// writer. maxContext is not one either: it is legacy-only and is written by
-// nothing here — a ceiling is edited per agent through stepAgentContext.
+// endlessMode and hideChatter are not among them: they are the file's booleans
+// and each has its own writer. maxContext is not one either: it is legacy-only
+// and is written by nothing here — a ceiling is edited per agent through
+// stepAgentContext.
 export type LimitKey = "maxSubagents" | "endlessContext";
 
 // Every key of Settings the file itself carries. maxContextSource is derived
@@ -83,6 +86,10 @@ export const DEFAULT_AGENT_CONTEXT: AgentContext = {
 };
 export const DEFAULT_ENDLESS_MODE = false;
 export const DEFAULT_ENDLESS_CONTEXT = 250000;
+// Whether the plugin's own postings are hidden from the transcript. The
+// plugin's own copy is DEFAULT_HIDE_CHATTER in src/settings.js and
+// test/settings-defaults-parity.test.js fails on a divergence.
+export const DEFAULT_HIDE_CHATTER = false;
 
 const MAX_CONTEXT_ENV = "OPENCODE_AGENT_INTERCOM_MAX_CONTEXT";
 
@@ -97,8 +104,8 @@ export function setSettingsPath(p: string): void {
 const isLimit = (v: unknown): v is number =>
   Number.isInteger(v) && (v as number) >= 0;
 
-// What the plugin accepts for endless mode: a real boolean. "true", 1 and null
-// are rejected there and are rejected here.
+// What the plugin accepts for a boolean setting: a real boolean. "true", 1 and
+// null are rejected there and are rejected here.
 const isFlag = (v: unknown): v is boolean => typeof v === "boolean";
 
 // The usable entries of an agentContext value, or null when the value is not a
@@ -123,6 +130,7 @@ const SETTING_VALIDATORS: { [K in FileKey]: (v: unknown) => boolean } = {
   agentContext: (v) => filterAgentContext(v) !== null,
   endlessMode: isFlag,
   endlessContext: isLimit,
+  hideChatter: isFlag,
 };
 
 function envNum(name: string, def: number): number {
@@ -141,7 +149,7 @@ function envNumSet(name: string): boolean {
   return isLimit(Number(env));
 }
 
-// The plugin reads its one boolean env var as "1"/"0"; anything else leaves the
+// The plugin reads a boolean env var as "1"/"0"; anything else leaves the
 // default standing, the way a bad number does above.
 function envFlag(name: string, def: boolean): boolean {
   const env = process.env[name]?.trim();
@@ -160,6 +168,7 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
     agentContext: {},
     endlessMode: envFlag("OPENCODE_AGENT_INTERCOM_ENDLESS_MODE", DEFAULT_ENDLESS_MODE),
     endlessContext: envNum("OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT", DEFAULT_ENDLESS_CONTEXT),
+    hideChatter: envFlag("OPENCODE_AGENT_INTERCOM_HIDE_CHATTER", DEFAULT_HIDE_CHATTER),
   };
   if (isLimit(raw.maxSubagents)) s.maxSubagents = raw.maxSubagents;
   if (isLimit(raw.maxContext)) {
@@ -170,6 +179,7 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
   if (perAgent !== null) s.agentContext = perAgent;
   if (isFlag(raw.endlessMode)) s.endlessMode = raw.endlessMode;
   if (isLimit(raw.endlessContext)) s.endlessContext = raw.endlessContext;
+  if (isFlag(raw.hideChatter)) s.hideChatter = raw.hideChatter;
   return s;
 }
 
@@ -308,16 +318,29 @@ export function stepAgentContext(
   return resolveSettings(merged);
 }
 
-// Sets endless mode. The file's only boolean, so it has its own writer rather
-// than a spot in the stepping pair above.
+// Sets endless mode. A boolean, so it has its own writer rather than a spot in
+// the stepping pair above.
 export function setEndlessMode(value: boolean): Settings {
   return applySetting("endlessMode", () => value);
 }
 
-// Flips endless mode. The counterpart of stepSetting for the one two-valued
-// setting: the flip starts from what the file holds at this moment, so a switch
-// thrown outside the panel — by hand, or by the plugin's own bounds writing
+// Flips endless mode. The counterpart of stepSetting for a two-valued setting:
+// the flip starts from what the file holds at this moment, so a switch thrown
+// outside the panel — by hand, or by the plugin's own bounds writing
 // endlessMode back to false — is toggled from rather than overwritten.
 export function toggleEndlessMode(): Settings {
   return applySetting("endlessMode", (current) => !current.endlessMode);
+}
+
+// Sets the chatter switch. While it is on, the plugin stamps every posting it
+// makes into a session as hidden: the transcript does not render it, the model
+// still receives its text.
+export function setHideChatter(value: boolean): Settings {
+  return applySetting("hideChatter", () => value);
+}
+
+// Flips the chatter switch, from the value the file holds at this moment rather
+// than from the panel's copy, which a hand edit may have made stale.
+export function toggleHideChatter(): Settings {
+  return applySetting("hideChatter", (current) => !current.hideChatter);
 }

@@ -143,11 +143,14 @@ function buildPrimaryHandoffDeps(client, sessionID, sessionDir) {
     // We bridge: the kickoff message must set `agent` so opencode
     // routes the first turn to the orchestrator role for the new
     // (otherwise empty) session.
+    // `hideable`: the kickoff is traffic between the plugin and the fresh
+    // orchestrator, so it follows the `hideChatter` setting.
     promptAsync: (sid, message) =>
       promptSession(client, {
         sessionID: sid,
         agent: ORCHESTRATOR_AGENT_NAME,
         prompt: message,
+        hideable: true,
       }),
     // Point the TUI at the new session right after the kickoff (handoff step
     // 6b). Best-effort inside client.js — it never throws into the handoff.
@@ -276,6 +279,7 @@ async function promptOldPrimaryFor(client, primarySessionID, { prompt, looksLike
         sessionID: primarySessionID,
         agent: ORCHESTRATOR_AGENT_NAME,
         prompt,
+        hideable: true,
       }),
     looksLikeReply,
   })

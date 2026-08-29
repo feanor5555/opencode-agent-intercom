@@ -10,6 +10,14 @@
 // the provider request) was verified empirically against opencode 1.17.15 —
 // see the scratch notes intercom-wake-notice-fix.
 //
+// The second flag on the part is `synthetic`, which client.js stamps from the
+// `hideChatter` setting: it keeps the part off the transcript and leaves its
+// text in the model's payload. The tests below pin which send is hidden —
+// postNotice always follows the setting, promptSession only where the call
+// site opts in with `hideable` — and that the marker metadata, the text and
+// the detector are the same either way. `ignored`, the inverse flag, is never
+// set.
+//
 // Run: node --test --test-timeout=2000 test/pluginmsg.test.js
 
 import test from "node:test"
@@ -22,23 +30,35 @@ import {
   looksLikePluginMessage,
 } from "../src/pluginmsg.js"
 import { postNotice, promptSession } from "../src/client.js"
+import { lastUserGoal } from "../src/handoff.js"
 import { setSettingsPath, resetSettings } from "../src/settings.js"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 // Pinned settings path so postNotice's retry settings come from defaults,
 // not a real ~/.config file (same discipline as postNotice-retry.test.js).
 let tmpDir
+let settingsFile
 test.beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "agent-intercom-pluginmsg-"))
-  setSettingsPath(join(tmpDir, "agent-intercom.json"))
+  settingsFile = join(tmpDir, "agent-intercom.json")
+  setSettingsPath(settingsFile)
+  delete process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER
   resetSettings()
 })
 test.afterEach(() => {
+  delete process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER
   resetSettings()
   if (tmpDir) rmSync(tmpDir, { recursive: true, force: true })
 })
+
+// Turns the hide switch on for the next send; the TTL cache is dropped so the
+// value is read from the file.
+function hideChatter(on) {
+  writeFileSync(settingsFile, JSON.stringify({ hideChatter: on }))
+  resetSettings()
+}
 
 function makeFakeClient() {
   const calls = []
@@ -61,6 +81,28 @@ test("intercomTextPart: builds a text part carrying the marker metadata", () => 
   assert.equal(part.type, "text")
   assert.equal(part.text, "hello")
   assert.deepEqual(part.metadata, { [INTERCOM_MESSAGE_METADATA_KEY]: true })
+})
+
+test("intercomTextPart: without the option the part carries no synthetic key at all", () => {
+  const part = intercomTextPart("hello")
+  assert.equal("synthetic" in part, false)
+  assert.equal("ignored" in part, false)
+  assert.deepEqual(part, intercomTextPart("hello", {}))
+})
+
+test("intercomTextPart: { hidden: true } stamps synthetic and changes nothing else", () => {
+  const visible = intercomTextPart("hello")
+  const hidden = intercomTextPart("hello", { hidden: true })
+  assert.equal(hidden.synthetic, true)
+  // The inverse flag would take the text out of the model payload instead.
+  assert.equal("ignored" in hidden, false)
+  assert.equal(hidden.text, visible.text)
+  assert.deepEqual(hidden.metadata, visible.metadata)
+  assert.equal(hidden.type, "text")
+})
+
+test("intercomTextPart: { hidden: false } is byte-identical to the visible part", () => {
+  assert.deepEqual(intercomTextPart("hello", { hidden: false }), intercomTextPart("hello"))
 })
 
 test("isPluginGeneratedMessage: detects a session-shaped message built from intercomTextPart", () => {
@@ -153,4 +195,80 @@ test("promptSession: kickoff/doc-summary/spawn prompts carry the marker metadata
   const part = body.parts[0]
   assert.equal(part.type, "text")
   assert.equal(part.metadata[INTERCOM_MESSAGE_METADATA_KEY], true)
+})
+
+test("postNotice: with hideChatter off the posted part has no synthetic key", async () => {
+  const client = makeFakeClient()
+  await postNotice(client, "ses_parent", "🔔 agent-intercom: notice text")
+  const part = client.calls[0].body.parts[0]
+  assert.equal("synthetic" in part, false)
+})
+
+test("postNotice: with hideChatter on the posted part carries synthetic: true", async () => {
+  hideChatter(true)
+  const client = makeFakeClient()
+  await postNotice(client, "ses_parent", "🔔 agent-intercom: notice text")
+  const part = client.calls[0].body.parts[0]
+  assert.equal(part.synthetic, true)
+  assert.equal("ignored" in part, false)
+  // The wake still carries its full text to the model, and the marker holds.
+  assert.equal(part.text, "🔔 agent-intercom: notice text")
+  assert.equal(part.metadata[INTERCOM_MESSAGE_METADATA_KEY], true)
+})
+
+test("promptSession: with hideChatter on a call site that does not opt in stays visible", async () => {
+  hideChatter(true)
+  const client = makeFakeClient()
+  // The spawn task prompt: it lands in the SUBAGENT's session and is that
+  // session's entire instruction.
+  await promptSession(client, {
+    sessionID: "ses_sub",
+    agent: "coder",
+    prompt: "task text",
+  })
+  const part = client.calls[0].body.parts[0]
+  assert.equal("synthetic" in part, false)
+  assert.equal(part.text, "task text")
+})
+
+test("promptSession: with hideChatter on and hideable: true the part is hidden", async () => {
+  hideChatter(true)
+  const client = makeFakeClient()
+  await promptSession(client, {
+    sessionID: "ses_new",
+    agent: "orchestrator",
+    prompt: "## Stand / Aktueller Zustand\n\nLetztes Ziel: …",
+    hideable: true,
+  })
+  const part = client.calls[0].body.parts[0]
+  assert.equal(part.synthetic, true)
+  assert.equal(part.text, "## Stand / Aktueller Zustand\n\nLetztes Ziel: …")
+  assert.equal(part.metadata[INTERCOM_MESSAGE_METADATA_KEY], true)
+})
+
+test("promptSession: with hideChatter off even hideable: true stays visible", async () => {
+  const client = makeFakeClient()
+  await promptSession(client, {
+    sessionID: "ses_new",
+    agent: "orchestrator",
+    prompt: "kickoff",
+    hideable: true,
+  })
+  const part = client.calls[0].body.parts[0]
+  assert.equal("synthetic" in part, false)
+})
+
+test("a hidden part is still recognised as plugin-generated and skipped by the goal scan", async () => {
+  hideChatter(true)
+  const client = makeFakeClient()
+  await postNotice(client, "ses_parent", '🔔 agent-intercom: your subagent "x" has finished')
+  const part = client.calls[0].body.parts[0]
+  assert.equal(part.synthetic, true)
+  const notice = { info: { role: "user" }, parts: [part] }
+  assert.equal(isPluginGeneratedMessage(notice), true)
+  const messages = [
+    { info: { role: "user" }, parts: [{ type: "text", text: "fix the bug in module X" }] },
+    notice,
+  ]
+  assert.equal(lastUserGoal(messages), "fix the bug in module X")
 })

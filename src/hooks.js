@@ -462,6 +462,11 @@ async function notifyParentOfDenialLoop(client, entry) {
 // per role the orchestrator can spawn — the plugin's own roles minus the
 // primary. "off" means that type's budget is disabled, "unlimited" that the
 // subagent cap is.
+//
+// While `hideChatter` is on, the block also carries the one sentence that
+// tells the orchestrator the user cannot read the notices it receives: the
+// completion notice is then the only copy of a subagent's result and nothing
+// renders it, so the orchestrator is the channel to the user.
 function formatLimitsNotice() {
   const s = getSettings()
   const sub = s.maxSubagents > 0 ? `${s.maxSubagents}` : "unlimited"
@@ -477,7 +482,13 @@ function formatLimitsNotice() {
     `maxSubagents = ${sub}.\n` +
     `Context budget per agent: ${budgets}.\n` +
     "Use the number of the agent you are spawning when applying the " +
-    "right-sized-chunks rule.\n---\n"
+    "right-sized-chunks rule.\n" +
+    (s.hideChatter
+      ? "Subagent results and handoff messages are hidden from the user's " +
+        "screen. The user sees only what you write. Relay the substance of a " +
+        "subagent's result in your own answer.\n"
+      : "") +
+    "---\n"
   )
 }
 

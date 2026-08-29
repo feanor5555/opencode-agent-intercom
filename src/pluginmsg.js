@@ -17,10 +17,20 @@
 //     metadata object intact.
 //   - The part's text still reaches the provider request unchanged
 //     (captured with a fake OpenAI endpoint), so notices stay model-visible.
-// Metadata is plugin-defined and opaque to opencode. The SDK's `synthetic`
-// flag also round-trips, but it is an opencode-INTERPRETED flag whose
-// rendering/visibility semantics we did not measure — metadata is the
-// side-effect-free choice.
+// Metadata is plugin-defined and opaque to opencode; it says nothing about
+// how a part is rendered.
+//
+// VISIBILITY is the separate, opencode-interpreted flag `synthetic` on the
+// same part, set from `intercomTextPart`'s `hidden` option. A synthetic text
+// part is skipped by the transcript renderer and by the jump-to-message and
+// session-title scans, while the user -> model conversion filters on
+// `ignored` alone and therefore still passes the text to the model verbatim.
+// It is what opencode marks its own model-facing wrappers with. Hidden and
+// visible parts are alike in every other respect: the same text, the same
+// marker metadata, the same wake.
+//
+// `ignored` is the INVERSE flag — it takes the text out of the model payload
+// and leaves it on screen. This plugin never sets it.
 //
 // This module is a pure leaf (imports nothing) so BOTH sides can share it:
 // client.js — the single send-side chokepoint (postNotice + promptSession
@@ -37,10 +47,19 @@ export const INTERCOM_MESSAGE_METADATA_KEY = "agentIntercom"
 // re-posts, the handoff kickoff, the DOC_SUMMARY prompt and spawn task
 // prompts. A new send path added later inherits the marker for free as long
 // as it goes through client.js — which is the repo rule anyway.
-export function intercomTextPart(text) {
+//
+// `hidden` stamps `synthetic: true` on the part, which keeps it off the
+// screen and leaves it in the model's payload. It is absent — not `false` —
+// when the part is visible, so a visible part is byte-identical to what this
+// helper built before the option existed. The marker metadata is
+// unconditional, so isPluginGeneratedMessage reads hidden and visible parts
+// alike. Who decides `hidden` is client.js, which resolves the `hideChatter`
+// setting at send time; this module stays a leaf.
+export function intercomTextPart(text, { hidden = false } = {}) {
   return {
     type: "text",
     text,
+    ...(hidden ? { synthetic: true } : {}),
     metadata: { [INTERCOM_MESSAGE_METADATA_KEY]: true },
   }
 }

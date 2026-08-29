@@ -231,6 +231,19 @@ exposes every runtime knob:
   the budget is disabled for that type.
 - **`thinking [on/off]`** / **`tool details [on/off]`** — opencode's
   built-in visibility toggles.
+- **`hide chatter [on/off]`** — hides the plugin's own notices
+  (subagent completion messages, handoff kickoffs, doc-summary prompts) from
+  the transcript. The text part the plugin posts is stamped `synthetic: true`,
+  which opencode's TUI does not render; the model still receives the text
+  unchanged, so the orchestrator keeps being woken and keeps receiving its
+  subagent results. The task prompt sent to a subagent stays visible by
+  design — it is the subagent's entire instruction, not chatter — and tool
+  results stay under opencode's own `tool_details_visibility`. Writes
+  `~/.config/opencode/agent-intercom.json` as `"hideChatter": true|false`,
+  picked up within ~2 s; env var `OPENCODE_AGENT_INTERCOM_HIDE_CHATTER`
+  resolves with `1`/`0`. Default `false`. With the switch on, the transcript
+  no longer shows why the orchestrator continues — the orchestrator is told
+  to relay the substance itself.
 - **Per-agent LLM sampling** — temperature, top-p/top-k, max-tokens, plus
   llama.cpp keys (`min_p`, `repeat_penalty`, `chat_template_kwargs`) routed
   through `output.options`. Writes `~/.config/opencode/llm-params.json`.
@@ -339,6 +352,7 @@ also takes `"searxngUrl"` and `"exaApiKey"`, each overriding its environment var
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT` | `250000` | Orchestrator context threshold (tokens) while endless mode is on. Displaces the plain handoff threshold. `"0"` disables. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS` | `600000` | How long (ms) one endless cycle waits for the last subagent to finish before abandoning. |
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES` | `10` | Cycle ceiling per opencode process. At the ceiling endless mode writes itself off. `"0"` arms no ceiling. |
+| `OPENCODE_AGENT_INTERCOM_HIDE_CHATTER` | off | `"1"` hides the plugin's own postings — subagent notices, handoff kickoff, doc-summary prompts — from the transcript. Their text still reaches the model unchanged. `"0"` shows them. TUI file overrides. |
 
 ## Endless mode
 

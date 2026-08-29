@@ -40,6 +40,7 @@ import {
   stepAgentContext,
   stepSetting,
   toggleEndlessMode,
+  toggleHideChatter,
 } from "./settings-file.ts";
 
 const TUI_PLUGIN_ID = "agent-intercom.tui";
@@ -321,6 +322,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const maxSubagents = (): number => settings().maxSubagents;
   const endlessMode = (): boolean => settings().endlessMode;
   const endlessContext = (): number => settings().endlessContext;
+  const hideChatter = (): boolean => settings().hideChatter;
 
   // Every store call hands back the whole merged file state, so one place puts
   // it into the signal — the panel then shows the true file state, including
@@ -347,6 +349,13 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // loop.
   const toggleEndless = (): void => {
     showSettings(toggleEndlessMode());
+  };
+
+  // Flip the chatter switch and save. Read-modify-write like the one above: the
+  // value flipped is the one on disk, which a hand edit may have changed since
+  // the panel read it.
+  const toggleChatter = (): void => {
+    showSettings(toggleHideChatter());
   };
 
   // Section collapse state. Subagents-section is the workhorse and stays open
@@ -979,6 +988,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             endlessContext={endlessContext}
             onAdjust={adjustSetting}
             onToggleEndless={toggleEndless}
+            hideChatter={hideChatter}
+            onToggleHideChatter={toggleChatter}
             thinkingOn={thinkingOn}
             onToggleThinking={toggleThinking}
             actionsOn={actionsOn}
@@ -1072,6 +1083,8 @@ function SubagentPanel(props: {
   endlessContext: () => number;
   onAdjust: (key: LimitKey, delta: number) => void;
   onToggleEndless: () => void;
+  hideChatter: () => boolean;
+  onToggleHideChatter: () => void;
   thinkingOn: () => boolean;
   onToggleThinking: () => void;
   actionsOn: () => boolean;
@@ -1385,6 +1398,15 @@ function SubagentPanel(props: {
             <text fg={props.theme.text}>{numCell(props.endlessContext() / 1000)}</text>
             <text fg={props.theme.accent} {...holdRepeat(() => props.onAdjust("endlessContext", 10000))}>
               {"[+]"}
+            </text>
+          </box>
+          <box flexDirection="row">
+            <text fg={props.theme.textMuted}>{rowLabel("hide chatter")}</text>
+            <text
+              fg={props.hideChatter() ? props.theme.success : props.theme.textMuted}
+              onMouseDown={props.onToggleHideChatter}
+            >
+              {props.hideChatter() ? "[on] " : "[off]"}
             </text>
           </box>
         </Show>

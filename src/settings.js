@@ -28,12 +28,18 @@
 // EXA_API_KEY > unset). Unset is not an error: web_search then uses Exa's
 // anonymous tier. The value is a secret — it is never written to the debug log.
 //
-// Endless mode resolves the same way: `endlessMode` (the only boolean key in
-// the file), `endlessContext`, `endlessQuiesceTimeoutMs` and `endlessMaxCycles`.
+// Endless mode resolves the same way: `endlessMode`, `endlessContext`,
+// `endlessQuiesceTimeoutMs` and `endlessMaxCycles`.
 // While `endlessMode` is on, `endlessContext` is the primary threshold in
 // effect instead of `maxPrimaryContext` — see `primaryContextThreshold`. The
 // plugin writes `endlessMode: false` back itself when one of the mode's own
 // bounds ends the loop (`writeEndlessMode`).
+//
+// `hideChatter` resolves the same way and is the second boolean key. While it
+// is on, every message the plugin posts into a session carries `synthetic:
+// true` on its text part: opencode's renderer skips such a part, the model
+// still receives its text verbatim. Nothing is suppressed — see
+// src/pluginmsg.js.
 //
 // The searxng engine bangs `forum_search` chains resolve from the file key
 // `forumBangs` alone (no env var). It is the only array-valued key and it
@@ -51,7 +57,8 @@
 //       "exaApiKey": "<key>", "forumBangs": ["!hn", "!lo"],
 //       "postNoticeRetries": N, "postNoticeRetryBackoffMs": N,
 //       "endlessMode": true|false, "endlessContext": N,
-//       "endlessQuiesceTimeoutMs": N, "endlessMaxCycles": N }
+//       "endlessQuiesceTimeoutMs": N, "endlessMaxCycles": N,
+//       "hideChatter": true|false }
 
 import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs"
 import { homedir } from "node:os"
@@ -126,6 +133,14 @@ const DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS = 600000
 // How many cycles one opencode process runs before endless mode switches
 // itself off. Counted over the handoff-redirect chain (handoffGeneration).
 const DEFAULT_ENDLESS_MAX_CYCLES = 10
+// Whether the plugin's own postings are hidden from the transcript. While it
+// is on, the text part every posting carries is stamped `synthetic: true` —
+// opencode's renderer skips it, the model still gets the text. Off by
+// default: with it on, a finished subagent's result is nowhere on screen and
+// its session is already deleted, a loss the user chooses rather than
+// inherits. Exported for the same reason as the limits above — the TUI plugin
+// carries its own copy and test/settings-defaults-parity.test.js pins them.
+export const DEFAULT_HIDE_CHATTER = false
 const TTL_MS = 2000
 
 let settingsPath = join(homedir(), ".config", "opencode", "agent-intercom.json")
@@ -197,7 +212,7 @@ function envStr(name, def) {
 // maxPrimaryContext,
 // maxSubagentAgeMs, searxngUrl, exaApiKey, forumBangs, postNoticeRetries,
 // postNoticeRetryBackoffMs, endlessMode, endlessContext,
-// endlessQuiesceTimeoutMs, endlessMaxCycles }.
+// endlessQuiesceTimeoutMs, endlessMaxCycles, hideChatter }.
 // Cached for TTL_MS so the hot paths (spawn, every subagent transform) don't
 // stat the file constantly. searxngUrl is "" when unset (searxng disabled).
 // exaApiKey is "" when unset (web_search falls back to Exa's anonymous tier).
@@ -216,6 +231,8 @@ function envStr(name, def) {
 // endlessContext the primary threshold in effect; endlessQuiesceTimeoutMs
 // bounds a cycle's wait for the last subagent and endlessMaxCycles the maximum
 // number of cycles one process runs; 0 disables the cycle ceiling.
+// hideChatter hides the plugin's own postings from the transcript while
+// leaving them in the model's payload.
 export function getSettings() {
   const now = Date.now()
   if (cache && now - cachedAt < TTL_MS) return cache
@@ -238,6 +255,7 @@ export function getSettings() {
       DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS,
     ),
     endlessMaxCycles: envNum("OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES", DEFAULT_ENDLESS_MAX_CYCLES),
+    hideChatter: envBool("OPENCODE_AGENT_INTERCOM_HIDE_CHATTER", DEFAULT_HIDE_CHATTER),
   }
   try {
     const raw = JSON.parse(readFileSync(settingsPath, "utf8"))
@@ -288,9 +306,9 @@ export function getSettings() {
     if (Number.isInteger(raw?.postNoticeRetryBackoffMs) && raw.postNoticeRetryBackoffMs >= 0) {
       resolved.postNoticeRetryBackoffMs = raw.postNoticeRetryBackoffMs
     }
-    // The only boolean key in the file. Anything but a real boolean ("true",
-    // 1, null) leaves the env-or-default resolution standing, exactly as a bad
-    // numeric value does above.
+    // A boolean key. Anything but a real boolean ("true", 1, null) leaves the
+    // env-or-default resolution standing, exactly as a bad numeric value does
+    // above. `hideChatter` below reads the same way.
     if (typeof raw?.endlessMode === "boolean") {
       resolved.endlessMode = raw.endlessMode
     }
@@ -302,6 +320,9 @@ export function getSettings() {
     }
     if (Number.isInteger(raw?.endlessMaxCycles) && raw.endlessMaxCycles >= 0) {
       resolved.endlessMaxCycles = raw.endlessMaxCycles
+    }
+    if (typeof raw?.hideChatter === "boolean") {
+      resolved.hideChatter = raw.hideChatter
     }
   } catch {
     // no file / unreadable -> env + defaults; not an error

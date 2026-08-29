@@ -32,7 +32,19 @@ import {
   sameModel,
   setLlmModel,
 } from "./llm-models-file.ts";
-import { composeSubagentLabel, truncate } from "./subagent-label.ts";
+import {
+  composeSubagentLabel,
+  subagentLabelWidth,
+  truncate,
+} from "./subagent-label.ts";
+import {
+  ABORT_CONFIRM_MS,
+  ABORT_CONFIRM_TEXT,
+  type ArmedAbort,
+  armingAfterSelection,
+  decideAbort,
+  isAbortArmed,
+} from "./abort-arming.ts";
 import {
   type LimitKey,
   type Settings,
@@ -310,6 +322,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const [pulseOn, setPulseOn] = createSignal(true);
   const [listFocused, setListFocused] = createSignal(false);
   const [selectedID, setSelectedID] = createSignal<string | undefined>();
+  // The one subagent whose abort has been asked for once and is waiting for the
+  // confirming second request. Undefined while nothing is armed.
+  const [armedAbort, setArmedAbort] = createSignal<ArmedAbort | undefined>();
   // Cumulative count of subagents that have finished and been removed from the
   // list — keeps "something completed" visible without cluttering the panel.
   const [completedCount, setCompletedCount] = createSignal(0);
@@ -806,6 +821,39 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     scheduleRefresh();
   };
 
+  // Every way to abort — the row's cross, the `x`/`d` keys and the abort
+  // command — goes through this one request, so none of them can kill a session
+  // on a single press. The first request arms the entry and the row asks for
+  // the confirmation; the second request for that same entry aborts.
+  let armTimer: ReturnType<typeof setTimeout> | undefined;
+  const disarmAbort = (): void => {
+    if (armTimer) {
+      clearTimeout(armTimer);
+      armTimer = undefined;
+    }
+    if (armedAbort()) setArmedAbort(undefined);
+  };
+  const requestAbort = (id: string): void => {
+    const decision = decideAbort(armedAbort(), id, Date.now());
+    disarmAbort();
+    if (decision.kind === "abort") {
+      void abortSubagent(id);
+      return;
+    }
+    setArmedAbort(decision.armed);
+    // The arming expires on its own, so a row left in the confirm state does
+    // not stay a single keypress away from an abort.
+    armTimer = setTimeout(() => {
+      armTimer = undefined;
+      setArmedAbort(undefined);
+    }, ABORT_CONFIRM_MS);
+  };
+  // Moving the selection to another entry takes the arming with it.
+  createEffect(() => {
+    const kept = armingAfterSelection(armedAbort(), selectedID());
+    if (!kept && armedAbort()) disarmAbort();
+  });
+
   // Keyboard: Alt+A focuses the list; the focus-aware handler lives in the
   // panel component (so it only fires while the panel box is focused).
   const focusList = (): void => {
@@ -813,7 +861,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   };
   const abortSelected = (): void => {
     const id = selectedID();
-    if (id) void abortSubagent(id);
+    if (id) requestAbort(id);
   };
 
   const commandDispose =
@@ -951,6 +999,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     clearInterval(opencodeDefaultsTimer);
     clearInterval(modelChoicesTimer);
     if (refreshTimer) clearTimeout(refreshTimer);
+    if (armTimer) clearTimeout(armTimer);
     commandDispose();
     for (const dispose of disposers) dispose();
     disposeRoot();
@@ -976,10 +1025,12 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             setListFocused={setListFocused}
             selectedID={selectedID}
             setSelectedID={setSelectedID}
+            armedAbort={armedAbort}
+            onDisarmAbort={disarmAbort}
             completedCount={completedCount}
             isPrimary={(id: string) => primaryIDs.has(id)}
             onOpen={openSubagent}
-            onAbort={(id: string) => void abortSubagent(id)}
+            onAbort={requestAbort}
             maxSubagents={maxSubagents}
             settings={settings}
             contextAgent={currentContextAgent}
@@ -1069,9 +1120,14 @@ function SubagentPanel(props: {
   setListFocused: (focused: boolean) => void;
   selectedID: () => string | undefined;
   setSelectedID: (id: string | undefined) => void;
+  // The entry whose abort is armed and waiting for its confirming second
+  // request, and the way to take that arming back.
+  armedAbort: () => ArmedAbort | undefined;
+  onDisarmAbort: () => void;
   completedCount: () => number;
   isPrimary: (id: string) => boolean;
   onOpen: (id: string) => void;
+  // Asks for the abort of one entry: the first ask arms it, the second aborts.
   onAbort: (id: string) => void;
   maxSubagents: () => number;
   // The whole resolved settings state: the context row works its ceiling out of
@@ -1189,7 +1245,10 @@ function SubagentPanel(props: {
       const id = props.selectedID();
       if (id) props.onAbort(id);
     } else if (name === "escape" || name === "esc") {
-      blurPanel();
+      // Escape takes back a pending abort question first; only a second Escape
+      // gives the panel's focus up.
+      if (props.armedAbort()) props.onDisarmAbort();
+      else blurPanel();
     } else {
       return;
     }
@@ -1243,6 +1302,17 @@ function SubagentPanel(props: {
         panelWidth(),
       ),
     );
+    // While this row's abort is armed the label area carries the question
+    // instead of the label, so the confirm state cannot be missed. It is cut to
+    // the same budget the label has, so it stays on the one line too.
+    const armed = createMemo(() =>
+      isAbortArmed(props.armedAbort(), rowProps.entry.sessionID, props.nowMs()),
+    );
+    const rowText = createMemo(() =>
+      armed()
+        ? truncate(ABORT_CONFIRM_TEXT, subagentLabelWidth(panelWidth()))
+        : label(),
+    );
     // A busy/retry subagent's dot alternates filled/hollow on the pulse timer
     // so you can see it is still working; finished/aborted dots stay static.
     const marker = createMemo(() => {
@@ -1273,11 +1343,17 @@ function SubagentPanel(props: {
           <text fg={statusColor(rowProps.entry.status, props.theme)}>
             {`${marker()} `}
           </text>
-          <text fg={props.theme.text} onMouseDown={openThis}>
-            {label()}
+          <text
+            fg={armed() ? props.theme.error : props.theme.text}
+            onMouseDown={openThis}
+          >
+            {rowText()}
           </text>
           <text fg={props.theme.textMuted}> </text>
-          <text fg={props.theme.error} onMouseDown={abortThis}>
+          <text
+            fg={armed() ? props.theme.accent : props.theme.error}
+            onMouseDown={abortThis}
+          >
             {"✕"}
           </text>
         </box>

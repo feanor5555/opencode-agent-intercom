@@ -42,6 +42,7 @@
     "@opentui/solid": "0.2.10",
     "esbuild-plugin-solid": "^0.6.0",
     "solid-js": "1.9.12",
+    "string-width": "^7.2.0",
     "tsup": "^8.5.1",
     "typescript": "^5.8.3"
   }

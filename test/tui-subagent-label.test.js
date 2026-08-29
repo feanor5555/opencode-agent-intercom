@@ -12,7 +12,10 @@ import {
   ROW_CHROME_W,
   TOPIC_MAX_W,
   composeSubagentLabel,
+  displayWidth,
+  graphemes,
   modelDisplayName,
+  sanitizeTitle,
   subagentLabelWidth,
   subagentModel,
   subagentTopic,
@@ -283,4 +286,216 @@ test("composeSubagentLabel cuts even the handle on a panel that cannot hold it",
   const entry = { handle: "documenter#12", agent: "coder", title: "x" }
   const label = composeSubagentLabel(entry, MODELS, CHOICES, ROW_CHROME_W + 5)
   assert.equal(label, "docu…")
+})
+
+// --- Unicode: columns, grapheme clusters and sanitizing -------------------
+//
+// The label is measured in terminal columns, cut between grapheme clusters and
+// composed from a sanitized title, so that a session title the panel does not
+// control can neither wrap the row onto its second line (which hides the
+// age/ctx line) nor put a glyph on screen that the terminal draws as an empty
+// rectangle.
+
+// No code point of the surrogate range may survive on its own: a lone surrogate
+// is exactly what a cut through the middle of an astral character leaves, and
+// what the renderer shows as a rectangle.
+const hasLoneSurrogate = (s) =>
+  Array.from(s).some((cp) => {
+    const c = cp.codePointAt(0)
+    return c >= 0xd800 && c <= 0xdfff
+  })
+
+test("displayWidth counts terminal columns, not UTF-16 code units", () => {
+  assert.equal(displayWidth("abc"), 3)
+  assert.equal(displayWidth("漢字"), 4, "a CJK ideograph takes two columns")
+  assert.equal(displayWidth("a\u0308"), 1, "a combining mark takes none")
+  assert.equal(displayWidth("\u{1F600}"), 2)
+  assert.equal(displayWidth("…"), 1)
+  assert.equal(displayWidth(" · "), 3)
+})
+
+test("graphemes keeps a surrogate pair and its combining marks together", () => {
+  assert.deepEqual(graphemes("a\u0308b"), ["a\u0308", "b"])
+  assert.deepEqual(graphemes("x\u{1F600}y"), ["x", "\u{1F600}", "y"])
+})
+
+test("truncate cuts wide characters by column, not by code unit", () => {
+  // Six columns of CJK cut to five: two ideographs plus the ellipsis.
+  const cut = truncate("漢字漢字漢字", 5)
+  assert.equal(cut, "漢字…")
+  assert.equal(displayWidth(cut), 5)
+})
+
+test("truncate leaves a cut a column short rather than a column over", () => {
+  // Four columns of budget: the ellipsis takes one, and a two-column ideograph
+  // does not fit in the two that are left over beside the first one.
+  const cut = truncate("漢字漢", 4)
+  assert.equal(cut, "漢…")
+  assert.ok(displayWidth(cut) <= 4)
+})
+
+test("truncate never cuts through a surrogate pair", () => {
+  const emoji = "\u{1F600}\u{1F601}\u{1F602}\u{1F603}"
+  for (let w = 1; w <= 12; w++) {
+    const cut = truncate(emoji, w)
+    assert.equal(hasLoneSurrogate(cut), false, `width ${w}: ${JSON.stringify(cut)}`)
+    assert.ok(displayWidth(cut) <= w, `width ${w}: ${displayWidth(cut)} columns`)
+  }
+})
+
+test("truncate never parts a base character from its combining marks", () => {
+  const cut = truncate("a\u0308e\u0301i\u0302o\u0303", 3)
+  assert.equal(cut, "a\u0308e\u0301…")
+  assert.equal(displayWidth(cut), 3)
+})
+
+test("truncate leaves a string that fits, whatever it is made of", () => {
+  assert.equal(truncate("漢字", 4), "漢字")
+  assert.equal(truncate("a\u0308", 1), "a\u0308")
+})
+
+test("sanitizeTitle keeps plain Latin text including umlauts as it stands", () => {
+  assert.equal(sanitizeTitle("Prüfe die Größe"), "Prüfe die Größe")
+  assert.equal(sanitizeTitle("rewrite the parser"), "rewrite the parser")
+})
+
+test("sanitizeTitle drops ANSI escape sequences", () => {
+  assert.equal(sanitizeTitle("\u001B[31mred\u001B[0m text"), "red text")
+  assert.equal(sanitizeTitle("\u001B]0;window title\u0007done"), "done")
+})
+
+test("sanitizeTitle drops control and zero-width characters", () => {
+  // A zero-width space, a zero-width joiner, a byte-order mark and a bell.
+  assert.equal(sanitizeTitle("a\u200Bb\u200Dc\uFEFFd\u0007e"), "abcde")
+})
+
+test("sanitizeTitle drops variation selectors", () => {
+  assert.equal(sanitizeTitle("info\uFE0F sign\uFE0E"), "info sign")
+})
+
+test("sanitizeTitle drops emoji and pictographic symbols", () => {
+  assert.equal(sanitizeTitle("ship it \u{1F680} now"), "ship it now")
+  assert.equal(sanitizeTitle("\u{1F44D}\u{1F3FD} ok"), "ok")
+  assert.equal(sanitizeTitle("flag \u{1F1E9}\u{1F1EA} here"), "flag here")
+  assert.equal(
+    sanitizeTitle("family \u{1F468}\u200D\u{1F469}\u200D\u{1F467}"),
+    "family",
+  )
+})
+
+test("sanitizeTitle keeps the glyphs the panel's own chrome is made of", () => {
+  assert.equal(sanitizeTitle("a · b … c"), "a · b … c")
+})
+
+test("sanitizeTitle collapses runs of whitespace to a single space", () => {
+  assert.equal(sanitizeTitle("a  \t b\n\nc   "), "a b c")
+  assert.equal(sanitizeTitle("  spaced out  "), "spaced out")
+  assert.equal(sanitizeTitle("no\u00A0break"), "no break")
+})
+
+test("sanitizeTitle drops an unpaired surrogate but keeps a valid pair", () => {
+  assert.equal(sanitizeTitle("a\uD800b"), "ab")
+  assert.equal(sanitizeTitle("a\uDC00b"), "ab")
+  // A valid pair that is not pictographic survives: a mathematical capital A.
+  assert.equal(sanitizeTitle("x\u{1D400}y"), "x\u{1D400}y")
+})
+
+test("subagentTopic sanitizes the title before it strips the prefix", () => {
+  assert.equal(
+    subagentTopic("coder", "\u001B[1mcoder:\u001B[0m  rewrite\nthe parser"),
+    "rewrite the parser",
+  )
+  assert.equal(subagentTopic("coder", "\u{1F680}\u200B"), "")
+})
+
+test("composeSubagentLabel keeps a wide-character title inside the budget", () => {
+  const entry = {
+    handle: "coder#1",
+    agent: "coder",
+    // 17 ideographs: 17 code units, but 34 columns — the case that used to wrap.
+    title: "漢".repeat(17),
+  }
+  const label = composeSubagentLabel(entry, MODELS, CHOICES, HOST_PANEL_W)
+  assert.ok(
+    displayWidth(label) <= HOST_LABEL_W,
+    `${displayWidth(label)} > ${HOST_LABEL_W}: ${label}`,
+  )
+  assert.equal(hasLoneSurrogate(label), false)
+})
+
+test("composeSubagentLabel puts no emoji and no lone surrogate on the row", () => {
+  const entry = {
+    handle: "researcher#2",
+    agent: "researcher",
+    title: "\u{1F680} ship \u{1F468}\u200D\u{1F469}\u200D\u{1F467} it \uD800",
+  }
+  const label = composeSubagentLabel(entry, MODELS, CHOICES, HOST_PANEL_W)
+  assert.equal(label, "researcher#2 · ship it (Luna)")
+  assert.equal(hasLoneSurrogate(label), false)
+  assert.equal(/\p{Extended_Pictographic}/u.test(label), false)
+})
+
+test("composeSubagentLabel keeps combining marks attached in a cut topic", () => {
+  const entry = {
+    handle: "coder#1",
+    agent: "coder",
+    title: "a\u0308".repeat(40),
+  }
+  const label = composeSubagentLabel(entry, MODELS, CHOICES, HOST_PANEL_W)
+  assert.ok(displayWidth(label) <= HOST_LABEL_W)
+  // Every combining diaeresis in the label still sits behind its letter.
+  assert.equal(label.includes(" \u0308"), false, label)
+  assert.equal(label.includes("\u0308\u0308"), false, label)
+})
+
+test("composeSubagentLabel holds the budget for wide, emoji and combining input", () => {
+  const titles = [
+    "漢".repeat(60),
+    "\u{1F600}".repeat(40),
+    "a\u0308".repeat(60),
+    "\u001B[31m" + "ｆｕｌｌｗｉｄｔｈ".repeat(6) + "\u001B[0m",
+    "mixed 漢 \u{1F680} a\u0308 text ".repeat(8),
+    "\u{10000}\uD800".repeat(10),
+  ]
+  for (const panel of [12, 20, 26, HOST_PANEL_W, 60, 120]) {
+    for (const title of titles) {
+      for (const agent of ["coder", "researcher", "documenter"]) {
+        const label = composeSubagentLabel(
+          { handle: `${agent}#1`, agent, title },
+          MODELS,
+          CHOICES,
+          panel,
+        )
+        const width = displayWidth(label)
+        assert.ok(
+          width <= subagentLabelWidth(panel),
+          `${panel}/${agent}: ${width} > ${subagentLabelWidth(panel)}: ${label}`,
+        )
+        assert.equal(hasLoneSurrogate(label), false, label)
+        assert.equal(label.includes("\n"), false, label)
+      }
+    }
+  }
+})
+
+test("composeSubagentLabel clamps a composed label that would overrun", () => {
+  // A wide handle that fills the row, and a model part measured against it:
+  // the final clamp is what keeps the two from standing side by side.
+  const entry = { handle: "漢".repeat(20), agent: "coder", title: "x" }
+  const label = composeSubagentLabel(entry, MODELS, CHOICES, HOST_PANEL_W)
+  assert.ok(displayWidth(label) <= HOST_LABEL_W, `${displayWidth(label)}: ${label}`)
+})
+
+test("composeSubagentLabel cuts an over-long title to one line's worth", () => {
+  const entry = {
+    handle: "coder#1",
+    agent: "coder",
+    title:
+      "Rewrite the whole parser, then the printer, then everything else that " +
+      "touches the grammar, and write the tests for all of it",
+  }
+  const label = composeSubagentLabel(entry, MODELS, CHOICES, HOST_PANEL_W)
+  assert.equal(displayWidth(label), HOST_LABEL_W)
+  assert.equal(label.startsWith("coder#1 · Rewrite "), true, label)
+  assert.equal(label.endsWith("… (Claude Opus)"), true, label)
 })

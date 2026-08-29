@@ -51,7 +51,7 @@ const PLANNER_PROMPT = `# Role: Planner (Subagent)
 You write concept and design documents — you implement nothing, no edits in src/, no shell commands.
 The rough project description lives only in PROJECT.md. When asked for it, return what is in PROJECT.md; if PROJECT.md is empty or only the default stub, say so explicitly instead of guessing from the code.
 Plan features as thin vertical slices: each slice runs and is testable on its own, cutting through every layer; one slice per task, no large multi-slice tasks.
-Before any library or framework choice, the current stable versions and their compatibility come from a \`researcher\` — you have no web tools and do not search yourself; use only URLs a researcher returned, and where the lookup is missing, name it in your final reply so the orchestrator can order it.
+Before any library or framework choice, the current stable versions and their compatibility come from a \`researcher\` — you have no web tools and do not search yourself; use only URLs a researcher returned; spawn one where the lookup is worth a run of its own, otherwise name the missing lookup in your final reply so the orchestrator can order it.
 ${TODO_TOOLS_BLOCK}
 Final reply: one short paragraph naming the path you wrote/updated; when given a task id you completed, put \`DONE: T<n>\` on the first line.`
 
@@ -66,10 +66,10 @@ Final reply: first line \`DONE: T<n>\` when you completed the task, then a short
 
 const DEBUGGER_PROMPT = `# Role: Debugger (Subagent)
 
-You diagnose errors — find the root cause; you do not fix it and you do not spawn anyone. The orchestrator dispatches a coder for the fix.
+You diagnose errors — find the root cause; you do not fix it. The orchestrator dispatches a coder for the fix.
 Reproduce the failure yourself → read the full stack trace → form a hypothesis, check it, confirm or discard.
 Separate the surface error from the real cause.
-For a cryptic error the lookup comes from a \`researcher\` — you have no web tools; name what you need looked up in your final reply. For runtime errors in a web page use the pw CLI from bash (\`pw start\`, \`pw goto\`, \`pw screenshot\`, \`pw evaluate\`, \`pw stop\`).
+For a cryptic error the lookup comes from a \`researcher\` — you have no web tools; spawn one where the lookup is worth a run of its own, otherwise name what you need looked up in your final reply. For runtime errors in a web page use the pw CLI from bash (\`pw start\`, \`pw goto\`, \`pw screenshot\`, \`pw evaluate\`, \`pw stop\`).
 ${TODO_TOOLS_BLOCK}
 Final reply: first line \`DONE: T<n>\` when you completed the task, then what fails, why (root cause distinct from symptom), where (file:line), and one sentence on the fix direction.`
 
@@ -134,12 +134,42 @@ const SUBAGENT_NO_DELEGATION = {
 
 // Denied on a role that may not delegate at all. Kept apart from
 // SUBAGENT_NO_DELEGATION because `spawn` is the one entry of the four that
-// varies per role; the other three never do. Spread into every subagent role
-// below, so the resulting maps are the same as when the four entries stood in
-// one constant. The spawnHandler caller-gate and the guard's task-deny are the
-// runtime backstops for the case a project override re-exposes them.
+// varies per role; the other three never do.
+//
+// Who carries it, and why:
+//   researcher — the carve-out of the delegation rule. It is the one role WITH
+//     web tools, so it has nothing to delegate, and its own denial is what
+//     bounds the nesting depth at one level structurally: the only target a
+//     nested spawn may name is the researcher (NESTED_SPAWN_TARGET in
+//     tools.js), and a target that cannot spawn can never have children.
+//   designer, gitter — neither does token-heavy preparatory reading; both are
+//     told in their role prompt to request web material in their final reply.
+//
+// planner, coder, debugger, reviewer and documenter do NOT carry it: they may
+// spawn, and a spawn of theirs is gated by the three checks in
+// nestedSpawnRefusal plus the per-run quota (maxNestedSpawns). The absence of
+// `spawn: "deny"` is the whole grant — the schema strip leaves the tool in
+// their schema and checkSpawnPermission resolves the same map at run time.
 const NO_SPAWN = {
   spawn: "deny",
+}
+
+// The only agent type a NESTED spawn — one whose caller is itself a subagent —
+// may name. Lives here because it is a fact about the roles: it is exactly the
+// one role that keeps the web tools (NO_WEB_ACCESS below) and exactly the one
+// that carries NO_SPAWN for that reason. The spawn gate (tools.js) enforces it
+// and the delegating roles' limits block (hooks.js) sizes against it.
+export const NESTED_SPAWN_TARGET = "researcher"
+
+// The subagent roles that may delegate, derived from the permission maps below
+// rather than listed by hand so the prompt a role is given and the tool it
+// actually has cannot drift apart. A project that overrides a role's whole
+// `permission` map moves the runtime gate (checkSpawnPermission reads the
+// resolved config) without moving this set — the same limitation the outline
+// and TODO role sets in hooks.js already carry.
+export function mayDelegate(agent) {
+  const def = AGENTS[agent]
+  return Boolean(def) && def.mode === "subagent" && def.permission?.spawn !== "deny"
 }
 
 // Web access is concentrated in the `researcher` role: it is the only role that
@@ -173,35 +203,35 @@ export const AGENTS = {
     description:
       "Writes concept/design documents. Plans but does not implement. Version and compatibility facts come from a researcher.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS, bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
     prompt: PLANNER_PROMPT,
   },
   coder: {
     description:
       "Implements code changes in thin vertical slices, runs build/test commands, verifies before reporting back.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS },
     prompt: CODER_PROMPT,
   },
   debugger: {
     description:
       "Diagnoses build/test/runtime errors. Finds the root cause but does not fix it itself.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS, edit: "deny", write: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, edit: "deny", write: "deny" },
     prompt: DEBUGGER_PROMPT,
   },
   reviewer: {
     description:
       "Critical developer. Reviews code against best practices, clean code, performance. Writes a review document in reviews/, changes no source code.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS, bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
     prompt: REVIEWER_PROMPT,
   },
   documenter: {
     description:
       "Writes user/API documentation (README, usage, changelog). Reads the actual code, invents nothing.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS, bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
     prompt: DOCUMENTER_PROMPT,
   },
   researcher: {

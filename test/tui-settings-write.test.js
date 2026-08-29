@@ -25,6 +25,7 @@ import {
   DEFAULT_ENDLESS_MODE,
   DEFAULT_HIDE_CHATTER,
   DEFAULT_MAX_CONTEXT,
+  DEFAULT_MAX_NESTED_SPAWNS,
   DEFAULT_MAX_SUBAGENTS,
   readSettings,
   setEndlessMode,
@@ -52,6 +53,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS
 })
 
 const onDisk = () => JSON.parse(readFileSync(file, "utf8"))
@@ -66,6 +68,9 @@ const state = (over = {}) => ({
   agentContext: {},
   endlessMode: DEFAULT_ENDLESS_MODE,
   endlessContext: DEFAULT_ENDLESS_CONTEXT,
+  // Read and preserved by the store, stepped by no sidebar row; it is part of
+  // every resolved state all the same.
+  maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
   hideChatter: DEFAULT_HIDE_CHATTER,
   ...over,
 })

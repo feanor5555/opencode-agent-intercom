@@ -50,6 +50,7 @@ export function completionNotice(
   taskOutcome,
   ctxTokens,
   packageTokens,
+  nested,
 ) {
   return (
     `🔔 agent-intercom: your subagent "${handle}" (${agent}) has finished and been destroyed.\n` +
@@ -58,8 +59,34 @@ export function completionNotice(
     `subagent — the one above is gone.` +
     taskOutcomeLine(taskOutcome) +
     runSizeNotice(agent, ctxTokens, packageTokens) +
+    nestedRunsNotice(nested) +
     slotsNoticeAfterFinish(parentID)
   )
+}
+
+// Tail line: what this subagent spent on subagents of its OWN, when it spawned
+// any. Absent otherwise, which is every run of a role that does not delegate.
+//
+// It sits BELOW the run-size verdict and outside it on purpose. runSizeNotice
+// measures the parent's own run against the parent's own budget, and folding a
+// child's internal spend into that figure would make a well-scoped parent read
+// as oversized and push the orchestrator to split a package that was the right
+// size. The figure here is the one thing that number cannot show — what the
+// delegation cost on top — so the orchestrator can see it and stop paying for
+// it where it is not earning its keep.
+//
+// `{ runs, tokens }` from the parent's registry entry (chargeNestedRun). Runs
+// are children whose ending came back; tokens are the sum of what those
+// children burned in their own sessions, which an ending without a snapshot
+// does not report — hence the two shapes.
+function nestedRunsNotice(nested) {
+  const runs = nested?.runs ?? 0
+  if (runs <= 0) return ""
+  const tokens = nested?.tokens ?? 0
+  const what = runs === 1 ? "1 run" : `${runs} runs`
+  const cost =
+    tokens > 0 ? `~${fmtTokens(tokens)} tokens` : "token cost not reported by the child"
+  return `\n⤷ nested: ${what}, ${cost} (not counted in the figure above).`
 }
 
 // Tail line: surfaces what the finished RUN consumed against the context

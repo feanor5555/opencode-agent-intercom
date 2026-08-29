@@ -121,8 +121,12 @@ const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
 //
 // 0 disables nesting entirely and is the escape hatch for a user who does not
 // want it — with it set, a nested spawn is refused before any session is
-// created. Not shared with the TUI, which shows no nesting figure.
-const DEFAULT_MAX_NESTED_SPAWNS = 2
+// created, and a role that may delegate is told it does not (hooks.js).
+//
+// Exported because the TUI carries its own copy of this default
+// (tui/src/settings-file.ts) and test/settings-defaults-parity.test.js pins the
+// two against each other.
+export const DEFAULT_MAX_NESTED_SPAWNS = 2
 // Built-in searxng bang set for `forum_search`, each engine verified to answer
 // on its bang. Four of the five return thread URLs on their own site —
 // stackoverflow, askubuntu, superuser, hackernews; lobste.rs is carried as a

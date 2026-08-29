@@ -543,16 +543,42 @@ test("tool.execute.before hard-denies the native `task` tool from a subagent", a
 
 // --- only-the-orchestrator-delegates enforcement ---------------------------
 
-test("every subagent role denies spawn and task in its permission map", () => {
+// The five roles that may delegate: they hold `spawn`, and a spawn of theirs is
+// gated at run time (one target, no task id, a per-run quota) rather than by the
+// permission map. The three that may not: researcher, because it is the one role
+// WITH web tools and its own denial is what bounds nesting at one level;
+// designer and gitter, because neither does token-heavy preparatory reading.
+const DELEGATING_ROLES = ["planner", "coder", "debugger", "reviewer", "documenter"]
+const NON_DELEGATING_ROLES = ["researcher", "designer", "gitter"]
+
+test("spawn is granted to five subagent roles and denied to three; task never", () => {
   const subagents = Object.entries(AGENTS).filter(([, def]) => def.mode === "subagent")
   assert.equal(subagents.length, 8, "expected 8 subagent roles")
+  assert.deepEqual(
+    subagents.map(([name]) => name).sort(),
+    [...DELEGATING_ROLES, ...NON_DELEGATING_ROLES].sort(),
+    "every subagent role must be accounted for on one side of the grant",
+  )
   for (const [name, def] of subagents) {
-    assert.equal(def.permission?.spawn, "deny", `${name} must deny spawn`)
+    // Unchanged for all eight: opencode's blocking `task` tool and the
+    // orchestrator's own fleet controls stay the orchestrator's alone.
     assert.equal(def.permission?.task, "deny", `${name} must deny task`)
     assert.equal(def.permission?.abort, "deny", `${name} must deny abort`)
     assert.equal(def.permission?.list, "deny", `${name} must deny list`)
   }
-  // the orchestrator is the sole delegator — it keeps spawn/abort/list.
+  for (const name of NON_DELEGATING_ROLES) {
+    assert.equal(AGENTS[name].permission?.spawn, "deny", `${name} must deny spawn`)
+  }
+  for (const name of DELEGATING_ROLES) {
+    // Absence, not `"allow"`: an absent key leaves the tool in the schema and
+    // lets checkSpawnPermission fall through to allow, and it is what a project
+    // override of `permission.spawn` can still close.
+    assert.equal(
+      AGENTS[name].permission?.spawn, undefined,
+      `${name} must carry no spawn key — the absence is the grant`,
+    )
+  }
+  // the orchestrator keeps spawn/abort/list; it is the only role with all three.
   assert.notEqual(AGENTS.orchestrator.permission?.spawn, "deny")
   assert.notEqual(AGENTS.orchestrator.permission?.abort, "deny")
   assert.notEqual(AGENTS.orchestrator.permission?.list, "deny")
@@ -600,16 +626,19 @@ test("the denied roles' prompts route a lookup to the researcher instead of sear
   assert.match(AGENTS.researcher.prompt, /never delegate the searching/)
 })
 
-test("spawn from a subagent session is refused as a tool result and creates no session", async () => {
+test("spawn from a NON-DELEGATING subagent is refused as a tool result and creates no session", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   // the orchestrator spawns a subagent (this also proves the orchestrator path works)
-  await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
+  await hooks.tool.spawn.execute({ agent: "designer", prompt: "x" }, toolCtx)
   const subID = created[0]
   const countBefore = created.length
   // the subagent now tries to spawn another agent -> friendly refusal, no throw,
   // no new session, and the subagent's session is NOT misregistered as primary.
-  const subCtx = { sessionID: subID, agent: "coder", messageID: "m2" }
+  // designer carries `spawn: "deny"`, so the caller gate refuses before any
+  // session is created; the five roles that hold `spawn` take the nested path
+  // instead (test/nested-spawn.test.js).
+  const subCtx = { sessionID: subID, agent: "designer", messageID: "m2" }
   const res = await hooks.tool.spawn.execute({ agent: "researcher", prompt: "y" }, subCtx)
   assert.match(res.output, /you are a subagent/i)
   assert.equal(created.length, countBefore, "no new session may be created for a subagent spawn")

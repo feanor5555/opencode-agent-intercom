@@ -30,11 +30,12 @@ import {
   spawnCapDecision,
   nestedQuotaDecision,
   chargeNestedSpawn,
+  chargeNestedRun,
 } from "./registry.js"
 import { registerChildWaiter, settleChildWaiter } from "./childwait.js"
 import { endLiveChildrenOf } from "./teardown.js"
 import { projectContext } from "./project.js"
-import { AGENTS } from "./agents.js"
+import { AGENTS, NESTED_SPAWN_TARGET } from "./agents.js"
 import { projectAgentNames, spawnableAgentNames, unspawnableAgentKinds } from "./config.js"
 import {
   getSettings,
@@ -133,16 +134,16 @@ function packageSizeVerdict(agent, fullPrompt) {
   return { estimate, budget, refusal: "", notice: "" }
 }
 
-// The only agent type a NESTED spawn — one whose caller is itself a subagent —
-// may name. `researcher` is the carve-out of the delegation rule: web access is
-// concentrated in it, so it is the one thing another role cannot do for itself.
+// NESTED_SPAWN_TARGET (agents.js) is the one agent type a NESTED spawn — one
+// whose caller is itself a subagent — may name. `researcher` is the carve-out
+// of the delegation rule: web access is concentrated in it, so it is the one
+// thing another role cannot do for itself.
 //
 // It is also what bounds the nesting depth at exactly one level, structurally,
 // with no counter and no walk of the session tree: the researcher role is
 // itself denied `spawn` (agents.js), so a nested child can never have children
 // of its own. Every teardown therefore has to consider one generation of
 // children, never a tree.
-const NESTED_SPAWN_TARGET = "researcher"
 
 // The refusal a nested spawn gets, or "" when it passes. Covers the three
 // checks that decide before anything is reserved or created; the per-run quota
@@ -612,11 +613,19 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
           sessionID,
         })
         const outcome = await childResult
+        // Book the ended run against this caller's entry, at the moment the
+        // waiter resolves and before anything is rendered. What the child
+        // burned inside its own session is invisible in the caller's ctxTokens
+        // — those hold only the text below — so without this the caller's own
+        // completion notice would report the delegation as free.
+        const nestedTotals = chargeNestedRun(toolCtx.sessionID, outcome.ctxTokens)
         log("nested spawn: child ended", {
           handle: entry.handle,
           sessionID,
           status: outcome.status,
           waitedMs: outcome.waitedMs,
+          nestedRuns: nestedTotals.runs,
+          nestedTokens: nestedTotals.tokens,
         })
         return {
           output: nestedSpawnOutput(outcome, entry.handle, args.agent),

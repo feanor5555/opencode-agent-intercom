@@ -175,6 +175,7 @@ The primary never blocks. You stay in the driver's seat the entire time.
 | `spawn(agent, prompt, description?)` | Start a subagent non-blocking. Returns a handle (`researcher#1`). Sizes the work package against the agent's context budget — refused over 40 %, warned over 20 %, gated off when the type's budget is `0`. Unknown agent types are refused and the refusal lists the accepted set. | Orchestrator |
 | `abort(subagent)` | Cooperatively abort and hard-deny further tool calls. User-requested stops. | Orchestrator |
 | `list()` | List active subagents. | Orchestrator |
+| `task` | Denied everywhere. opencode's native tool is blocking; the schema strip hides it. | — |
 | `todos_open()` | List open tasks from `TODO.md` with their stable id (`T5`) and `accept:` criterion. | All agents |
 | `todo_add(title, accept?)` / `todo_edit(id, …)` / `todo_done(id)` | Add / refine / remove a task in `TODO.md`. `todo_done` deletes the completed task — usually the wake-hook does it for you. | The six deliverable roles |
 | `web_search(query, numResults?)` | Anonymous web search via Exa (no key, 150/day; an Exa key lifts the cap). | `researcher` only |
@@ -184,6 +185,19 @@ The primary never blocks. You stay in the driver's seat the entire time.
 Subagents are one-shot: **spawn → run → reply → destroyed.** The primary is
 woken automatically with the full (capped) result on completion. No
 status-poll tool by design — small LLMs would call it in a loop.
+
+The delegating subagents (`planner`/`coder`/`debugger`/`reviewer`/`documenter`)
+also carry `spawn`, but it is gated to the single target `researcher` and
+the call **blocks** until that researcher replies: there is no wake, no
+second ask, and the researcher's reply comes back as the result of the
+`spawn` call. The spawn prompt sent in this path carries no `T<n>:` prefix
+and no `DONE:` marker is expected. A per-run quota
+(`maxNestedSpawns`, default `2`, env
+`OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS`, `0` disables) bounds how many
+such nested runs one subagent may start; the limits block the subagent
+sees names what is left. `researcher`, `designer` and `gitter` are denied
+`spawn` outright. `abort`, `list` and `task` are denied for every
+subagent.
 
 ### Work-package size gate
 
@@ -216,6 +230,11 @@ measures the whole run, not just the package — system prompt, every
 tool result, the model's own output — and the two figures separate an
 oversized prompt from a task that sprawled while it ran.
 
+For a parent whose subagent had children of its own (a subagent that
+started one or more nested `researcher` runs) the notice carries an
+extra `⤷ nested:` line naming what those nested runs consumed (count
+and tokens, not counted in the parent's own figure above).
+
 ### Task tracking that doesn't depend on the model remembering
 
 `TODO.md` is the single source of truth for what's still open in the current
@@ -247,14 +266,14 @@ one of the same name. Orchestrator is the default primary unless
 | Agent | Role | Notes |
 |---|---|---|
 | `orchestrator` | Primary. Coordinates only. | Restricted to `spawn`/`abort`/`list`. |
-| `planner` | Concept/design docs in `plans/`. | No `bash`, no web — version facts come from a `researcher`. |
-| `coder` | Implements code in thin vertical slices. | Bash, edit, build/test. No web. Catch-all. |
-| `debugger` | Diagnoses build/test/runtime errors. | Bash for repro, no `edit`/`write`, no web — fix goes back to `coder`. |
-| `reviewer` | Reviews staged work into `reviews/`, iterates on it. | No `bash`, no web. Convention: no source-code edits. |
-| `documenter` | Writes/iterates user docs in place (README, `docs/`, changelog). | No `bash`, no web. Convention: no source-code edits. |
-| `researcher` | Web research via `web_search` + `forum_search` + `webfetch`. | The only role with web access. No `edit`/`write`/`bash`. |
-| `designer` | Generates images via [`gen`](#gen--image-generation-no-api-key). | No `outline`, no web. Convention: no source-code edits. |
-| `gitter` | Repo operations matching project's git style. | No `edit`/`write`/`webfetch`/`web_search`/`forum_search`. |
+| `planner` | Concept/design docs in `plans/`. | No `bash`, no web — version facts come from a `researcher`. May spawn a `researcher` for web lookups. |
+| `coder` | Implements code in thin vertical slices. | Bash, edit, build/test. No web. Catch-all. May spawn a `researcher` for web lookups. |
+| `debugger` | Diagnoses build/test/runtime errors. | Bash for repro, no `edit`/`write`, no web — fix goes back to `coder`. May spawn a `researcher` for web lookups. |
+| `reviewer` | Reviews staged work into `reviews/`, iterates on it. | No `bash`, no web. Convention: no source-code edits. May spawn a `researcher` for web lookups. |
+| `documenter` | Writes/iterates user docs in place (README, `docs/`, changelog). | No `bash`, no web. Convention: no source-code edits. May spawn a `researcher` for web lookups. |
+| `researcher` | Web research via `web_search` + `forum_search` + `webfetch`. | The only role with web access. No `edit`/`write`/`bash`. `spawn` denied — names needed lookups in the final reply instead. |
+| `designer` | Generates images via [`gen`](#gen--image-generation-no-api-key). | No `outline`, no web. Convention: no source-code edits. `spawn` denied — requests visual references in the final reply instead. |
+| `gitter` | Repo operations matching project's git style. | No `edit`/`write`/`webfetch`/`web_search`/`forum_search`. `spawn` denied. |
 
 ## The TUI sidebar (companion plugin)
 
@@ -384,6 +403,7 @@ also takes `"searxngUrl"` and `"exaApiKey"`, each overriding its environment var
 | `OPENCODE_AGENT_INTERCOM_DEBUG` | on | `"0"` disables logging to `~/.cache/opencode-agent-intercom/debug.log` |
 | `OPENCODE_AGENT_INTERCOM_LOG_REQUESTS` | off | `"1"` writes per-LLM-call JSONL to `~/.cache/opencode-agent-intercom/requests.jsonl` (path override: `_LOG_REQUESTS_FILE`) |
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS` | `1` | Concurrent subagents per primary. `"0"` disables. TUI file overrides. |
+| `OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS` | `2` | Nested `spawn` calls a single subagent run may start (always targeting `researcher`). `"0"` disables — the subagent must do the work itself. TUI file overrides via `"maxNestedSpawns"`. |
 | `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` | `40000` | Subagent context budget (tokens). `"0"` disables. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_RESULT_CHARS` | `8000` | Cap on a subagent's final reply forwarded to the primary. `"0"` disables. |
 | `OPENCODE_AGENT_INTERCOM_PROJECT_CONTEXT` | on | `"0"` skips the project snapshot prepended to spawn prompts |

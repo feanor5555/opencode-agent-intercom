@@ -1,7 +1,7 @@
 // The runtime settings on disk, shared with the main plugin: it reads this file
-// (file > env > default) for the subagent cap, the context budget, endless mode
-// and the chatter switch. Writing it here changes them live, no opencode
-// restart needed.
+// (file > env > default) for the subagent cap, the context budget, endless mode,
+// the nested-spawn quota and the chatter switch. Writing it here changes them
+// live, no opencode restart needed.
 //
 // The context budget is a value PER AGENT TYPE, held in the `agentContext` map.
 // There is no single user-facing ceiling: a type with no entry of its own falls
@@ -52,6 +52,7 @@ export interface Settings {
   agentContext: AgentContext;
   endlessMode: boolean;
   endlessContext: number;
+  maxNestedSpawns: number;
   hideChatter: boolean;
 }
 
@@ -59,7 +60,8 @@ export interface Settings {
 // endlessMode and hideChatter are not among them: they are the file's booleans
 // and each has its own writer. maxContext is not one either: it is legacy-only
 // and is written by nothing here — a ceiling is edited per agent through
-// stepAgentContext.
+// stepAgentContext. maxNestedSpawns is not one either: it is read and preserved
+// for parity with the plugin, and no row edits it.
 export type LimitKey = "maxSubagents" | "endlessContext";
 
 // Every key of Settings the file itself carries. maxContextSource is derived
@@ -86,6 +88,12 @@ export const DEFAULT_AGENT_CONTEXT: AgentContext = {
 };
 export const DEFAULT_ENDLESS_MODE = false;
 export const DEFAULT_ENDLESS_CONTEXT = 250000;
+// How many subagents one subagent run may start; 0 switches nesting off. The
+// plugin's own copy is DEFAULT_MAX_NESTED_SPAWNS in src/settings.js and
+// test/settings-defaults-parity.test.js fails on a divergence. Carried here for
+// that parity and because a write must not drop a key the plugin honours — no
+// row steps it.
+export const DEFAULT_MAX_NESTED_SPAWNS = 2;
 // Whether the plugin's own postings are hidden from the transcript. The
 // plugin's own copy is DEFAULT_HIDE_CHATTER in src/settings.js and
 // test/settings-defaults-parity.test.js fails on a divergence.
@@ -130,6 +138,7 @@ const SETTING_VALIDATORS: { [K in FileKey]: (v: unknown) => boolean } = {
   agentContext: (v) => filterAgentContext(v) !== null,
   endlessMode: isFlag,
   endlessContext: isLimit,
+  maxNestedSpawns: isLimit,
   hideChatter: isFlag,
 };
 
@@ -168,6 +177,10 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
     agentContext: {},
     endlessMode: envFlag("OPENCODE_AGENT_INTERCOM_ENDLESS_MODE", DEFAULT_ENDLESS_MODE),
     endlessContext: envNum("OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT", DEFAULT_ENDLESS_CONTEXT),
+    maxNestedSpawns: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS",
+      DEFAULT_MAX_NESTED_SPAWNS,
+    ),
     hideChatter: envFlag("OPENCODE_AGENT_INTERCOM_HIDE_CHATTER", DEFAULT_HIDE_CHATTER),
   };
   if (isLimit(raw.maxSubagents)) s.maxSubagents = raw.maxSubagents;
@@ -179,6 +192,7 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
   if (perAgent !== null) s.agentContext = perAgent;
   if (isFlag(raw.endlessMode)) s.endlessMode = raw.endlessMode;
   if (isLimit(raw.endlessContext)) s.endlessContext = raw.endlessContext;
+  if (isLimit(raw.maxNestedSpawns)) s.maxNestedSpawns = raw.maxNestedSpawns;
   if (isFlag(raw.hideChatter)) s.hideChatter = raw.hideChatter;
   return s;
 }

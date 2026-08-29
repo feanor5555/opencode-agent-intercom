@@ -48,11 +48,18 @@ import {
   cancelPendingEndless,
   cancelPendingHandoff,
   resetEndlessProgress,
+  nestedQuotaDecision,
   CTX_TTL_MS,
 } from "./registry.js"
 import { fetchSnapshot, showToast, getSessionDirectory } from "./client.js"
-import { getSettings, primaryContextThreshold, contextBudgetFor } from "./settings.js"
-import { AGENTS } from "./agents.js"
+import {
+  getSettings,
+  primaryContextThreshold,
+  contextBudgetFor,
+  PACKAGE_WARN_SHARE,
+  PACKAGE_REFUSE_SHARE,
+} from "./settings.js"
+import { AGENTS, NESTED_SPAWN_TARGET, mayDelegate } from "./agents.js"
 import { projectAgentNames, spawnableAgentNames } from "./config.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
@@ -61,10 +68,12 @@ import {
   ABORT_NOTICE,
   ORCHESTRATION_GUIDE,
   SUBAGENT_GUIDE_CORE,
+  SUBAGENT_DELEGATION_GUIDE,
+  SUBAGENT_NO_SPAWN_GUIDE,
   SUBAGENT_OUTLINE_GUIDE,
 } from "./prompts.js"
 import { loadCustomPrompt, applyCustomPrompt } from "./promptsfile.js"
-import { tokens as fmtTokens, ageSeconds, estimateTokens } from "./format.js"
+import { tokens as fmtTokens, ageSeconds, estimateTokens, percent } from "./format.js"
 import { postParentNotice, teardownSubagent } from "./teardown.js"
 import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
 import { completionNotice, errorNotice, denialLoopNotice } from "./notices.js"
@@ -196,6 +205,15 @@ export function createTransformSystem(client) {
       // it re-reads the settings file, whose content moves on a user edit and
       // not otherwise.
       const projectMd = projectMdBlock(sessionDir) || ""
+      // Whether THIS subagent gets the delegation guide and the reduced limits
+      // block that goes with it. Two conditions, both necessary: the role must
+      // allow `spawn`, and nesting must not be switched off installation-wide.
+      // With `maxNestedSpawns = 0` every nested spawn is refused before a
+      // session is created, so a role that may delegate still cannot — it is
+      // told it does not delegate, which is what is true of it, and neither
+      // block is paid for.
+      const delegates =
+        isSubagent && mayDelegate(entry.agent) && getSettings().maxNestedSpawns > 0
       let limits = ""
       if (!isSubagent) {
         // Primary (non-subagent) turn. Measurement only — record the current
@@ -270,6 +288,14 @@ export function createTransformSystem(client) {
             ...(await spawnableAgentNames(client)),
           ],
         })
+      } else if (delegates) {
+        // A delegating subagent gets its own, much smaller block: it has to
+        // size a researcher package and it has never seen the orchestrator's.
+        limits = formatDelegationLimitsNotice(entry.agent, sessionID, {
+          projectMd,
+          agentsMd: slices.agentsMd || "",
+          snapshot: projectContext(sessionDir),
+        })
       }
 
       // User-editable per-agent template: `<sessionDir>/.opencode/agent-intercom/<agent>.md`.
@@ -308,10 +334,17 @@ export function createTransformSystem(client) {
       if (isSubagent) {
         if (!aborted.has(sessionID)) {
           guideParts.push(SUBAGENT_GUIDE_CORE)
+          // Exactly one of the two delegation blocks, always: the spawn rule
+          // is not in CORE because it differs per role, so leaving both out
+          // would leave a subagent with nothing said about spawning at all.
+          guideParts.push(delegates ? SUBAGENT_DELEGATION_GUIDE : SUBAGENT_NO_SPAWN_GUIDE)
           if (!OUTLINE_DISABLED_AGENTS.has(entry.agent)) {
             guideParts.push(SUBAGENT_OUTLINE_GUIDE)
           }
           if (projectMd) guideParts.push(projectMd)
+          // Last, because the delegation block above points at it for the
+          // quota figure and the researcher budget. Empty unless `delegates`.
+          if (limits) guideParts.push(limits)
         }
       } else {
         guideParts.push(ORCHESTRATION_GUIDE)
@@ -656,15 +689,69 @@ function formatLimitsNotice({
   )
 }
 
+// The reduced limits block a DELEGATING subagent is shown, in place of the
+// orchestrator's. It is built only on the primary branch above, so without
+// this a planner sizing a researcher package would be working from numbers it
+// has never seen — its own ceiling, what a researcher costs, and the shares at
+// which the size gate warns and refuses are all invisible to it otherwise.
+//
+// Four things and nothing more (the primary's block also carries maxSubagents,
+// every spawnable type's budget and the hideChatter sentence — none of which a
+// subagent can act on):
+//   - its own context budget, the ceiling its run is enforced against;
+//   - the researcher's budget with the fixed overhead every researcher spawn
+//     pays and the headroom left of it, rendered exactly as the primary's block
+//     renders an entry so the two read as one number;
+//   - the two package shares, which the gate applies to a nested spawn the same
+//     way it applies them to the orchestrator's (packageSizeVerdict sizes
+//     against the TARGET type's budget, whoever the caller is);
+//   - how much of the per-run nested quota is left, counted down live from the
+//     caller's own registry entry.
+function formatDelegationLimitsNotice(agent, sessionID, { projectMd, agentsMd, snapshot }) {
+  const s = getSettings()
+  const own = contextBudgetFor(agent)
+  const target = NESTED_SPAWN_TARGET
+  const budget = contextBudgetFor(target)
+  const quota = nestedQuotaDecision(sessionID, s.maxNestedSpawns)
+  const left = Math.max(0, quota.limit - quota.used)
+  const targetLine =
+    budget <= 0
+      ? `${target} off (no context budget set — the package gate does not size against it)`
+      : (() => {
+          const fixed = fixedOverheadFor(target, { projectMd, agentsMd, snapshot })
+          const headroom = Math.max(0, budget - fixed)
+          return `${target} ${fmtTokens(budget)} (−${fmtTokens(fixed)} fixed → ${fmtTokens(headroom)})`
+        })()
+  return (
+    "\n\n---\n📐 agent-intercom: limits on the work you delegate.\n" +
+    `Your own context budget: ${own > 0 ? fmtTokens(own) : "off"} — the ceiling this whole run ` +
+    "is measured against, the researcher's returned text included.\n" +
+    `Context budget of what you may spawn: ${targetLine}.\n` +
+    "The second number is the fixed overhead every researcher spawn carries before your own " +
+    "words, the third the headroom left of the budget for your prompt and its work.\n" +
+    `Size your spawn prompt against that budget: keep it at or under ${percent(PACKAGE_WARN_SHARE)} ` +
+    `of it; over ${percent(PACKAGE_REFUSE_SHARE)} the spawn is REFUSED and no subagent starts. ` +
+    "Pass bulk material as a file path, never pasted inline.\n" +
+    `Nested spawns left this run: ${left} of ${quota.limit}. The quota does not reset.\n---\n`
+  )
+}
+
 // The tokens a spawn of `agent` carries before the orchestrator's own words:
 // the plugin's subagent guides, the PROJECT.md block, the project snapshot
 // prepended to every spawn prompt, and AGENTS.md for the types that keep it.
 // Estimated with the same chars/4 estimator the spawn gate uses, so the
 // headroom in the limits block and the figure the gate reports are one method.
 // The type's own role prompt is not counted — it comes from opencode and is
-// not resolved on a primary turn.
+// not resolved on a primary turn. Nor is the delegation limits block above:
+// it is built from the caller's live registry entry, which does not exist on
+// the turn this estimate is made, and at ~150 tokens it moves no verdict.
 function fixedOverheadFor(agent, { projectMd, agentsMd, snapshot }) {
   let text = SUBAGENT_GUIDE_CORE + projectMd + snapshot
+  // The delegation block a role is actually given — the two differ by ~250
+  // tokens, which is real against a 40k budget.
+  text += mayDelegate(agent) && getSettings().maxNestedSpawns > 0
+    ? SUBAGENT_DELEGATION_GUIDE
+    : SUBAGENT_NO_SPAWN_GUIDE
   if (!OUTLINE_DISABLED_AGENTS.has(agent)) text += SUBAGENT_OUTLINE_GUIDE
   if (AGENTS_MD_SUBAGENTS.has(agent)) text += agentsMd
   return estimateTokens(text)
@@ -878,10 +965,14 @@ async function onSessionIdle({ sessionID }, client) {
       taskId: e.taskId,
       directory: e.directory,
       packageTokens: e.packageTokens,
+      // Read off the entry inside the critical section, with the rest of what
+      // the notice needs: the entry is removed a few lines above and is gone
+      // by the time the notice is composed.
+      nested: { runs: e.nestedRuns ?? 0, tokens: e.nestedTokens ?? 0 },
     }
   })
   if (!wake) return
-  const { handle, parentID, agent, taskId, directory, packageTokens } = wake
+  const { handle, parentID, agent, taskId, directory, packageTokens, nested } = wake
   try {
     const snapshot = await fetchSnapshot(client, sessionID)
     // Hand the reply to a session blocked on this one, if there is one. This
@@ -916,6 +1007,7 @@ async function onSessionIdle({ sessionID }, client) {
         taskOutcome,
         snapshot.ctxTokens,
         packageTokens,
+        nested,
       ),
     )
     showToast(client, {

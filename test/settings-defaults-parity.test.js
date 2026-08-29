@@ -28,6 +28,7 @@ import {
   DEFAULT_ENDLESS_MODE,
   DEFAULT_HIDE_CHATTER,
   DEFAULT_MAX_CONTEXT,
+  DEFAULT_MAX_NESTED_SPAWNS,
   DEFAULT_MAX_SUBAGENTS,
   contextBudgetFor,
   getSettings,
@@ -40,6 +41,7 @@ import {
   DEFAULT_ENDLESS_MODE as TUI_DEFAULT_ENDLESS_MODE,
   DEFAULT_HIDE_CHATTER as TUI_DEFAULT_HIDE_CHATTER,
   DEFAULT_MAX_CONTEXT as TUI_DEFAULT_MAX_CONTEXT,
+  DEFAULT_MAX_NESTED_SPAWNS as TUI_DEFAULT_MAX_NESTED_SPAWNS,
   DEFAULT_MAX_SUBAGENTS as TUI_DEFAULT_MAX_SUBAGENTS,
   effectiveAgentContext,
   readSettings,
@@ -61,6 +63,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS
 })
 
 // Every setting both sides carry, as each resolves it right now. The plugin
@@ -77,6 +80,7 @@ function bothSides() {
       agentContext: plugin.agentContext,
       endlessMode: plugin.endlessMode,
       endlessContext: plugin.endlessContext,
+      maxNestedSpawns: plugin.maxNestedSpawns,
       hideChatter: plugin.hideChatter,
     },
     tui,
@@ -107,6 +111,7 @@ test("the two modules carry the same built-in defaults", () => {
   assert.equal(DEFAULT_ENDLESS_MODE, TUI_DEFAULT_ENDLESS_MODE)
   assert.equal(DEFAULT_ENDLESS_CONTEXT, TUI_DEFAULT_ENDLESS_CONTEXT)
   assert.equal(DEFAULT_HIDE_CHATTER, TUI_DEFAULT_HIDE_CHATTER)
+  assert.equal(DEFAULT_MAX_NESTED_SPAWNS, TUI_DEFAULT_MAX_NESTED_SPAWNS)
   assert.deepEqual(DEFAULT_AGENT_CONTEXT, TUI_DEFAULT_AGENT_CONTEXT)
 })
 
@@ -119,6 +124,7 @@ test("with neither file nor env both resolve the built-in defaults", () => {
     agentContext: {},
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
+    maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
     hideChatter: DEFAULT_HIDE_CHATTER,
   })
   assert.deepEqual(tui, plugin)
@@ -130,6 +136,7 @@ test("with env alone both resolve the env value", () => {
   process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE = "1"
   process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT = "300000"
   process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER = "1"
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS = "3"
   const [plugin, tui] = bothSides()
   assert.deepEqual(plugin, {
     maxSubagents: 4,
@@ -138,6 +145,7 @@ test("with env alone both resolve the env value", () => {
     agentContext: {},
     endlessMode: true,
     endlessContext: 300000,
+    maxNestedSpawns: 3,
     hideChatter: true,
   })
   assert.deepEqual(tui, plugin)
@@ -149,6 +157,7 @@ test("with file and env both let the file win", () => {
   process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE = "1"
   process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT = "300000"
   process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER = "1"
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS = "3"
   writeFileSync(
     file,
     JSON.stringify({
@@ -156,6 +165,7 @@ test("with file and env both let the file win", () => {
       maxContext: 95000,
       endlessMode: false,
       endlessContext: 120000,
+      maxNestedSpawns: 1,
       hideChatter: false,
     }),
   )
@@ -167,6 +177,7 @@ test("with file and env both let the file win", () => {
     agentContext: {},
     endlessMode: false,
     endlessContext: 120000,
+    maxNestedSpawns: 1,
     hideChatter: false,
   })
   assert.deepEqual(tui, plugin)
@@ -186,6 +197,7 @@ test("both reject the same file values and fall back to env or default", () => {
     agentContext: {},
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
+    maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
     hideChatter: DEFAULT_HIDE_CHATTER,
   })
   assert.deepEqual(tui, plugin)
@@ -194,7 +206,7 @@ test("both reject the same file values and fall back to env or default", () => {
 test("both keep 0 as a value in its own right", () => {
   writeFileSync(
     file,
-    JSON.stringify({ maxSubagents: 0, maxContext: 0, endlessContext: 0 }),
+    JSON.stringify({ maxSubagents: 0, maxContext: 0, endlessContext: 0, maxNestedSpawns: 0 }),
   )
   const [plugin, tui] = bothSides()
   assert.deepEqual(plugin, {
@@ -204,9 +216,32 @@ test("both keep 0 as a value in its own right", () => {
     agentContext: {},
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: 0,
+    maxNestedSpawns: 0,
     hideChatter: DEFAULT_HIDE_CHATTER,
   })
   assert.deepEqual(tui, plugin)
+})
+
+test("both resolve maxNestedSpawns file > env > default and reject the same values", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS = "5"
+  const [envOnly, tuiEnvOnly] = bothSides()
+  assert.equal(envOnly.maxNestedSpawns, 5, "env over the built-in default")
+  assert.deepEqual(tuiEnvOnly, envOnly)
+
+  // Same integer rule as every other limit: a fraction and a negative are both
+  // dropped on both sides, leaving the env resolution standing.
+  for (const bad of [1.5, -1, "2", null]) {
+    writeFileSync(file, JSON.stringify({ maxNestedSpawns: bad }))
+    const [plugin, tui] = bothSides()
+    assert.equal(plugin.maxNestedSpawns, 5, `${bad} must be rejected by both`)
+    assert.deepEqual(tui, plugin)
+  }
+
+  // 0 is a value in its own right on both sides: nesting switched off.
+  writeFileSync(file, JSON.stringify({ maxNestedSpawns: 0 }))
+  const [off, tuiOff] = bothSides()
+  assert.equal(off.maxNestedSpawns, 0)
+  assert.deepEqual(tuiOff, off)
 })
 
 test("both take endlessMode from the file only as a real boolean", () => {

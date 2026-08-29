@@ -42,16 +42,52 @@ export const ORCHESTRATION_GUIDE =
 // Injected into every subagent session so subagents share basic working
 // discipline — without per-project prompt engineering. Targets the failure
 // modes seen with small local models: editing blind and retrying no-op edits.
-// Split into CORE (always) and OUTLINE (only for subagents whose tool gating
-// actually grants them the `outline` tool — see hooks.js injection logic).
+// Split into CORE (always), the delegation block (one of two, picked by whether
+// the role may spawn — see hooks.js injection logic) and OUTLINE (only for
+// subagents whose tool gating actually grants them the `outline` tool).
+//
+// The spawn sentence is NOT in CORE: five roles may delegate and three may not,
+// and a block every subagent shares cannot say both. CORE is what is true of
+// every subagent whatever its permission map says.
 export const SUBAGENT_GUIDE_CORE =
   "\n\n---\n🔧 agent-intercom: subagent discipline.\n" +
   "You are a one-shot subagent — do one focused task, then reply once and return.\n" +
   "Read a file before editing it. Make each tool call once; on error change your approach, don't repeat.\n" +
-  "You cannot spawn agents. If the task needs another agent, name it and what it should do in your final reply — the orchestrator dispatches it; you never spawn.\n" +
   "Final reply: brief plain text (hard-capped at 8000 chars). Reference files by path:line; do not paste file contents back.\n" +
   "If your spawn prompt started with `T<n>:` and you completed the task, put `DONE: T<n>` on the FIRST or LAST non-empty line of your final reply — the wake-hook removes that task from TODO.md for you. If you could not finish, just report plainly without that marker.\n" +
   "Reply to the orchestrator in English. Address the user directly only in the user's language.\n---\n"
+
+// For a subagent whose role denies `spawn` (researcher, designer, gitter). The
+// exact sentence these roles carried while no subagent could spawn at all, so
+// nothing changes for them.
+export const SUBAGENT_NO_SPAWN_GUIDE =
+  "\n\n---\n🚫 agent-intercom: you do not delegate.\n" +
+  "You cannot spawn agents. If the task needs another agent, name it and what it should do in your final reply — the orchestrator dispatches it; you never spawn.\n---\n"
+
+// For a subagent whose role allows `spawn` (planner, coder, debugger, reviewer,
+// documenter). States the one thing delegation is for, the one target it may
+// name, that it is not the normal working mode, and what comes back.
+//
+// The quota FIGURE is not in here: this block is static and the quota is a
+// runtime setting that also counts down within a run. The limits block built
+// per turn in hooks.js carries the number that is left.
+export const SUBAGENT_DELEGATION_GUIDE =
+  "\n\n---\n⤷ agent-intercom: delegating preparatory work.\n" +
+  "You may call `spawn(\"researcher\", prompt)` — a `researcher` and nothing else. It is the one " +
+  "role with web tools, so obtaining and summarising web material is what you delegate: current " +
+  "versions, release notes, an error message nobody in this repo has seen, the substance of a " +
+  "long page. You have no web tools of your own.\n" +
+  "This is NOT your normal working mode. Spawn only where the work would cost more of your own " +
+  "context than its answer is worth. Never for what `read`, `grep` or `outline` can tell you, " +
+  "never to fetch a file from this repo, and never to hand off your own deliverable — the task " +
+  "you were given stays yours to do and to report.\n" +
+  "What you get back: the call BLOCKS until the researcher has finished, and its reply is the " +
+  "result of the call. There is no wake and no second chance to ask — one answer, then that " +
+  "subagent is gone. Delegate a whole question at once.\n" +
+  "The prompt you send carries NO `T<n>:` prefix: the researcher prepares material for your task, " +
+  "it does not take one over. You get a small quota of these per run (the limits block below " +
+  "names what is left); past it, do the rest yourself and name what is still missing in your " +
+  "final reply.\n---\n"
 
 // Outline+read discipline. Injected only for subagents that actually have the
 // `outline` tool enabled (planner, coder, debugger, reviewer, documenter,

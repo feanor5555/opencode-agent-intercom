@@ -299,6 +299,33 @@ export function chargeNestedSpawn(callerSessionID) {
   return entry.nestedSpawns
 }
 
+// Books an ENDED nested run against its parent: one run, plus whatever context
+// that child burned inside its own session.
+//
+// Separate from chargeNestedSpawn, and deliberately not the same counter. That
+// one is the quota and counts spawns ADMITTED, so a model that loops on failing
+// spawns is still bounded. This one counts children whose ending the parent
+// actually received, which is what the completion notice reports: a run that was
+// admitted but never got as far as being prompted cost the orchestrator nothing
+// and must not appear as a run in the bill.
+//
+// `ctxTokens` is what the child's own snapshot reported and is frequently
+// absent (an ending with no result — error, abort, timeout — carries no
+// figure). The run is counted either way; only the token sum is left short, and
+// the notice says so rather than implying a run was free.
+//
+// A no-op for a primary parent: the orchestrator's own children are not nested
+// runs, they are its subagents, and they are already reported one by one.
+export function chargeNestedRun(parentSessionID, ctxTokens) {
+  const entry = entryForSession(parentSessionID)
+  if (!entry) return { runs: 0, tokens: 0 }
+  entry.nestedRuns = (entry.nestedRuns ?? 0) + 1
+  if (Number.isFinite(ctxTokens) && ctxTokens > 0) {
+    entry.nestedTokens = (entry.nestedTokens ?? 0) + ctxTokens
+  }
+  return { runs: entry.nestedRuns, tokens: entry.nestedTokens ?? 0 }
+}
+
 // Atomically reserve a global concurrency slot (synchronous, no awaits
 // between caller's cap-check and this call). Caller MUST pair every reserve()
 // with exactly one releasePendingSpawn() — typically in a `finally` so an
@@ -1079,6 +1106,16 @@ function createEntry(sessionID, agent, prompt, parentID, taskId, directory, pack
     // because the entry lives exactly as long as the one-shot run does: a fresh
     // subagent starts at 0 and nothing ever has to reset it.
     nestedSpawns: 0,
+    // How many nested runs this subagent has taken back a result from, and the
+    // context those children burned inside their own sessions. Summed by
+    // chargeNestedRun when a waited child ends, and reported on this
+    // subagent's own completion notice: the parent's ctxTokens hold the
+    // child's RETURNED text but nothing of what it spent getting there, so
+    // without these two the true cost of a delegation is invisible to the
+    // orchestrator paying for it. Per RUN, like nestedSpawns, and reset by
+    // nothing — the entry lives exactly as long as the one-shot run.
+    nestedRuns: 0,
+    nestedTokens: 0,
     // Latch: set true the instant sweepWatchdog decides this subagent has
     // timed out, BEFORE we call signalAbort / postNotice / removeEntry.
     // Used to keep the watchdog and the normal onSessionIdle path from both

@@ -3,11 +3,12 @@
 // blocking behaviour that makes the child's ending the caller's tool result, and
 // the two pieces of session bookkeeping a nested child needs.
 //
-// No role is granted `spawn` by this step — every role the plugin ships still
-// carries `spawn: "deny"`, so in production the path below is unreachable and
-// nothing behaves differently. The tests that drive the ADMITTED path open it
-// the way a project would: a config override that sets `permission.spawn` on
-// the caller's role, which is rung 1 of checkSpawnPermission's resolution.
+// Step S6 grants `spawn` to five of the eight roles (planner, coder, debugger,
+// reviewer, documenter); researcher, designer and gitter keep `spawn: "deny"`.
+// The tests that drive the ADMITTED path still open it through a config
+// override on the caller's role — rung 1 of checkSpawnPermission's resolution —
+// so both rungs stay pinned and a later change to the plugin's own map cannot
+// silently take these cases with it.
 //
 // Run: node --test test/nested-spawn.test.js
 
@@ -34,6 +35,13 @@ import { createPermissionGuard, resetPermissionGuardCache } from "../src/config.
 import { setSettingsPath, resetSettings, getSettings } from "../src/settings.js"
 import { hasLiveChildren, settleChildWaiter } from "../src/childwait.js"
 import { AGENTS } from "../src/agents.js"
+
+// The two sides of the S6 grant. Held here as well as in test/plugin.test.js
+// because the gate and the permission map are two different things to get
+// wrong: the map says who holds the tool, this file says what the gate does
+// with that.
+const DELEGATING_ROLES = ["planner", "coder", "debugger", "reviewer", "documenter"]
+const NON_DELEGATING_ROLES = ["researcher", "designer", "gitter"]
 
 const PRIMARY = "ses_primary"
 const primaryCtx = { sessionID: PRIMARY, agent: "orchestrator", messageID: "m1" }
@@ -64,10 +72,10 @@ beforeEach(() => {
   resetSettings()
 })
 
-// The config a delegating role would have once S6 drops its `spawn: "deny"`,
-// expressed here as the project override that reaches the same decision. Only
-// the named roles are opened; every other role still resolves through the
-// plugin's own map, which denies.
+// The project override that opens `spawn` on the named roles — rung 1 of
+// checkSpawnPermission. For the five roles S6 grants it is the same decision
+// their own map already reaches; stated explicitly so the case under test is
+// the nested path itself and not which rung admitted the caller.
 function configAllowingSpawn(...roles) {
   const agent = {}
   for (const role of roles) agent[role] = { permission: { spawn: "allow" } }
@@ -156,15 +164,22 @@ function subagentCaller(sessionID, agent) {
 
 // ---- the gate: which caller may nest at all -------------------------------
 
-test("every subagent role the plugin ships is still refused — S5 opens nothing", async () => {
+test("the caller gate splits the eight roles exactly as S6 grants them", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   const roles = Object.entries(AGENTS)
     .filter(([, def]) => def.mode === "subagent")
     .map(([name]) => name)
   assert.equal(roles.length, 8, "expected 8 subagent roles")
+  assert.deepEqual(
+    roles.slice().sort(),
+    [...DELEGATING_ROLES, ...NON_DELEGATING_ROLES].sort(),
+    "a new subagent role must be placed on one side of the grant here",
+  )
 
-  for (const role of roles) {
+  // The three that may not delegate: the caller gate is the first check, so
+  // they never reach the target check and no session is created for them.
+  for (const role of NON_DELEGATING_ROLES) {
     const callerCtx = subagentCaller(`ses_caller_${role}`, role)
     const res = await hooks.tool.spawn.execute({ agent: "researcher", prompt: "look it up" }, callerCtx)
     assert.match(
@@ -173,15 +188,31 @@ test("every subagent role the plugin ships is still refused — S5 opens nothing
       `${role} must keep the refusal it has today`,
     )
   }
-  assert.deepEqual(created, [], "not one session may be created for a denied role")
+
+  // The five that may: they pass the caller gate. Probed with a target the NEXT
+  // check refuses, so the assertion stays on the gate and nothing blocks on a
+  // live child — reaching the target refusal is proof the caller was admitted.
+  for (const role of DELEGATING_ROLES) {
+    const callerCtx = subagentCaller(`ses_caller_${role}`, role)
+    const res = await hooks.tool.spawn.execute({ agent: "coder", prompt: "do it" }, callerCtx)
+    assert.match(
+      res.output,
+      /a subagent may spawn a "researcher" and nothing else/,
+      `${role} must be past the caller gate — it holds spawn`,
+    )
+  }
+
+  assert.deepEqual(created, [], "no refusal on either side may create a session")
 })
 
 test("the refusal text for a denied role is unchanged, word for word", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
+  // designer keeps `spawn: "deny"`, so it gets exactly the sentence every
+  // subagent got while no role could spawn at all.
   const res = await hooks.tool.spawn.execute(
     { agent: "researcher", prompt: "x" },
-    subagentCaller("ses_planner", "planner"),
+    subagentCaller("ses_designer", "designer"),
   )
   assert.equal(
     res.output,
@@ -207,8 +238,11 @@ test("checkSpawnPermission: config decides, then the plugin's map, then deny", a
   const guard = createPermissionGuard(ctx.client)
   // rung 1: the config's explicit deny wins over a role whose own map allows.
   assert.match(await guard.checkSpawnPermission("orchestrator"), /permission\.spawn/)
-  // rung 2: a role the config does not decide for falls to the plugin's map.
-  assert.match(await guard.checkSpawnPermission("planner"), /permission\.spawn/)
+  // rung 2: a role the config does not decide for falls to the plugin's map —
+  // deny for the three that carry `spawn: "deny"`, allow for the five S6 grants
+  // (an absent key resolves to allow).
+  assert.match(await guard.checkSpawnPermission("designer"), /permission\.spawn/)
+  assert.equal(await guard.checkSpawnPermission("planner"), null)
   // rung 3: a role neither side defines.
   assert.match(await guard.checkSpawnPermission("nobody"), /not a role this plugin defines/)
   assert.equal(await guard.checkSpawnPermission(""), "the calling agent could not be identified")

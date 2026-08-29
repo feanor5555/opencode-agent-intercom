@@ -53,7 +53,7 @@ import {
 import { fetchSnapshot, showToast, getSessionDirectory } from "./client.js"
 import { getSettings, primaryContextThreshold, contextBudgetFor } from "./settings.js"
 import { AGENTS } from "./agents.js"
-import { projectAgentNames } from "./config.js"
+import { projectAgentNames, spawnableAgentNames } from "./config.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
 import { log, errMsg } from "./log.js"
@@ -262,7 +262,12 @@ export function createTransformSystem(client) {
           sessionDir,
           projectMd,
           agentsMd: slices.agentsMd || "",
-          projectAgents: await projectAgentNames(client),
+          // The same union the spawn gate accepts (src/tools.js availableAgents),
+          // so no type the orchestrator may spawn is missing its budget here.
+          spawnableAgents: [
+            ...(await projectAgentNames(client)),
+            ...(await spawnableAgentNames(client)),
+          ],
         })
       }
 
@@ -597,9 +602,11 @@ async function notifyParentOfDenialLoop(client, entry) {
 //
 // The context budget is a value per agent type, so the block lists one ceiling
 // per role the orchestrator can spawn — the plugin's own roles minus the
-// primary, plus every agent the project's own config defines, which is the
-// same set `spawn` accepts. "off" means that type's budget is disabled,
-// "unlimited" that the subagent cap is.
+// primary, plus every agent the project's own config defines, plus every agent
+// the server reports as spawnable (non-primary, non-hidden, which is how
+// opencode's own `general` and `explore` appear). That is the same set `spawn`
+// accepts. "off" means that type's budget is disabled, "unlimited" that the
+// subagent cap is.
 //
 // Each entry carries the fixed overhead that type's spawns pay before the
 // orchestrator's own words and the headroom left over, so a package sized
@@ -610,11 +617,16 @@ async function notifyParentOfDenialLoop(client, entry) {
 // tells the orchestrator the user cannot read the notices it receives: the
 // completion notice is then the only copy of a subagent's result and nothing
 // renders it, so the orchestrator is the channel to the user.
-function formatLimitsNotice({ sessionDir, projectMd = "", agentsMd = "", projectAgents = [] } = {}) {
+function formatLimitsNotice({
+  sessionDir,
+  projectMd = "",
+  agentsMd = "",
+  spawnableAgents = [],
+} = {}) {
   const s = getSettings()
   const sub = s.maxSubagents > 0 ? `${s.maxSubagents}` : "unlimited"
   const snapshot = projectContext(sessionDir)
-  const budgets = [...new Set([...Object.keys(AGENTS), ...projectAgents])]
+  const budgets = [...new Set([...Object.keys(AGENTS), ...spawnableAgents])]
     .filter((agent) => agent !== "orchestrator")
     .map((agent) => {
       const budget = contextBudgetFor(agent)

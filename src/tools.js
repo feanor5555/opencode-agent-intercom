@@ -29,7 +29,7 @@ import {
 } from "./registry.js"
 import { projectContext } from "./project.js"
 import { AGENTS } from "./agents.js"
-import { projectAgentNames } from "./config.js"
+import { projectAgentNames, spawnableAgentNames, unspawnableAgentKinds } from "./config.js"
 import {
   getSettings,
   contextBudgetFor,
@@ -173,14 +173,20 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     return fromSession || toolCtx?.directory || factoryDirectory
   }
 
-  // Every agent type a spawn may legally name: the roles the plugin installs
-  // plus the ones the project's own opencode config defines. The config read
-  // is cached at module scope in config.js, so this costs one request per
-  // process. Both halves carry a visible ceiling in the orchestrator's limits
-  // block, which lists the same union.
+  // Every agent type a spawn may legally name: the roles the plugin installs,
+  // the ones the project's own opencode config defines, and the ones the server
+  // itself reports as spawnable — non-primary, non-hidden, which is how
+  // opencode's own `general` and `explore` get in without appearing in
+  // `config.agent`. The project half is kept alongside it because a config
+  // agent declared with opencode's default `mode: "all"` is a legal spawn
+  // target too, and because it still answers when the server list is empty.
+  // Both reads are cached at module scope in config.js, so this costs one
+  // request each per process. Every member carries a visible ceiling in the
+  // orchestrator's limits block, which is built from the same union.
   async function availableAgents() {
     const names = new Set(Object.keys(AGENTS))
     for (const name of await projectAgentNames(client)) names.add(name)
+    for (const name of await spawnableAgentNames(client)) names.add(name)
     return names
   }
 
@@ -224,21 +230,30 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     trackPrimary(toolCtx.sessionID)
     const directory = await dirFor(toolCtx)
 
-    // Agent-type gate. A name neither the plugin nor the project defines would
-    // otherwise be handed to opencode's own agent resolution and run against
+    // Agent-type gate. A name nothing spawnable answers to would otherwise be
+    // handed to opencode's own agent resolution and run against
     // DEFAULT_MAX_CONTEXT — a budget the orchestrator was never shown, since
     // the limits block lists only the types named here. The sizing rule the
     // orchestrator is given would then be applied to a number that is not the
     // one in force, so a typo is refused instead. The refusal names every type
-    // that IS available, so the orchestrator can correct itself in place.
+    // that IS available, so the orchestrator can correct itself in place, and
+    // it states the reason that is true of the name: a primary or hidden agent
+    // the server does resolve is refused for what it is, not as a name the
+    // project does not have.
     const available = await availableAgents()
     if (!available.has(args.agent)) {
-      log("spawn refused: unknown agent type", { agent: args.agent })
+      const kind = (await unspawnableAgentKinds(client)).get(args.agent)
+      const cause = kind
+        ? `"${args.agent}" is one of opencode's ${
+            kind === "primary" ? "primary agents" : "internal hidden agents"
+          }, not a type that can run as a subagent`
+        : `"${args.agent}" is not an agent type this project has`
+      log("spawn refused: agent type not spawnable", { agent: args.agent, kind: kind ?? "unknown" })
       return {
         output:
-          `Spawn refused: "${args.agent}" is not an agent type this project has, so no subagent ` +
-          `was started. Available types: ${[...available].sort().join(", ")}. Re-spawn with one ` +
-          `of them — pick by the deliverable you want back.`,
+          `Spawn refused: ${cause}, so no subagent was started. Available types: ` +
+          `${[...available].sort().join(", ")}. Re-spawn with one of them — pick by the ` +
+          `deliverable you want back.`,
       }
     }
 

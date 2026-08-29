@@ -19,6 +19,8 @@ const RESPECT_TASK_PERMS = process.env.OPENCODE_AGENT_INTERCOM_RESPECT_TASK_PERM
 // avoids re-fetching it once per session.
 let configCache
 let configInflight
+let serverAgentsCache
+let serverAgentsInflight
 
 async function loadConfig(client) {
   if (configCache !== undefined) return configCache
@@ -47,10 +49,71 @@ export async function projectAgentNames(client) {
   return Object.keys(agents).filter((name) => name !== "")
 }
 
-// Test-only: drop the cached config so a fresh ctx-mock is re-read.
+// Every agent the SERVER resolves, whatever its mode. Unlike the config above
+// this sees opencode's own built-ins — `build`, `plan`, `general`, `explore`,
+// `compaction`, `title`, `summary` — which never appear in `config.agent`: the
+// server constructs them before the project config is folded in, and only
+// overlays that config onto them.
+//
+// Fails soft on purpose. No `app` namespace (every unit-test mock client), an
+// older server without the route, or a transport error all yield the empty list
+// rather than a throw, which leaves each caller at the behaviour it had before
+// this reader existed.
+//
+// Cached at module scope like the config above: one request per process.
+async function loadServerAgents(client) {
+  if (serverAgentsCache !== undefined) return serverAgentsCache
+  if (serverAgentsInflight) return serverAgentsInflight
+  serverAgentsInflight = (async () => {
+    try {
+      const agents = unwrap(await client.app.agents())
+      if (!Array.isArray(agents)) return []
+      return agents.filter((a) => a && typeof a.name === "string" && a.name !== "")
+    } catch (err) {
+      log("app.agents failed", errMsg(err))
+      return []
+    }
+  })()
+  serverAgentsCache = await serverAgentsInflight
+  serverAgentsInflight = undefined
+  return serverAgentsCache
+}
+
+// An agent the server resolves is a legal spawn target only if it can actually
+// run as a one-shot subagent. Excluded: `mode: "primary"` (`build`, `plan`) —
+// spawned as a subagent it would carry a primary's tool set, since the plugin's
+// schema strip applies only to its own roles — and `hidden` (`compaction`,
+// `title`, `summary`), opencode's internal agents, which are not delegation
+// targets.
+function isSpawnable(agent) {
+  return agent.mode !== "primary" && agent.hidden !== true
+}
+
+// The server-resolved agent names a spawn may name.
+export async function spawnableAgentNames(client) {
+  return (await loadServerAgents(client)).filter(isSpawnable).map((a) => a.name)
+}
+
+// The server-resolved agent names a spawn may NOT name, each mapped to why:
+// "primary" or "hidden". Lets the refusal state the reason that is true of the
+// name — the project HAS `build`, it just cannot be run as a subagent — instead
+// of reporting it as a name nobody resolves.
+export async function unspawnableAgentKinds(client) {
+  const kinds = new Map()
+  for (const agent of await loadServerAgents(client)) {
+    if (isSpawnable(agent)) continue
+    kinds.set(agent.name, agent.mode === "primary" ? "primary" : "hidden")
+  }
+  return kinds
+}
+
+// Test-only: drop the cached config and server agent list so a fresh ctx-mock
+// is re-read.
 export function resetPermissionGuardCache() {
   configCache = undefined
   configInflight = undefined
+  serverAgentsCache = undefined
+  serverAgentsInflight = undefined
 }
 
 // Creates a guard over the opencode config. The config is fetched once and

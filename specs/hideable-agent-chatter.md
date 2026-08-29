@@ -36,7 +36,7 @@ promptSession are the only two functions in src/ that call session.promptAsync".
 
 | Kind | Call site |
 |---|---|
-| Subagent completion notice (handle, full result, task outcome, spawn-size, free slots) | `src/hooks.js:670-674` → `postParentNotice` (`src/teardown.js:24-35`) |
+| Subagent completion notice (handle, full result, task outcome, run-size, free slots) | `src/hooks.js:847-859` → `postParentNotice` (`src/teardown.js:24-35`) |
 | Error / abort notice | `src/hooks.js:752-761`, text `src/notices.js:110-121` |
 | Watchdog timeout notice | `src/watchdog.js:118-122`, text `src/notices.js:95-103` |
 | Denial-loop notice | `src/hooks.js:444-446`, text `src/notices.js:123-132` |

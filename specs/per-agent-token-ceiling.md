@@ -201,16 +201,28 @@ budget, and `recordPrimaryContext` (`src/hooks.js:170`) is a different setting.
 
 ### 2.6 The `{{limits}}` block
 
-A single `maxContext = X` (`src/hooks.js:466`) is now false. `formatLimitsNotice()`
-lists the ceiling per spawnable type instead, one wrapped line, `0` shown as
-`off`:
+A single `maxContext = X` (`src/hooks.js:466`) is no longer the ceiling.
+`formatLimitsNotice()` (`src/hooks.js:613-644`) lists the budget per spawnable
+type, with each entry carrying the fixed overhead that type's spawns pay
+before the orchestrator's own words and the headroom left over; `0` is shown
+as `off`. The full block:
 
 ```
 📐 agent-intercom: current limits — maxSubagents = 3.
-   Context budget per agent: planner 40k · coder 60k · debugger 60k ·
-   reviewer 40k · documenter 40k · researcher 60k · designer 30k · gitter off.
-   Use the number of the agent you are spawning when applying the right-sized-chunks rule.
+Context budget per agent: planner 40k (−10k fixed → 30k) · coder 60k (−12k
+fixed → 48k) · debugger 60k (−12k fixed → 48k) · reviewer 40k (−10k fixed →
+30k) · documenter 40k (−10k fixed → 30k) · researcher 60k (−12k fixed → 48k)
+· designer 30k (−8k fixed → 22k) · gitter off.
+Per entry: the budget, the fixed overhead every spawn of that type carries
+before your own words (subagent guides, PROJECT.md, the project snapshot the
+plugin prepends, AGENTS.md where that type keeps it), and the headroom left of
+the budget for your prompt text and the subagent's own work.
+Use the budget — the first number of the agent you are spawning — in the
+right-sized-chunks rule of the orchestration protocol above.
 ```
+
+(The `hideChatter` tail — "Subagent results and handoff messages are hidden
+from the user's screen…" — is appended only while that setting is on.)
 
 The list is built from `Object.keys(AGENTS)` minus `orchestrator`
 (`src/agents.js:138-217`) mapped through `contextBudgetFor` — the plugin's own

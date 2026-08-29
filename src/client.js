@@ -150,7 +150,8 @@ export function forgetSessionDirectory(sessionID) {
 // spawned a child of its own has live children like anything else. It is
 // ENFORCED instead — `endLiveChildrenOf` in teardown.js ends a session's live
 // children immediately before every delete on that path, and the abort tool
-// does the same before its own delete.
+// does the same before its own delete. Abort/error paths also wait for the
+// session's own idle event (or their bounded fallback) before deleting.
 export async function deleteSession(client, sessionID) {
   try {
     await client.session.delete({ path: { id: sessionID } })

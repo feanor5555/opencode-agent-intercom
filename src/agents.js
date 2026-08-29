@@ -7,9 +7,17 @@
 // names to `deny`; the runtime guard in hooks.js is the hard enforcement layer
 // on top of it.
 //
-// `installAgents` merges NON-destructively: a project that defines an agent of
-// the same name in its own config keeps its definition — the plugin only fills
-// in roles the project has not defined.
+// `installAgents` merges field-wise and refuses nothing: on a role the project
+// already defines — through `.opencode/agent/<name>.md` or an `opencode.json`
+// entry, both of which opencode folds into `config.agent` before this plugin
+// sees it — the project's value wins for `prompt`, `description`, `model`,
+// `mode`, `hidden`, `color` and `temperature`. `permission` is the one
+// exception: it merges per TOOL KEY, so a project map that names no key at all
+// (opencode materialises an empty one on every markdown agent, which is
+// indistinguishable from an unset one) cannot silently hand a role back the
+// tools this plugin denies it. Every such collision is recorded in the override
+// register (overrides.js) and reported to the user through the primary's system
+// prompt — reported, never refused.
 //
 // Web search: the plugin ships a custom `web_search` tool (see websearch.js)
 // that talks directly to Exa AI's hosted MCP endpoint via raw HTTPS. We do NOT
@@ -21,8 +29,16 @@
 // plugin can't set env vars in time, since opencode reads them before
 // plugins load.
 
+import { statSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
+
 // state.js imports nothing, so this cannot close an import cycle.
 import { resolvedDefaultAgent } from "./state.js"
+// overrides.js imports nothing at all — the register is pure and locating the
+// offending file is this module's job, not the register's.
+import { recordAgentEntryOverride } from "./overrides.js"
+import { log } from "./log.js"
 
 const ORCHESTRATOR_PROMPT = `# Role: Orchestrator
 
@@ -310,16 +326,165 @@ export const SPAWNABLE_ROLES = Object.freeze(
     .map(([name]) => name),
 )
 
+// The fields of a plugin role a project entry can carry a value of its own for,
+// in the order a finding names them. `prompt` and `permission` are the two the
+// plugin has something at stake in; the rest are the user's to own and are
+// reported without a verdict. `model` is in the list although no role sets one:
+// a project that pins a model is overriding what opencode would otherwise
+// resolve for this plugin's role, and the report says so.
+const OVERRIDABLE_FIELDS = [
+  "prompt",
+  "permission",
+  "model",
+  "description",
+  "mode",
+  "hidden",
+  "color",
+  "temperature",
+]
+
+// A project `permission` value the per-key merge can read: an object, and not
+// an array. Anything else (a string, null, a list) names no tool key, so the
+// merge keeps the plugin's map whole and the classifier sees no change — which
+// is also what a re-run of installAgents over its own output must see, since by
+// then the entry carries the merged object.
+function permissionKeys(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  return value
+}
+
+function sameValue(a, b) {
+  if (a === b) return true
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false
+  try {
+    return JSON.stringify(a) === JSON.stringify(b)
+  } catch {
+    return false
+  }
+}
+
+// The markdown file a project agent entry could have come from, or null. Four
+// candidates in opencode's own order — the project's `.opencode/agent/` and its
+// `agents/` spelling, then the same two under the global opencode config dir.
+// Best-effort by construction: an entry written straight into `opencode.json`
+// has no file, and `null` is the honest answer for it. The resolved agent
+// carries no origin field, so this probe is the only way to name the file at
+// all.
+function locateAgentFile(directory, name) {
+  try {
+    const candidates = []
+    if (typeof directory === "string" && directory.length > 0) {
+      candidates.push(
+        join(directory, ".opencode", "agent", `${name}.md`),
+        join(directory, ".opencode", "agents", `${name}.md`),
+      )
+    }
+    const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config")
+    candidates.push(
+      join(configHome, "opencode", "agent", `${name}.md`),
+      join(configHome, "opencode", "agents", `${name}.md`),
+    )
+    for (const candidate of candidates) {
+      try {
+        if (statSync(candidate).isFile()) return candidate
+      } catch {
+        // not there, or not readable — try the next candidate
+      }
+    }
+  } catch {
+    // never let the probe break the config hook
+  }
+  return null
+}
+
+// What a project entry actually displaces on one plugin role, read BEFORE the
+// merge writes the result back.
+//
+// A field counts only when the project entry carries a value that DIFFERS from
+// the plugin's — not merely a key of that name. That is what keeps the detector
+// honest across a second `installAgents` run over its own output: the merged
+// entry carries every field of the plugin role, so an equal value is no
+// collision, while the project's own values are still there and still differ.
+// It is also what keeps the finding's text stable, which the system-prompt block
+// it renders into depends on.
+//
+// `permission` counts when the project's map sets a different value for at
+// least one tool key. `keptDenies` names the keys the plugin denies that the
+// project map did not take away — read off the MERGED map, so it says the same
+// thing on every re-run.
+function classifyCollision(base, projectEntry) {
+  const fields = []
+  const projectPermission = permissionKeys(projectEntry.permission)
+  for (const field of OVERRIDABLE_FIELDS) {
+    if (field === "permission") {
+      if (
+        projectPermission &&
+        Object.keys(projectPermission).some((tool) => !sameValue(projectPermission[tool], base.permission?.[tool]))
+      ) {
+        fields.push(field)
+      }
+      continue
+    }
+    if (!Object.hasOwn(projectEntry, field)) continue
+    if (!sameValue(projectEntry[field], base[field])) fields.push(field)
+  }
+  const merged = { ...base.permission, ...projectPermission }
+  const keptDenies = Object.keys(base.permission ?? {}).filter(
+    (tool) => base.permission[tool] === "deny" && merged[tool] === "deny",
+  )
+  return { fields, keptDenies }
+}
+
+// Records one collision in the override register and logs it. The log is the
+// first of the report's three outlets: it always fires, it costs nothing, and
+// it is what a later diagnosis reads. Only a finding that CHANGED the register
+// is logged — an idempotent re-run of installAgents re-detects the same
+// collision and must not write the line a second time.
+//
+// A finding with no displaced field is no finding: the entry carries what this
+// plugin would have written anyway (the shape a second run over the merged
+// config produces), and nothing of the role was displaced.
+function reportCollision(name, base, projectEntry, directory) {
+  const { fields, keptDenies } = classifyCollision(base, projectEntry)
+  if (fields.length === 0) return
+  const file = locateAgentFile(directory, name)
+  // The generated wording covers the fields; the one thing it cannot say is
+  // what the per-key merge held on to, so that clause is added here — and only
+  // where the project map took something away, since a map that names no key
+  // expressed nothing to report on.
+  const detail =
+    fields.includes("permission") && keptDenies.length
+      ? `a project agent entry replaces ${fields.join(", ")}; this plugin's deny stays in force for ${keptDenies.join(", ")}`
+      : ""
+  if (recordAgentEntryOverride({ kind: "agent-entry", agent: name, fields, file, detail })) {
+    log("override: project agent entry", { agent: name, fields, keptDenies, file })
+  }
+}
+
 // Merges the plugin's roles into a project's resolved config and makes the
-// orchestrator the default primary. Non-destructive field-wise merge: the
-// plugin role is the base, and any top-level key the project already set on the
-// same agent name wins — so a project that only sets `model` keeps the plugin's
-// `prompt`/`permission`, while a project that also sets
-// `prompt` overrides just that. An explicit `default_agent` the project set is
-// respected. `default_agent` is the opencode config key that picks the startup
-// primary (falls back to "build" when unset), and the value that ends up there
-// is captured for defaultAgentName(). Mutates `config` in place.
-export function installAgents(config) {
+// orchestrator the default primary. Field-wise merge: the plugin role is the
+// base, and any top-level key the project already set on the same agent name
+// wins — so a project that only sets `model` keeps the plugin's
+// `prompt`/`permission`, while a project that also sets `prompt` overrides just
+// that.
+//
+// `permission` is the one field that merges per TOOL KEY instead of wholesale:
+// opencode materialises a `permission` object on EVERY markdown agent whether
+// or not the frontmatter names one, so a wholesale overlay reads "the author
+// wrote nothing" as "grant this role everything" and hands a `coder.md` back
+// the web tools this plugin denies it. Per-key merging honours every intent an
+// author can actually express — a `read: allow` line still wins — and discards
+// only the one nobody can express.
+//
+// Every collision is recorded in the override register and logged; nothing is
+// refused, removed or rewritten. `directory` is the project directory the
+// plugin was loaded for and is used only to name the file a finding came from.
+//
+// An explicit `default_agent` the project set is respected. `default_agent` is
+// the opencode config key that picks the startup primary (falls back to "build"
+// when unset), and the value that ends up there is captured for
+// defaultAgentName(). Mutates `config` in place.
+export function installAgents(config, { directory } = {}) {
   if (!config || typeof config !== "object") return
   if (!config.agent || typeof config.agent !== "object") config.agent = {}
   for (const [name, def] of Object.entries(AGENTS)) {
@@ -328,10 +493,24 @@ export function installAgents(config) {
     // permission map and a future per-session tweak would leak across
     // sessions.
     const base = { ...def, permission: def.permission ? { ...def.permission } : undefined }
+    const projectEntry =
+      config.agent[name] && typeof config.agent[name] === "object" && !Array.isArray(config.agent[name])
+        ? config.agent[name]
+        : null
+    // The pre-existing entry IS the collision — opencode folds a markdown agent
+    // and an `opencode.json` entry into `config.agent` before this hook runs.
+    // Costs a handful of property reads and no request.
+    if (projectEntry) reportCollision(name, base, projectEntry, directory)
     // Plugin role as base, overlaid by whatever fields the project already set
-    // (user wins per top-level key). Idempotent: re-running just re-applies the
-    // same merge.
-    config.agent[name] = { ...base, ...config.agent[name] }
+    // (user wins per top-level key), except `permission`, where the plugin's
+    // denies are the base and each tool key the project names wins over them.
+    // Idempotent: re-running just re-applies the same merge.
+    const merged = { ...base, ...projectEntry }
+    const projectPermission = projectEntry ? permissionKeys(projectEntry.permission) : null
+    if (base.permission || projectPermission) {
+      merged.permission = { ...base.permission, ...projectPermission }
+    }
+    config.agent[name] = merged
   }
   if (!config.default_agent) config.default_agent = DEFAULT_AGENT
   // Capture what the primary of this instance is actually called. It is the

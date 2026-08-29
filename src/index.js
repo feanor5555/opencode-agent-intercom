@@ -88,11 +88,14 @@ export default async (ctx) => {
   return {
     // Inject the plugin's agent roles (orchestrator + 8 subagents) into the
     // resolved config, so the orchestration pattern needs no per-project
-    // `.opencode/agents/*.md`. Non-destructive — a project can still override
-    // any role by name.
+    // `.opencode/agents/*.md`. A project can still override any role by name;
+    // what it displaces is recorded in the override register and reported to
+    // the user, and the per-tool-key permission merge is the one field where
+    // the plugin's denies survive an override that named no key. `directory`
+    // only lets a finding name the file it came from.
     config: async (config) => {
       try {
-        installAgents(config)
+        installAgents(config, { directory })
       } catch (err) {
         log("config hook error", err?.message ?? String(err))
       }

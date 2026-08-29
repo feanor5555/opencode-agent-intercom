@@ -61,6 +61,7 @@ import {
   PACKAGE_REFUSE_SHARE,
 } from "./settings.js"
 import { NESTED_SPAWN_TARGET, SPAWNABLE_ROLES, mayDelegate, defaultAgentName } from "./agents.js"
+import { overrideBlock, overrideToastText } from "./overrides.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
 import { log, errMsg } from "./log.js"
@@ -292,6 +293,31 @@ export function createTransformSystem(client) {
         })
       }
 
+      // Outlets two and three of the override report (overrides.js): a toast
+      // once per process and a block in the primary's system prompt naming
+      // every finding and telling the orchestrator to pass it on. Report only —
+      // nothing here refuses anything.
+      //
+      // Primary only. A subagent cannot reach the user, and its own directory's
+      // findings are in this block already: the register is process-wide.
+      //
+      // The block belongs in the STABLE element (and to the custom path, after
+      // the template): its text depends on the finding set alone, so it holds
+      // its bytes across the turns of a session and costs no breakpoint per
+      // turn. The toast is fired from the same place so a user with a TUI
+      // attached sees it at once instead of only in the next answer; showToast
+      // is best-effort and a `serve` instance without a TUI drops it.
+      let overrideNotice = ""
+      if (!isSubagent) {
+        overrideNotice = overrideBlock()
+        if (overrideNotice) {
+          const toast = overrideToastText()
+          if (toast) {
+            showToast(client, { title: "agent-intercom", message: toast, variant: "warning" })
+          }
+        }
+      }
+
       // User-editable per-agent template: `<sessionDir>/.opencode/agent-intercom/<agent>.md`.
       // When present, it REPLACES the auto-assembled prompt wholesale, with
       // `{{placeholder}}` tokens for the runtime parts the user chose to keep.
@@ -319,7 +345,11 @@ export function createTransformSystem(client) {
           abort_notice: "",
         })
         output.system.length = 0
-        output.system.push(result)
+        // The template owns the layout, so the block goes AFTER it rather than
+        // into it: a warning that a project file displaced this plugin's role —
+        // or that the template itself is stale — cannot be inside the very file
+        // it warns about.
+        output.system.push(result + overrideNotice)
         return
       }
 
@@ -344,6 +374,7 @@ export function createTransformSystem(client) {
         guideParts.push(ORCHESTRATION_GUIDE)
         if (projectMd) guideParts.push(projectMd)
         guideParts.push(limits)
+        guideParts.push(overrideNotice)
       }
 
       const stable =

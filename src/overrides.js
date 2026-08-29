@@ -382,12 +382,17 @@ const scannedDirectories = new Set()
 // The scan is eager and once — nine stats at the first primary transform of a
 // directory — for two reasons. Per-request probing would put fs work on the hot
 // path of every LLM call, and the finding set has to be COMPLETE before the
-// first block is rendered: the block lives in the stable system-prompt element
-// and its text must not move between the turns of a session.
+// first block is rendered: the block lives in the stable system-prompt element,
+// and a set that filled in over the first few turns would move that element for
+// no user action at all.
 //
-// The cost of "once" is that a file the user repairs mid-session keeps its
-// finding until the next process — which is the same trade the stable element
-// demands.
+// The claim covers that first scan alone. What keeps the register true after it
+// is `rescanPromptFiles`, called from the primary's `session.idle`: it takes no
+// claim and replaces the directory's finding set through
+// `replacePromptFileFindings`, so a file the user repairs mid-session loses its
+// finding on the next turn instead of on the next process. That is the rule the
+// stable element actually obeys, and the same one `limits` obeys beside it —
+// idempotent within a turn, moved only by a change the user made.
 export function claimPromptFileScan(directory) {
   if (!nonEmptyString(directory) || scannedDirectories.has(directory)) return false
   scannedDirectories.add(directory)

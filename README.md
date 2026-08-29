@@ -364,9 +364,11 @@ Both kinds are reported through three outlets:
   where a toast alone would already be gone.
 - **A block in the orchestrator's stable system prompt**, listing every
   finding with role, displacement, source file and the instruction to
-  pass it on once. The block lives in the cached stable element and its
-  text does not move between turns of a session, so a finding clears
-  only on a restart or on the next opencode process.
+  pass it on once. The block lives in the cached stable element, so its
+  text never moves inside a turn; between turns it moves only where a
+  file on disk changed. The prompt files are re-judged whenever the
+  orchestrator's session goes idle, so a file repaired mid-session loses
+  its finding on the next turn, with no restart.
 
 How to silence a report:
 
@@ -378,16 +380,19 @@ How to silence a report:
   prompt the plugin honours in place of its own. `permission` is the one
   field with a middle course — the report names only the keys the file
   actually took away, so a frontmatter map that names no key produces no
-  permission finding.
+  permission finding. Whichever course you take, this finding stands for
+  the life of the opencode process: opencode folds project agent files
+  into its config once, at instance bootstrap, so the file's effect and
+  the report of it end together, at the next restart.
 - For a stale prompt file: re-render it (`bin/init-prompts.js` writes the
   current contract with the `{{guide}}` placeholder and the contract
   stamp) and overwrite, or paste in the guide text the placeholder would
   have substituted at call time to freeze it deliberately — a file frozen
   that way is clean while its stamp matches the plugin's contract number,
   and is reported again when that number moves past the stamp. Either way
-  the finding clears on the next opencode process — the scan is once
-  per directory per process, so a mid-session edit is visible after a
-  restart only.
+  the finding clears on the turn after the edit: the prompt files are
+  re-judged whenever the orchestrator's session goes idle, so a
+  mid-session repair needs no restart.
 
 Findings are scoped by project directory, so two projects in one
 opencode instance each receive their own block; the per-key `permission`
@@ -647,11 +652,6 @@ removing every "do it yourself" tool from the primary is the enforcement lever.
   A subagent that ran into a problem its prompt did not cover hands the
   decision up via a `Blocked:` wake notice; you handle it, not the live
   subagent. Continue by spawning a fresh one with a clearer prompt.
-- **A repaired prompt file clears its stale-file finding on the next
-  opencode process.** The prompt-file scan runs once per project
-  directory per process, so the block the orchestrator sees cannot move
-  mid-session. A file a user fixes during the session is reported as
-  stale until the next restart.
 - **The prompt contract's text is pinned; the number is still bumped by
   hand.** `PROMPT_CONTRACT` is a hand-edited integer in `prompts.js`, and
   the rendered text of the four elements it covers — the `Blocked:`
@@ -666,7 +666,7 @@ removing every "do it yourself" tool from the primary is the enforcement lever.
   text outside those four elements, and a maintainer who re-pins a real
   contract change without bumping.
 - **Solo-maintainer surface area.** `pw` daemon, `gen` CLI, Exa SSE parser,
-  ctags subprocess, four opencode hooks. 1010 unit tests, no CI against real
+  ctags subprocess, four opencode hooks. 1031 unit tests, no CI against real
   opencode. Bugs are addressed at hobby-project pace.
 
 ## Development

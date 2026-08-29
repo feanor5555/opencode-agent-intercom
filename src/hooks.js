@@ -51,6 +51,7 @@ import {
   nestedQuotaDecision,
   sessionAgentName,
   rememberPrimaryDirectory,
+  primaryDirectoryOf,
   CTX_TTL_MS,
 } from "./registry.js"
 import { fetchSnapshot, showToast, getSessionDirectory } from "./client.js"
@@ -67,7 +68,12 @@ import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
 import { log, errMsg } from "./log.js"
 import { ABORT_NOTICE, guideBlocks } from "./prompts.js"
-import { loadCustomPrompt, applyCustomPrompt, scanPromptFiles } from "./promptsfile.js"
+import {
+  loadCustomPrompt,
+  applyCustomPrompt,
+  scanPromptFiles,
+  rescanPromptFiles,
+} from "./promptsfile.js"
 import { tokens as fmtTokens, ageSeconds, estimateTokens, percent } from "./format.js"
 import { postParentNotice, teardownSubagent, signalSessionIdle } from "./teardown.js"
 import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
@@ -308,7 +314,9 @@ export function createTransformSystem(client) {
       // judged against the current contract. Eager and once per directory —
       // `scanPromptFiles` holds the claim — so the finding set is complete
       // before the block below is rendered for the first time, and so no fs
-      // work lands on the per-request path.
+      // work lands on the per-request path. Every later judgement of these files
+      // happens off this path, on the primary's idle
+      // (`rescanPromptFilesForPrimary`).
       if (primaryScope) scanPromptFiles(primaryScope)
 
       // Outlets two and three of the override report (overrides.js): a toast
@@ -329,9 +337,15 @@ export function createTransformSystem(client) {
       // that carry no directory to a session that has one.
       //
       // The block belongs in the STABLE element (and to the custom path, after
-      // the template): its text depends on the selected finding set alone, so
-      // it holds its bytes across the turns of a session and costs no breakpoint
-      // per turn. The toast is fired from the same place so a user with a TUI
+      // the template): its text depends on the selected finding set alone, so it
+      // holds its bytes for exactly as long as that set does and costs no
+      // breakpoint per turn. Nothing writes that set under a turn already in
+      // flight: the eager scan runs just above, before this call reads it, and
+      // every later judgement runs on the primary's idle. So the block cannot
+      // move inside a turn, and between two turns it moves only where the user
+      // changed a file.
+      //
+      // The toast is fired from the same place so a user with a TUI
       // attached sees it at once instead of only in the next answer; showToast
       // is best-effort and a `serve` instance without a TUI drops it.
       let overrideNotice = ""
@@ -867,6 +881,27 @@ function formatSubagentSnapshot(primaryID) {
 // once per process so we notice during upgrades without spamming the log.
 const unknownEventsSeen = new Set()
 
+// Re-judges the prompt files of the project a primary session belongs to. Runs
+// off the LLM path, on that session's idle, so the finding register can only
+// change BETWEEN turns — the transform keeps doing what it always did, read the
+// register and render it.
+//
+// The gate is the project scope alone. `primaryDirectory` is written by the
+// transform's primary branch and by nothing else (rememberPrimaryDirectory), so
+// a scope here means "a primary whose turn resolved a directory": a subagent
+// idle and a primary still without a directory both fall through before any fs
+// work. The scope is READ, never written — an event carries the instance's own
+// location, not the answer `getSessionDirectory` gave for this session.
+//
+// Nine stats per primary idle, and content re-read only for the files whose
+// mtime moved, because the scan shares the loader's cache. When nothing on disk
+// changed the register is untouched and the block renders byte-identically.
+function rescanPromptFilesForPrimary(sessionID) {
+  const scope = primaryDirectoryOf(sessionID)
+  if (!scope) return
+  rescanPromptFiles(scope)
+}
+
 // Auto-registers subagents spawned via the native `task` tool, keeps status
 // fresh from session lifecycle events, and — the key bit — wakes the primary
 // when a subagent finishes. opencode never re-activates an idle primary on its
@@ -919,6 +954,15 @@ export function createEventHandler(client) {
           // return for every other idle. Detached because a cycle waits for
           // quiesce and then runs a full handoff.
           void maybeRunPendingEndless(client, props?.sessionID)
+          // Detector B stays true within the session: the prompt files are
+          // re-judged between turns, never during one, so the finding block
+          // moves its bytes only where the user actually changed a file.
+          //
+          // Last in the branch and synchronous. It shares no state with the
+          // three calls above, and standing after them means a throw from here
+          // reaches the outer catch only once the wake path and both latches
+          // have had their run.
+          rescanPromptFilesForPrimary(props?.sessionID)
           break
         case "session.error":
           await onSessionError(props, client)

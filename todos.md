@@ -9,4 +9,3 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- A repaired prompt file clears its stale-file finding only on the next opencode process: the prompt-file scan is once per directory per process, so a mid-session edit is reported as stale until the next restart. The trade-off is the stability of the block in the orchestrator's cached system prompt; the cure is either a rescan trigger on edit (loses byte-stability) or a per-file re-evaluation that re-issues the finding instead of patching the block in place.

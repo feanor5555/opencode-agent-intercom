@@ -301,3 +301,22 @@ opencode start.
 Only agents already present in `config.agent` are touched. A choice
 stored for an opencode built-in that the project does not list in its
 `opencode.json` `agent` map therefore reaches only the message hook.
+
+## System-prompt injection and opencode's caching
+
+The plugin's `experimental.chat.system.transform` rewrites the array opencode passes in, then `provider/transform.ts:359-360` and `session/llm/request.ts:100-112` shape how that array reaches the provider.
+
+- opencode joins everything it assembled — `agent.prompt`, `input.system` (env / instructions / MCP / skills), `user.system` — into a single string in `system[0]` before the hook fires (`request.ts:56-78`). The hook is handed a one-element array.
+- `request.ts:56-78` collapses the array only when the plugin APPENDED to an untouched header (`length > 2 && system[0] === header`). The plugin clears the array and pushes two elements (`src/hooks.js:328-333`), so neither condition holds and order and element count survive verbatim.
+- `request.ts:100-112` maps each array element to its own `role: "system"` message. The plugin's `[0]` and `[1]` are two distinct system messages, not one joined blob.
+- `provider/transform.ts:359-360` (`applyCaching`) marks the first two system messages and the last two non-system messages. With two elements in the system array, both carry a breakpoint. Each element is its own cache scope: a hit on `[0]` reuses everything in front of it; a miss on `[1]` does not invalidate `[0]`.
+- `output.system[0]` (stable mass): agent prompt (`slices.role`), AGENTS.md content (`slices.agentsMd`, kept for orchestrator / coder / debugger / reviewer), the role-specific guide strings from `src/prompts.js`, `projectMd`, and — because `parseOpencodeSystem` (`src/hooks.js:441-465`) takes everything from `Instructions from:` to the end of the joined blob — MCP instructions, skills, and `user.system`. The mass is stable across the turns of a session, given no edit to AGENTS.md / PROJECT.md / the role prompt / `~/.config/opencode/agent-intercom.json`.
+- `output.system[1]` (`<env>` block from `src/hooks.js:441-465`, extracted verbatim from opencode's blob). Holds cwd, worktree, platform, git-repo flag, and the only `new Date().toDateString()` in the whole prompt path (`session/system.ts:81`). Element-level breakpoint means a calendar-day rollover or a `cd` costs the ~80 tokens of `<env>`, not the stable mass.
+- Per-turn blocks — abort notice, active-subagent snapshot, over-budget STOP — ride on a synthetic text part appended to the last user message (`src/hooks.js:423`, factory at `src/hooks.js:390`), not in the system prompt. They live past the cached prefix and never invalidate it.
+
+Latent caveats:
+
+- A caller that sets `user.system` on a user message would land that text inside element `[0]` (it is captured into the `Instructions from:`…end span). Nothing in this project sets it; opencode never sets it itself. If a future caller does, element `[0]` invalidates per call.
+- If opencode's marker strings change, `parseOpencodeSystem` returns `{ role: joined, env: "", agentsMd: "" }` (`src/hooks.js:442`): the rewrite degrades to one element with `<env>` embedded at its front. Per-day invalidation, not a corrupted prompt.
+
+Anthropic-style `ttl: 1h` cache marker: not worth pursuing at the providers in use. DeepSeek (`deepseek-v4-flash`), MiniMax M3 native, and xAI Grok 4.6 cache prefixes automatically with no caller breakpoints or TTL. OpenAI GPT-5.6 Luna only supports `ttl: "30m"`. opencode merges plugin-supplied `providerOptions` rather than overwriting them (`provider/transform.ts:401`), so the setting would reach the provider — it simply has no documented effect at these four. The current two-element split with system breakpoints and a trailing-message synthetic part is what gives the cache its hit surface.

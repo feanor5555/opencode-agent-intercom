@@ -12,7 +12,7 @@
 // The role set itself is pinned the same way. The plugin derives it once, from
 // AGENTS in src/agents.js: AGENT_NAMES (src/promptsfile.js) is every installed
 // role, SPAWNABLE_ROLES (src/agents.js) is the spawn gate's closed set. The
-// sidebar carries its own copy in tui/src/settings-file.ts and builds the
+// sidebar carries its own copy in tui/src/agent-roles.ts and builds the
 // prompt-file set, the ceiling cycler and the budget table out of it, so a role
 // added to AGENTS that never reached the sidebar would give the user a spawn
 // gate and a budget line the panel cannot show — and a name the sidebar offered
@@ -50,17 +50,19 @@ import {
 import {
   AGENT_NAMES as TUI_AGENT_NAMES,
   DEFAULT_AGENT_CONTEXT as TUI_DEFAULT_AGENT_CONTEXT,
+  PROMPT_AGENT_FILES,
+  SPAWNABLE_ROLES as TUI_SPAWNABLE_ROLES,
+  spawnableAgentNames,
+} from "../tui/src/agent-roles.ts"
+import {
   DEFAULT_ENDLESS_CONTEXT as TUI_DEFAULT_ENDLESS_CONTEXT,
   DEFAULT_ENDLESS_MODE as TUI_DEFAULT_ENDLESS_MODE,
   DEFAULT_HIDE_CHATTER as TUI_DEFAULT_HIDE_CHATTER,
   DEFAULT_MAX_CONTEXT as TUI_DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_NESTED_SPAWNS as TUI_DEFAULT_MAX_NESTED_SPAWNS,
   DEFAULT_MAX_SUBAGENTS as TUI_DEFAULT_MAX_SUBAGENTS,
-  PROMPT_AGENT_FILES,
-  SPAWNABLE_ROLES as TUI_SPAWNABLE_ROLES,
   effectiveAgentContext,
   readSettings,
-  spawnableAgentNames,
   setSettingsPath as setTuiSettingsPath,
 } from "../tui/src/settings-file.ts"
 

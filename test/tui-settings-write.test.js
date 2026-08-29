@@ -19,8 +19,8 @@ import assert from "node:assert/strict"
 import { chmodSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DEFAULT_AGENT_CONTEXT } from "../tui/src/agent-roles.ts"
 import {
-  DEFAULT_AGENT_CONTEXT,
   DEFAULT_ENDLESS_CONTEXT,
   DEFAULT_ENDLESS_MODE,
   DEFAULT_HIDE_CHATTER,

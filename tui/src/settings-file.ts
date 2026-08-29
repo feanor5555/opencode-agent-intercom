@@ -6,12 +6,13 @@
 // The context budget is a value PER AGENT TYPE, held in the `agentContext` map.
 // There is no single user-facing ceiling: a type with no entry of its own falls
 // back to the flat legacy `maxContext` key, then to the env var, then to the
-// built-in table DEFAULT_AGENT_CONTEXT, then to DEFAULT_MAX_CONTEXT — the order
-// `effectiveAgentContext` implements and the plugin's `contextBudgetFor`
-// mirrors. `0` is a real value at every level and means the budget is disabled
-// for that type. `maxContextSource` says which of file, env and default
-// produced `maxContext`, because a flat value the user set governs every type
-// without an own entry while the built-in default does not.
+// built-in table DEFAULT_AGENT_CONTEXT (agent-roles.ts), then to
+// DEFAULT_MAX_CONTEXT — the order `effectiveAgentContext` implements and the
+// plugin's `contextBudgetFor` mirrors. `0` is a real value at every level and
+// means the budget is disabled for that type. `maxContextSource` says which of
+// file, env and default produced `maxContext`, because a flat value the user
+// set governs every type without an own entry while the built-in default does
+// not.
 //
 // Every write goes through a read-modify-write: the sidebar seeds its signals
 // once at mount, so its copy is stale as soon as the file is edited elsewhere.
@@ -35,6 +36,7 @@
 // leave the file as it is and hand back the state that is on disk, so the panel
 // never shows a limit the plugin will not read.
 
+import { DEFAULT_AGENT_CONTEXT } from "./agent-roles.ts";
 import { createJsonObjectFile } from "./json-object-file.ts";
 
 // The context budget per agent type, in whole tokens. Only the types the user
@@ -68,83 +70,10 @@ export type LimitKey = "maxSubagents" | "endlessContext";
 // from the file rather than stored in it.
 type FileKey = Exclude<keyof Settings, "maxContextSource">;
 
-// Every role the plugin installs, the orchestrator first. This is the TUI's
-// copy of the one authority on the server side — AGENT_NAMES in
-// src/promptsfile.js, itself Object.keys(AGENTS) in src/agents.js — because the
-// TUI is a separate npm package and cannot import the plugin module at runtime.
-// test/settings-defaults-parity.test.js fails on a divergence, so a role added
-// or removed over there cannot leave this list behind. Everything the sidebar
-// knows about roles is derived from here: the prompt-file set, the spawnable
-// set, and the per-type budget table below.
-export const AGENT_NAMES = [
-  "orchestrator",
-  "planner",
-  "coder",
-  "debugger",
-  "reviewer",
-  "documenter",
-  "researcher",
-  "designer",
-  "gitter",
-];
-
-// One prompt template file per installed role, under
-// <project>/.opencode/agent-intercom/. The prompts-reload button touches
-// exactly these.
-export const PROMPT_AGENT_FILES = AGENT_NAMES.map((name) => `${name}.md`);
-
-// The closed set of agent types a spawn may name — the plugin's subagent roles
-// and nothing else. The TUI's copy of SPAWNABLE_ROLES in src/agents.js, which
-// is the spawn gate's whole authority (src/tools.js): a name outside it is
-// refused, so the sidebar offers a context ceiling for no other name. The
-// orchestrator falls out as the one primary role.
-export const SPAWNABLE_ROLES = AGENT_NAMES.filter(
-  (name) => name !== "orchestrator",
-);
-
-// The agent names of an opencode `app.agents()` listing that this plugin can
-// actually spawn, in the order the listing gave them. opencode resolves more
-// than the plugin's roles — its own primaries, its hidden helpers, and every
-// model wrapper a project declares — and none of those is a spawn target, so
-// none of them gets a ceiling row.
-//
-// Membership in SPAWNABLE_ROLES is the only filter, because that set is exactly
-// what the spawn gate accepts (src/tools.js). The `mode` a listing entry carries
-// is not read: a project may override one of the plugin's roles to
-// `mode: "primary"`, and that moves neither the gate nor this list — it is
-// reported through the override register instead. The orchestrator has no
-// ceiling row whatever mode it is reported with, since it is not in the set.
-export function spawnableAgentNames(
-  agents: Array<{ name?: string; mode?: string }>,
-): string[] {
-  const names: string[] = [];
-  for (const agent of agents) {
-    if (!agent || typeof agent.name !== "string") continue;
-    if (!SPAWNABLE_ROLES.includes(agent.name)) continue;
-    names.push(agent.name);
-  }
-  return names;
-}
-
 export const DEFAULT_MAX_SUBAGENTS = 1;
-// The budget for an agent type the table below does not name, and the fallback
-// of the legacy flat key.
+// The budget for an agent type the built-in table DEFAULT_AGENT_CONTEXT
+// (agent-roles.ts) does not name, and the fallback of the legacy flat key.
 export const DEFAULT_MAX_CONTEXT = 40000;
-// The built-in context budget per agent type, in whole tokens. The plugin's own
-// copy is DEFAULT_AGENT_CONTEXT in src/settings.js and
-// test/settings-defaults-parity.test.js fails on a divergence, which also pins
-// its keys to SPAWNABLE_ROLES. No orchestrator entry: the budget governs
-// subagents only.
-export const DEFAULT_AGENT_CONTEXT: AgentContext = {
-  planner: 40000,
-  coder: 60000,
-  debugger: 60000,
-  reviewer: 40000,
-  documenter: 40000,
-  researcher: 60000,
-  designer: 30000,
-  gitter: 30000,
-};
 export const DEFAULT_ENDLESS_MODE = false;
 export const DEFAULT_ENDLESS_CONTEXT = 250000;
 // How many subagents one subagent run may start; 0 switches nesting off. The

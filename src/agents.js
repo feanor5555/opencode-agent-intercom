@@ -319,7 +319,7 @@ export const AGENTS = {
 // The set comes from this module's own AGENTS table, so a project entry that
 // overrides one of these roles' `mode` does not move it: the override is
 // reported, the role stays spawnable, and the sidebar's ceiling list
-// (spawnableAgentNames in tui/src/settings-file.ts) filters on the same set. The
+// (spawnableAgentNames in tui/src/agent-roles.ts) filters on the same set. The
 // gate and that list both read the role name; neither consults the resolved
 // `mode`.
 

@@ -47,13 +47,15 @@ import {
 } from "./abort-arming.ts";
 import {
   AGENT_NAMES,
-  type LimitKey,
   PROMPT_AGENT_FILES,
   SPAWNABLE_ROLES,
+  spawnableAgentNames,
+} from "./agent-roles.ts";
+import {
+  type LimitKey,
   type Settings,
   effectiveAgentContext,
   readSettings,
-  spawnableAgentNames,
   stepAgentContext,
   stepSetting,
   toggleEndlessMode,

@@ -558,6 +558,48 @@ test("every subagent role denies spawn and task in its permission map", () => {
   assert.notEqual(AGENTS.orchestrator.permission?.list, "deny")
 })
 
+// --- web access is concentrated in the researcher ---------------------------
+
+const WEB_TOOLS = ["webfetch", "websearch", "web_search", "forum_search"]
+
+test("only the researcher role keeps the web tools — every other role denies all four", () => {
+  for (const [name, def] of Object.entries(AGENTS)) {
+    if (name === "researcher") continue
+    for (const t of WEB_TOOLS) {
+      assert.equal(
+        def.permission?.[t], "deny",
+        `${name} must deny web tool ${t} — only the researcher searches`,
+      )
+    }
+  }
+  // the researcher is the single web-capable role: no deny entry on any of the four.
+  for (const t of WEB_TOOLS) {
+    assert.notEqual(
+      AGENTS.researcher.permission?.[t], "deny",
+      `researcher must keep web tool ${t}`,
+    )
+  }
+})
+
+test("the denied roles' prompts route a lookup to the researcher instead of searching", () => {
+  // no role but the researcher may name a web tool as something IT calls.
+  for (const [name, def] of Object.entries(AGENTS)) {
+    if (name === "researcher") continue
+    assert.doesNotMatch(
+      def.prompt ?? "", /web_search|forum_search|webfetch/,
+      `${name} prompt must not instruct the role to use a web tool`,
+    )
+  }
+  // the two prompts that used to search now name the researcher route.
+  assert.match(AGENTS.planner.prompt, /versions and their compatibility come from a `researcher`/)
+  assert.match(AGENTS.debugger.prompt, /cryptic error the lookup comes from a `researcher`/)
+  // designer neither searches nor advertises that it can.
+  assert.doesNotMatch(AGENTS.designer.description, /research|web/i)
+  assert.match(AGENTS.designer.prompt, /no web tools/)
+  // the researcher's carve-out: it searches itself and does not hand that on.
+  assert.match(AGENTS.researcher.prompt, /never delegate the searching/)
+})
+
 test("spawn from a subagent session is refused as a tool result and creates no session", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)

@@ -9,5 +9,5 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- Strip the orchestration tools from every spawnable agent, not only from the plugin's own roles. `installAgents` (`src/agents.js:130`) applies the strip over its own roles, so a spawned `general` — or a project agent like `scribe` — still carries `spawn`, `abort` and `list` in its schema and is refused only at runtime by `src/tools.js:200`. Pre-existing, but more reachable since the spawn gate accepts the server's spawnable agents.
+- Rework the roles' permission maps along two rules: a role does not search the web itself but obtains the result through the `researcher` role, and a subagent may spawn a subagent of its own for token-heavy preparation such as summarising documentation. Today `SUBAGENT_NO_DELEGATION` (`src/agents.js:131-133`) denies `spawn`, `task`, `abort` and `list` to every role, while `planner`, `coder`, `debugger`, `documenter` and `designer` all keep the web tools (`src/agents.js:156-204`). The concept is being written to `concepts/role-delegation-and-web-access.md`; it has to settle first whether the wake machinery carries a nested spawn.
 

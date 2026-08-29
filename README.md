@@ -177,8 +177,8 @@ The primary never blocks. You stay in the driver's seat the entire time.
 | `list()` | List active subagents. | Orchestrator |
 | `todos_open()` | List open tasks from `TODO.md` with their stable id (`T5`) and `accept:` criterion. | All agents |
 | `todo_add(title, accept?)` / `todo_edit(id, …)` / `todo_done(id)` | Add / refine / remove a task in `TODO.md`. `todo_done` deletes the completed task — usually the wake-hook does it for you. | The six deliverable roles |
-| `web_search(query, numResults?)` | Anonymous web search via Exa (no key, 150/day; an Exa key lifts the cap). | Subagents |
-| `forum_search(query, keywords?, numResults?)` | Discussion-forum search (Exa + searxng with forum-only engine bangs). Use for lived user experience; `web_search` for docs/releases/official facts. | Subagents (except `gitter`) |
+| `web_search(query, numResults?)` | Anonymous web search via Exa (no key, 150/day; an Exa key lifts the cap). | `researcher` only |
+| `forum_search(query, keywords?, numResults?)` | Discussion-forum search (Exa + searxng with forum-only engine bangs). Use for lived user experience; `web_search` for docs/releases/official facts. | `researcher` only |
 | `outline(path)` | Top-level declarations of a source file via universal-ctags. ~100 languages, ~95 % token savings vs `read`. | Subagents (except `designer`/`gitter`) |
 
 Subagents are one-shot: **spawn → run → reply → destroyed.** The primary is
@@ -247,13 +247,13 @@ one of the same name. Orchestrator is the default primary unless
 | Agent | Role | Notes |
 |---|---|---|
 | `orchestrator` | Primary. Coordinates only. | Restricted to `spawn`/`abort`/`list`. |
-| `planner` | Concept/design docs in `plans/`. | No `bash`. Researches current versions first. |
-| `coder` | Implements code in thin vertical slices. | Bash, edit, build/test. Catch-all. |
-| `debugger` | Diagnoses build/test/runtime errors. | Bash for repro, no `edit`/`write` — fix goes back to `coder`. |
-| `reviewer` | Reviews staged work into `reviews/`, iterates on it. | No `bash`. Convention: no source-code edits. |
-| `documenter` | Writes/iterates user docs in place (README, `docs/`, changelog). | No `bash`. Convention: no source-code edits. |
-| `researcher` | Web research via `web_search` + `forum_search` + `webfetch`. | No `edit`/`write`/`bash`. |
-| `designer` | Generates images via [`gen`](#gen--image-generation-no-api-key), researches visual refs on the web. | No `outline`. Convention: no source-code edits. |
+| `planner` | Concept/design docs in `plans/`. | No `bash`, no web — version facts come from a `researcher`. |
+| `coder` | Implements code in thin vertical slices. | Bash, edit, build/test. No web. Catch-all. |
+| `debugger` | Diagnoses build/test/runtime errors. | Bash for repro, no `edit`/`write`, no web — fix goes back to `coder`. |
+| `reviewer` | Reviews staged work into `reviews/`, iterates on it. | No `bash`, no web. Convention: no source-code edits. |
+| `documenter` | Writes/iterates user docs in place (README, `docs/`, changelog). | No `bash`, no web. Convention: no source-code edits. |
+| `researcher` | Web research via `web_search` + `forum_search` + `webfetch`. | The only role with web access. No `edit`/`write`/`bash`. |
+| `designer` | Generates images via [`gen`](#gen--image-generation-no-api-key). | No `outline`, no web. Convention: no source-code edits. |
 | `gitter` | Repo operations matching project's git style. | No `edit`/`write`/`webfetch`/`web_search`/`forum_search`. |
 
 ## The TUI sidebar (companion plugin)

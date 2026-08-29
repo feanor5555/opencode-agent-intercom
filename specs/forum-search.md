@@ -29,9 +29,12 @@ Model: the forum route in `~/.claude/agents/researcher.md` (lines 52–66).
   trimmed strings kept, everything else dropped, nothing usable left → the built-in set) and
   read by `getForumBangs()` (`:173`). The built-in set is `DEFAULT_FORUM_BANGS`
   (`src/settings.js:55`).
-- Prompt and roles: `RESEARCHER_PROMPT` names both tools (`src/agents.js:96-99`); the
-  orchestrator (`src/agents.js:145`) and gitter (`:213-214`) deny `web_search` and
-  `forum_search` by name; the `researcher` role description names both (`:189`).
+- Prompt and roles: `RESEARCHER_PROMPT` names both tools (`src/agents.js:96-99`); web access is
+  concentrated in the `researcher` role (`src/agents.js:137-145`), and every other role — the
+  orchestrator (`src/agents.js:157`) and every subagent — denies `webfetch`, `websearch`,
+  `web_search` and `forum_search` via the `NO_WEB_ACCESS` constant (`src/agents.js:143-145`),
+  with gitter also naming them explicitly (`src/agents.js:225-226`); the `researcher` role
+  description names both (`:201`).
 - The stated reason for a custom tool rather than an MCP server is prompt size
   (`src/searchcore.js` header, and `src/websearch.js:5-8`): a server-supplied description
   (~1.5 KB) would land in every LLM call's system prompt. §3.1 and §3.2 are measured against
@@ -526,8 +529,8 @@ Depends on: all of the above.
 ## 6. Open, and outside this boundary
 
 - Whether `forum_search` should be offered to roles beyond `researcher` — the planner chooses
-  libraries (`src/agents.js:53`) and would plausibly want it. Left as it falls out: every role
-  except orchestrator and gitter gets it, the same as `web_search`.
+  libraries (`src/agents.js:53`) and would plausibly want it. Left as it falls out: only
+  `researcher` keeps it (and `web_search`), the same as `webfetch` and `websearch`.
 - Ownership of the two things that drift: the bang set and the per-lane thread counts. Both are
   this project's own maintenance. A changed set is recorded in the README's `forumBangs` row
   (`README.md:306`) with what each added engine returns per §2.3's table; a sustained fall in the

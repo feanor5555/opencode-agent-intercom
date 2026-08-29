@@ -51,7 +51,7 @@ const PLANNER_PROMPT = `# Role: Planner (Subagent)
 You write concept and design documents — you implement nothing, no edits in src/, no shell commands.
 The rough project description lives only in PROJECT.md. When asked for it, return what is in PROJECT.md; if PROJECT.md is empty or only the default stub, say so explicitly instead of guessing from the code.
 Plan features as thin vertical slices: each slice runs and is testable on its own, cutting through every layer; one slice per task, no large multi-slice tasks.
-Before any library or framework choice, search current stable versions and compatibility with web_search and use only URLs the search returned.
+Before any library or framework choice, the current stable versions and their compatibility come from a \`researcher\` — you have no web tools and do not search yourself; use only URLs a researcher returned, and where the lookup is missing, name it in your final reply so the orchestrator can order it.
 ${TODO_TOOLS_BLOCK}
 Final reply: one short paragraph naming the path you wrote/updated; when given a task id you completed, put \`DONE: T<n>\` on the first line.`
 
@@ -69,7 +69,7 @@ const DEBUGGER_PROMPT = `# Role: Debugger (Subagent)
 You diagnose errors — find the root cause; you do not fix it and you do not spawn anyone. The orchestrator dispatches a coder for the fix.
 Reproduce the failure yourself → read the full stack trace → form a hypothesis, check it, confirm or discard.
 Separate the surface error from the real cause.
-For cryptic errors search with web_search; for runtime errors in a web page use the pw CLI from bash (\`pw start\`, \`pw goto\`, \`pw screenshot\`, \`pw evaluate\`, \`pw stop\`).
+For a cryptic error the lookup comes from a \`researcher\` — you have no web tools; name what you need looked up in your final reply. For runtime errors in a web page use the pw CLI from bash (\`pw start\`, \`pw goto\`, \`pw screenshot\`, \`pw evaluate\`, \`pw stop\`).
 ${TODO_TOOLS_BLOCK}
 Final reply: first line \`DONE: T<n>\` when you completed the task, then what fails, why (root cause distinct from symptom), where (file:line), and one sentence on the fix direction.`
 
@@ -94,6 +94,7 @@ Final reply: one short paragraph naming the file path and the kind of update (cr
 const RESEARCHER_PROMPT = `# Role: Researcher (Subagent)
 
 You do web research — searches via the \`web_search\` and \`forum_search\` tools, fetches via \`webfetch\`; never curl/wget, never recall URLs from memory.
+You are the only role with web tools: you search and fetch yourself and never delegate the searching.
 For a question about lived experience — whether something works in practice, which settings people actually run, what breaks on them, what others hit before you — call \`forum_search\` FIRST; it replaces the general search for that question and is never a fallback for one that came back empty.
 For documentation, a release, an announcement, a version or an official fact use \`web_search\` — \`forum_search\` would keep exactly those answers out. A question carrying both takes \`forum_search\` first and \`web_search\` after it for the documented part.
 Forum excerpts are triage: pick the threads worth reading and \`webfetch\` them; a project's own documentation outranks a third-party page about that project.
@@ -108,6 +109,7 @@ You generate images from a written brief — UI mockups, icons, hero graphics, i
 Use the \`gen\` CLI: \`gen "<prompt>" --out designs/<descriptive-name>.jpg [--width N --height N --seed N]\` (default 1024x1024; for UI pick 16:9 hero, 9:16 phone, 4:3 tablet, 1:1 icon).
 Good prompts name: what it is, style, content, constraints; the gen prompt itself is English.
 Cap 5 images per task without confirmation; if the first result is clearly off, retry up to 2 times with a refined prompt and a fresh seed.
+You have no web tools: visual references are requested from the orchestrator in your final reply, never fetched yourself.
 ${TODO_TOOLS_BLOCK}
 Final reply: first line \`DONE: T<n>\` when you completed the task, then one bullet per generated file with the seed used for reproducibility.`
 
@@ -132,6 +134,16 @@ const SUBAGENT_NO_DELEGATION = {
   spawn: "deny", task: "deny", abort: "deny", list: "deny",
 }
 
+// Web access is concentrated in the `researcher` role: it is the only role that
+// searches and fetches. Every other role carries all four web tools as `deny` —
+// opencode's built-in `webfetch`/`websearch` and the plugin's own `web_search`/
+// `forum_search` (see websearch.js, forumsearch.js) — so the schema strip hides
+// them and the runtime guard re-denies them. A role that needs web material
+// names it in its final reply; the orchestrator spawns a researcher for it.
+const NO_WEB_ACCESS = {
+  webfetch: "deny", websearch: "deny", web_search: "deny", forum_search: "deny",
+}
+
 // The 9 roles. `permission` maps tools a role must not have to `deny`; everything
 // else stays enabled by default (incl. the intercom tools and any MCP tools). The
 // runtime guard in hooks.js still hard-enforces the primary-only restriction.
@@ -151,37 +163,37 @@ export const AGENTS = {
   },
   planner: {
     description:
-      "Writes concept/design documents. Plans but does not implement. Researches current versions before every concept.",
+      "Writes concept/design documents. Plans but does not implement. Version and compatibility facts come from a researcher.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
     prompt: PLANNER_PROMPT,
   },
   coder: {
     description:
       "Implements code changes in thin vertical slices, runs build/test commands, verifies before reporting back.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS },
     prompt: CODER_PROMPT,
   },
   debugger: {
     description:
       "Diagnoses build/test/runtime errors. Finds the root cause but does not fix it itself.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, edit: "deny", write: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, edit: "deny", write: "deny" },
     prompt: DEBUGGER_PROMPT,
   },
   reviewer: {
     description:
       "Critical developer. Reviews code against best practices, clean code, performance. Writes a review document in reviews/, changes no source code.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
     prompt: REVIEWER_PROMPT,
   },
   documenter: {
     description:
       "Writes user/API documentation (README, usage, changelog). Reads the actual code, invents nothing.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
     prompt: DOCUMENTER_PROMPT,
   },
   researcher: {
@@ -199,9 +211,9 @@ export const AGENTS = {
   },
   designer: {
     description:
-      "Generates images (UI mockups, screen designs, icons, illustrations, hero graphics) from a written brief. Saves files to disk; does not write source code. Can research visual references on the web.",
+      "Generates images (UI mockups, screen designs, icons, illustrations, hero graphics) from a written brief. Saves files to disk; does not write source code.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, websearch: "deny", outline: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, outline: "deny" },
     prompt: DESIGNER_PROMPT,
   },
   gitter: {

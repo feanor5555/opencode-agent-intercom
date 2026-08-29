@@ -274,8 +274,7 @@ list with `todo_add` / `todo_edit` / `todo_done`.
 ## Agent roles
 
 Nine roles injected by the `config` hook — no per-project
-`.opencode/agents/*.md` needed. A project can override any role by defining
-one of the same name. Orchestrator is the default primary unless
+`.opencode/agents/*.md` needed. Orchestrator is the default primary unless
 `default_agent` is explicit.
 
 | Agent | Role | Notes |
@@ -289,6 +288,91 @@ one of the same name. Orchestrator is the default primary unless
 | `researcher` | Web research via `web_search` + `forum_search` + `webfetch`. | The only role with web access. No `edit`/`write`/`bash`. `spawn` denied — names needed lookups in the final reply instead. |
 | `designer` | Generates images via [`gen`](#gen--image-generation-no-api-key). | No `outline`, no web. Convention: no source-code edits. `spawn` denied — requests visual references in the final reply instead. |
 | `gitter` | Repo operations matching project's git style. | No `edit`/`write`/`webfetch`/`web_search`/`forum_search`. `spawn` denied. |
+
+A project can override any role by defining one of the same name — either
+through `.opencode/agent/<name>.md` (a markdown agent file opencode loads
+into `config.agent[name]`) or through an explicit `agent` entry in the
+project's `opencode.json`. Overrides are **reported, not refused**: the
+plugin never drops a project's entry and never refuses a spawn because of
+one. See [Project files that override this plugin](#project-files-that-override-this-plugin)
+for what gets reported and how to silence a report.
+
+The orchestrator is identified through a resolution chain, not through a
+hard-coded `orchestrator.md` lookup: the name recorded from the
+`chat.message` hook, then the `# Role:` header in the system prompt, then
+the `default_agent` the project set. A primary that the project renamed
+(e.g. `default_agent: "build"`) loads `build.md` and stops loading
+`orchestrator.md`. `ORCHESTRATION_GUIDE` still goes in unconditionally,
+because the protocol it carries is a property of the three tools, not of
+the role name.
+
+## Project files that override this plugin
+
+Two kinds of project file can silently displace what this plugin installs:
+
+1. **A markdown agent file or `opencode.json` entry that shares one of the
+   plugin's nine role names** — `prompt`, `permission`, `model`,
+   `description`, `mode`, `hidden` or `color` from that entry overrides
+   the plugin's value of the same field. `prompt`, `model` and
+   `description` are the user's to own, so the plugin records that they
+   were replaced and moves on. `permission` is different: opencode
+   materialises an empty `permission` object on every markdown agent
+   whether or not the author wrote one, so a wholesale overlay reads "the
+   author said nothing" as "grant this role everything" and hands a
+   `coder.md` with no frontmatter the web tools this plugin denies it.
+   For that reason `permission` is the one field that merges **per tool
+   key** — the plugin's denies are the base and each key the project
+   names wins over them. A `read: allow` line still wins; a project map
+   that names no key expresses nothing to overlay. The deny keys the
+   project did not relax are listed in the report as "this plugin's
+   deny stays in force for …".
+2. **A customised prompt file under
+   `.opencode/agent-intercom/<agent>.md`** that predates a change to the
+   plugin's prompt contract. The prompt contract covers the four elements
+   the plugin relies on subagents to carry — the `Blocked:` report, the
+   `DONE: T<n>` marker, the orchestrator's `spawn` protocol, and the
+   delegation block a spawning role needs. The default file
+   `bin/init-prompts.js` writes for each role substitutes the guide
+   blocks at call time through a `{{guide}}` placeholder and carries a
+   numeric contract stamp in its top-of-file comment, so a freshly
+   rendered file cannot go stale on its own.
+
+Both kinds are reported through three outlets:
+
+- **A debug log line at detection** — `override: project agent entry` or
+  `override: stale prompt file`, written to
+  `~/.cache/opencode-agent-intercom/debug.log`. Full finding with the
+  field list and the source file path.
+- **A one-shot warning toast** on the first primary transform of the
+  session — `<N> role(s) overridden by project files, <M> prompt file(s)
+  out of date — see the orchestrator's first answer`. The orchestrator
+  reports the substance in its next answer, where a toast alone would
+  already be gone.
+- **A block in the orchestrator's stable system prompt**, listing every
+  finding with role, displacement, source file and the instruction to
+  pass it on once. The block lives in the cached stable element and its
+  text does not move between turns of a session, so a finding clears
+  only on a restart or on the next opencode process.
+
+How to silence a report:
+
+- For a markdown-agent collision: edit the file so it does not carry the
+  overridden fields (delete `prompt` from the frontmatter to keep the
+  plugin's role prompt; delete `model` to keep the plugin's model pin),
+  or accept the override and leave it.
+- For a stale prompt file: re-render it (`bin/init-prompts.js` writes the
+  current contract with the `{{guide}}` placeholder and the contract
+  stamp) and overwrite, or paste in the guide text the placeholder would
+  have substituted at call time to freeze it deliberately. Either way
+  the finding clears on the next opencode process — the scan is once
+  per directory per process, so a mid-session edit is visible after a
+  restart only.
+
+Findings are scoped by project directory, so two projects in one
+opencode instance each receive their own block; the per-key `permission`
+merge is also applied per instance. A subagent's project directory
+contributes its findings to the orchestrator's block, because the
+register is process-scoped.
 
 ## The TUI sidebar (companion plugin)
 
@@ -542,6 +626,18 @@ removing every "do it yourself" tool from the primary is the enforcement lever.
   A subagent that ran into a problem its prompt did not cover hands the
   decision up via a `Blocked:` wake notice; you handle it, not the live
   subagent. Continue by spawning a fresh one with a clearer prompt.
+- **A repaired prompt file clears its stale-file finding on the next
+  opencode process.** The prompt-file scan runs once per project
+  directory per process, so the block the orchestrator sees cannot move
+  mid-session. A file a user fixes during the session is reported as
+  stale until the next restart.
+- **No automatic bump of the prompt contract when a guide constant
+  changes.** `PROMPT_CONTRACT` is a hand-edited integer in `prompts.js`
+  and the parity test catches a probe going stale, not a contract
+  element being reworded. A change to one of the four elements the
+  contract covers — the `Blocked:` report, the `DONE: T<n>` marker, the
+  orchestrator's `spawn` protocol, or the delegation block — needs the
+  stamp bumped manually for the report to flag every customised file.
 - **Solo-maintainer surface area.** `pw` daemon, `gen` CLI, Exa SSE parser,
   ctags subprocess, four opencode hooks. 86 unit tests, no CI against real
   opencode. Bugs are addressed at hobby-project pace.

@@ -1,6 +1,6 @@
 # Concept: making a silent override visible
 
-Status: proposed, 2026-08-29. Design only — no source file changed by this run.
+Status: implemented, 2026-08-29.
 
 Scope: the `opencode-agent-intercom` plugin (`/home/user/opencode-agent-intercom`),
 opencode 1.18.25. Two defects of one shape, answered together:
@@ -239,8 +239,9 @@ API:
     overrideToastText()                   // one-shot toast body, null when clean or already shown
     resetOverrides()                      // test seam, mirroring src/state.js `resetState`
 
-Findings are keyed `kind + agent` so a repeated detection cannot duplicate a
-line; `installAgents` is documented idempotent (`src/agents.js:323`) and will
+Findings are keyed `kind + directory + agent` so a repeated detection
+cannot duplicate a line and findings from different projects stay independent;
+`installAgents` is documented idempotent (`src/agents.js:323`) and will
 re-report the same collision on every re-run.
 
 ### 2.2 Detector A — collision at the config hook
@@ -253,7 +254,7 @@ the plugin sets against what the project entry carries:
 - `permission` present → record which of the plugin's `deny` keys the project's
   map does not carry (after the merge change of 2.4, these are the keys the
   plugin re-imposes, which is exactly what the report should name).
-- `model`, `description`, `mode`, `hidden`, `color`, `temperature` → recorded as
+- `model`, `description`, `mode`, `hidden`, `color` → recorded as
   "also overridden", one line, no verdict — these are the user's to own.
 
 Cost: a handful of property reads at bootstrap, inside a hook that already runs
@@ -302,9 +303,9 @@ stamp is inside the comment `stripFrontmatterComment` removes
 directory. Cost: nine `stat`s and up to nine reads of ~4 KB, once per process.
 Scanning eagerly rather than lazily per agent is deliberate: it makes the finding
 set complete before the first block is rendered, so the block's text is stable
-for the rest of the session (see 2.5). `loadCustomPrompt`'s existing mtime cache
-(`src/promptsfile.js:97-124`) re-evaluates a file the user edits, so a fix clears
-the finding on the next call.
+for the rest of the session (see 2.5). The cost of "once" is that a file the
+user repairs mid-session keeps its finding until the next process, which is the
+same trade the stable element demands.
 
 ### 2.4 Merge policy — what the plugin concedes and what it keeps
 
@@ -315,7 +316,7 @@ tool key** instead of being replaced wholesale.
     permission: { ...base.permission, ...projectEntry.permission }
 
 Everything else keeps today's rule — the project's value wins for
-`prompt`, `description`, `model`, `mode`, `hidden`, `color`, `temperature`.
+`prompt`, `description`, `model`, `mode`, `hidden` and `color`.
 
 Why permission and nothing else: §1.2 shows the map arrives materialised on
 every markdown agent, so wholesale replacement reads an empty object as "grant

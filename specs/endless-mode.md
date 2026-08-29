@@ -614,8 +614,10 @@ auto? }`) compacts a session in place. §2.1 says why that is not this feature.
   session; whether the new orchestrator's first act should instead be reading those files is a
   prompt question for `ORCHESTRATION_GUIDE` (`src/prompts.js`), not a structural one.
 - The interaction between endless mode and a project that overrides `default_agent`: the
-  handoff hardcodes `ORCHESTRATOR_AGENT_NAME = "orchestrator"` and flags the override as
-  unverified (`src/handoffwiring.js:40-44`). Endless mode inherits that flag unchanged.
+  handoff resolves the new primary's name through `handoffAgentName(client)`
+  (`src/handoffwiring.js:74`), which uses `defaultAgentName()` and confirms any
+  name other than this plugin's own role against the resolved agent list before
+  using it. Endless mode inherits that resolution unchanged.
 
 ## 7. What must be tested
 

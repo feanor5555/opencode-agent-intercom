@@ -231,7 +231,7 @@ function nestedSpawnOutput(outcome, handle, agent) {
   return (
     `${who} ${cause}${why}. You have no result from it. Carry on with what you can do ` +
     `yourself and state plainly in your final reply what is still missing, so the orchestrator ` +
-    `can get it.`
+    `can get it — open that reply with "Blocked:" where the missing material stops the task.`
   )
 }
 
@@ -470,11 +470,13 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
             output: quota.disabled
               ? `Spawn refused: nested spawns are switched off for this installation ` +
                 `(maxNestedSpawns = 0). Do what you can yourself and name in your final reply ` +
-                `what you still need; the orchestrator decides and spawns it.`
+                `what you still need; the orchestrator decides and spawns it. Open that reply ` +
+                `with "Blocked:" where the missing material stops the task.`
               : `Spawn refused: you have already started ${quota.used} of the ${quota.limit} ` +
                 `${NESTED_SPAWN_TARGET} spawns one subagent run gets, and the quota does not ` +
                 `reset. Do the rest of the work yourself and name in your final reply what is ` +
-                `still missing; the orchestrator decides and spawns it.`,
+                `still missing; the orchestrator decides and spawns it. Open that reply with ` +
+                `"Blocked:" where the missing material stops the task.`,
           }
         }
         chargeNestedSpawn(toolCtx.sessionID)
@@ -856,6 +858,9 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
         'Start a subagent non-blocking. Returns a handle ("researcher#1") for `abort`. You stay ' +
         "responsive; you are woken automatically with the subagent's reply when it finishes. " +
         "One-shot: a subagent replies once and is destroyed. For more work, spawn a fresh one. " +
+        "A reply starting with `Blocked:` is a decision handed up to you, not a failure to retry: " +
+        "decide about the problem and whether the task continues, then spawn a fresh subagent " +
+        "carrying that decision instead of re-sending the same prompt. " +
         "Optional first-line prefix `T<n>:` (taken from TODO.md) opts in to wake-hook auto-tick — " +
         "omit for ad-hoc questions and status checks.",
       args: {

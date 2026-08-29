@@ -36,6 +36,7 @@ export const ORCHESTRATION_GUIDE =
   "\n" +
   "After spawn your turn ends — you are woken when the subagent finishes. Spawn independent subagents back-to-back so they run in parallel; a refused spawn means you are at the concurrency cap.\n" +
   "Do NOT verify a subagent's work with another spawn in the same turn — the work is not done yet.\n" +
+  "A reply whose FIRST line starts with `Blocked:` is a decision handed up to you, not a failed run to retry: the subagent hit a problem its prompt did not cover, finished what did not depend on it, and stopped there. Decide what happens about the problem and whether the original task continues; where it continues, spawn a FRESH subagent carrying your decision and the missing facts. Never re-send the same prompt unchanged, and never tell a subagent to work around a blocker it reported.\n" +
   "\n" +
   "A live snapshot of your active subagents is injected below — reference subagents by the handle from that snapshot in abort.\n---\n"
 
@@ -54,7 +55,8 @@ export const SUBAGENT_GUIDE_CORE =
   "You are a one-shot subagent — do one focused task, then reply once and return.\n" +
   "Read a file before editing it. Make each tool call once; on error change your approach, don't repeat.\n" +
   "Final reply: brief plain text (hard-capped at 8000 chars). Reference files by path:line; do not paste file contents back.\n" +
-  "If your spawn prompt started with `T<n>:` and you completed the task, put `DONE: T<n>` on the FIRST or LAST non-empty line of your final reply — the wake-hook removes that task from TODO.md for you. If you could not finish, just report plainly without that marker.\n" +
+  "If your spawn prompt started with `T<n>:` and you completed the task, put `DONE: T<n>` on the FIRST or LAST non-empty line of your final reply — the wake-hook removes that task from TODO.md for you. If you could not finish, leave that marker off and report as blocked, below.\n" +
+  "Blocked: on a problem your prompt does not cover — a blocker, a missing precondition, an ambiguity, a tool that keeps failing, a decision that is not yours to make — stop that step, still finish every part of the task that does not depend on it, and start the FIRST line of your final reply with `Blocked:` naming the problem, what you did complete, and what you need to go on. Do not invent a workaround, do not widen the task, do not drop the step in silence. The orchestrator decides what happens and spawns a fresh subagent if the task continues.\n" +
   "Reply to the orchestrator in English. Address the user directly only in the user's language.\n---\n"
 
 // For a subagent whose role denies `spawn` (researcher, designer, gitter). The
@@ -62,7 +64,7 @@ export const SUBAGENT_GUIDE_CORE =
 // nothing changes for them.
 export const SUBAGENT_NO_SPAWN_GUIDE =
   "\n\n---\n🚫 agent-intercom: you do not delegate.\n" +
-  "You cannot spawn agents. If the task needs another agent, name it and what it should do in your final reply — the orchestrator dispatches it; you never spawn.\n---\n"
+  "You cannot spawn agents. If the task needs another agent, name it and what it should do in your final reply — the orchestrator dispatches it; you never spawn. Where the task cannot go on without that agent, this is a blocker: open the reply with `Blocked:`.\n---\n"
 
 // For a subagent whose role allows `spawn` (planner, coder, debugger, reviewer,
 // documenter). States the one thing delegation is for, the one target it may
@@ -87,7 +89,7 @@ export const SUBAGENT_DELEGATION_GUIDE =
   "The prompt you send carries NO `T<n>:` prefix: the researcher prepares material for your task, " +
   "it does not take one over. You get a small quota of these per run (the limits block below " +
   "names what is left); past it, do the rest yourself and name what is still missing in your " +
-  "final reply.\n---\n"
+  "final reply — opened with `Blocked:` where the missing material stops the task.\n---\n"
 
 // Outline+read discipline. Injected only for subagents that actually have the
 // `outline` tool enabled (planner, coder, debugger, reviewer, documenter,

@@ -186,6 +186,20 @@ Subagents are one-shot: **spawn → run → reply → destroyed.** The primary i
 woken automatically with the full (capped) result on completion. No
 status-poll tool by design — small LLMs would call it in a loop.
 
+When a subagent hits a problem its spawn prompt did not cover — a blocker, a
+missing precondition, an ambiguity, a tool that keeps failing, a decision
+that is not its to make — it stops that step, still finishes every part of
+the task that does not depend on it, and opens its final reply with
+`Blocked:` naming the problem, what it completed, and what it needs to go
+on. The matching wake notice says the subagent "came back BLOCKED and was
+destroyed" and treats the report as a **decision for you**, not a failed
+run to retry: decide what happens about the problem and whether the
+original task continues; where it continues, spawn a FRESH subagent
+carrying that decision. Never re-send the same prompt — the previous one
+is gone — and never tell a subagent to work around a blocker it reported.
+A blocked report carries no `DONE: <id>` marker by design, so the matching
+`TODO.md` entry stays open until you decide.
+
 The delegating subagents (`planner`/`coder`/`debugger`/`reviewer`/`documenter`)
 also carry `spawn`, but it is gated to the single target `researcher` and
 the call **blocks** until that researcher replies: there is no wake, no
@@ -524,7 +538,9 @@ removing every "do it yourself" tool from the primary is the enforcement lever.
 - **Abort is best-effort.** `session.abort` is cooperative; the
   `tool.execute.before` hard-deny is the backstop.
 - **No mid-flight subagent steering** — by design. Subagents are one-shot.
-  Spawn a fresh one with a clearer prompt.
+  A subagent that ran into a problem its prompt did not cover hands the
+  decision up via a `Blocked:` wake notice; you handle it, not the live
+  subagent. Continue by spawning a fresh one with a clearer prompt.
 - **Solo-maintainer surface area.** `pw` daemon, `gen` CLI, Exa SSE parser,
   ctags subprocess, four opencode hooks. 86 unit tests, no CI against real
   opencode. Bugs are addressed at hobby-project pace.

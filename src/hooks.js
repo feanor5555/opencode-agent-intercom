@@ -1140,8 +1140,10 @@ function errorName(error) {
 
 // Marker the subagent is taught to put on the FIRST or LAST non-empty line of
 // its final reply. `DONE: T<n>` — the wake-hook removes the matching task from
-// TODO.md. No blocked state; if the work cannot finish, the subagent just
-// reports plainly and TODO.md stays unchanged.
+// TODO.md. There is no blocked marker HERE: a subagent that could not finish
+// opens its reply with `Blocked:` (prompts.js), which this regex does not
+// match, so TODO.md stays unchanged and the notice (notices.js) hands the
+// decision to the orchestrator.
 const MARKER_RE = /^\s*DONE:\s*(T\d+)\s*$/i
 
 // Parses the marker out of the subagent's final reply and removes the task

@@ -17,12 +17,36 @@ import { tokens as fmtTokens, percent } from "./format.js"
 const RUN_SIZE_SOFT_SHARE = 0.6
 const RUN_SIZE_HARD_SHARE = 0.9
 
-function taskOutcomeLine(outcome) {
+// The marker a subagent puts at the very start of its final reply when it hit
+// a problem its spawn prompt did not cover: it stopped that step, completed
+// what did not depend on it, and handed the decision up. Matched on the first
+// non-empty line so leading blank lines from the model do not hide it. Models
+// may wrap the marker in markdown emphasis or put a list/heading marker first;
+// wrapped forms require the same delimiter on both sides of the word.
+const BLOCKED_MARKER_PATTERN =
+  /^\s*(?:(?:#+|[-*>])\s+)*(?:(\*\*|__|\*|_|`)\s*blocked(?:\s*:\s*\1(?![*_`])|\s*\1(?![*_`])\s*:)|blocked\s*:)/i
+
+export function isBlockedResult(result) {
+  if (typeof result !== "string") return false
+  const firstLine = result.split("\n").find((l) => l.trim().length > 0)
+  return firstLine !== undefined && BLOCKED_MARKER_PATTERN.test(firstLine)
+}
+
+function taskOutcomeLine(outcome, blocked = false) {
   if (!outcome || outcome.kind === "no-task") return ""
   switch (outcome.kind) {
     case "done":
       return `\n📋 TODO.md: ${outcome.id} removed.`
     case "no-marker":
+      // A blocked report carries no `DONE:` marker by design — the task is not
+      // finished. Saying "delegate verification" there would send the
+      // orchestrator past the decision the report is asking it for.
+      if (blocked) {
+        return (
+          "\n📋 TODO.md: the task stays open — a blocked report carries no `DONE: <id>` " +
+          "marker. Nothing was auto-removed."
+        )
+      }
       return (
         "\n⚠️ TODO.md: this subagent had a task id but its reply did NOT put " +
         "`DONE: <id>` on its FIRST or LAST non-empty line. The task was NOT auto-removed. Delegate verification and TODO.md cleanup " +
@@ -52,12 +76,27 @@ export function completionNotice(
   packageTokens,
   nested,
 ) {
+  // A result opening with `Blocked:` is the subagent handing a decision up:
+  // it stopped at a problem its prompt did not cover, did what did not depend
+  // on it, and is gone. The headline says so instead of "has finished", and
+  // the tail line names the decision the orchestrator now owns — otherwise the
+  // report reads like any other completion and gets passed to the user or
+  // re-spawned unchanged.
+  const blocked = isBlockedResult(result)
+  const head = blocked
+    ? `🔔 agent-intercom: your subagent "${handle}" (${agent}) came back BLOCKED and was destroyed.\n`
+    : `🔔 agent-intercom: your subagent "${handle}" (${agent}) has finished and been destroyed.\n`
+  const tail = blocked
+    ? `⚠️ This is a DECISION for you, not a failed run to retry: decide what happens about the ` +
+      `problem and whether the original task continues — where it does, spawn a FRESH subagent ` +
+      `carrying that decision. Do not re-send the same prompt; the one above is gone.`
+    : `Use this to report back to the user. If you need more work in this area, spawn a fresh ` +
+      `subagent — the one above is gone.`
   return (
-    `🔔 agent-intercom: your subagent "${handle}" (${agent}) has finished and been destroyed.\n` +
+    head +
     (result ? `Its result:\n${result}\n` : "It produced no text result.\n") +
-    `Use this to report back to the user. If you need more work in this area, spawn a fresh ` +
-    `subagent — the one above is gone.` +
-    taskOutcomeLine(taskOutcome) +
+    tail +
+    taskOutcomeLine(taskOutcome, blocked) +
     runSizeNotice(agent, ctxTokens, packageTokens) +
     nestedRunsNotice(nested) +
     slotsNoticeAfterFinish(parentID)

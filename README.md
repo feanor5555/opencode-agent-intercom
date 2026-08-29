@@ -335,7 +335,11 @@ Two kinds of project file can silently displace what this plugin installs:
    `bin/init-prompts.js` writes for each role substitutes the guide
    blocks at call time through a `{{guide}}` placeholder and carries a
    numeric contract stamp in its top-of-file comment, so a freshly
-   rendered file cannot go stale on its own.
+   rendered file cannot go stale on its own. A file that carries a stamp
+   is judged by that stamp alone — it is reported once the plugin's
+   contract number moves past it. A file with no stamp, which is every
+   file written before the stamp existed, is judged by whether its text
+   still carries those four elements.
 
 Both kinds are reported through three outlets:
 
@@ -343,11 +347,13 @@ Both kinds are reported through three outlets:
   `override: stale prompt file`, written to
   `~/.cache/opencode-agent-intercom/debug.log`. Full finding with the
   field list and the source file path.
-- **A one-shot warning toast** on the first primary transform of the
-  session — `<N> role(s) overridden by project files, <M> prompt file(s)
-  out of date — see the orchestrator's first answer`. The orchestrator
-  reports the substance in its next answer, where a toast alone would
-  already be gone.
+- **A warning toast, once per project directory per opencode process**,
+  on the first primary transform that has findings to show — `<N> role(s)
+  overridden by project files, <M> prompt file(s) out of date — see the
+  orchestrator's first answer`. Two projects served by one process each
+  get their own toast; a second session in the same project does not
+  repeat it. The orchestrator reports the substance in its next answer,
+  where a toast alone would already be gone.
 - **A block in the orchestrator's stable system prompt**, listing every
   finding with role, displacement, source file and the instruction to
   pass it on once. The block lives in the cached stable element and its
@@ -356,14 +362,21 @@ Both kinds are reported through three outlets:
 
 How to silence a report:
 
-- For a markdown-agent collision: edit the file so it does not carry the
-  overridden fields (delete `prompt` from the frontmatter to keep the
-  plugin's role prompt; delete `model` to keep the plugin's model pin),
-  or accept the override and leave it.
+- For a markdown-agent collision: remove the file, or rename the agent so
+  it no longer shares one of the plugin's nine role names, or accept the
+  override and leave it. There is no way to keep the file, keep the name
+  and clear the report for `prompt`: a markdown agent's prompt is the file
+  **body**, not a frontmatter key, and an empty body still resolves to a
+  prompt the plugin honours in place of its own. `permission` is the one
+  field with a middle course — the report names only the keys the file
+  actually took away, so a frontmatter map that names no key produces no
+  permission finding.
 - For a stale prompt file: re-render it (`bin/init-prompts.js` writes the
   current contract with the `{{guide}}` placeholder and the contract
   stamp) and overwrite, or paste in the guide text the placeholder would
-  have substituted at call time to freeze it deliberately. Either way
+  have substituted at call time to freeze it deliberately — a file frozen
+  that way is clean while its stamp matches the plugin's contract number,
+  and is reported again when that number moves past the stamp. Either way
   the finding clears on the next opencode process — the scan is once
   per directory per process, so a mid-session edit is visible after a
   restart only.

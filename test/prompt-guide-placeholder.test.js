@@ -39,6 +39,7 @@ import { resetOverrides, CONTRACT_STAMP_KEY } from "../src/overrides.js"
 import {
   AGENT_NAMES,
   renderDefaultsFile,
+  renderOpencodeDefaultFile,
   applyCustomPrompt,
   getPromptFilePath,
   resetCache,
@@ -236,4 +237,48 @@ test("a file written before the token existed keeps working, guide text and all"
 test("an unknown token is still left in place — only `guide` was added", () => {
   const rendered = applyCustomPrompt("head {{guide}} {{typo}} tail", { guide: "G" })
   assert.equal(rendered, "head G {{typo}} tail")
+})
+
+// ---- the reference file's account of what the plugin adds -------------------
+
+// The guide constants by name, so the reference file's note can be compared
+// against what `guideBlocks` really assembles instead of against a hand-kept
+// list. `HAS_OUTLINE` in promptsfile.js is derived from OUTLINE_DISABLED_AGENTS
+// and this is what pins the derivation: a role moved into or out of that set
+// changes both sides here, and a note that stops naming a block fails.
+const GUIDE_CONSTANTS = [
+  ["ORCHESTRATION_GUIDE", ORCHESTRATION_GUIDE],
+  ["SUBAGENT_GUIDE_CORE", SUBAGENT_GUIDE_CORE],
+  ["SUBAGENT_DELEGATION_GUIDE", SUBAGENT_DELEGATION_GUIDE],
+  ["SUBAGENT_NO_SPAWN_GUIDE", SUBAGENT_NO_SPAWN_GUIDE],
+  ["SUBAGENT_OUTLINE_GUIDE", SUBAGENT_OUTLINE_GUIDE],
+]
+
+const GUIDE_NOTE = /^ {2}- the agent-intercom guide block \(([^)]+)\) appended by the plugin$/m
+
+test("the opencode-defaults reference names every guide block the role really gets", () => {
+  for (const agent of AGENT_NAMES) {
+    const primary = agent === "orchestrator"
+    const guide = guideBlocks({ primary, agent, delegates: mayDelegate(agent) })
+    const expected = GUIDE_CONSTANTS.filter(([, text]) => guide.includes(text)).map(([name]) => name)
+
+    const note = GUIDE_NOTE.exec(renderOpencodeDefaultFile(agent))
+    assert.ok(note, `${agent}: the reference file must carry the guide-block note`)
+    assert.deepEqual(
+      note[1].split(" + "),
+      expected,
+      `${agent}: the reference file must name the blocks guideBlocks assembles, in order`,
+    )
+  }
+})
+
+test("the reference file names the no-spawn stand-in for exactly the delegating roles", () => {
+  // `delegates` is a runtime answer, not the role's map alone: with nested
+  // spawning switched off a delegating role gets SUBAGENT_NO_SPAWN_GUIDE
+  // instead (hooks.js), and only for those roles is the caveat true.
+  for (const agent of AGENT_NAMES) {
+    const file = renderOpencodeDefaultFile(agent)
+    const hasCaveat = file.includes("stands in for SUBAGENT_DELEGATION_GUIDE")
+    assert.equal(hasCaveat, mayDelegate(agent), `${agent}: caveat iff the role may delegate`)
+  }
 })

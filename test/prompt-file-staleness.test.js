@@ -45,6 +45,7 @@ import {
 import {
   AGENT_NAMES,
   writeDefaultPromptsFiles,
+  renderDefaultsFile,
   scanPromptFiles,
   getPromptFilePath,
   resetCache,
@@ -298,6 +299,62 @@ test("the scan runs once per directory — it is not per-request work", () => {
   assert.equal(claimPromptFileScan(dir), false, "the claim is held")
   assert.equal(claimPromptFileScan(""), false, "an unusable directory claims nothing")
   assert.equal(claimPromptFileScan(newProject()), true, "another directory has its own claim")
+})
+
+// The header of a rendered file tells the user what pasting the guide text in
+// place of `{{guide}}` costs. These two pin that sentence to what
+// `classifyPromptFile` does with the resulting file: the stamp answers for it
+// while the numbers match, and it is reported when the plugin's number moves
+// past the stamp. Nothing reports such a file at the moment of pasting — the
+// header must not promise that, and the wording is asserted with the behaviour.
+function inlinedGuideFile(agent, stamp = PROMPT_CONTRACT) {
+  const guide = guideBlocks({
+    primary: agent === "orchestrator",
+    agent,
+    delegates: mayDelegate(agent),
+  })
+  return renderDefaultsFile(agent)
+    .replace("{{guide}}", guide)
+    .replace(`${CONTRACT_STAMP_KEY}: ${PROMPT_CONTRACT}`, `${CONTRACT_STAMP_KEY}: ${stamp}`)
+}
+
+test("the header's account of pasting the guide in is what the stamp rule does", () => {
+  const header = renderDefaultsFile("coder")
+  assert.match(
+    header,
+    /reports it as out of date once its own contract number\s+moves\s+past the agent-intercom-contract stamp/,
+    "the header claims the stamp rule, not a report at the moment of pasting",
+  )
+
+  // Pasted in today: the stamp still matches, so the file is not reported.
+  const current = newProject()
+  writePromptFile(current, "coder", inlinedGuideFile("coder"))
+  scanPromptFiles(current)
+  assert.deepEqual(overrideFindings(current), [], "a stamp that matches answers for the file")
+
+  // The plugin's contract has since moved past the stamp the file froze at.
+  const moved = newProject()
+  const file = writePromptFile(moved, "coder", inlinedGuideFile("coder", PROMPT_CONTRACT - 1))
+  scanPromptFiles(moved)
+  const findings = overrideFindings(moved)
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].file, file)
+  assert.deepEqual([...findings[0].missing], ["contract-stamp"])
+  assert.match(findings[0].detail, new RegExp(`current contract is ${PROMPT_CONTRACT}`))
+})
+
+test("a stamped file is judged by its stamp alone, whatever its text lost", () => {
+  // The other half of the same rule: a current stamp is the author's word that
+  // they saw this contract, so the probes are not run over their file. The
+  // README says this in the same words.
+  const dir = newProject()
+  writePromptFile(
+    dir,
+    "coder",
+    `<!--\n ${CONTRACT_STAMP_KEY}: ${PROMPT_CONTRACT}\n-->\n\na prompt of my own, no contract element in it\n`,
+  )
+  scanPromptFiles(dir)
+  assert.deepEqual(overrideFindings(dir), [])
 })
 
 test("a directory with no prompt files at all produces no finding", () => {

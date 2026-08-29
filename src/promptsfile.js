@@ -33,7 +33,9 @@
 // substituted at call time from the constants in prompts.js, so a change to the
 // contract reaches a file that carries the token. A file with the guide text
 // inlined instead — every file written before this token existed — freezes the
-// contract it was rendered from, which is what `scanPromptFiles` below reports.
+// contract it was rendered from, which is what `scanPromptFiles` below reports:
+// by the contract probes where the file carries no stamp, and by the stamp
+// alone where it does, i.e. once the plugin's contract number moves past it.
 //
 // Hot-reload: the loader is mtime-keyed. Editing a file in any editor busts
 // the cache on the next stat(); the companion TUI's "reload" button bumps
@@ -42,8 +44,8 @@
 import { readFileSync, statSync, mkdirSync, writeFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { log, errMsg } from "./log.js"
-import { AGENTS } from "./agents.js"
-import { PROMPT_CONTRACT } from "./prompts.js"
+import { AGENTS, mayDelegate } from "./agents.js"
+import { PROMPT_CONTRACT, OUTLINE_DISABLED_AGENTS } from "./prompts.js"
 import {
   classifyPromptFile,
   claimPromptFileScan,
@@ -62,19 +64,16 @@ export const OPENCODE_DEFAULTS_SUBDIR = "_opencode-defaults"
 // drift out of the template set.
 export const AGENT_NAMES = Object.keys(AGENTS)
 
-// Which subagents the plugin gives the outline-discipline block to (mirrors
-// prompts.js OUTLINE_DISABLED_AGENTS, inverted, minus the orchestrator, which is
-// not a subagent). The active template gets that block through `{{guide}}`; this
-// set is what the read-only opencode-defaults reference file names in its
-// what-the-plugin-adds note.
-const HAS_OUTLINE = new Set([
-  "planner",
-  "coder",
-  "debugger",
-  "reviewer",
-  "documenter",
-  "researcher",
-])
+// Which subagents the plugin gives the outline-discipline block to: derived
+// from prompts.js OUTLINE_DISABLED_AGENTS rather than listed, so a role added
+// there cannot drift out of this set. The orchestrator is excluded because it is
+// not a subagent and gets ORCHESTRATION_GUIDE alone (prompts.js guideBlocks).
+// The active template gets the block through `{{guide}}`; this set is what the
+// read-only opencode-defaults reference file names in its what-the-plugin-adds
+// note.
+const HAS_OUTLINE = new Set(
+  AGENT_NAMES.filter((agent) => agent !== "orchestrator" && !OUTLINE_DISABLED_AGENTS.has(agent)),
+)
 
 // Which agents get AGENTS.md in their default template (mirrors hooks.js
 // AGENTS_MD_SUBAGENTS = {coder, debugger, reviewer} plus orchestrator, which
@@ -253,8 +252,11 @@ export function renderDefaultsFile(agent) {
     ` role has the tool, the reading discipline. It is substituted from the\n` +
     ` plugin's constants on every call, so this file keeps the CURRENT contract\n` +
     ` as the plugin is updated. Pasting that text in place of the token freezes\n` +
-    ` it at today's wording instead, which is the point of doing so — the\n` +
-    ` plugin then reports the file as predating the contract.\n` +
+    ` it at today's wording instead, which is the point of doing so — the file\n` +
+    ` then holds contract ${PROMPT_CONTRACT} whatever the plugin does next, and\n` +
+    ` the plugin reports it as out of date once its own contract number moves\n` +
+    ` past the ${CONTRACT_STAMP_KEY} stamp above. While the two numbers match,\n` +
+    ` the stamp answers for the file and its content is not judged.\n` +
     ` The live subagent snapshot, the over-budget STOP notice and the abort\n` +
     ` notice are not placeholders here: they are delivered as a message on the\n` +
     ` turn they apply to, which keeps this prompt byte-stable and the\n` +
@@ -288,12 +290,28 @@ export function renderOpencodeDefaultFile(agent) {
         " — this role does not benefit from project conventions)",
     )
   }
+  // The blocks prompts.js `guideBlocks` assembles for this role, all of them:
+  // the orchestrator gets ORCHESTRATION_GUIDE alone, every subagent gets the
+  // core plus exactly one of the two spawn blocks plus, unless its outline tool
+  // is gated off, the reading discipline.
+  const guideNames =
+    agent === "orchestrator"
+      ? "ORCHESTRATION_GUIDE"
+      : [
+          "SUBAGENT_GUIDE_CORE",
+          mayDelegate(agent) ? "SUBAGENT_DELEGATION_GUIDE" : "SUBAGENT_NO_SPAWN_GUIDE",
+          ...(HAS_OUTLINE.has(agent) ? ["SUBAGENT_OUTLINE_GUIDE"] : []),
+        ].join(" + ")
   const addNotes = [
-    `  - the agent-intercom guide block (${agent === "orchestrator" ? "ORCHESTRATION_GUIDE" : "SUBAGENT_GUIDE_CORE"}` +
-      (HAS_OUTLINE.has(agent) ? " + SUBAGENT_OUTLINE_GUIDE" : "") +
-      ") appended by the plugin",
+    `  - the agent-intercom guide block (${guideNames}) appended by the plugin`,
     "  - {{project_md}} block (the full PROJECT.md content, agent-intercom injects)",
   ]
+  if (mayDelegate(agent)) {
+    addNotes.push(
+      "  - SUBAGENT_NO_SPAWN_GUIDE stands in for SUBAGENT_DELEGATION_GUIDE" +
+        " while nested spawning is switched off (maxNestedSpawns = 0)",
+    )
+  }
   if (agent === "orchestrator") {
     addNotes.push("  - the {{limits}} block (orchestrator only)")
   }

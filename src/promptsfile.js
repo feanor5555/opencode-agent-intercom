@@ -50,6 +50,9 @@ import {
   classifyPromptFile,
   claimPromptFileScan,
   recordPromptFileOverride,
+  replacePromptFileFindings,
+  overrideFindings,
+  KIND_PROMPT_FILE,
   CONTRACT_STAMP_KEY,
 } from "./overrides.js"
 
@@ -101,7 +104,12 @@ export function getOpencodeDefaultFilePath(directory, agent) {
   return join(getOpencodeDefaultsDir(directory), `${agent}.md`)
 }
 
-// filePath -> { mtimeMs, content } | { mtimeMs: -1, content: null }
+// filePath -> { mtimeMs, content } | { mtimeMs: -1, content: null, unreadable }
+//
+// `unreadable` is set on the failure entries alone and separates the two ways
+// `loadCustomPrompt` answers null: the file is not there (false), or it is there
+// and could not be read (true). Both are "no prompt text" to the loader's
+// callers; only the scan needs them apart.
 const cache = new Map()
 
 // Load (with mtime cache) and return the raw file contents, or null when the
@@ -116,7 +124,7 @@ export function loadCustomPrompt(directory, agent) {
     if (err && err.code !== "ENOENT") {
       log("promptsfile stat failed", { filePath, err: errMsg(err) })
     }
-    cache.set(filePath, { mtimeMs: -1, content: null })
+    cache.set(filePath, { mtimeMs: -1, content: null, unreadable: err?.code !== "ENOENT" })
     return null
   }
   const entry = cache.get(filePath)
@@ -126,7 +134,7 @@ export function loadCustomPrompt(directory, agent) {
     raw = readFileSync(filePath, "utf8")
   } catch (err) {
     log("promptsfile read failed", { filePath, err: errMsg(err) })
-    cache.set(filePath, { mtimeMs: -1, content: null })
+    cache.set(filePath, { mtimeMs: -1, content: null, unreadable: true })
     return null
   }
   cache.set(filePath, { mtimeMs: stat.mtimeMs, content: raw })
@@ -172,32 +180,106 @@ export function applyCustomPrompt(template, vars) {
 // debug log here, the toast and the primary's system-prompt block in hooks.js.
 // Report only: nothing is refused and no file is touched.
 //
-// Eager and once per directory, at the first primary system transform. The claim
-// is held by the register so the scan cannot become per-request work, and so the
-// finding set is complete before the first block is rendered.
+// One classifier, two entry points over it: `scanPromptFiles` is the eager first
+// scan at the primary's first system transform, `rescanPromptFiles` re-judges a
+// directory between turns. Neither runs on the LLM path more than once.
 //
 // Reads through `loadCustomPrompt`, so the scan shares the loader's mtime cache
 // and costs one stat per role on a directory whose files are already loaded.
-export function scanPromptFiles(directory) {
-  if (!claimPromptFileScan(directory)) return
+
+// Judges every role's prompt file in one directory and returns one result per
+// role, logging nothing about what it found. Three outcomes:
+//
+//   { agent, file, state: "clean" }       — no file, or a file that carries the
+//                                           current contract
+//   { agent, file, state: "stale", missing, detail }
+//   { agent, file, state: "unreadable" }  — the file is there and could not be
+//                                           read, so nothing is known about it
+//
+// The last one exists because "no finding" and "no answer" are not the same
+// thing to a caller that replaces a finding set: a role whose file went
+// unreadable mid-session must keep whatever was found about it, not be read as
+// repaired. A single such file costs the other eight roles nothing.
+function classifyDirectory(directory) {
+  const results = []
   for (const agent of AGENT_NAMES) {
+    const file = getPromptFilePath(directory, agent)
     try {
       const raw = loadCustomPrompt(directory, agent)
-      if (raw === null) continue
+      if (raw === null) {
+        results.push({ agent, file, state: cache.get(file)?.unreadable === true ? "unreadable" : "clean" })
+        continue
+      }
       const { missing, detail } = classifyPromptFile(agent, {
         header: frontmatterComment(raw),
         body: stripFrontmatterComment(raw),
       })
-      if (!missing.length) continue
-      const filePath = getPromptFilePath(directory, agent)
-      if (recordPromptFileOverride({ agent, missing, detail, file: filePath, directory })) {
-        log("override: stale prompt file", { agent, missing, file: filePath, directory })
-      }
+      results.push(missing.length ? { agent, file, state: "stale", missing, detail } : { agent, file, state: "clean" })
     } catch (err) {
-      // A single unreadable file must not cost the other eight their scan.
       log("promptsfile scan failed", { directory, agent, err: errMsg(err) })
+      results.push({ agent, file, state: "unreadable" })
     }
   }
+  return results
+}
+
+// The eager first scan, once per directory per process. The claim is held by the
+// register so the scan cannot become per-request work, and so the finding set is
+// complete before the first block is rendered. Adds findings only — it has no
+// prior set of its own to replace.
+export function scanPromptFiles(directory) {
+  if (!claimPromptFileScan(directory)) return
+  for (const result of classifyDirectory(directory)) {
+    if (result.state !== "stale") continue
+    const { agent, file, missing, detail } = result
+    if (recordPromptFileOverride({ agent, missing, detail, file, directory })) {
+      log("override: stale prompt file", { agent, missing, file, directory })
+    }
+  }
+}
+
+// Re-judges a directory and makes the result the whole truth about its prompt
+// files: a file the user repaired loses its finding, a file newly broken gains
+// one. No claim — the caller decides when this may run, and the caller is the
+// primary's `session.idle`, so the register changes between turns and never
+// during one.
+//
+// A role whose file could not be read keeps the finding it already carries: the
+// classification did not find it clean, it found nothing at all.
+//
+// Returns whether the finding set changed, so the caller can log or stay silent.
+export function rescanPromptFiles(directory) {
+  if (typeof directory !== "string" || directory.length === 0) return false
+  const held = new Map(
+    overrideFindings(directory)
+      .filter((finding) => finding.kind === KIND_PROMPT_FILE)
+      .map((finding) => [finding.agent, finding]),
+  )
+  const next = []
+  for (const result of classifyDirectory(directory)) {
+    if (result.state === "stale") {
+      next.push({
+        agent: result.agent,
+        missing: result.missing,
+        detail: result.detail,
+        file: result.file,
+      })
+      continue
+    }
+    if (result.state !== "unreadable") continue
+    const kept = held.get(result.agent)
+    if (kept) {
+      next.push({
+        agent: kept.agent,
+        missing: [...kept.missing],
+        detail: kept.detail,
+        file: kept.file,
+      })
+    }
+  }
+  const changed = replacePromptFileFindings(directory, next)
+  if (changed) log("override: prompt files rescanned", { directory, stale: next.length })
+  return changed
 }
 
 // ----------------------------------------------------------------------------

@@ -42,7 +42,9 @@ const findings = new Map()
 const toastedScopes = new Set()
 
 const KIND_AGENT_ENTRY = "agent-entry"
-const KIND_PROMPT_FILE = "prompt-file"
+// Exported because the prompt-file producer selects its own findings out of
+// `overrideFindings` before handing a fresh set to `replacePromptFileFindings`.
+export const KIND_PROMPT_FILE = "prompt-file"
 
 // The order findings are rendered in: by kind, then by agent name. Deliberately
 // NOT insertion order — the block goes into the primary's STABLE system prompt
@@ -132,6 +134,40 @@ export function recordAgentEntryOverride(finding) {
 // that owns the finding, and `missing` names the probe ids that did not match.
 export function recordPromptFileOverride(finding) {
   return record(KIND_PROMPT_FILE, finding)
+}
+
+// Replaces this project's prompt-file findings with `next`, the result of one
+// full re-classification of that directory. Findings of other kinds and other
+// directories are untouched. Returns true when the set changed — a finding
+// appeared, changed, or was dropped because its file is now clean.
+//
+// `next` carries entries of the shape `recordPromptFileOverride` takes
+// (`{ agent, missing, detail, file }`); the directory comes from the argument,
+// so an entry cannot write itself into another project's scope. An entry with
+// no usable agent name is skipped, exactly as `record` skips it, and therefore
+// keeps nothing alive either.
+//
+// The difference to `recordPromptFileOverride` is the removal: that one says "I
+// found this", this one says "this is now the whole truth about this
+// directory". The eager first scan keeps using the former, because it has no
+// prior set to replace.
+export function replacePromptFileFindings(directory, next) {
+  const scope = scopeOf(directory)
+  const kept = new Set()
+  let changed = false
+  for (const entry of Array.isArray(next) ? next : []) {
+    const agent = oneLine(entry?.agent)
+    if (!agent) continue
+    kept.add(keyOf(KIND_PROMPT_FILE, scope, agent))
+    if (record(KIND_PROMPT_FILE, { ...entry, agent, directory })) changed = true
+  }
+  for (const [key, finding] of [...findings]) {
+    if (finding.kind !== KIND_PROMPT_FILE || finding.directory !== scope) continue
+    if (kept.has(key)) continue
+    findings.delete(key)
+    changed = true
+  }
+  return changed
 }
 
 // Whether anything has been found in this process, or in one project when a

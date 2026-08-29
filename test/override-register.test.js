@@ -14,6 +14,7 @@ import assert from "node:assert/strict"
 import {
   recordAgentEntryOverride,
   recordPromptFileOverride,
+  replacePromptFileFindings,
   hasFindings,
   overrideFindings,
   overrideBlock,
@@ -253,4 +254,135 @@ test("resetOverrides clears the findings and re-arms the toast", () => {
   assert.equal(overrideBlock(), "")
   recordAgentEntryOverride({ agent: "coder", fields: ["prompt"], file: "/p/c.md" })
   assert.notEqual(overrideToastText(), null, "the one-shot latch is a test seam too")
+})
+
+// ---- the replacing write ---------------------------------------------------
+//
+// `recordPromptFileOverride` only ever adds; a directory re-classified after
+// the user repaired a file needs the other half — a write that says "this is
+// now the whole truth about this project's prompt files", removal included.
+
+test("a replace drops the finding of a file that is no longer stale", () => {
+  recordPromptFileOverride({
+    agent: "coder",
+    missing: ["blocked-contract"],
+    file: "/proj/.opencode/agent-intercom/coder.md",
+    directory: "/proj",
+  })
+  recordPromptFileOverride({
+    agent: "planner",
+    missing: ["done-marker"],
+    file: "/proj/.opencode/agent-intercom/planner.md",
+    directory: "/proj",
+  })
+
+  assert.equal(
+    replacePromptFileFindings("/proj", [
+      {
+        agent: "planner",
+        missing: ["done-marker"],
+        file: "/proj/.opencode/agent-intercom/planner.md",
+      },
+    ]),
+    true,
+    "a dropped finding is a change — the block loses a line",
+  )
+  assert.deepEqual(
+    overrideFindings("/proj").map((f) => f.agent),
+    ["planner"],
+    "the repaired role is gone, the still-stale one stays",
+  )
+  assert.doesNotMatch(overrideBlock("/proj"), /- coder:/)
+})
+
+test("a replace leaves other kinds and other projects alone", () => {
+  recordAgentEntryOverride({
+    agent: "coder",
+    fields: ["prompt"],
+    file: "/proj/.opencode/agent/coder.md",
+    directory: "/proj",
+  })
+  recordPromptFileOverride({
+    agent: "coder",
+    missing: ["blocked-contract"],
+    file: "/proj/.opencode/agent-intercom/coder.md",
+    directory: "/proj",
+  })
+  recordPromptFileOverride({
+    agent: "coder",
+    missing: ["blocked-contract"],
+    file: "/other/.opencode/agent-intercom/coder.md",
+    directory: "/other",
+  })
+
+  assert.equal(replacePromptFileFindings("/proj", []), true)
+  assert.deepEqual(
+    overrideFindings("/proj").map((f) => `${f.kind}/${f.agent}`),
+    ["agent-entry/coder"],
+    "detector A's finding is not this write's business",
+  )
+  assert.deepEqual(
+    overrideFindings("/other").map((f) => `${f.kind}/${f.agent}`),
+    ["prompt-file/coder"],
+    "another project's prompt-file finding survives the replace",
+  )
+})
+
+test("a replace with the identical set reports no change", () => {
+  const entry = {
+    agent: "coder",
+    missing: ["blocked-contract", "delegation-block"],
+    file: "/proj/.opencode/agent-intercom/coder.md",
+  }
+  recordPromptFileOverride({ ...entry, directory: "/proj" })
+  const before = overrideBlock("/proj")
+
+  assert.equal(
+    replacePromptFileFindings("/proj", [{ ...entry }]),
+    false,
+    "nothing moved, so the stable prompt element must not move either",
+  )
+  assert.equal(overrideBlock("/proj"), before, "byte-identical")
+
+  // A changed `missing` list on the same role IS a change.
+  assert.equal(
+    replacePromptFileFindings("/proj", [{ ...entry, missing: ["blocked-contract"] }]),
+    true,
+  )
+  assert.deepEqual([...overrideFindings("/proj")[0].missing], ["blocked-contract"])
+})
+
+test("a replace with an empty array clears the project's prompt-file findings", () => {
+  recordPromptFileOverride({
+    agent: "coder",
+    missing: ["blocked-contract"],
+    file: "/proj/c.md",
+    directory: "/proj",
+  })
+  assert.equal(replacePromptFileFindings("/proj", []), true)
+  assert.deepEqual(overrideFindings("/proj"), [])
+  assert.equal(overrideBlock("/proj"), "", "the last line gone means no block at all")
+  assert.equal(
+    replacePromptFileFindings("/proj", []),
+    false,
+    "clearing an already clear project changes nothing",
+  )
+})
+
+test("a replace writes under the directory it was given, not the entry's", () => {
+  // The scope is the argument's, so a stray `directory` on an entry cannot move
+  // a finding into another project's block.
+  assert.equal(
+    replacePromptFileFindings("/proj", [
+      { agent: "coder", missing: ["done-marker"], file: "/proj/c.md", directory: "/elsewhere" },
+      { agent: "", missing: ["done-marker"], file: "/proj/nameless.md" },
+    ]),
+    true,
+  )
+  assert.deepEqual(
+    overrideFindings("/proj").map((f) => f.agent),
+    ["coder"],
+    "the entry with no usable agent name is skipped, as record() skips it",
+  )
+  assert.deepEqual(overrideFindings("/elsewhere"), [])
 })

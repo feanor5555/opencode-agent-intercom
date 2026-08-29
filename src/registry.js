@@ -778,6 +778,21 @@ export function rememberPrimaryDirectory(sessionID, directory) {
   return primaryDirectory.get(sessionID) ?? null
 }
 
+// The project scope a primary session already holds, or null when no turn of it
+// has resolved a directory yet. A pure read: it never writes.
+//
+// This is what a caller OUTSIDE the transform uses — the event path above all.
+// `rememberPrimaryDirectory` writes the scope on first sight, and the event path
+// has no directory of its own to offer that is worth remembering: an event
+// carries the instance's own location, not the answer `getSessionDirectory` gave
+// for this session, so writing from there would fix a scope the transform never
+// resolved and could bind the session to the wrong project for the rest of its
+// life. Reading is safe; writing belongs to the transform alone.
+export function primaryDirectoryOf(sessionID) {
+  if (typeof sessionID !== "string" || sessionID.length === 0) return null
+  return primaryDirectory.get(sessionID) ?? null
+}
+
 // ----------------------------------------------------------------------------
 // Primary (non-subagent) context-token cache.
 //

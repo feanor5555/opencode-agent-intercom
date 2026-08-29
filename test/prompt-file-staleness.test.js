@@ -24,7 +24,7 @@
 
 import test, { beforeEach, after } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -59,6 +59,7 @@ import {
   writeDefaultPromptsFiles,
   renderDefaultsFile,
   scanPromptFiles,
+  rescanPromptFiles,
   getPromptFilePath,
   resetCache,
 } from "../src/promptsfile.js"
@@ -524,4 +525,123 @@ test("an unreadable file costs the other roles nothing", () => {
     overrideFindings().map((f) => f.agent),
     ["coder"],
   )
+})
+
+// ---- the re-scan -----------------------------------------------------------
+//
+// `scanPromptFiles` only ever adds, and it runs once per directory. A file the
+// user repairs mid-session is therefore still reported by the register until
+// `rescanPromptFiles` re-judges the directory and replaces its finding set.
+
+// Rewrites a prompt file and moves its mtime, which is what the loader keys its
+// cache on. The bump is explicit rather than left to the clock: two writes
+// inside one filesystem timestamp tick would otherwise be one file to the
+// loader.
+function rewritePromptFile(dir, agent, text) {
+  const filePath = writePromptFile(dir, agent, text)
+  const later = new Date(Date.now() + 2000)
+  utimesSync(filePath, later, later)
+  return filePath
+}
+
+test("a rescan drops the finding of a repaired file", () => {
+  const dir = newProject()
+  writePromptFile(dir, "coder", `${roleOf("coder")}\n${preBlockedCore}\n`)
+  scanPromptFiles(dir)
+  assert.deepEqual(overrideFindings(dir).map((f) => f.agent), ["coder"])
+
+  // The repair the plugin itself prescribes: the file re-rendered from the
+  // current contract, carrying today's stamp.
+  rewritePromptFile(dir, "coder", renderDefaultsFile("coder"))
+
+  assert.equal(rescanPromptFiles(dir), true, "the set changed, so the caller may log it")
+  assert.deepEqual(overrideFindings(dir), [], "no restart needed — the finding is gone")
+  assert.equal(overrideBlock(dir), "", "the last line gone means no block at all")
+})
+
+test("a rescan picks up a file broken after the first scan", () => {
+  const dir = newProject()
+  writeDefaultPromptsFiles(dir, { overwrite: true })
+  scanPromptFiles(dir)
+  assert.deepEqual(overrideFindings(dir), [])
+
+  // The claim is spent, so `scanPromptFiles` is blind to this from here on.
+  const filePath = rewritePromptFile(dir, "planner", `${roleOf("planner")}\n${preBlockedCore}\n`)
+  scanPromptFiles(dir)
+  assert.deepEqual(overrideFindings(dir), [], "the eager scan stays once per directory")
+
+  assert.equal(rescanPromptFiles(dir), true)
+  const findings = overrideFindings(dir)
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].agent, "planner")
+  assert.equal(findings[0].file, filePath)
+  // The planner's own role prompt carries the `Blocked:` contract and the DONE
+  // marker, so the delegation block is the one element this file lacks.
+  assert.deepEqual([...findings[0].missing], ["delegation-block"])
+})
+
+test("a rescan keeps the finding of a file that became unreadable", () => {
+  const dir = newProject()
+  const filePath = writePromptFile(dir, "coder", `${roleOf("coder")}\n${preBlockedCore}\n`)
+  writePromptFile(dir, "planner", "bare template")
+  scanPromptFiles(dir)
+  assert.deepEqual(overrideFindings(dir).map((f) => f.agent), ["coder", "planner"])
+
+  // A directory where the loader expects a file: statSync succeeds, readFileSync
+  // throws EISDIR. Nothing is known about the role — which is not the same as
+  // knowing it is clean, so its finding must survive the replace.
+  rmSync(filePath, { force: true })
+  mkdirSync(filePath, { recursive: true })
+  const later = new Date(Date.now() + 2000)
+  utimesSync(filePath, later, later)
+
+  assert.equal(rescanPromptFiles(dir), false, "an unreadable role changes nothing")
+  const findings = overrideFindings(dir)
+  assert.deepEqual(findings.map((f) => f.agent), ["coder", "planner"])
+  assert.equal(findings[0].file, filePath)
+  assert.deepEqual([...findings[0].missing], ["blocked-contract", "delegation-block"])
+})
+
+test("a rescan over an unchanged directory changes nothing", () => {
+  const dir = newProject()
+  writePromptFile(dir, "coder", "bare template")
+  scanPromptFiles(dir)
+  const before = overrideBlock(dir)
+
+  assert.equal(rescanPromptFiles(dir), false)
+  assert.equal(overrideBlock(dir), before, "byte-identical — nothing on disk moved")
+  assert.equal(rescanPromptFiles(dir), false, "and it stays that way however often it runs")
+})
+
+test("a rescan is scoped to its directory and refuses an unusable one", () => {
+  const first = newProject()
+  const second = newProject()
+  writePromptFile(first, "coder", "bare template")
+  writePromptFile(second, "coder", "bare template")
+  scanPromptFiles(first)
+  scanPromptFiles(second)
+
+  rewritePromptFile(first, "coder", renderDefaultsFile("coder"))
+  assert.equal(rescanPromptFiles(first), true)
+  assert.deepEqual(overrideFindings(first), [])
+  assert.deepEqual(
+    overrideFindings(second).map((f) => f.agent),
+    ["coder"],
+    "the other project's findings are not this rescan's business",
+  )
+
+  assert.equal(rescanPromptFiles(""), false, "no directory, no work")
+  assert.equal(rescanPromptFiles(undefined), false)
+  assert.equal(overrideFindings().length, 1, "and nothing was cleared under a null scope")
+})
+
+test("a rescan needs no claim and does not spend one", () => {
+  const dir = newProject()
+  writePromptFile(dir, "coder", "bare template")
+
+  // Before any eager scan: the rescan is the first thing to touch this
+  // directory, and it still judges it.
+  assert.equal(rescanPromptFiles(dir), true)
+  assert.deepEqual(overrideFindings(dir).map((f) => f.agent), ["coder"])
+  assert.equal(claimPromptFileScan(dir), true, "the eager scan's claim is untouched")
 })

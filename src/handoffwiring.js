@@ -26,6 +26,7 @@ import {
   flushHandoffDrain,
   abortHandoffDrain,
   handoffGeneration,
+  sessionAgentName,
   hasEndlessPending,
   cancelPendingEndless,
   claimPendingEndless,
@@ -54,30 +55,30 @@ import { knownAgentKinds } from "./config.js"
 import { readPlannedSteps, formatPrimarySummary, writePrimarySummary } from "./project.js"
 import { log, errMsg } from "./log.js"
 
-// The agent a replacement primary runs as: whatever this opencode instance
-// starts a primary as — `default_agent`, captured at the `config` hook — so a
-// project that names its own primary is handed one of those back and not an
-// `orchestrator` it never asked for.
+// The agent a replacement primary runs as: the name opencode resolved for the
+// old primary's current session, recorded by the `chat.message` hook. This is
+// the session's actual role, not merely the process default; a user can select
+// a different primary agent for an individual session. Before that hook has
+// run, the captured `default_agent` remains the fallback identification rung.
 //
-// The name must be one opencode can actually route a session to, and the
-// captured value is only a config string: a `default_agent` naming an agent
-// nothing resolves would fail the kickoff and with it the whole handoff. So a
-// name other than this plugin's own role is confirmed against the resolved
-// agent list first — the same cached read the spawn refusal uses, one request
-// per process, no extra round trip on the handoff path. `DEFAULT_AGENT` needs
-// no confirmation: installAgents writes that role into every config.
+// The name must be one opencode can actually route a session to. A project or
+// session name that nothing resolves would fail the kickoff and with it the
+// whole handoff, so every non-plugin role is confirmed against the resolved
+// agent list first — the same cached read the spawn refusal uses. `DEFAULT_AGENT`
+// needs no confirmation: installAgents writes that role into every config.
 //
 // Unconfirmable means fall back, not fail: knownAgentKinds yields an empty map
 // on a server without the route or a transport error, and replacing the primary
 // with this plugin's own role is what the handoff did before it consulted the
-// name at all.
-export async function handoffAgentName(client) {
-  const name = defaultAgentName()
+// name at all. `directory` keeps the default fallback tied to the same project
+// when one process serves more than one configured instance.
+export async function handoffAgentName(client, sessionID, directory) {
+  const name = sessionAgentName(sessionID) ?? defaultAgentName(directory)
   if (name === DEFAULT_AGENT) return name
   const kinds = await knownAgentKinds(client)
   if (kinds.has(name)) return name
-  log("handoff: default_agent is not a resolved agent, using the plugin role", {
-    default_agent: name,
+  log("handoff: session agent is not a resolved agent, using the plugin role", {
+    agent: name,
     using: DEFAULT_AGENT,
   })
   return DEFAULT_AGENT
@@ -127,10 +128,12 @@ export function maybeRunPendingHandoff(client, sessionID) {
 // between the pure handoff sequence (handoff.js) and the live client /
 // registry / project plumbing. Async for one reason: the agent the replacement
 // primary runs as may have to be confirmed against the resolved agent list.
-async function buildPrimaryHandoffDeps(client, sessionID, sessionDir) {
-  // Resolved once for the whole handoff, so the name the deps carry and the
-  // name the kickoff prompt routes to cannot diverge.
-  const agentName = await handoffAgentName(client)
+async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, resolvedAgentName) {
+  // Resolve once for the whole handoff, so the name the deps carry and every
+  // prompt it routes cannot diverge. Endless mode supplies the name it already
+  // resolved for its open-points turn; the plain path resolves it here.
+  const agentName =
+    resolvedAgentName ?? (await handoffAgentName(client, sessionID, sessionDir))
   return {
     primarySessionID: sessionID,
     directory: sessionDir,
@@ -191,7 +194,7 @@ async function buildPrimaryHandoffDeps(client, sessionID, sessionDir) {
     // primary is idle at this point, so the prompt starts immediately
     // instead of queuing behind an in-flight turn.
     promptOldPrimaryForDocSummaries: () =>
-      promptOldPrimaryFor(client, sessionID, {
+      promptOldPrimaryFor(client, sessionID, agentName, {
         prompt: DOC_SUMMARY_PROMPT,
         looksLikeReply: looksLikeDocSummariesReply,
       }),
@@ -296,7 +299,7 @@ async function buildPrimaryHandoffDeps(client, sessionID, sessionDir) {
 // `docSummaries` block with `FALLBACK_DOC_SUMMARIES` and the kickoff still
 // lands, while the endless cycle ABANDONS — replacing a primary after failing
 // to save its open points is the data loss the mode exists to prevent.
-async function promptOldPrimaryFor(client, primarySessionID, { prompt, looksLikeReply }) {
+async function promptOldPrimaryFor(client, primarySessionID, agentName, { prompt, looksLikeReply }) {
   if (!client || !primarySessionID) {
     throw new Error("promptOldPrimaryFor: missing client or primarySessionID")
   }
@@ -305,7 +308,7 @@ async function promptOldPrimaryFor(client, primarySessionID, { prompt, looksLike
     sendPrompt: async () =>
       promptSession(client, {
         sessionID: primarySessionID,
-        agent: await handoffAgentName(client),
+        agent: agentName,
         prompt,
         hideable: true,
       }),
@@ -344,6 +347,9 @@ export async function maybeRunPendingEndless(client, sessionID) {
   // with ?directory=… land in a different project but share the same factory
   // ctx, and the todo file this cycle writes must be that project's.
   const directory = await getSessionDirectory(client, sessionID)
+  // Resolve the session's actual agent once and reuse it for both the
+  // open-points prompt and the replacement kickoff.
+  const agentName = await handoffAgentName(client, sessionID, directory)
   return runEndlessCycle({
     primarySessionID: sessionID,
     claim: () => claimPendingEndless(sessionID),
@@ -352,7 +358,7 @@ export async function maybeRunPendingEndless(client, sessionID) {
     isQuiesced: () => isQuiesced(sessionID),
     countActive: () => countActiveSubagents(),
     requestOpenPoints: () =>
-      promptOldPrimaryFor(client, sessionID, {
+      promptOldPrimaryFor(client, sessionID, agentName, {
         prompt: OPEN_POINTS_PROMPT,
         looksLikeReply: looksLikeOpenPointsReply,
       }),
@@ -385,7 +391,7 @@ export async function maybeRunPendingEndless(client, sessionID) {
     // orchestrator reads the documents itself — it has the context to.
     performHandoff: async ({ extraKickoffBlock, openPointsText }) =>
       performPrimaryHandoff({
-        ...(await buildPrimaryHandoffDeps(client, sessionID, directory)),
+        ...(await buildPrimaryHandoffDeps(client, sessionID, directory, agentName)),
         extraKickoffBlock,
         promptOldPrimaryForDocSummaries: async () => openPointsText,
       }),

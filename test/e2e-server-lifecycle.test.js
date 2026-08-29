@@ -128,6 +128,48 @@ exit 0
   rmSync(r.dir, { recursive: true, force: true })
 })
 
+test("a start with no pid removes its own empty capture directory", () => {
+  const port = freePort()
+  const r = runShell(
+    `set -uo pipefail
+. "$LIB"
+mkdir "$DIR/captures"
+e2e_server_start ${port} "$DIR" "$DIR/captures/00-suite.server.log" "$DIR/missing/00-suite.serverpid" && exit 12
+echo "START_REFUSED"
+test ! -e "$DIR/captures/00-suite.server.log" || exit 13
+test ! -e "$DIR/captures" || exit 14
+test ! -e "$DIR/missing/00-suite.serverpid" || exit 15
+`,
+    { env: { STUB_MODE: "die" } },
+  )
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  assert.match(r.stdout, /START_REFUSED/)
+  assert.match(r.stderr, /wrapper never wrote its pid/)
+
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("a failed start keeps pre-existing capture content", () => {
+  const port = freePort()
+  const r = runShell(
+    `set -uo pipefail
+. "$LIB"
+mkdir "$DIR/captures"
+printf 'keep this\n' > "$DIR/captures/keep.txt"
+e2e_server_start ${port} "$DIR" "$DIR/captures/00-suite.server.log" "$DIR/missing/00-suite.serverpid" && exit 12
+echo "START_REFUSED"
+test -s "$DIR/captures/keep.txt" || exit 13
+test ! -e "$DIR/captures/00-suite.server.log" || exit 14
+`,
+    { env: { STUB_MODE: "die" } },
+  )
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  assert.match(r.stdout, /START_REFUSED/)
+  assert.match(r.stderr, /wrapper never wrote its pid/)
+
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
 test("readiness fails loudly, with the server log, when opencode dies at startup", () => {
   const port = freePort()
   const r = runShell(

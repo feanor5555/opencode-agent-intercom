@@ -148,6 +148,7 @@ e2e_build_tui() {
 # calls it, so a subshell would leak the server it starts.
 e2e_server_start() {
   local port="$1" project_dir="$2" log_file="$3" pid_file="$4"
+  local capture_dir log_created=0 pid_existed=0
 
   e2e_require_caller_shell e2e_server_start || return 1
 
@@ -161,6 +162,16 @@ e2e_server_start() {
   E2E_SERVER_BASE=$(e2e_server_url "$port")
   E2E_SERVER_LOG="$log_file"
 
+  capture_dir=$(dirname -- "$log_file")
+  if [ -e "$log_file" ] || [ -L "$log_file" ]; then
+    log_created=0
+  else
+    log_created=1
+  fi
+  if [ -e "$pid_file" ] || [ -L "$pid_file" ]; then
+    pid_existed=1
+  fi
+
   : > "$log_file"
   rm -f "$pid_file"
 
@@ -173,6 +184,18 @@ e2e_server_start() {
   done
   if [ ! -s "$pid_file" ]; then
     e2e_fail "server start: the wrapper never wrote its pid to $pid_file — see $log_file"
+    # A failed start owns only the files it created. Removing the log first
+    # leaves the capture directory for rmdir to remove only when it is empty;
+    # pre-existing files therefore keep both their directory and themselves.
+    if [ "$log_created" = 1 ]; then
+      rm -f -- "$log_file"
+    fi
+    if [ "$pid_existed" = 0 ]; then
+      rm -f -- "$pid_file"
+    fi
+    if [ "$log_created" = 1 ] && [ "$pid_existed" = 0 ]; then
+      rmdir -- "$capture_dir" 2>/dev/null || :
+    fi
     return 1
   fi
   E2E_SERVER_PID=$(cat "$pid_file")

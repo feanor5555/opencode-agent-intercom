@@ -81,6 +81,32 @@ export const pendingTaskIds = new Set()
 // of ending the turn after a spawn; one snapshot per turn is plenty).
 export const lastPrimaryTool = new Map()
 
+// sessionID -> the agent name opencode resolved for that session's current
+// turn, as reported by the `chat.message` hook (`input.agent`, falling back to
+// the created user message's own `agent` field). That hook fires once per user
+// turn inside createUserMessage, BEFORE the request loop that triggers the
+// system transform, so the name is in hand at the first transform of the turn.
+//
+// This is the authoritative source for a PRIMARY session's agent name: unlike
+// the `# Role:` header in the role prompt, it survives a project markdown file
+// that displaces the plugin's own prompt, and unlike `default_agent` it is the
+// name of the agent actually running. Subagents are identified from their
+// registry entry instead and never read this map.
+//
+// One short string per live session; pruned in forgetPrimary and
+// removeEntryLocked, mirroring lastPrimaryTool.
+export const sessionAgent = new Map()
+
+// The `default_agent` value this process resolved at the `config` hook, or
+// null before that hook has run. Written by installAgents, which is also what
+// puts the plugin's own default there when the project set none, so this holds
+// whatever opencode will actually start a primary as. Last rung of the primary
+// identification chain in hooks.js.
+//
+// Wrapped in an object for the same reason as pendingSpawns (resetState
+// reassigns the field, importers share the one live reference).
+export const resolvedDefaultAgent = { name: null }
+
 // sessionID -> { tokens:number|undefined, lastFetchAt:number }.
 // Cached context-token measurement for primary (non-subagent) sessions. The
 // transform hook refreshes this on each primary turn (TTL-guarded, mirroring
@@ -243,6 +269,8 @@ export function resetState() {
   }
   pendingSessionQuiescence.clear()
   lastPrimaryTool.clear()
+  sessionAgent.clear()
+  resolvedDefaultAgent.name = null
   primaryCtx.clear()
   pendingHandoffs.clear()
   handoffInProgress.clear()

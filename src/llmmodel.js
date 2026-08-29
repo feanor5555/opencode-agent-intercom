@@ -92,13 +92,26 @@ function splitModelRef(ref) {
   return { providerID: ref.slice(0, slash), modelID: ref.slice(slash + 1) }
 }
 
+// The agent name of the turn a `chat.message` call describes: what opencode
+// resolved (`input.agent`), falling back to the name it stamped on the user
+// message it just created. Null when neither carries one.
+//
+// Two readers: the model choice below, and the session -> agent record in
+// index.js that the primary identification chain in hooks.js reads back. Both
+// want the same name, so the read lives in one place.
+export function messageAgent(input, output) {
+  if (nonEmptyString(input?.agent)) return input.agent
+  const fromMessage = output?.message?.agent
+  return nonEmptyString(fromMessage) ? fromMessage : null
+}
+
 // The hook itself. opencode calls it with input.{sessionID, agent, model, ...}
 // and a mutable output.{message, parts}; `output.message.model` is the pair the
 // request will run with.
 export function chatMessageHook(input, output) {
   const message = output?.message
   if (!message) return
-  const agent = nonEmptyString(input?.agent) ? input.agent : message.agent
+  const agent = messageAgent(input, output)
   const chosen = resolveModelForAgent(agent)
   if (chosen) {
     message.model = chosen

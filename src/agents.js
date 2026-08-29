@@ -21,6 +21,9 @@
 // plugin can't set env vars in time, since opencode reads them before
 // plugins load.
 
+// state.js imports nothing, so this cannot close an import cycle.
+import { resolvedDefaultAgent } from "./state.js"
+
 const ORCHESTRATOR_PROMPT = `# Role: Orchestrator
 
 Your only job is to delegate work to subagents — you have three tools (spawn, abort, list) and nothing else.
@@ -296,6 +299,11 @@ export const AGENTS = {
 // plugin's role prompt, none of its permission map and no context budget of
 // its own, and the schema strip that gates a role's tools applies only to the
 // roles here.
+// The primary role this plugin ships. Written into `default_agent` when the
+// project set none, and the fallback of defaultAgentName() below — one source
+// for both, so the two can never drift apart.
+export const DEFAULT_AGENT = "orchestrator"
+
 export const SPAWNABLE_ROLES = Object.freeze(
   Object.entries(AGENTS)
     .filter(([, def]) => def.mode === "subagent")
@@ -309,7 +317,8 @@ export const SPAWNABLE_ROLES = Object.freeze(
 // `prompt`/`permission`, while a project that also sets
 // `prompt` overrides just that. An explicit `default_agent` the project set is
 // respected. `default_agent` is the opencode config key that picks the startup
-// primary (falls back to "build" when unset). Mutates `config` in place.
+// primary (falls back to "build" when unset), and the value that ends up there
+// is captured for defaultAgentName(). Mutates `config` in place.
 export function installAgents(config) {
   if (!config || typeof config !== "object") return
   if (!config.agent || typeof config.agent !== "object") config.agent = {}
@@ -324,5 +333,21 @@ export function installAgents(config) {
     // same merge.
     config.agent[name] = { ...base, ...config.agent[name] }
   }
-  if (!config.default_agent) config.default_agent = "orchestrator"
+  if (!config.default_agent) config.default_agent = DEFAULT_AGENT
+  // Capture what the primary of this instance is actually called. It is the
+  // last rung of the primary identification chain in hooks.js: a session with
+  // no recorded `chat.message` agent and no `# Role:` header left in its
+  // prompt is whatever opencode starts a primary as, which is this value.
+  resolvedDefaultAgent.name =
+    typeof config.default_agent === "string" && config.default_agent.length > 0
+      ? config.default_agent
+      : null
+}
+
+// The name the primary of this opencode instance runs under: the
+// `default_agent` captured at the `config` hook, or the plugin's own default
+// before that hook has run (installAgents writes exactly that value when the
+// project set none).
+export function defaultAgentName() {
+  return resolvedDefaultAgent.name ?? DEFAULT_AGENT
 }

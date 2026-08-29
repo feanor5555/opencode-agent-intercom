@@ -21,6 +21,7 @@ import {
   endlessInProgress,
   endlessCooldowns,
   endlessProgress,
+  sessionAgent,
 } from "./state.js"
 // client.js does NOT import registry.js (verified — it only imports log /
 // settings / pluginmsg), so importing forgetSessionDirectory here creates no
@@ -105,6 +106,9 @@ export function forgetPrimary(sessionID) {
   // heuristic. Neither is reachable again once the session is deleted.
   forgetSessionDirectory(sessionID)
   lastPrimaryTool.delete(sessionID)
+  // The turn's agent name goes with it: recorded per turn by the chat.message
+  // hook, and a deleted session never has another turn.
+  sessionAgent.delete(sessionID)
   // Handoff bookkeeping for the OLD primary dies with it: clear the
   // in-progress latch (this is the success-path release — the failure path
   // is releaseHandoff) and any pending flag the doc-summary turn's transform
@@ -487,6 +491,9 @@ export function removeEntryLocked(sessionID) {
   // Same primary-set cleanup as removeEntry — see trackPrimary.
   primarySessions.delete(sessionID)
   aborted.delete(sessionID)
+  // A subagent's session is deleted right after its entry is removed, so the
+  // name the chat.message hook recorded for it is dead weight from here on.
+  sessionAgent.delete(sessionID)
   return true
 }
 
@@ -717,6 +724,31 @@ export function routeParentNotice(parentID, notice) {
 
 export function hasHandoffDrain(sessionID) {
   return handoffDrains.has(sessionID)
+}
+
+// ----------------------------------------------------------------------------
+// Session -> agent name, recorded from the `chat.message` hook.
+//
+// Pure helpers around the `sessionAgent` Map in state.js. index.js writes on
+// every user turn; hooks.js reads it as the first rung of the primary
+// identification chain. Entries are pruned in forgetPrimary (primary gone) and
+// removeEntryLocked (subagent gone).
+// ----------------------------------------------------------------------------
+
+// Records the agent name opencode resolved for this session's turn. A missing
+// session id or a non-string / empty name is ignored rather than stored, so a
+// later read cannot hand the caller an empty agent name.
+export function recordSessionAgent(sessionID, agent) {
+  if (typeof sessionID !== "string" || sessionID.length === 0) return
+  if (typeof agent !== "string" || agent.length === 0) return
+  sessionAgent.set(sessionID, agent)
+}
+
+// The recorded agent name for a session, or null when no `chat.message` hook
+// has run for it yet (a fresh session whose first request arrived by a path
+// that skipped createUserMessage — the caller falls through to its next rung).
+export function sessionAgentName(sessionID) {
+  return sessionAgent.get(sessionID) ?? null
 }
 
 // ----------------------------------------------------------------------------

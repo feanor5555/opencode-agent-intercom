@@ -59,8 +59,9 @@ import {
   rewritePendingTools,
 } from "./hooks.js"
 import { installAgents } from "./agents.js"
+import { recordSessionAgent } from "./registry.js"
 import { chatParamsHook } from "./llmparams.js"
-import { chatMessageHook, applyModelChoices } from "./llmmodel.js"
+import { chatMessageHook, applyModelChoices, messageAgent } from "./llmmodel.js"
 import { captureSystem, captureMessages, captureParams } from "./reqlog.js"
 import { setServerUrl } from "./client.js"
 import { log } from "./log.js"
@@ -146,6 +147,16 @@ export default async (ctx) => {
     // that pin displaced is put back, so a removed choice stops running at the
     // next message instead of at the next opencode start.
     "chat.message": async (input, output) => {
+      // Record which agent this turn runs as, before anything else can throw.
+      // opencode triggers this hook inside createUserMessage, ahead of the
+      // request loop that triggers the system transform, so the transform of
+      // this very turn can read the name back — see hooks.js
+      // resolvePrimaryAgent, whose first rung this is.
+      try {
+        recordSessionAgent(input?.sessionID, messageAgent(input, output))
+      } catch (err) {
+        log("session agent record error", err?.message ?? String(err))
+      }
       try {
         chatMessageHook(input, output)
       } catch (err) {

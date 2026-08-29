@@ -49,6 +49,7 @@ import {
   cancelPendingHandoff,
   resetEndlessProgress,
   nestedQuotaDecision,
+  sessionAgentName,
   CTX_TTL_MS,
 } from "./registry.js"
 import { fetchSnapshot, showToast, getSessionDirectory } from "./client.js"
@@ -59,7 +60,7 @@ import {
   PACKAGE_WARN_SHARE,
   PACKAGE_REFUSE_SHARE,
 } from "./settings.js"
-import { NESTED_SPAWN_TARGET, SPAWNABLE_ROLES, mayDelegate } from "./agents.js"
+import { NESTED_SPAWN_TARGET, SPAWNABLE_ROLES, mayDelegate, defaultAgentName } from "./agents.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
 import { log, errMsg } from "./log.js"
@@ -181,7 +182,7 @@ export function createTransformSystem(client) {
 
       const entry = entryForSession(sessionID)
       const isSubagent = Boolean(entry)
-      const agentName = isSubagent ? entry.agent : detectAgentFromSystem(output) ?? "orchestrator"
+      const agentName = isSubagent ? entry.agent : resolvePrimaryAgent(sessionID, output)
 
       // Decide whether this agent gets AGENTS.md
       const keepAgentsMd = isSubagent
@@ -491,11 +492,38 @@ function parseOpencodeSystem(systemArr) {
   return { role, env, agentsMd }
 }
 
+// The agent name of a PRIMARY session, resolved most-authoritative-first.
+// Subagents never come here — their name stands on their registry entry, which
+// the caller uses instead.
+//
+// 1. What the `chat.message` hook recorded for this session. opencode triggers
+//    that hook once per user turn inside createUserMessage, before the request
+//    loop that triggers this transform, so it is in hand at the first transform
+//    of every turn — and it is the only rung a project markdown file cannot
+//    disturb, because it is the name opencode itself resolved.
+// 2. The `# Role:` header of the prompt this plugin wrote. Correct whenever the
+//    plugin's own prompt is intact, and the only source for a session whose
+//    first request arrived by a path that skipped createUserMessage.
+// 3. The `default_agent` captured at the `config` hook. What opencode starts a
+//    primary as when nothing else says otherwise.
+//
+// The name is not cosmetic: it selects the user's per-agent prompt template
+// (`.opencode/agent-intercom/<agentName>.md`), so a primary called something
+// other than the plugin's own default loads ITS file, not the orchestrator's.
+export function resolvePrimaryAgent(sessionID, output) {
+  return (
+    sessionAgentName(sessionID) ??
+    detectAgentFromSystem(output) ??
+    defaultAgentName()
+  )
+}
+
 // Pulls the agent name out of an "# Role: <Name>" header in the role prompt.
 // Used for primary sessions where we don't have a registry entry yet — the
 // agents.js role prompts all start with `# Role: Orchestrator` or
 // `# Role: Coder (Subagent)` etc. Returns the lowercased agent name, or null
-// if the header isn't found (caller falls back to "orchestrator").
+// if the header isn't found (rung 2 of resolvePrimaryAgent — the caller falls
+// through to the captured `default_agent`).
 function detectAgentFromSystem(output) {
   if (!Array.isArray(output?.system) || output.system.length === 0) return null
   const head = output.system[0].slice(0, 200)

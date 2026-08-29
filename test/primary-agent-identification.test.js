@@ -120,6 +120,42 @@ test("rung 3: with neither record nor header the captured default_agent answers"
   assert.equal(resolvePrimaryAgent("ses_c", displaced()), "build")
 })
 
+test("rung 3 is per project: two default_agents in one process do not cross", () => {
+  // The `config` hook runs once per plugin instance, i.e. once per project. A
+  // single captured value would hand every session the name the LAST hook to
+  // run saw — the other project's primary — and with it the other project's
+  // prompt file, since this name selects `.opencode/agent-intercom/<name>.md`.
+  const projectA = "/projects/a"
+  const projectB = "/projects/b"
+  installAgents({ default_agent: "build" }, { directory: projectA })
+  installAgents({ default_agent: "review" }, { directory: projectB })
+
+  assert.equal(defaultAgentName(projectA), "build")
+  assert.equal(defaultAgentName(projectB), "review")
+  assert.equal(resolvePrimaryAgent("ses_a", displaced(), projectA), "build")
+  assert.equal(
+    resolvePrimaryAgent("ses_b", displaced(), projectB),
+    "review",
+    "the last config hook to run does not own the answer for both projects",
+  )
+  assert.equal(
+    defaultAgentName(),
+    DEFAULT_AGENT,
+    "with two projects captured there is no unambiguous answer for a caller with no directory — " +
+      "the plugin's own role, never the other project's primary",
+  )
+  assert.equal(defaultAgentName("/projects/unseen"), DEFAULT_AGENT)
+})
+
+test("with one project captured, a caller with no directory still gets that default_agent", () => {
+  // The single-project case the plugin was built for: a caller that has no
+  // directory in hand (and a session created with a `?directory=` of its own)
+  // reads the one captured value, exactly as before.
+  installAgents({ default_agent: "build" }, { directory: "/projects/a" })
+  assert.equal(defaultAgentName(), "build")
+  assert.equal(defaultAgentName("/projects/unseen"), "build")
+})
+
 test("installAgents writes and captures the plugin's default when the project set none", () => {
   const config = {}
   installAgents(config)

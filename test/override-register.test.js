@@ -192,6 +192,36 @@ test("the toast body counts both kinds and is handed out exactly once", () => {
   assert.equal(overrideToastText(), null)
 })
 
+test("each project gets its own toast", () => {
+  // One opencode process serving two projects owes each of them a toast: a
+  // single process-wide latch would let the first project spend the second
+  // project's toast, and that user would never be told at all.
+  recordAgentEntryOverride({
+    agent: "coder",
+    fields: ["prompt"],
+    file: "/project-a/.opencode/agent/coder.md",
+    directory: "/project-a",
+  })
+  recordAgentEntryOverride({
+    agent: "planner",
+    fields: ["prompt"],
+    file: "/project-b/.opencode/agent/planner.md",
+    directory: "/project-b",
+  })
+
+  assert.equal(
+    overrideToastText("/project-a"),
+    "1 role overridden by project files — see the orchestrator's first answer",
+  )
+  assert.equal(
+    overrideToastText("/project-b"),
+    "1 role overridden by project files — see the orchestrator's first answer",
+    "the second project has its own latch and its own count",
+  )
+  assert.equal(overrideToastText("/project-a"), null, "one toast per project, not one per turn")
+  assert.equal(overrideToastText("/project-b"), null)
+})
+
 test("the toast body is singular for a single override", () => {
   recordAgentEntryOverride({ agent: "coder", fields: ["prompt"], file: "/p/c.md" })
   assert.equal(

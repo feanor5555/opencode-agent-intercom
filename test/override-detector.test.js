@@ -158,12 +158,35 @@ test("a nested instance finds a project agent at the worktree root", () => {
   assert.equal(findingFor("coder")?.file, coderFile)
 })
 
-test("the same collision through nested and root instances logs once", () => {
+test("a nested instance files its finding under the instance directory, not the worktree", () => {
+  // The key both halves of the report have to agree on. opencode writes
+  // `session.directory` from the instance directory (`ctx.directory`), and the
+  // block in hooks.js selects findings by that value — so a finding filed under
+  // the worktree root would be dropped for every nested instance, block and
+  // toast alike, which is precisely the case the worktree probe exists for.
+  const config = { agent: { coder: mdAgent({ prompt: "Project coder." }) } }
+  installAgents(config, { directory: nestedDir, worktree: projectDir })
+  assert.deepEqual(
+    overrideFindings(nestedDir).map((finding) => finding.file),
+    [coderFile],
+    "the session's own directory selects the finding",
+  )
+  assert.deepEqual(
+    overrideFindings(projectDir),
+    [],
+    "the worktree root is a different instance and has no session of its own here",
+  )
+})
+
+test("a repeated collision logs once per instance directory", () => {
   const home = mkdtempSync(join(tmpdir(), "intercom-override-log-"))
   const detectorUrl = new URL("../src/agents.js", import.meta.url).href
+  // Twice for the nested instance (the config hook is idempotent and re-runs
+  // over its own output) and once for a second instance started at the root.
   const script = `
     import { installAgents } from ${JSON.stringify(detectorUrl)}
     const config = { agent: { coder: { permission: {}, prompt: "Project coder." } } }
+    installAgents(config, { directory: ${JSON.stringify(nestedDir)}, worktree: ${JSON.stringify(projectDir)} })
     installAgents(config, { directory: ${JSON.stringify(nestedDir)}, worktree: ${JSON.stringify(projectDir)} })
     installAgents(config, { directory: ${JSON.stringify(projectDir)}, worktree: ${JSON.stringify(projectDir)} })
   `
@@ -182,8 +205,19 @@ test("the same collision through nested and root instances logs once", () => {
     const lines = readFileSync(logPath, "utf8")
       .split("\n")
       .filter((line) => line.includes("override: project agent entry"))
-    assert.equal(lines.length, 1, "one collision must produce one log line")
-    assert.ok(lines[0].includes(`"file":${JSON.stringify(coderFile)}`), "the log names the project file")
+    assert.equal(lines.length, 2, "one line per instance directory, not one per hook run")
+    assert.ok(
+      lines.every((line) => line.includes(`"file":${JSON.stringify(coderFile)}`)),
+      "both name the one project file the worktree probe found",
+    )
+    assert.ok(
+      lines.some((line) => line.includes(`"directory":${JSON.stringify(nestedDir)}`)),
+      "the nested instance's finding is scoped to the nested directory",
+    )
+    assert.ok(
+      lines.some((line) => line.includes(`"directory":${JSON.stringify(projectDir)}`)),
+      "the root instance's finding is scoped to the root",
+    )
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

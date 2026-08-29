@@ -28,6 +28,7 @@ import {
 import { resetProjectContext } from "../src/project.js"
 import { setSettingsPath, resetSettings } from "../src/settings.js"
 import { resetPermissionGuardCache } from "../src/config.js"
+import { forgetSessionDirectory } from "../src/client.js"
 
 const fixtureDir = mkdtempSync(join(tmpdir(), "intercom-delivery-"))
 writeFileSync(join(fixtureDir, "package.json"), JSON.stringify({ name: "fixture-proj" }))
@@ -50,9 +51,16 @@ beforeEach(() => {
   rmSync(join(fixtureDir, ".opencode", "agent-intercom"), { recursive: true, force: true })
 })
 
-function makeCtx() {
+// `directory`/`worktree` are the instance paths the plugin is loaded with (the
+// `config` hook's view of the project), `sessionDirectory` what `session.get`
+// answers for a primary (the transform's view). They are equal for an instance
+// started at the project root and differ for a nested one — which is the case
+// the two halves of the report have to agree on. `session.fail` makes the
+// lookup throw, i.e. a transport error, for as long as it is set.
+function makeCtx({ directory = fixtureDir, worktree = fixtureDir, sessionDirectory = fixtureDir } = {}) {
   const created = []
   const toasts = []
+  const session = { directory: sessionDirectory, fail: false }
   let counter = 0
   const client = {
     session: {
@@ -63,7 +71,10 @@ function makeCtx() {
         return { data: { id } }
       },
       promptAsync: async () => ({ data: undefined }),
-      get: async () => ({ data: { directory: fixtureDir } }),
+      get: async () => {
+        if (session.fail) throw new Error("session.get: transport error")
+        return { data: { directory: session.directory } }
+      },
       messages: async () => ({ data: [] }),
       status: async () => ({ data: {} }),
       delete: async () => ({ data: true }),
@@ -77,7 +88,7 @@ function makeCtx() {
     },
     config: { get: async () => ({ data: { agent: {} } }) },
   }
-  return { ctx: { client, directory: fixtureDir, worktree: fixtureDir, project: {} }, created, toasts }
+  return { ctx: { client, directory, worktree, project: {} }, created, toasts, session }
 }
 
 // A resolved config as opencode hands it to the `config` hook when the project
@@ -133,6 +144,74 @@ test("a primary receives only findings from its session project", async () => {
   const out = await primaryTransform(hooks)
   assert.ok(out.system[0].includes(fixtureDir))
   assert.doesNotMatch(out.system[0], /\/project-b\/\.opencode\/agent\/coder\.md/)
+})
+
+test("a nested instance's finding reaches its own primary", async () => {
+  // The join the two halves are keyed on. opencode writes `session.directory`
+  // from the instance directory, so detector A has to file its finding under
+  // that same directory even when the file it names was found at the worktree
+  // root. Scoped by the worktree instead, this block would be empty.
+  const nested = join(fixtureDir, "nested")
+  mkdirSync(nested, { recursive: true })
+  const { ctx } = makeCtx({ directory: nested, worktree: fixtureDir, sessionDirectory: nested })
+  const hooks = await plugin(ctx)
+  await hooks.config(displacedConfig())
+  const out = await primaryTransform(hooks, "ses_nested")
+  assert.match(out.system[0], /- coder: a project agent entry replaces prompt/)
+  assert.ok(out.system[0].includes(coderFile), "the file found at the worktree root is named")
+})
+
+test("a session directory that cannot be resolved renders no block at all", async () => {
+  // A finding recorded with no directory — what a `config` hook that ran
+  // without one leaves behind. It belongs to no project, and a block selected
+  // under a null scope is exactly what would pick it up and show it to a
+  // session that has a project of its own.
+  recordAgentEntryOverride({
+    agent: "planner",
+    fields: ["prompt"],
+    file: "/elsewhere/.opencode/agent/planner.md",
+  })
+  const { ctx, session, toasts } = makeCtx()
+  const hooks = await plugin(ctx)
+  await hooks.config(displacedConfig())
+
+  session.fail = true
+  const first = await primaryTransform(hooks, "ses_nodir")
+  assert.doesNotMatch(
+    first.system.join(""),
+    /agent-intercom: project files/,
+    "no project scope, no report — and no empty block where a real one belongs",
+  )
+  assert.equal(toasts.length, 0, "the project's one toast is not spent on a turn with no scope")
+
+  session.fail = false
+  const second = await primaryTransform(hooks, "ses_nodir")
+  assert.match(second.system[0], /- coder: a project agent entry replaces prompt/)
+  assert.doesNotMatch(
+    second.system[0],
+    /- planner: a project agent entry/,
+    "a finding that carries no directory is nobody's project",
+  )
+  assert.equal(toasts.length, 1, "the toast arrives with the first turn that has a scope")
+})
+
+test("a failing session.get cannot take away a block an earlier turn showed", async () => {
+  const { ctx, session } = makeCtx()
+  const hooks = await plugin(ctx)
+  await hooks.config(displacedConfig())
+  const sessionID = "ses_hold"
+  const first = await primaryTransform(hooks, sessionID)
+  const block = overrideBlock(fixtureDir)
+  assert.ok(block.length > 0 && first.system[0].includes(block), "the first turn carries the block")
+
+  // Drop the per-session directory cache and let the lookup fail: the scope the
+  // block is selected by is held for the session and does not hang on a
+  // per-turn `session.get`. Otherwise this turn renders "" into the STABLE
+  // element and moves the bytes the provider cache matches on.
+  forgetSessionDirectory(sessionID)
+  session.fail = true
+  const second = await primaryTransform(hooks, sessionID)
+  assert.ok(second.system[0].includes(block), "the same block, byte for byte, on the next turn")
 })
 
 test("the toast fires once per process, on the primary transform", async () => {

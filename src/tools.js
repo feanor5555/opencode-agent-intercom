@@ -28,7 +28,14 @@ import {
   isEndlessFrozen,
 } from "./registry.js"
 import { projectContext } from "./project.js"
-import { getSettings } from "./settings.js"
+import { AGENTS } from "./agents.js"
+import { projectAgentNames } from "./config.js"
+import {
+  getSettings,
+  contextBudgetFor,
+  PACKAGE_WARN_SHARE,
+  PACKAGE_REFUSE_SHARE,
+} from "./settings.js"
 import { createWebsearchTool, isWebsearchEnabled } from "./websearch.js"
 import { createForumSearchTool, isForumSearchEnabled } from "./forumsearch.js"
 import { createOutlineTool, isOutlineEnabled } from "./outline.js"
@@ -41,7 +48,7 @@ import {
   TodoFileMissingError,
 } from "./todofile.js"
 import { log, errMsg } from "./log.js"
-import { tokens as fmtTokens, ageSeconds } from "./format.js"
+import { tokens as fmtTokens, ageSeconds, estimateTokens, percent } from "./format.js"
 
 // Matches an optional task-id prefix on the first line of a spawn prompt
 // (T5). When present, the wake-hook will auto-tick TODO.md on the matching
@@ -70,6 +77,54 @@ function extractAllTaskIds(prompt) {
   SPAWN_TASK_ID_LINE_RE.lastIndex = 0
   while ((m = SPAWN_TASK_ID_LINE_RE.exec(prompt)) !== null) ids.add(m[1])
   return ids
+}
+
+// Sizes a work package against the context budget of the type it is going to.
+// The package is everything the spawn sends — the project snapshot the plugin
+// prepends plus the orchestrator's own text — so the figure is what the
+// subagent actually receives, not what the orchestrator typed. The size is an
+// ESTIMATE (estimateTokens, chars/4), which is why the bars sit at fifths of
+// the budget rather than close to it.
+//
+// Returns `refusal` (a message to hand back instead of spawning) or `notice`
+// (a line to append to a successful spawn), at most one of them non-empty. A
+// budget of 0 means the ceiling is disabled for that type; the gate is then
+// skipped entirely and both come back empty.
+function packageSizeVerdict(agent, fullPrompt) {
+  const budget = contextBudgetFor(agent)
+  if (budget <= 0) return { estimate: estimateTokens(fullPrompt), budget, refusal: "", notice: "" }
+  const estimate = estimateTokens(fullPrompt)
+  const warnAt = budget * PACKAGE_WARN_SHARE
+  const refuseAt = budget * PACKAGE_REFUSE_SHARE
+  if (estimate > refuseAt) {
+    return {
+      estimate,
+      budget,
+      notice: "",
+      refusal:
+        `Spawn refused: the work package is ~${fmtTokens(estimate)} tokens (estimated, project ` +
+        `snapshot included) — over the ${percent(PACKAGE_REFUSE_SHARE)} bar of ` +
+        `${fmtTokens(refuseAt)} for a ${agent}, whose context budget is ${fmtTokens(budget)}. ` +
+        `No subagent was started. SPLIT this work into smaller packages — one concern each — and ` +
+        `spawn them one per task; pass bulk material as a file path for the subagent to read ` +
+        `instead of pasting it inline. Keep each package at or under ` +
+        `${percent(PACKAGE_WARN_SHARE)} of the budget (${fmtTokens(warnAt)} for a ${agent}) so ` +
+        `the subagent has room to work.`,
+    }
+  }
+  if (estimate > warnAt) {
+    return {
+      estimate,
+      budget,
+      refusal: "",
+      notice:
+        ` Package size: ~${fmtTokens(estimate)} of the ${fmtTokens(budget)} ${agent} budget ` +
+        `(estimated) — over the ${percent(PACKAGE_WARN_SHARE)} target of ${fmtTokens(warnAt)}, ` +
+        `${fmtTokens(Math.max(0, budget - estimate))} left for the subagent's own work. Scope the ` +
+        `next package in this area tighter, or pass bulk material as a file path.`,
+    }
+  }
+  return { estimate, budget, refusal: "", notice: "" }
 }
 
 const z = tool.schema
@@ -118,6 +173,17 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     return fromSession || toolCtx?.directory || factoryDirectory
   }
 
+  // Every agent type a spawn may legally name: the roles the plugin installs
+  // plus the ones the project's own opencode config defines. The config read
+  // is cached at module scope in config.js, so this costs one request per
+  // process. Both halves carry a visible ceiling in the orchestrator's limits
+  // block, which lists the same union.
+  async function availableAgents() {
+    const names = new Set(Object.keys(AGENTS))
+    for (const name of await projectAgentNames(client)) names.add(name)
+    return names
+  }
+
   async function spawnHandler(args, toolCtx) {
     // Only the orchestrator delegates. A caller that already has a registry
     // entry is a subagent — refuse with a friendly tool result (not a throw,
@@ -158,6 +224,24 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     trackPrimary(toolCtx.sessionID)
     const directory = await dirFor(toolCtx)
 
+    // Agent-type gate. A name neither the plugin nor the project defines would
+    // otherwise be handed to opencode's own agent resolution and run against
+    // DEFAULT_MAX_CONTEXT — a budget the orchestrator was never shown, since
+    // the limits block lists only the types named here. The sizing rule the
+    // orchestrator is given would then be applied to a number that is not the
+    // one in force, so a typo is refused instead. The refusal names every type
+    // that IS available, so the orchestrator can correct itself in place.
+    const available = await availableAgents()
+    if (!available.has(args.agent)) {
+      log("spawn refused: unknown agent type", { agent: args.agent })
+      return {
+        output:
+          `Spawn refused: "${args.agent}" is not an agent type this project has, so no subagent ` +
+          `was started. Available types: ${[...available].sort().join(", ")}. Re-spawn with one ` +
+          `of them — pick by the deliverable you want back.`,
+      }
+    }
+
     const denied = await permissionGuard.checkTaskPermission(toolCtx.agent, args.agent)
     if (denied) {
       log("spawn denied", denied)
@@ -179,6 +263,22 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
           `(parallel up to maxSubagents). The wake-hook ticks one TODO.md slot per spawn, so a ` +
           `bundled prompt loses status tracking for all but one of them.`,
       }
+    }
+
+    // Work-package size gate. Runs before any reservation and before the child
+    // session exists, so a refusal costs nothing and leaves no state behind.
+    // `fullPrompt` is built here and reused for promptSession below — the gate
+    // measures exactly the text the subagent gets.
+    const ctxBlock = projectContext(directory)
+    const fullPrompt = ctxBlock ? `${ctxBlock}\n\n${args.prompt}` : args.prompt
+    const size = packageSizeVerdict(args.agent, fullPrompt)
+    if (size.refusal) {
+      log("spawn refused: package too large", {
+        agent: args.agent,
+        estimate: size.estimate,
+        budget: size.budget,
+      })
+      return { output: size.refusal }
     }
 
     // Pull an optional task id (T5) off the first line of the prompt.
@@ -258,9 +358,8 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       // never allowed to mask the original error. The outer finally still
       // releases the pendingSpawn / pendingTaskId reservations on this path.
       try {
-        // Prepend a light project snapshot so the subagent does not start blind.
-        const ctxBlock = projectContext(directory)
-        const fullPrompt = ctxBlock ? `${ctxBlock}\n\n${args.prompt}` : args.prompt
+        // `fullPrompt` carries the light project snapshot prepended above, so
+        // the subagent does not start blind.
         await promptSession(client, { sessionID, agent: args.agent, prompt: fullPrompt })
       } catch (err) {
         try {
@@ -279,6 +378,9 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
         parentID: toolCtx.sessionID,
         taskId,
         directory,
+        // The gate's own figure, kept for the completion notice: it reports
+        // what this package cost beside what the whole run cost.
+        packageTokens: size.estimate,
       })
       // Tag this tool-call with the same metadata shape that opencode's built-in
       // `task` tool emits. The TUI keys off `parentSessionId` + `sessionId` to
@@ -305,7 +407,8 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
           `Spawned subagent "${entry.handle}" (session ${sessionID}). It runs in the background — ` +
           `you are woken automatically with its result when it finishes. ` +
           `abort("${entry.handle}") to stop it (only if the user asks). It will reply once, then be destroyed.` +
-          slotsNoticeAfterSpawn(toolCtx.sessionID),
+          slotsNoticeAfterSpawn(toolCtx.sessionID) +
+          size.notice,
         metadata: { handle: entry.handle, sessionID, agent: args.agent },
       }
     } finally {

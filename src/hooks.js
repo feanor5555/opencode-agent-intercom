@@ -53,8 +53,9 @@ import {
 import { fetchSnapshot, showToast, getSessionDirectory } from "./client.js"
 import { getSettings, primaryContextThreshold, contextBudgetFor } from "./settings.js"
 import { AGENTS } from "./agents.js"
+import { projectAgentNames } from "./config.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
-import { projectMdBlock } from "./project.js"
+import { projectMdBlock, projectContext } from "./project.js"
 import { log, errMsg } from "./log.js"
 import {
   ABORT_NOTICE,
@@ -63,7 +64,7 @@ import {
   SUBAGENT_OUTLINE_GUIDE,
 } from "./prompts.js"
 import { loadCustomPrompt, applyCustomPrompt } from "./promptsfile.js"
-import { tokens as fmtTokens, ageSeconds } from "./format.js"
+import { tokens as fmtTokens, ageSeconds, estimateTokens } from "./format.js"
 import { postParentNotice, teardownSubagent } from "./teardown.js"
 import { completionNotice, errorNotice, denialLoopNotice } from "./notices.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
@@ -257,7 +258,12 @@ export function createTransformSystem(client) {
             })
           }
         }
-        limits = formatLimitsNotice()
+        limits = formatLimitsNotice({
+          sessionDir,
+          projectMd,
+          agentsMd: slices.agentsMd || "",
+          projectAgents: await projectAgentNames(client),
+        })
       }
 
       // User-editable per-agent template: `<sessionDir>/.opencode/agent-intercom/<agent>.md`.
@@ -591,29 +597,43 @@ async function notifyParentOfDenialLoop(client, entry) {
 //
 // The context budget is a value per agent type, so the block lists one ceiling
 // per role the orchestrator can spawn — the plugin's own roles minus the
-// primary. "off" means that type's budget is disabled, "unlimited" that the
-// subagent cap is.
+// primary, plus every agent the project's own config defines, which is the
+// same set `spawn` accepts. "off" means that type's budget is disabled,
+// "unlimited" that the subagent cap is.
+//
+// Each entry carries the fixed overhead that type's spawns pay before the
+// orchestrator's own words and the headroom left over, so a package sized
+// against the bare budget is not over the ceiling by an amount the
+// orchestrator cannot see.
 //
 // While `hideChatter` is on, the block also carries the one sentence that
 // tells the orchestrator the user cannot read the notices it receives: the
 // completion notice is then the only copy of a subagent's result and nothing
 // renders it, so the orchestrator is the channel to the user.
-function formatLimitsNotice() {
+function formatLimitsNotice({ sessionDir, projectMd = "", agentsMd = "", projectAgents = [] } = {}) {
   const s = getSettings()
   const sub = s.maxSubagents > 0 ? `${s.maxSubagents}` : "unlimited"
-  const budgets = Object.keys(AGENTS)
+  const snapshot = projectContext(sessionDir)
+  const budgets = [...new Set([...Object.keys(AGENTS), ...projectAgents])]
     .filter((agent) => agent !== "orchestrator")
     .map((agent) => {
       const budget = contextBudgetFor(agent)
-      return `${agent} ${budget > 0 ? fmtTokens(budget) : "off"}`
+      if (budget <= 0) return `${agent} off`
+      const fixed = fixedOverheadFor(agent, { projectMd, agentsMd, snapshot })
+      const headroom = Math.max(0, budget - fixed)
+      return `${agent} ${fmtTokens(budget)} (−${fmtTokens(fixed)} fixed → ${fmtTokens(headroom)})`
     })
     .join(" · ")
   return (
     "\n\n---\n📐 agent-intercom: current limits — " +
     `maxSubagents = ${sub}.\n` +
     `Context budget per agent: ${budgets}.\n` +
-    "Use the number of the agent you are spawning when applying the " +
-    "right-sized-chunks rule.\n" +
+    "Per entry: the budget, the fixed overhead every spawn of that type carries before your own " +
+    "words (subagent guides, PROJECT.md, the project snapshot the plugin prepends, AGENTS.md " +
+    "where that type keeps it), and the headroom left of the budget for your prompt text and the " +
+    "subagent's own work.\n" +
+    "Use the budget — the first number of the agent you are spawning — in the " +
+    "right-sized-chunks rule of the orchestration protocol above.\n" +
     (s.hideChatter
       ? "Subagent results and handoff messages are hidden from the user's " +
         "screen. The user sees only what you write. Relay the substance of a " +
@@ -621,6 +641,20 @@ function formatLimitsNotice() {
       : "") +
     "---\n"
   )
+}
+
+// The tokens a spawn of `agent` carries before the orchestrator's own words:
+// the plugin's subagent guides, the PROJECT.md block, the project snapshot
+// prepended to every spawn prompt, and AGENTS.md for the types that keep it.
+// Estimated with the same chars/4 estimator the spawn gate uses, so the
+// headroom in the limits block and the figure the gate reports are one method.
+// The type's own role prompt is not counted — it comes from opencode and is
+// not resolved on a primary turn.
+function fixedOverheadFor(agent, { projectMd, agentsMd, snapshot }) {
+  let text = SUBAGENT_GUIDE_CORE + projectMd + snapshot
+  if (!OUTLINE_DISABLED_AGENTS.has(agent)) text += SUBAGENT_OUTLINE_GUIDE
+  if (AGENTS_MD_SUBAGENTS.has(agent)) text += agentsMd
+  return estimateTokens(text)
 }
 
 // A compact, live list of ALL active subagents across every primary in this
@@ -795,10 +829,11 @@ async function onSessionIdle({ sessionID }, client) {
       agent: e.agent,
       taskId: e.taskId,
       directory: e.directory,
+      packageTokens: e.packageTokens,
     }
   })
   if (!wake) return
-  const { handle, parentID, agent, taskId, directory } = wake
+  const { handle, parentID, agent, taskId, directory, packageTokens } = wake
   try {
     const snapshot = await fetchSnapshot(client, sessionID)
     // Auto-tick TODO.md based on the subagent's `DONE: T<n>` marker, if it's
@@ -812,7 +847,15 @@ async function onSessionIdle({ sessionID }, client) {
     await postParentNotice(
       client,
       parentID,
-      completionNotice(handle, agent, snapshot.result, parentID, taskOutcome, snapshot.ctxTokens),
+      completionNotice(
+        handle,
+        agent,
+        snapshot.result,
+        parentID,
+        taskOutcome,
+        snapshot.ctxTokens,
+        packageTokens,
+      ),
     )
     showToast(client, {
       title: "agent-intercom",

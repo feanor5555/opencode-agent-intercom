@@ -247,7 +247,10 @@ export function isTaskIdPending(taskId) {
 // for plugin-spawned sessions too — and it can fire *during* the `session.create`
 // await, before `spawn` even has the sessionID. So either path may run first:
 // whoever is first creates the entry, the second upgrades it in place.
-export function upsertSession(sessionID, { agent, prompt, parentID, taskId, directory } = {}) {
+export function upsertSession(
+  sessionID,
+  { agent, prompt, parentID, taskId, directory, packageTokens } = {},
+) {
   if (!sessionID) return undefined
   const existing = entryForSession(sessionID)
   if (existing) {
@@ -256,9 +259,10 @@ export function upsertSession(sessionID, { agent, prompt, parentID, taskId, dire
     if (parentID && !existing.parentID) existing.parentID = parentID
     if (taskId && !existing.taskId) existing.taskId = taskId
     if (directory && !existing.directory) existing.directory = directory
+    if (packageTokens && !existing.packageTokens) existing.packageTokens = packageTokens
     return existing
   }
-  return createEntry(sessionID, agent || "subagent", prompt || "", parentID, taskId, directory)
+  return createEntry(sessionID, agent || "subagent", prompt || "", parentID, taskId, directory, packageTokens)
 }
 
 // Returns the set of taskIds currently held by active subagents of a primary.
@@ -901,7 +905,7 @@ export function resetEndlessProgress() {
   endlessProgress.stalledCycles = 0
 }
 
-function createEntry(sessionID, agent, prompt, parentID, taskId, directory) {
+function createEntry(sessionID, agent, prompt, parentID, taskId, directory, packageTokens) {
   const now = Date.now()
   const entry = {
     handle: nextHandle(agent),
@@ -920,6 +924,13 @@ function createEntry(sessionID, agent, prompt, parentID, taskId, directory) {
     // session's actual project (sessions created with ?directory=... land in a
     // different project but share the same factory ctx).
     directory: directory || undefined,
+    // Estimated size of the work package this subagent was started with — the
+    // project snapshot plus the orchestrator's prompt, as the spawn gate
+    // measured it. Undefined for an entry the event hook registered before
+    // `spawn` reached it. The completion notice prints it beside the run's
+    // total so the orchestrator can tell an oversized package from a task
+    // that sprawled once it was running.
+    packageTokens: packageTokens || undefined,
     status: "busy",
     spawnedAt: now,
     // Wall-clock ms of the most recent lifecycle event observed for this

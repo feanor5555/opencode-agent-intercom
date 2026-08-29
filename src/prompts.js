@@ -3,6 +3,9 @@
 // (subagent snapshot, context-budget notice) stay in
 // hooks.js because they depend on runtime state.
 
+import { PACKAGE_WARN_SHARE, PACKAGE_REFUSE_SHARE } from "./settings.js"
+import { percent } from "./format.js"
+
 export const ABORT_NOTICE =
   "\n\n---\n🛑 agent-intercom: This subagent has been ABORTED by the orchestrator.\n" +
   "STOP immediately. Do not call any further tools. Return control now.\n---\n"
@@ -25,6 +28,11 @@ export const ORCHESTRATION_GUIDE =
   "    Output: <artifact path or final-reply form>\n" +
   "Drop the T<n>: prefix when the spawn is not task-tracked (status check, ad-hoc question).\n" +
   "For task-tracked spawns, tell the subagent to put `DONE: T<n>` on the FIRST or LAST non-empty line of its final reply. The marker must occupy a whole line and match the spawn task id.\n" +
+  "\n" +
+  `Right-sized chunks — size every spawn prompt against the context budget of the agent you are spawning; the limits block below lists that budget per type:\n` +
+  `- Keep the prompt at or under ${percent(PACKAGE_WARN_SHARE)} of that budget. The plugin adds a project snapshot to every spawn and counts it toward the same figure, so leave room for it.\n` +
+  `- Material larger than that goes in as a FILE PATH for the subagent to read, never pasted inline.\n` +
+  `- A spawn over ${percent(PACKAGE_REFUSE_SHARE)} of that budget is REFUSED and no subagent starts — split the work into one package per concern and spawn them separately.\n` +
   "\n" +
   "After spawn your turn ends — you are woken when the subagent finishes. Spawn independent subagents back-to-back so they run in parallel; a refused spawn means you are at the concurrency cap.\n" +
   "Do NOT verify a subagent's work with another spawn in the same turn — the work is not done yet.\n" +

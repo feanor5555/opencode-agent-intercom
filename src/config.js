@@ -36,6 +36,17 @@ async function loadConfig(client) {
   return configCache
 }
 
+// The agent names the project's own opencode config defines. Read from the
+// same module-level cached config the permission guard uses, so the spawn-time
+// agent-type check and the orchestrator's limits block cost no extra request.
+// Empty when the config carries no `agent` map — a project that defines none.
+export async function projectAgentNames(client) {
+  const config = await loadConfig(client)
+  const agents = config?.agent
+  if (!agents || typeof agents !== "object" || Array.isArray(agents)) return []
+  return Object.keys(agents).filter((name) => name !== "")
+}
+
 // Test-only: drop the cached config so a fresh ctx-mock is re-read.
 export function resetPermissionGuardCache() {
   configCache = undefined

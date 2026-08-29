@@ -343,6 +343,15 @@ export function getSettings() {
   return cache
 }
 
+// The size a spawn's work package may take of the spawned type's context
+// budget, as a share of `contextBudgetFor(agent)`. A package over the warn
+// share still spawns but carries the figure back to the orchestrator; one over
+// the refuse share is rejected before any session is created. The same two
+// shares are what ORCHESTRATION_GUIDE tells the orchestrator, so the rule it
+// is given and the gate it meets are one number each.
+export const PACKAGE_WARN_SHARE = 0.2
+export const PACKAGE_REFUSE_SHARE = 0.4
+
 // The context budget in effect for one agent type, in whole tokens; 0 means
 // the budget is disabled for that type. Order:
 //   1. the type's own `agentContext` entry,

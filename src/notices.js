@@ -2,19 +2,20 @@
 // only turn registry-entry / snapshot data into the wake-notice text that the
 // orchestrator sees. No client, no I/O, no session-lifecycle side effects.
 
-import { getSettings } from "./settings.js"
+import { getSettings, contextBudgetFor } from "./settings.js"
 import { countActiveSubagents } from "./registry.js"
-import { tokens as fmtTokens } from "./format.js"
+import { tokens as fmtTokens, percent } from "./format.js"
 
-// Spawn-size thresholds applied AFTER a subagent finishes. The orchestrator's
-// ORCHESTRATION_GUIDE asks for ≤ ~15 k tokens per spawn; in practice this is
-// hard to feel as a number on the orchestrator side without feedback. The
-// wake notice surfaces the actual ctxTokens consumed and escalates the tone
-// once the spawn was clearly too big, so the next spawn in the same area is
-// scoped tighter. Soft = "noticeably large", hard = "way too big, split next
-// time". Pure messaging — we never auto-abort or re-spawn.
-const LARGE_CTX_TOKENS_SOFT = 30_000
-const LARGE_CTX_TOKENS_HARD = 50_000
+// Size thresholds applied AFTER a subagent finishes, as shares of that type's
+// own context budget (contextBudgetFor) — the same ceiling the plugin enforces
+// while the subagent runs, so the feedback and the enforcement name one
+// number. The wake notice surfaces the tokens the whole RUN consumed — system
+// prompt, work package, every tool result, the model's own output — and
+// escalates the tone as they approach the budget, so the next spawn in the
+// same area is scoped tighter. Soft = "noticeably large", hard = "way too big,
+// split next time". Pure messaging — we never auto-abort or re-spawn.
+const RUN_SIZE_SOFT_SHARE = 0.6
+const RUN_SIZE_HARD_SHARE = 0.9
 
 function taskOutcomeLine(outcome) {
   if (!outcome || outcome.kind === "no-task") return ""
@@ -41,39 +42,62 @@ function taskOutcomeLine(outcome) {
   }
 }
 
-export function completionNotice(handle, agent, result, parentID, taskOutcome, ctxTokens) {
+export function completionNotice(
+  handle,
+  agent,
+  result,
+  parentID,
+  taskOutcome,
+  ctxTokens,
+  packageTokens,
+) {
   return (
     `🔔 agent-intercom: your subagent "${handle}" (${agent}) has finished and been destroyed.\n` +
     (result ? `Its result:\n${result}\n` : "It produced no text result.\n") +
     `Use this to report back to the user. If you need more work in this area, spawn a fresh ` +
     `subagent — the one above is gone.` +
     taskOutcomeLine(taskOutcome) +
-    spawnSizeNotice(ctxTokens) +
+    runSizeNotice(agent, ctxTokens, packageTokens) +
     slotsNoticeAfterFinish(parentID)
   )
 }
 
-// Tail line: surfaces the actual ctx consumption of the finished subagent so
-// the orchestrator gets numerical feedback on whether the spawn was right-sized.
-// Tone escalates in two steps; numbers ≥ HARD are spawn-too-big and the next
-// one in the area should be split tighter.
-function spawnSizeNotice(ctxTokens) {
+// Tail line: surfaces what the finished RUN consumed against the context
+// budget of its own type, so the orchestrator gets feedback measured on the
+// ceiling that governed the run. The work package the orchestrator itself sent
+// is named beside it (`packageTokens`, the spawn gate's estimate carried on the
+// registry entry) — the two figures separate an oversized prompt from a task
+// that sprawled while it ran, and each has a different corrective. Absent for
+// a subagent the plugin did not size at spawn time; the line then reports the
+// run alone. Tone escalates in two steps; a figure at or over the hard share
+// is too big and the next spawn in the area should be split tighter. A budget
+// of 0 means the ceiling is disabled for that type — the figure is then
+// reported with no verdict.
+function runSizeNotice(agent, ctxTokens, packageTokens) {
   if (!ctxTokens || ctxTokens <= 0) return ""
   const used = fmtTokens(ctxTokens)
-  if (ctxTokens >= LARGE_CTX_TOKENS_HARD) {
+  const budget = contextBudgetFor(agent)
+  if (budget <= 0) {
+    const pkg = packageTokens > 0 ? `, your package was ${fmtTokens(packageTokens)} of it` : ""
+    return `\n📏 run-size: ${used} tokens${pkg} (no context budget set for ${agent}).`
+  }
+  const pkg = packageTokens > 0 ? ` — your package was ${fmtTokens(packageTokens)} of it` : ""
+  const against = `${used} of the ${fmtTokens(budget)} ${agent} budget${pkg}`
+  if (ctxTokens >= budget * RUN_SIZE_HARD_SHARE) {
     return (
-      `\n📏 spawn-size: this subagent used ${used} tokens — far over the ~15 k target. The ` +
-      `task was too big. SPLIT the next spawn in this area into smaller, single-concern pieces ` +
-      `(1 file / 1 slice each) before continuing.`
+      `\n📏 run-size: ${against} — at ${percent(RUN_SIZE_HARD_SHARE)} of it or beyond. The task ` +
+      `was too big. SPLIT the next spawn in this area into smaller, single-concern pieces ` +
+      `(1 file / 1 slice each) before continuing. Where the package figure is itself a large ` +
+      `share of the budget, cut the prompt first and pass bulk material as a file path.`
     )
   }
-  if (ctxTokens >= LARGE_CTX_TOKENS_SOFT) {
+  if (ctxTokens >= budget * RUN_SIZE_SOFT_SHARE) {
     return (
-      `\n📏 spawn-size: this subagent used ${used} tokens — above the ~15 k target. Scope the ` +
-      `next spawn in this area tighter (fewer files, narrower goal).`
+      `\n📏 run-size: ${against} — over ${percent(RUN_SIZE_SOFT_SHARE)} of it. Scope the next ` +
+      `spawn in this area tighter (fewer files, narrower goal).`
     )
   }
-  return `\n📏 spawn-size: ${used} tokens (target ≤ ~15 k — ok).`
+  return `\n📏 run-size: ${against} — ok.`
 }
 
 // Tail line for completion notices: tells the orchestrator how many subagent

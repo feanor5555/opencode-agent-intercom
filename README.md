@@ -208,8 +208,9 @@ second ask, and the researcher's reply comes back as the result of the
 and no `DONE:` marker is expected. A per-run quota
 (`maxNestedSpawns`, default `2`, env
 `OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS`, `0` disables) bounds how many
-such nested runs one subagent may start; the limits block the subagent
-sees names what is left. `researcher`, `designer` and `gitter` are denied
+such nested runs one subagent may start; the messages hook appends a per-turn
+notice to the last user message naming what is left. `researcher`, `designer` and
+`gitter` are denied
 `spawn` outright. `abort`, `list` and `task` are denied for every
 subagent.
 

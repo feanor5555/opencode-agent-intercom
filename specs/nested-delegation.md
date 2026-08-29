@@ -187,9 +187,9 @@ Exactly one of the two is appended to a subagent's guide, never neither
 a subagent with nothing said about spawning at all.
 
 The quota figure is not in `SUBAGENT_DELEGATION_GUIDE` — it is a runtime setting that
-also counts down within a run. The per-turn block that carries the number that is
-left is `formatDelegationLimitsNotice` (`src/hooks.js:710-749`), appended only when
-the role may delegate and the installation has not switched nesting off:
+also counts down within a run. The static limits block is
+`formatDelegationLimitsNotice` (`src/hooks.js:852-875`), appended only when the
+role may delegate and the installation has not switched nesting off:
 
 ```
 ⤷ agent-intercom: limits on the work you delegate.
@@ -198,20 +198,26 @@ Your own context budget: <own> — the ceiling this whole run is measured agains
 Context budget of what you may spawn: researcher <budget> (−<fixed> fixed → <headroom>).
 Size your spawn prompt against that budget: keep it at or under <warn%> of it; over
   <refuse%> the spawn is REFUSED and no subagent starts.
-Nested spawns left this run: <left> of <quota.limit>. The quota does not reset.
 ```
 
-(`src/hooks.js:728-744`.) The two package shares — `PACKAGE_WARN_SHARE` and
-`PACKAGE_REFUSE_SHARE` — apply to a nested spawn the same way they apply to the
-orchestrator's: `packageSizeVerdict` sizes against the TARGET type's budget, whoever
-the caller is. `fixedOverheadFor(target, …)` (`src/hooks.js:748-756`) is the
-researcher's fixed overhead, estimated with the same chars/4 estimator the spawn gate
-uses, so the headroom in the limits block and the figure the gate reports are one
-method. The condition is `isSubagent && mayDelegate(entry.agent) &&
-getSettings().maxNestedSpawns > 0` (`src/hooks.js:215-216`); with `maxNestedSpawns = 0`
-every nested spawn is refused before a session is created, so a role that may
-delegate still cannot — it is told it does not delegate, which is what is true of it,
-and neither block is paid for.
+The remaining quota is a separate per-turn notice, built by `nestedQuotaNotice`
+(`src/hooks.js:890-897`) and appended to the last user message by
+`createTransformMessages` (`src/hooks.js:523-534`):
+
+```
+⤷ agent-intercom: nested spawns left this run: <left> of <quota.limit>. The quota does not reset.
+```
+
+The two package shares — `PACKAGE_WARN_SHARE` and `PACKAGE_REFUSE_SHARE` — apply to
+a nested spawn the same way they apply to the orchestrator's:
+`packageSizeVerdict` sizes against the TARGET type's budget, whoever the caller is.
+`fixedOverheadFor(target, …)` (`src/hooks.js:908-922`) is the researcher's fixed
+overhead, estimated with the same chars/4 estimator the spawn gate uses, so the
+headroom in the limits block and the figure the gate reports are one method. The
+condition is `delegatesNested(entry.agent)` (`src/hooks.js:825-827`); with
+`maxNestedSpawns = 0` every nested spawn is refused before a session is created, so
+a role that may delegate still cannot — it is told it does not delegate, which is
+what is true of it, and neither block is paid for.
 
 ## 6. The `⤷ nested:` line
 

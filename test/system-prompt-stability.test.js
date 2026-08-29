@@ -131,6 +131,36 @@ test("a failed session.get does not move the primary's stable element", async ()
   assert.equal(after, before, "a transient session.get failure reached the cached element")
 })
 
+test("a failed session.get does not drop the primary-scope custom prompt", async () => {
+  const promptDir = join(fixtureDir, ".opencode", "agent-intercom")
+  const promptPath = join(promptDir, "orchestrator.md")
+  mkdirSync(promptDir, { recursive: true })
+  writeFileSync(
+    promptPath,
+    "CUSTOM PRIMARY PROMPT\n{{guide}}\n",
+  )
+
+  try {
+    const ctx = makeCtx()
+    const hooks = await plugin(ctx)
+    const before = await stableElement(hooks, PRIMARY)
+    assert.match(before, /CUSTOM PRIMARY PROMPT/)
+
+    // Force the second turn to lose its per-turn directory while retaining the
+    // scope latched by the first turn. Without the fix, the custom loader sees
+    // no directory and the auto-assembled prompt replaces the user's template.
+    forgetSessionDirectory(PRIMARY)
+    ctx.client.session.get = async () => {
+      throw new Error("session.get: connection reset")
+    }
+    const after = await stableElement(hooks, PRIMARY)
+
+    assert.equal(after, before, "a transient session.get failure dropped the custom prompt")
+  } finally {
+    rmSync(join(fixtureDir, ".opencode"), { recursive: true, force: true })
+  }
+})
+
 test("the subagent branch reads its directory off its own entry, not the session API", async () => {
   // The mirror of the test above: a subagent never calls session.get for its
   // directory, so the latch is a primary-only concern and the entry is the one

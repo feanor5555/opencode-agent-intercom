@@ -380,7 +380,9 @@ export function createTransformSystem(client) {
         }
       }
 
-      // User-editable per-agent template: `<sessionDir>/.opencode/agent-intercom/<agent>.md`.
+      // User-editable per-agent template: `<scopeDir>/.opencode/agent-intercom/<agent>.md`.
+      // `scopeDir` is the primary's latched project scope or the subagent's
+      // captured directory, so prompt loading uses the same scope as scanning.
       // When present, it REPLACES the auto-assembled prompt wholesale, with
       // `{{placeholder}}` tokens for the runtime parts the user chose to keep.
       // Caches by mtime so the per-turn cost is one stat() call.
@@ -395,7 +397,7 @@ export function createTransformSystem(client) {
       // The user's template owns the whole layout, so this path emits ONE
       // element: `{{env}}` sits wherever the file puts it and cannot be split
       // off into its own system message.
-      const customTemplate = sessionDir ? loadCustomPrompt(sessionDir, agentName) : null
+      const customTemplate = scopeDir ? loadCustomPrompt(scopeDir, agentName) : null
       if (customTemplate) {
         const result = applyCustomPrompt(customTemplate, {
           env: slices.env || "",

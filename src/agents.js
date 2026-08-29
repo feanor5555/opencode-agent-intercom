@@ -121,17 +121,25 @@ Before each commit, run \`git log -10\` to match the project's existing pattern 
 On pre-commit hook failure, fix the underlying issue and create a NEW commit (do not amend); force-push only on a personal feature branch.
 Final reply: first line \`DONE: T<n>\` when you completed the task, then one bullet per action (commit hash + subject, pushed branch, PR #N).`
 
-// No subagent may delegate. Only the orchestrator spawns; a subagent that
-// needs work from another agent reports it in its final reply, and the
-// orchestrator decides and spawns. Denying the custom async tools
-// (`spawn`/`abort`/`list`) plus opencode's native blocking `task` makes the
-// schema strip hide all four from every subagent's LLM — a tool that stays in
-// the schema but gets thrown by the guard drives small models into a denial
-// loop, so hiding them at the schema level is the primary defense. The
-// spawnHandler caller-gate and the guard's task-deny are the runtime backstops
-// for the case a project override re-exposes them.
+// Denied on EVERY subagent, whatever else it may do. `abort` is user-only
+// throughout this plugin, `list` has nothing to show a subagent, and
+// opencode's native `task` is blocking — denying it is also what makes the
+// schema strip hide that blocking tool (see resolveTaskDecision in config.js,
+// which deliberately reads only the object form as a spawn allowlist).
+// Denying at the schema level is the primary defense: a tool that stays in the
+// schema but gets thrown by the guard drives small models into a denial loop.
 const SUBAGENT_NO_DELEGATION = {
-  spawn: "deny", task: "deny", abort: "deny", list: "deny",
+  task: "deny", abort: "deny", list: "deny",
+}
+
+// Denied on a role that may not delegate at all. Kept apart from
+// SUBAGENT_NO_DELEGATION because `spawn` is the one entry of the four that
+// varies per role; the other three never do. Spread into every subagent role
+// below, so the resulting maps are the same as when the four entries stood in
+// one constant. The spawnHandler caller-gate and the guard's task-deny are the
+// runtime backstops for the case a project override re-exposes them.
+const NO_SPAWN = {
+  spawn: "deny",
 }
 
 // Web access is concentrated in the `researcher` role: it is the only role that
@@ -165,35 +173,35 @@ export const AGENTS = {
     description:
       "Writes concept/design documents. Plans but does not implement. Version and compatibility facts come from a researcher.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS, bash: "deny" },
     prompt: PLANNER_PROMPT,
   },
   coder: {
     description:
       "Implements code changes in thin vertical slices, runs build/test commands, verifies before reporting back.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS },
     prompt: CODER_PROMPT,
   },
   debugger: {
     description:
       "Diagnoses build/test/runtime errors. Finds the root cause but does not fix it itself.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, edit: "deny", write: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS, edit: "deny", write: "deny" },
     prompt: DEBUGGER_PROMPT,
   },
   reviewer: {
     description:
       "Critical developer. Reviews code against best practices, clean code, performance. Writes a review document in reviews/, changes no source code.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS, bash: "deny" },
     prompt: REVIEWER_PROMPT,
   },
   documenter: {
     description:
       "Writes user/API documentation (README, usage, changelog). Reads the actual code, invents nothing.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS, bash: "deny" },
     prompt: DOCUMENTER_PROMPT,
   },
   researcher: {
@@ -201,7 +209,7 @@ export const AGENTS = {
       "Web research. Searches via the custom `web_search` tool (Exa AI backend, wired by this plugin) and, for lived user experience from forums and Q&A sites, the custom `forum_search` tool, never curl/wget. Never recalls URLs from memory.",
     mode: "subagent",
     permission: {
-      ...SUBAGENT_NO_DELEGATION,
+      ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN,
       read: "deny", edit: "deny", write: "deny", bash: "deny",
       glob: "deny", grep: "deny",
       outline: "deny",
@@ -213,7 +221,7 @@ export const AGENTS = {
     description:
       "Generates images (UI mockups, screen designs, icons, illustrations, hero graphics) from a written brief. Saves files to disk; does not write source code.",
     mode: "subagent",
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, outline: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS, outline: "deny" },
     prompt: DESIGNER_PROMPT,
   },
   gitter: {
@@ -221,7 +229,7 @@ export const AGENTS = {
       "Handles repository operations (commits, branches, rebases, tags, PR descriptions) matching the project's existing git style. Does not edit source code.",
     mode: "subagent",
     permission: {
-      ...SUBAGENT_NO_DELEGATION,
+      ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN,
       edit: "deny", write: "deny", webfetch: "deny", websearch: "deny", web_search: "deny",
       forum_search: "deny", outline: "deny",
       todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",

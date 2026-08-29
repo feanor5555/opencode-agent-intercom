@@ -148,6 +148,24 @@ export const endlessCooldowns = new Map()
 // switched it off.
 export const endlessProgress = { lastOpenTasks: null, stalledCycles: 0 }
 
+// childSessionID -> waiter record { childSessionID, parentSessionID, promise,
+//                                   createdAt, settled, timer, settle }.
+//
+// The one place a session's live children are recorded. A record exists from
+// the moment a session starts a child it will block on until that child's run
+// ends by any path (idle, error, abort, watchdog timeout, or the waiter's own
+// ceiling), and `record.promise` is what the starting session's `spawn` tool
+// call is suspended on for exactly that span. Everything that reads or writes
+// it lives in childwait.js; the map is here because it is process-wide shared
+// state like every other map in this file, and because resetState has to be
+// able to settle a leftover waiter without importing childwait.js (which
+// imports this module).
+//
+// The registry entries in `registry` above cannot express this: they describe
+// a one-shot leaf and carry no field for "blocked on somebody else", and the
+// parent of a waited child may be a primary, which has no entry at all.
+export const pendingChildResults = new Map()
+
 // sessionID -> drain object { oldID, newID, notices: [] }. A drain is opened
 // at the START of an orchestrator handoff (beginHandoffDrain) and keyed under
 // the OLD primary's id; once the new session exists it is ALSO keyed under
@@ -207,6 +225,13 @@ export function resetState() {
   pendingSpawns.count = 0
   pendingDeliveries.count = 0
   pendingTaskIds.clear()
+  // Settle before clearing: a leftover waiter's promise would otherwise never
+  // resolve, and its rescue timer would fire into the next test. `settle` is
+  // idempotent and clears the timer, so both hazards go with one call.
+  for (const record of pendingChildResults.values()) {
+    record.settle({ status: "abandoned", detail: "process state reset" })
+  }
+  pendingChildResults.clear()
   lastPrimaryTool.clear()
   primaryCtx.clear()
   pendingHandoffs.clear()

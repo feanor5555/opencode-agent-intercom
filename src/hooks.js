@@ -66,6 +66,7 @@ import {
 import { loadCustomPrompt, applyCustomPrompt } from "./promptsfile.js"
 import { tokens as fmtTokens, ageSeconds, estimateTokens } from "./format.js"
 import { postParentNotice, teardownSubagent } from "./teardown.js"
+import { settleChildWaiter } from "./childwait.js"
 import { completionNotice, errorNotice, denialLoopNotice } from "./notices.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
 import { maybeRunPendingHandoff, maybeRunPendingEndless } from "./handoffwiring.js"
@@ -848,6 +849,19 @@ async function onSessionIdle({ sessionID }, client) {
   const { handle, parentID, agent, taskId, directory, packageTokens } = wake
   try {
     const snapshot = await fetchSnapshot(client, sessionID)
+    // Hand the reply to a session blocked on this one, if there is one. This
+    // is the only ending path that has a RESULT rather than just a cause, so
+    // it settles here rather than leaving it to teardownSubagent's fallback —
+    // which still runs below and is then a no-op. `ctxTokens` rides along
+    // because what a nested run burned is invisible in the parent's own
+    // figure. No-op for every subagent today: nothing registers a waiter yet.
+    settleChildWaiter(sessionID, {
+      status: "completed",
+      handle,
+      agent,
+      result: snapshot.result,
+      ctxTokens: snapshot.ctxTokens,
+    })
     // Auto-tick TODO.md based on the subagent's `DONE: T<n>` marker, if it's
     // present and matches the spawn-assigned task id. Done BEFORE
     // removeEntry/postNotice so the completion notice can report the outcome.
@@ -884,7 +898,7 @@ async function onSessionIdle({ sessionID }, client) {
   try {
     await teardownSubagent(
       client,
-      { sessionID, handle, parentID },
+      { sessionID, handle, parentID, agent },
       { entryRemoved: true, label: "" },
     )
   } finally {
@@ -947,6 +961,12 @@ async function onSessionError(props, client) {
   // denying in-flight tool calls throughout removeEntry + deleteSession
   // (mirrors the watchdog path); see teardownSubagent.
   await teardownSubagent(client, entry, {
+    outcome: {
+      status: wasAborted ? "aborted" : "error",
+      handle: entry.handle,
+      agent: entry.agent,
+      detail: errText,
+    },
     notice: errorNotice(entry, errText, wasAborted),
     toast: {
       title: "agent-intercom",

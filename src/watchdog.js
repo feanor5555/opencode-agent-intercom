@@ -116,6 +116,12 @@ export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
   //    The notice is suppressed when watchdogClient is unset (mirrors the old
   //    `parentID && watchdogClient` guard).
   await teardownSubagent(watchdogClient, entry, {
+    outcome: {
+      status: "timeout",
+      handle,
+      agent,
+      detail: `no activity for ${silentMs} ms (inactivity limit ${maxAgeMs} ms)`,
+    },
     notice: watchdogClient ? timeoutNotice(entry, maxAgeMs, silentMs) : null,
     markAborted: true,
     label: "watchdog",

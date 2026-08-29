@@ -10,6 +10,7 @@ import {
   releasePendingDelivery,
 } from "./registry.js"
 import { postNotice, showToast, deleteSession, forgetSessionDirectory } from "./client.js"
+import { settleChildWaiter } from "./childwait.js"
 import { aborted } from "./state.js"
 import { log, errMsg } from "./log.js"
 
@@ -66,15 +67,40 @@ export async function postParentNotice(client, parentID, notice) {
 // being delivered. The idle path reserves earlier still (inside its wake
 // mutex) and releases after this call — the counter nests, both halves are
 // balanced.
+//
+// `outcome` settles the child-waiter, if this subagent is one somebody is
+// blocked on. This helper is the choke point every ending path runs through
+// (idle, error, watchdog timeout), so settling here is what guarantees the
+// property the blocking shape depends on: no path can end a child without
+// freeing the session waiting for it. The idle path settles earlier — it is
+// the only one that has a RESULT to hand over — and its second settle here is
+// the no-op that keeps the guarantee unconditional. A caller that names no
+// outcome settles as "ended".
 export async function teardownSubagent(
   client,
-  { sessionID, handle, parentID },
-  { notice = null, toast = null, markAborted = false, entryRemoved = false, label = "" } = {},
+  { sessionID, handle, parentID, agent },
+  {
+    notice = null,
+    toast = null,
+    markAborted = false,
+    entryRemoved = false,
+    label = "",
+    outcome = null,
+  } = {},
 ) {
   const tag = label ? `${label}: ` : ""
   reservePendingDelivery()
   if (markAborted) aborted.add(sessionID)
   try {
+    // FIRST, before any network I/O: the waiting session is blocked inside a
+    // tool call, and posting a notice or deleting a session is no reason to
+    // keep it blocked a second longer.
+    settleChildWaiter(sessionID, {
+      status: "ended",
+      handle,
+      agent,
+      ...(outcome ?? {}),
+    })
     if (notice != null && parentID) {
       try {
         await postParentNotice(client, parentID, notice)

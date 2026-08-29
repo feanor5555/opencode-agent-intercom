@@ -27,6 +27,7 @@ import {
   isTaskIdPending,
   isEndlessFrozen,
 } from "./registry.js"
+import { settleChildWaiter } from "./childwait.js"
 import { projectContext } from "./project.js"
 import { AGENTS } from "./agents.js"
 import { projectAgentNames, spawnableAgentNames, unspawnableAgentKinds } from "./config.js"
@@ -474,6 +475,16 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
 
     aborted.add(entry.sessionID)
     entry.status = "aborted"
+    // This handler ends a subagent WITHOUT going through teardownSubagent, so
+    // it settles the child-waiter itself; otherwise a session blocked on this
+    // subagent would stay blocked until the waiter's own ceiling fired. No-op
+    // for a subagent nobody is waiting on, which is every subagent today.
+    settleChildWaiter(entry.sessionID, {
+      status: "aborted",
+      handle: entry.handle,
+      agent: entry.agent,
+      detail: "aborted by its parent",
+    })
 
     const confirmed = await signalAbort(client, entry.sessionID)
     log("aborted", { handle: entry.handle, confirmed })

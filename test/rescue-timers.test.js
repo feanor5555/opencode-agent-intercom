@@ -9,10 +9,10 @@ import { spawnSync } from "node:child_process"
 const teardownURL = new URL("../src/teardown.js", import.meta.url).href
 const childwaitURL = new URL("../src/childwait.js", import.meta.url).href
 
-test("rescue timers keep a bare Node process alive until their promises settle", () => {
+test("rescue timers hold a bare Node process open until their promises settle, and release it then", () => {
   const script = `
     import { waitForSessionQuiescence } from ${JSON.stringify(teardownURL)}
-    import { registerChildWaiter } from ${JSON.stringify(childwaitURL)}
+    import { registerChildWaiter, settleChildWaiter } from ${JSON.stringify(childwaitURL)}
 
     const quiescence = await waitForSessionQuiescence("ses_quiescence", 20)
     if (quiescence !== "timeout") {
@@ -26,6 +26,22 @@ test("rescue timers keep a bare Node process alive until their promises settle",
     )
     if (waiter.status !== "expired") {
       throw new Error("waiter result: " + waiter.status)
+    }
+
+    // The other half: a waiter that settles NORMALLY. Its rescue timer is ref'd
+    // and 30 s out, so the assertion is this process EXITING — awaiting the
+    // promise says nothing, since settle resolves it either way. With the
+    // clearTimeout inside settle gone, the loop stays alive for those 30 s and
+    // the 5 s spawnSync timeout below kills the run.
+    const early = registerChildWaiter(
+      "ses_early",
+      "ses_parent",
+      { timeoutMs: 30_000 },
+    )
+    settleChildWaiter("ses_early", { reason: "completed" })
+    const ended = await early
+    if (ended.status !== "ended") {
+      throw new Error("settled waiter result: " + ended.status)
     }
   `
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {

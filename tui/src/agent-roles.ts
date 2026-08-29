@@ -66,12 +66,18 @@ export function spawnableAgentNames(
   return names;
 }
 
-// The built-in context budget per agent type, in whole tokens. The plugin's own
-// copy is DEFAULT_AGENT_CONTEXT in src/settings.js and
+// A context budget per agent type, in whole tokens. One name for the shape: the
+// built-in table below and the user's own `Settings.agentContext`
+// (settings-file.ts, which re-exports this name) are the same type, so a
+// narrowing here reaches both.
+export type AgentContext = Record<string, number>;
+
+// The built-in context budget per agent type. The plugin's own copy is
+// DEFAULT_AGENT_CONTEXT in src/settings.js and
 // test/settings-defaults-parity.test.js fails on a divergence, which also pins
 // its keys to SPAWNABLE_ROLES. No orchestrator entry: the budget governs
 // subagents only.
-export const DEFAULT_AGENT_CONTEXT: Record<string, number> = {
+export const DEFAULT_AGENT_CONTEXT: AgentContext = {
   planner: 40000,
   coder: 60000,
   debugger: 60000,

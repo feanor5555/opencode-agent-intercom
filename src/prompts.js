@@ -129,7 +129,7 @@ export const PROMPT_CONTRACT = 1
 // the module that owns the text it is made of, and so the exact text can be
 // pinned — `test/fixtures/prompt-contract.json`, written by
 // `scripts/pin-prompt-contract.js` and compared in
-// `test/prompt-file-staleness.test.js`.
+// `test/prompt-contract-pin.test.js`.
 export const CONTRACT_ELEMENTS = Object.freeze([
   Object.freeze({
     id: "blocked-contract",
@@ -199,8 +199,14 @@ export const CONTRACT_ELEMENTS = Object.freeze([
 // be re-wrapped across source lines without tripping the pin —
 // SUBAGENT_DELEGATION_GUIDE is written as concatenated literals.
 //
+// A source that takes its whole block (`select: null`) drops the empty lines
+// out of it: an empty line requires nothing of a prompt file, so re-padding a
+// guide would otherwise fail the pin and put the maintainer in front of a
+// decision with nothing in it. The trade is that a blank line inserted mid-block
+// is not pinned; a `---` rule is not empty and stays pinned.
+//
 // An id the table does not carry answers with an empty array; the id-set parity
-// test in test/prompt-file-staleness.test.js is what guards against that going
+// test in test/prompt-contract-pin.test.js is what guards against that going
 // unnoticed.
 export function contractElementText(id) {
   const element = CONTRACT_ELEMENTS.find((entry) => entry.id === id)
@@ -208,9 +214,12 @@ export function contractElementText(id) {
   const lines = []
   for (const source of element.sources) {
     for (const line of source.block.split("\n")) {
-      if (source.select === null || source.select.test(line)) {
-        lines.push({ block: source.name, line })
+      if (source.select === null) {
+        if (line.trim() === "") continue
+      } else if (!source.select.test(line)) {
+        continue
       }
+      lines.push({ block: source.name, line })
     }
   }
   return lines

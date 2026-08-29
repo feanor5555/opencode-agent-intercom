@@ -15,37 +15,23 @@
 // constant it mirrors, so an edit to prompts.js that drops a contract element
 // fails here instead of silently making every file on disk look fresh.
 //
-// Plus the PIN — `fixtures/prompt-contract.json`, the rendered text of the four
-// elements as of the contract number it names. A probe keeps matching a
-// reworded element; the pin does not, so a reword fails here until the
-// maintainer either bumps PROMPT_CONTRACT and re-pins, or re-pins alone.
+// Then the eager scan over a real directory and the three outlets a finding
+// leaves by. The pin of the elements' rendered text is
+// test/prompt-contract-pin.test.js; the in-session re-scan is
+// test/prompt-file-rescan.test.js.
 //
 // Run: node --test test/prompt-file-staleness.test.js
 
 import test, { beforeEach, after } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import { fileURLToPath } from "node:url"
+import { mkdirSync } from "node:fs"
 
 import plugin from "../src/index.js"
-import { resetState } from "../src/state.js"
 import { upsertSession } from "../src/registry.js"
-import { resetTurnNotices, TODO_AGENTS } from "../src/hooks.js"
-import { resetProjectContext } from "../src/project.js"
-import { resetPermissionGuardCache } from "../src/config.js"
-import { setSettingsPath, resetSettings } from "../src/settings.js"
-import { AGENTS, mayDelegate } from "../src/agents.js"
+import { TODO_AGENTS } from "../src/hooks.js"
+import { mayDelegate } from "../src/agents.js"
+import { PROMPT_CONTRACT, guideBlocks } from "../src/prompts.js"
 import {
-  PROMPT_CONTRACT,
-  CONTRACT_ELEMENTS,
-  contractElementText,
-  guideBlocks,
-  SUBAGENT_GUIDE_CORE,
-} from "../src/prompts.js"
-import {
-  resetOverrides,
   overrideFindings,
   overrideBlock,
   classifyPromptFile,
@@ -59,92 +45,23 @@ import {
   writeDefaultPromptsFiles,
   renderDefaultsFile,
   scanPromptFiles,
-  rescanPromptFiles,
+  readPromptFile,
+  loadCustomPrompt,
   getPromptFilePath,
-  resetCache,
 } from "../src/promptsfile.js"
+import {
+  newProject,
+  cleanupProjects,
+  resetPromptFileState,
+  writePromptFile,
+  makeCtx,
+  primaryTransform,
+  roleOf,
+  preBlockedCore,
+} from "./helpers/prompt-files.js"
 
-const dirs = []
-const settingsFile = join(mkdtempSync(join(tmpdir(), "intercom-stale-cfg-")), "agent-intercom.json")
-setSettingsPath(settingsFile)
-
-// One directory per test: the scan is claimed once per directory for the life
-// of the process, and a fresh path also keeps the loader's mtime cache from
-// answering with the previous test's file.
-function newProject() {
-  const dir = mkdtempSync(join(tmpdir(), "intercom-stale-"))
-  dirs.push(dir)
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture-proj" }))
-  mkdirSync(join(dir, ".opencode", "agent-intercom"), { recursive: true })
-  return dir
-}
-
-function writePromptFile(dir, agent, text) {
-  const filePath = getPromptFilePath(dir, agent)
-  writeFileSync(filePath, text)
-  return filePath
-}
-
-after(() => {
-  for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
-})
-
-beforeEach(() => {
-  resetState()
-  resetTurnNotices()
-  resetProjectContext()
-  resetPermissionGuardCache()
-  resetOverrides()
-  resetCache()
-  rmSync(settingsFile, { force: true })
-  resetSettings()
-})
-
-function makeCtx(dir) {
-  const toasts = []
-  const client = {
-    session: {
-      create: async () => ({ data: { id: "ses_sub1" } }),
-      promptAsync: async () => ({ data: undefined }),
-      get: async () => ({ data: { directory: dir } }),
-      messages: async () => ({ data: [] }),
-      status: async () => ({ data: {} }),
-      delete: async () => ({ data: true }),
-      abort: async () => ({ data: true }),
-    },
-    tui: {
-      showToast: async (opts) => {
-        toasts.push(opts?.body)
-        return { data: true }
-      },
-    },
-    config: { get: async () => ({ data: { agent: {} } }) },
-  }
-  return { ctx: { client, directory: dir, worktree: dir, project: {} }, toasts }
-}
-
-// A fresh session id per test: `getSessionDirectory` caches the directory per
-// SESSION for the life of the process, so a reused id would answer with the
-// previous test's project.
-let primaryCounter = 0
-const nextPrimary = () => `ses_primary_${++primaryCounter}`
-
-async function primaryTransform(hooks, sessionID = nextPrimary()) {
-  const out = { system: ["# Role: Orchestrator\n\nbase prompt"] }
-  await hooks["experimental.chat.system.transform"]({ sessionID }, out)
-  return out
-}
-
-// The role prompt heads every file the user starts from, so the fixtures below
-// carry it too — several probes would otherwise be answered by the guide alone.
-const roleOf = (agent) => AGENTS[agent].prompt
-
-// The subagent core guide as it read BEFORE the `Blocked:` contract: the one
-// line that carries it, removed from the current constant, so the fixture
-// cannot drift away from what the file it stands for actually looked like.
-const preBlockedCore = SUBAGENT_GUIDE_CORE.split("\n")
-  .filter((line) => !line.startsWith("Blocked:"))
-  .join("\n")
+after(cleanupProjects)
+beforeEach(resetPromptFileState)
 
 // ---- the probe table itself ------------------------------------------------
 
@@ -189,86 +106,6 @@ test("the probe role sets are the sets they mirror, not a list that can drift", 
   )
 
   assert.deepEqual(byId["spawn-protocol"].agents, ["orchestrator"])
-})
-
-// ---- the pinned element text -----------------------------------------------
-
-// The pin: the rendered text of the four contract elements as of the contract
-// number it names. Written by `npm run pin:contract`, never by hand.
-const pinPath = fileURLToPath(new URL("./fixtures/prompt-contract.json", import.meta.url))
-const pin = JSON.parse(readFileSync(pinPath, "utf8"))
-
-const elementIds = CONTRACT_ELEMENTS.map((element) => element.id)
-
-// The decision a failing pin asks the maintainer for. It is the whole mechanism
-// — everything else here only makes sure this text is reached.
-const PIN_DECISION =
-  "- a change to what the contract requires → bump PROMPT_CONTRACT in\n" +
-  "  src/prompts.js, then `npm run pin:contract`\n" +
-  "- a cosmetic edit that requires nothing new of a prompt file →\n" +
-  "  `npm run pin:contract` alone"
-
-// Names the lines that moved, so the maintainer decides on the actual diff
-// rather than on "some object differs".
-function elementDrift(id, pinned, current) {
-  const rows = []
-  for (let i = 0; i < Math.max(pinned.length, current.length); i++) {
-    const was = pinned[i]
-    const now = current[i]
-    if (was && now && was.block === now.block && was.line === now.line) continue
-    rows.push(
-      `  [${i}] ${now?.block ?? was?.block ?? "(no block)"}\n` +
-        `    pinned:  ${was ? JSON.stringify(was.line) : "(nothing — the element gained a line)"}\n` +
-        `    current: ${now ? JSON.stringify(now.line) : "(nothing — the element lost a line)"}`,
-    )
-  }
-  return `Contract element "${id}" was reworded.\n${rows.join("\n")}\n${PIN_DECISION}`
-}
-
-test("the pinned contract text is the text the guides carry today", () => {
-  // The pin covers exactly the table: an element added to CONTRACT_ELEMENTS
-  // without a re-pin has no pinned text to fail against, so it is caught here.
-  assert.deepEqual(
-    Object.keys(pin.elements).sort(),
-    [...elementIds].sort(),
-    `the pin names other elements than src/prompts.js does — \`npm run pin:contract\``,
-  )
-
-  for (const id of elementIds) {
-    const current = contractElementText(id)
-    const pinned = pin.elements[id]
-    assert.deepEqual(current, pinned, elementDrift(id, pinned, current))
-  }
-})
-
-test("the pin names the contract it belongs to", () => {
-  // The mirror image: a bump that forgot the re-pin. The pinned text is the
-  // definition of what contract `pin.contract` requires, so it may not outlive
-  // the number it was taken under.
-  assert.equal(
-    pin.contract,
-    PROMPT_CONTRACT,
-    `the pin was taken under contract ${pin.contract}, PROMPT_CONTRACT is now ` +
-      `${PROMPT_CONTRACT} — re-pin the element text with \`npm run pin:contract\``,
-  )
-})
-
-test("every contract element has a probe, and every probe an element", () => {
-  // The two tables are one contract seen twice: overrides.js probes a file for
-  // an element, prompts.js says which text that element is. An id in one and
-  // not the other means a file is judged on something that is not pinned, or
-  // text is pinned that no file is judged on.
-  assert.deepEqual([...elementIds].sort(), PROMPT_FILE_PROBES.map((probe) => probe.id).sort())
-
-  // The `select` regexes go stale the same way the probe regexes do — an
-  // element whose matcher stops selecting anything would otherwise pin an empty
-  // array and pass for ever after.
-  for (const id of elementIds) {
-    assert.ok(
-      contractElementText(id).length > 0,
-      `contract element ${id} selects no line — its select regex no longer matches its guide`,
-    )
-  }
 })
 
 // ---- the probes on the files that exist today ------------------------------
@@ -339,6 +176,48 @@ test("an unstamped file that carries {{guide}} is not stale — the guide arrive
     missing: [],
     detail: "",
   })
+})
+
+// ---- the loader the scan reads through -------------------------------------
+
+test("readPromptFile tells absent from unreadable and names the file either way", () => {
+  // The scan needs three answers where the prompt path needs two, and it gets
+  // them from the loader itself: nothing outside promptsfile.js derives the path
+  // a second time or asks the loader's cache what happened.
+  const dir = newProject()
+  const written = writePromptFile(dir, "coder", "bare template")
+
+  assert.deepEqual(readPromptFile(dir, "coder"), {
+    path: written,
+    content: "bare template",
+    unreadable: false,
+  })
+
+  // No such file — which is what the scan reads as clean.
+  assert.deepEqual(readPromptFile(dir, "planner"), {
+    path: getPromptFilePath(dir, "planner"),
+    content: null,
+    unreadable: false,
+  })
+
+  // A directory where a file belongs: statSync succeeds, readFileSync throws
+  // EISDIR. The same null content, and the flag that stops the scan calling it
+  // clean.
+  const asDirectory = getPromptFilePath(dir, "reviewer")
+  mkdirSync(asDirectory, { recursive: true })
+  assert.deepEqual(readPromptFile(dir, "reviewer"), {
+    path: asDirectory,
+    content: null,
+    unreadable: true,
+  })
+
+  // The wrapper the prompt path uses is the content and nothing else, so both
+  // ways of having no file answer it the same.
+  assert.equal(loadCustomPrompt(dir, "coder"), "bare template")
+  assert.equal(loadCustomPrompt(dir, "planner"), null)
+  assert.equal(loadCustomPrompt(dir, "reviewer"), null)
+  assert.equal(loadCustomPrompt("", "coder"), null, "no directory, no file to name")
+  assert.equal(readPromptFile("", "coder").path, null)
 })
 
 // ---- the scan --------------------------------------------------------------
@@ -527,238 +406,3 @@ test("an unreadable file costs the other roles nothing", () => {
   )
 })
 
-// ---- the re-scan -----------------------------------------------------------
-//
-// `scanPromptFiles` only ever adds, and it runs once per directory. A file the
-// user repairs mid-session is therefore still reported by the register until
-// `rescanPromptFiles` re-judges the directory and replaces its finding set.
-
-// Rewrites a prompt file and moves its mtime, which is what the loader keys its
-// cache on. The bump is explicit rather than left to the clock: two writes
-// inside one filesystem timestamp tick would otherwise be one file to the
-// loader.
-function rewritePromptFile(dir, agent, text) {
-  const filePath = writePromptFile(dir, agent, text)
-  const later = new Date(Date.now() + 2000)
-  utimesSync(filePath, later, later)
-  return filePath
-}
-
-test("a rescan drops the finding of a repaired file", () => {
-  const dir = newProject()
-  writePromptFile(dir, "coder", `${roleOf("coder")}\n${preBlockedCore}\n`)
-  scanPromptFiles(dir)
-  assert.deepEqual(overrideFindings(dir).map((f) => f.agent), ["coder"])
-
-  // The repair the plugin itself prescribes: the file re-rendered from the
-  // current contract, carrying today's stamp.
-  rewritePromptFile(dir, "coder", renderDefaultsFile("coder"))
-
-  assert.equal(rescanPromptFiles(dir), true, "the set changed, so the caller may log it")
-  assert.deepEqual(overrideFindings(dir), [], "no restart needed — the finding is gone")
-  assert.equal(overrideBlock(dir), "", "the last line gone means no block at all")
-})
-
-test("a rescan picks up a file broken after the first scan", () => {
-  const dir = newProject()
-  writeDefaultPromptsFiles(dir, { overwrite: true })
-  scanPromptFiles(dir)
-  assert.deepEqual(overrideFindings(dir), [])
-
-  // The claim is spent, so `scanPromptFiles` is blind to this from here on.
-  const filePath = rewritePromptFile(dir, "planner", `${roleOf("planner")}\n${preBlockedCore}\n`)
-  scanPromptFiles(dir)
-  assert.deepEqual(overrideFindings(dir), [], "the eager scan stays once per directory")
-
-  assert.equal(rescanPromptFiles(dir), true)
-  const findings = overrideFindings(dir)
-  assert.equal(findings.length, 1)
-  assert.equal(findings[0].agent, "planner")
-  assert.equal(findings[0].file, filePath)
-  // The planner's own role prompt carries the `Blocked:` contract and the DONE
-  // marker, so the delegation block is the one element this file lacks.
-  assert.deepEqual([...findings[0].missing], ["delegation-block"])
-})
-
-test("a rescan keeps the finding of a file that became unreadable", () => {
-  const dir = newProject()
-  const filePath = writePromptFile(dir, "coder", `${roleOf("coder")}\n${preBlockedCore}\n`)
-  writePromptFile(dir, "planner", "bare template")
-  scanPromptFiles(dir)
-  assert.deepEqual(overrideFindings(dir).map((f) => f.agent), ["coder", "planner"])
-
-  // A directory where the loader expects a file: statSync succeeds, readFileSync
-  // throws EISDIR. Nothing is known about the role — which is not the same as
-  // knowing it is clean, so its finding must survive the replace.
-  rmSync(filePath, { force: true })
-  mkdirSync(filePath, { recursive: true })
-  const later = new Date(Date.now() + 2000)
-  utimesSync(filePath, later, later)
-
-  assert.equal(rescanPromptFiles(dir), false, "an unreadable role changes nothing")
-  const findings = overrideFindings(dir)
-  assert.deepEqual(findings.map((f) => f.agent), ["coder", "planner"])
-  assert.equal(findings[0].file, filePath)
-  assert.deepEqual([...findings[0].missing], ["blocked-contract", "delegation-block"])
-})
-
-test("a rescan over an unchanged directory changes nothing", () => {
-  const dir = newProject()
-  writePromptFile(dir, "coder", "bare template")
-  scanPromptFiles(dir)
-  const before = overrideBlock(dir)
-
-  assert.equal(rescanPromptFiles(dir), false)
-  assert.equal(overrideBlock(dir), before, "byte-identical — nothing on disk moved")
-  assert.equal(rescanPromptFiles(dir), false, "and it stays that way however often it runs")
-})
-
-test("a rescan is scoped to its directory and refuses an unusable one", () => {
-  const first = newProject()
-  const second = newProject()
-  writePromptFile(first, "coder", "bare template")
-  writePromptFile(second, "coder", "bare template")
-  scanPromptFiles(first)
-  scanPromptFiles(second)
-
-  rewritePromptFile(first, "coder", renderDefaultsFile("coder"))
-  assert.equal(rescanPromptFiles(first), true)
-  assert.deepEqual(overrideFindings(first), [])
-  assert.deepEqual(
-    overrideFindings(second).map((f) => f.agent),
-    ["coder"],
-    "the other project's findings are not this rescan's business",
-  )
-
-  assert.equal(rescanPromptFiles(""), false, "no directory, no work")
-  assert.equal(rescanPromptFiles(undefined), false)
-  assert.equal(overrideFindings().length, 1, "and nothing was cleared under a null scope")
-})
-
-test("a rescan needs no claim and does not spend one", () => {
-  const dir = newProject()
-  writePromptFile(dir, "coder", "bare template")
-
-  // Before any eager scan: the rescan is the first thing to touch this
-  // directory, and it still judges it.
-  assert.equal(rescanPromptFiles(dir), true)
-  assert.deepEqual(overrideFindings(dir).map((f) => f.agent), ["coder"])
-  assert.equal(claimPromptFileScan(dir), true, "the eager scan's claim is untouched")
-})
-
-// ---- the wiring: the primary's `session.idle` -------------------------------
-//
-// Where the re-scan is called from, and what the two gates in front of it let
-// through. The block's own guarantee is the pair at the end: it moves between
-// turns and only for a file that actually changed, and it never moves for an
-// idle that found nothing.
-
-const idleFor = (hooks, sessionID) =>
-  hooks.event({ event: { type: "session.idle", properties: { sessionID } } })
-
-test("a primary's idle re-judges the directory and the next turn drops the line", async () => {
-  const dir = newProject()
-  writePromptFile(dir, "coder", `${roleOf("coder")}\n${preBlockedCore}\n`)
-  const { ctx } = makeCtx(dir)
-  const hooks = await plugin(ctx)
-  const sid = nextPrimary()
-
-  const before = await primaryTransform(hooks, sid)
-  const block = overrideBlock(dir)
-  assert.match(before.system[0], /- coder: the prompt file predates/)
-  assert.ok(block !== "" && before.system[0].includes(block), "the block is in the stable element")
-
-  // The repair, and the turn boundary that lets the plugin see it.
-  rewritePromptFile(dir, "coder", renderDefaultsFile("coder"))
-  await idleFor(hooks, sid)
-
-  assert.deepEqual(overrideFindings(dir), [], "no restart needed")
-  const after = await primaryTransform(hooks, sid)
-  assert.doesNotMatch(after.system[0], /- coder: the prompt file predates/)
-  assert.equal(
-    after.system[0],
-    before.system[0].replace(block, ""),
-    "the block's own text is the only thing that moved",
-  )
-})
-
-test("a file broken mid-session reaches the block on the turn after the next idle", async () => {
-  const dir = newProject()
-  writeDefaultPromptsFiles(dir, { overwrite: true })
-  const { ctx } = makeCtx(dir)
-  const hooks = await plugin(ctx)
-  const sid = nextPrimary()
-
-  const before = await primaryTransform(hooks, sid)
-  assert.doesNotMatch(before.system[0], /project files are overriding/)
-
-  rewritePromptFile(dir, "planner", `${roleOf("planner")}\n${preBlockedCore}\n`)
-  await idleFor(hooks, sid)
-
-  const after = await primaryTransform(hooks, sid)
-  assert.match(after.system[0], /- planner: the prompt file predates the current prompt contract/)
-  assert.ok(after.system[0].includes(getPromptFilePath(dir, "planner")), "the block names the file")
-})
-
-test("a subagent's idle re-judges nothing — the scope belongs to the primary", async () => {
-  const dir = newProject()
-  writePromptFile(dir, "coder", `${roleOf("coder")}\n${preBlockedCore}\n`)
-  const { ctx } = makeCtx(dir)
-  const hooks = await plugin(ctx)
-  const sid = nextPrimary()
-  await primaryTransform(hooks, sid)
-  upsertSession("ses_sub_idle", {
-    agent: "researcher",
-    prompt: "task",
-    parentID: sid,
-    directory: dir,
-  })
-
-  rewritePromptFile(dir, "coder", renderDefaultsFile("coder"))
-  await idleFor(hooks, "ses_sub_idle")
-
-  assert.deepEqual(
-    overrideFindings(dir).map((f) => f.agent),
-    ["coder"],
-    "a subagent holds no project scope, so its idle is not a re-scan trigger",
-  )
-})
-
-test("an idle for a session no turn has scoped does nothing", async () => {
-  const dir = newProject()
-  writePromptFile(dir, "coder", `${roleOf("coder")}\n${preBlockedCore}\n`)
-  const { ctx } = makeCtx(dir)
-  const hooks = await plugin(ctx)
-  await primaryTransform(hooks, nextPrimary())
-
-  rewritePromptFile(dir, "coder", renderDefaultsFile("coder"))
-  await idleFor(hooks, "ses_unknown_to_this_plugin")
-
-  assert.deepEqual(
-    overrideFindings(dir).map((f) => f.agent),
-    ["coder"],
-    "no held directory, no directory to re-judge",
-  )
-})
-
-// ---- the stability pins ----------------------------------------------------
-//
-// Stated in the negative, because they are what stops a later change from
-// quietly taking the guarantee away. The first half — two turns with no idle
-// between them — is "the block holds its bytes across the turns of a session"
-// above, which must keep passing unchanged.
-
-test("an idle that finds nothing changed leaves the next turn byte-identical", async () => {
-  const dir = newProject()
-  writePromptFile(dir, "coder", "bare template")
-  const { ctx } = makeCtx(dir)
-  const hooks = await plugin(ctx)
-  const sid = nextPrimary()
-
-  const first = await primaryTransform(hooks, sid)
-  await idleFor(hooks, sid)
-  const second = await primaryTransform(hooks, sid)
-
-  assert.equal(second.system[0], first.system[0], "nine stats, nothing moved")
-  assert.match(second.system[0], /- coder: the prompt file predates/, "and the finding still stands")
-})

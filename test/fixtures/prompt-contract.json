@@ -46,14 +46,6 @@
     "delegation-block": [
       {
         "block": "SUBAGENT_DELEGATION_GUIDE",
-        "line": ""
-      },
-      {
-        "block": "SUBAGENT_DELEGATION_GUIDE",
-        "line": ""
-      },
-      {
-        "block": "SUBAGENT_DELEGATION_GUIDE",
         "line": "---"
       },
       {
@@ -79,10 +71,6 @@
       {
         "block": "SUBAGENT_DELEGATION_GUIDE",
         "line": "---"
-      },
-      {
-        "block": "SUBAGENT_DELEGATION_GUIDE",
-        "line": ""
       }
     ]
   }

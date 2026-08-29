@@ -86,8 +86,8 @@ That catches a probe going stale (an element *removed* or renamed past its
 anchor). It cannot catch a reword: `/`Blocked:`/` keeps matching however the rest
 of that paragraph is rewritten, `/DONE: T/` likewise, `/spawn\(/` likewise.
 
-Two tests do arithmetic on the stamp — `test/prompt-file-staleness.test.js:226`
-and `:337` both use `PROMPT_CONTRACT - 1`. Any change that makes the stamp
+Two tests do arithmetic on the stamp — `test/prompt-file-staleness.test.js:156`
+and `:309` both use `PROMPT_CONTRACT - 1`. Any change that makes the stamp
 non-numeric breaks both.
 
 `test/prompt-guide-placeholder.test.js:113-116` asserts every rendered file

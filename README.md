@@ -360,8 +360,11 @@ Both kinds are reported through three outlets:
   overridden by project files, <M> prompt file(s) out of date — see the
   orchestrator's first answer`. Two projects served by one process each
   get their own toast; a second session in the same project does not
-  repeat it. The orchestrator reports the substance in its next answer,
-  where a toast alone would already be gone.
+  repeat it, and neither does a finding that appears later in the
+  session: once the toast is spent, the orchestrator's block is the only
+  outlet for anything found afterwards. The orchestrator reports the
+  substance in its next answer, where a toast alone would already be
+  gone.
 - **A block in the orchestrator's stable system prompt**, listing every
   finding with role, displacement, source file and the instruction to
   pass it on once. The block lives in the cached stable element, so its

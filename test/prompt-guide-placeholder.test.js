@@ -14,17 +14,10 @@
 
 import test, { beforeEach, after } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { writeFileSync } from "node:fs"
 
 import plugin from "../src/index.js"
-import { resetState } from "../src/state.js"
 import { upsertSession } from "../src/registry.js"
-import { resetTurnNotices } from "../src/hooks.js"
-import { resetProjectContext } from "../src/project.js"
-import { resetPermissionGuardCache } from "../src/config.js"
-import { setSettingsPath, resetSettings } from "../src/settings.js"
 import { mayDelegate } from "../src/agents.js"
 import {
   PROMPT_CONTRACT,
@@ -35,59 +28,24 @@ import {
   SUBAGENT_NO_SPAWN_GUIDE,
   SUBAGENT_OUTLINE_GUIDE,
 } from "../src/prompts.js"
-import { resetOverrides, CONTRACT_STAMP_KEY } from "../src/overrides.js"
+import { CONTRACT_STAMP_KEY } from "../src/overrides.js"
 import {
   AGENT_NAMES,
   renderDefaultsFile,
   renderOpencodeDefaultFile,
   applyCustomPrompt,
   getPromptFilePath,
-  resetCache,
 } from "../src/promptsfile.js"
+import {
+  newProject,
+  cleanupProjects,
+  resetPromptFileState,
+  makeCtx,
+} from "./helpers/prompt-files.js"
 
-const dirs = []
-const settingsFile = join(mkdtempSync(join(tmpdir(), "intercom-guide-cfg-")), "agent-intercom.json")
-setSettingsPath(settingsFile)
+after(cleanupProjects)
+beforeEach(resetPromptFileState)
 
-function newProject() {
-  const dir = mkdtempSync(join(tmpdir(), "intercom-guide-"))
-  dirs.push(dir)
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture-proj" }))
-  mkdirSync(join(dir, ".opencode", "agent-intercom"), { recursive: true })
-  return dir
-}
-
-after(() => {
-  for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
-})
-
-beforeEach(() => {
-  resetState()
-  resetTurnNotices()
-  resetProjectContext()
-  resetPermissionGuardCache()
-  resetOverrides()
-  resetCache()
-  rmSync(settingsFile, { force: true })
-  resetSettings()
-})
-
-function makeCtx(dir) {
-  const client = {
-    session: {
-      create: async () => ({ data: { id: "ses_sub1" } }),
-      promptAsync: async () => ({ data: undefined }),
-      get: async () => ({ data: { directory: dir } }),
-      messages: async () => ({ data: [] }),
-      status: async () => ({ data: {} }),
-      delete: async () => ({ data: true }),
-      abort: async () => ({ data: true }),
-    },
-    tui: { showToast: async () => ({ data: true }) },
-    config: { get: async () => ({ data: { agent: {} } }) },
-  }
-  return { client, directory: dir, worktree: dir, project: {} }
-}
 
 let counter = 0
 const nextSession = (prefix) => `${prefix}_${++counter}`
@@ -147,7 +105,7 @@ test("the stamp sits in the stripped comment, so it never reaches the model", ()
 test("a freshly rendered file substitutes to the same guide the auto path assembles", async () => {
   for (const agent of ["coder", "researcher", "designer"]) {
     const dir = newProject()
-    const hooks = await plugin(makeCtx(dir))
+    const hooks = await plugin(makeCtx(dir).ctx)
 
     // The auto path first, in a project with no prompt file at all.
     const bare = nextSession("ses_bare")
@@ -173,7 +131,7 @@ test("a freshly rendered file substitutes to the same guide the auto path assemb
 
 test("the substituted guide is the role's own — delegation and outline included", async () => {
   const dir = newProject()
-  const hooks = await plugin(makeCtx(dir))
+  const hooks = await plugin(makeCtx(dir).ctx)
   for (const agent of ["coder", "gitter"]) {
     writeFileSync(getPromptFilePath(dir, agent), renderDefaultsFile(agent))
   }
@@ -196,7 +154,7 @@ test("the substituted guide is the role's own — delegation and outline include
 test("a primary's file substitutes the orchestration protocol", async () => {
   const dir = newProject()
   writeFileSync(getPromptFilePath(dir, "orchestrator"), renderDefaultsFile("orchestrator"))
-  const hooks = await plugin(makeCtx(dir))
+  const hooks = await plugin(makeCtx(dir).ctx)
   const prompt = await promptFor(hooks, nextSession("ses_primary"))
   assert.ok(prompt.includes(ORCHESTRATION_GUIDE))
   assert.ok(!prompt.includes(SUBAGENT_GUIDE_CORE), "the primary gets its own protocol, not the subagent one")
@@ -216,7 +174,7 @@ test("a file written before the token existed keeps working, guide text and all"
     "\n{{project_md}}\n"
   writeFileSync(getPromptFilePath(dir, "coder"), inlined)
 
-  const hooks = await plugin(makeCtx(dir))
+  const hooks = await plugin(makeCtx(dir).ctx)
   const sessionID = nextSession("ses_inlined")
   subagent(sessionID, "coder", dir)
   const prompt = await promptFor(hooks, sessionID)

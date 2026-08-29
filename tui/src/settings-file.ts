@@ -36,12 +36,14 @@
 // leave the file as it is and hand back the state that is on disk, so the panel
 // never shows a limit the plugin will not read.
 
-import { DEFAULT_AGENT_CONTEXT } from "./agent-roles.ts";
+import { DEFAULT_AGENT_CONTEXT, type AgentContext } from "./agent-roles.ts";
 import { createJsonObjectFile } from "./json-object-file.ts";
 
 // The context budget per agent type, in whole tokens. Only the types the user
-// gave a value of their own; nothing is materialised on read.
-export type AgentContext = Record<string, number>;
+// gave a value of their own; nothing is materialised on read. Declared beside
+// the built-in table it falls back on and re-exported here, where the settings
+// shape is read.
+export type { AgentContext };
 
 // Where the flat `maxContext` came from. "default" means nobody set it, which
 // is what lets the built-in per-type table apply.

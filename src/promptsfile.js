@@ -104,42 +104,75 @@ export function getOpencodeDefaultFilePath(directory, agent) {
   return join(getOpencodeDefaultsDir(directory), `${agent}.md`)
 }
 
-// filePath -> { mtimeMs, content } | { mtimeMs: -1, content: null, unreadable }
-//
-// `unreadable` is set on the failure entries alone and separates the two ways
-// `loadCustomPrompt` answers null: the file is not there (false), or it is there
-// and could not be read (true). Both are "no prompt text" to the loader's
-// callers; only the scan needs them apart.
+// filePath -> { mtimeMs, content }. Successful loads only: a path that fails to
+// stat or to read drops out of the cache, so the next call stats it afresh.
 const cache = new Map()
 
-// Load (with mtime cache) and return the raw file contents, or null when the
-// file is absent / unreadable. Caller substitutes placeholders.
-export function loadCustomPrompt(directory, agent) {
-  if (!directory || !agent) return null
+// filePath -> the failure kind last logged for it. `classifyDirectory` runs on
+// every primary `session.idle`, so an unconditional log line in a failure branch
+// would write one line per turn for the life of the session for a condition that
+// persists (a prompt file that is a directory, a path with the read bit off).
+// The latch is dropped when the file loads, so a file that breaks again after a
+// repair is logged again, and it re-logs when the SAME file fails a different
+// way.
+const loggedFailures = new Map()
+
+function logFailureOnce(kind, filePath, fields) {
+  if (loggedFailures.get(filePath) === kind) return
+  loggedFailures.set(filePath, kind)
+  log(kind, { filePath, ...fields })
+}
+
+// The loader's whole answer about one prompt file: where it is, what is in it,
+// and — where there is no content — which of the two reasons applies.
+//
+//   { path, content: "…",  unreadable: false }  the file was read
+//   { path, content: null, unreadable: false }  there is no such file
+//   { path, content: null, unreadable: true }   the file is there and could not
+//                                               be read, so nothing is known
+//
+// The two null cases are one thing to a caller that only wants prompt text and
+// two things to the scan, which must not read "could not be read" as "clean".
+// They are told apart here rather than looked up in the cache afterwards, so
+// nothing outside this module depends on how a path is derived or on what the
+// cache holds.
+//
+// `path` is null only for a call with no directory or no agent, which has no
+// file to name.
+export function readPromptFile(directory, agent) {
+  if (!directory || !agent) return { path: null, content: null, unreadable: false }
   const filePath = getPromptFilePath(directory, agent)
   let stat
   try {
     stat = statSync(filePath)
   } catch (err) {
-    if (err && err.code !== "ENOENT") {
-      log("promptsfile stat failed", { filePath, err: errMsg(err) })
-    }
-    cache.set(filePath, { mtimeMs: -1, content: null, unreadable: err?.code !== "ENOENT" })
-    return null
+    const unreadable = err?.code !== "ENOENT"
+    if (unreadable) logFailureOnce("promptsfile stat failed", filePath, { err: errMsg(err) })
+    cache.delete(filePath)
+    return { path: filePath, content: null, unreadable }
   }
   const entry = cache.get(filePath)
-  if (entry && entry.mtimeMs === stat.mtimeMs) return entry.content
+  if (entry && entry.mtimeMs === stat.mtimeMs) {
+    return { path: filePath, content: entry.content, unreadable: false }
+  }
   let raw
   try {
     raw = readFileSync(filePath, "utf8")
   } catch (err) {
-    log("promptsfile read failed", { filePath, err: errMsg(err) })
-    cache.set(filePath, { mtimeMs: -1, content: null, unreadable: true })
-    return null
+    logFailureOnce("promptsfile read failed", filePath, { err: errMsg(err) })
+    cache.delete(filePath)
+    return { path: filePath, content: null, unreadable: true }
   }
   cache.set(filePath, { mtimeMs: stat.mtimeMs, content: raw })
+  loggedFailures.delete(filePath)
   log("promptsfile loaded", { filePath })
-  return raw
+  return { path: filePath, content: raw, unreadable: false }
+}
+
+// Load (with mtime cache) and return the raw file contents, or null when the
+// file is absent / unreadable. Caller substitutes placeholders.
+export function loadCustomPrompt(directory, agent) {
+  return readPromptFile(directory, agent).content
 }
 
 // A single top-of-file HTML comment block: the author-facing note, and the only
@@ -184,30 +217,37 @@ export function applyCustomPrompt(template, vars) {
 // scan at the primary's first system transform, `rescanPromptFiles` re-judges a
 // directory between turns. Neither runs on the LLM path more than once.
 //
-// Reads through `loadCustomPrompt`, so the scan shares the loader's mtime cache
+// Reads through `readPromptFile`, so the scan shares the loader's mtime cache
 // and costs one stat per role on a directory whose files are already loaded.
 
 // Judges every role's prompt file in one directory and returns one result per
-// role, logging nothing about what it found. Three outcomes:
+// role, logging nothing about what it found. Four outcomes:
 //
 //   { agent, file, state: "clean" }       — no file, or a file that carries the
 //                                           current contract
 //   { agent, file, state: "stale", missing, detail }
 //   { agent, file, state: "unreadable" }  — the file is there and could not be
 //                                           read, so nothing is known about it
+//   { agent, file, state: "unknown", reason } — the file was read and the
+//                                           classifier threw over it
 //
-// The last one exists because "no finding" and "no answer" are not the same
-// thing to a caller that replaces a finding set: a role whose file went
-// unreadable mid-session must keep whatever was found about it, not be read as
-// repaired. A single such file costs the other eight roles nothing.
+// The last two exist because "no finding" and "no answer" are not the same thing
+// to a caller that replaces a finding set: a role the scan could not judge must
+// keep whatever was found about it, not be read as repaired. They are two states
+// rather than one because they name two different conditions — the file could
+// not be read, or it was read and could not be judged — and a state name that
+// describes the wrong one misleads whoever reads the code next. A single such
+// file costs the other eight roles nothing.
 function classifyDirectory(directory) {
   const results = []
   for (const agent of AGENT_NAMES) {
-    const file = getPromptFilePath(directory, agent)
+    // The loader names the file it went to. Both callers guarantee a usable
+    // directory, so `file` is a real path; deriving it a second time here is
+    // exactly what would let the two derivations drift apart.
+    const { path: file, content: raw, unreadable } = readPromptFile(directory, agent)
     try {
-      const raw = loadCustomPrompt(directory, agent)
       if (raw === null) {
-        results.push({ agent, file, state: cache.get(file)?.unreadable === true ? "unreadable" : "clean" })
+        results.push({ agent, file, state: unreadable ? "unreadable" : "clean" })
         continue
       }
       const { missing, detail } = classifyPromptFile(agent, {
@@ -216,8 +256,8 @@ function classifyDirectory(directory) {
       })
       results.push(missing.length ? { agent, file, state: "stale", missing, detail } : { agent, file, state: "clean" })
     } catch (err) {
-      log("promptsfile scan failed", { directory, agent, err: errMsg(err) })
-      results.push({ agent, file, state: "unreadable" })
+      logFailureOnce("promptsfile classify failed", file, { directory, agent, err: errMsg(err) })
+      results.push({ agent, file, state: "unknown", reason: "classify-threw" })
     }
   }
   return results
@@ -244,8 +284,9 @@ export function scanPromptFiles(directory) {
 // primary's `session.idle`, so the register changes between turns and never
 // during one.
 //
-// A role whose file could not be read keeps the finding it already carries: the
-// classification did not find it clean, it found nothing at all.
+// A role whose file could not be read, or could not be judged, keeps the finding
+// it already carries: the classification did not find it clean, it found nothing
+// at all.
 //
 // Returns whether the finding set changed, so the caller can log or stay silent.
 export function rescanPromptFiles(directory) {
@@ -266,7 +307,7 @@ export function rescanPromptFiles(directory) {
       })
       continue
     }
-    if (result.state !== "unreadable") continue
+    if (result.state !== "unreadable" && result.state !== "unknown") continue
     const kept = held.get(result.agent)
     if (kept) {
       next.push({
@@ -466,4 +507,5 @@ export function writeDefaultPromptsFiles(directory, { overwrite = false } = {}) 
 // Test seam.
 export function resetCache() {
   cache.clear()
+  loggedFailures.clear()
 }

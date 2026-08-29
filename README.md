@@ -62,8 +62,7 @@ After restarting opencode, two things still have to happen before the
    type's ceiling in k tokens (with `★` marking a type that has its own
    value and `off` for a ceiling of `0`; stepping a type's own value below
    zero drops the entry so it falls back to the inherited ceiling again),
-   and collapsed `TUI settings` / `LLM params` / `Prompts` sections.
-   opencode 1.18.25 offers no layout choice — the
+   and the orchestrator's system prompt also carries a `Limits` block with headroom per agent type — each entry lists the budget, the fixed overhead (subagent guides, PROJECT.md, the project snapshot prepended to every spawn, AGENTS.md where that type keeps it) and the headroom left for the orchestrator's prompt and the subagent's work, in the form `coder 60.0k (−12.4k fixed → 47.6k)`. The fixed overhead occupies part of every budget before the orchestrator's words do; the limits block names it so the orchestrator can see why its own prompt has less room than the bare budget suggests. The work-package size gate below measures the package against the same budget the headroom was computed from. The same block names `off` for any type whose budget is disabled. The sidebar itself also exposes collapsed `TUI settings` / `LLM params` / `Prompts` sections.
    SDK's `layout` field is `"auto" | "stretch"` and marked deprecated with
    "Always uses stretch layout", and `tui.json` has no `sidebar` block,
    no width, no position. The column takes its width from the content
@@ -173,7 +172,7 @@ The primary never blocks. You stay in the driver's seat the entire time.
 
 | Tool | Purpose | Who |
 |---|---|---|
-| `spawn(agent, prompt, description?)` | Start a subagent non-blocking. Returns a handle (`researcher#1`). | Orchestrator |
+| `spawn(agent, prompt, description?)` | Start a subagent non-blocking. Returns a handle (`researcher#1`). Sizes the work package against the agent's context budget — refused over 40 %, warned over 20 %, gated off when the type's budget is `0`. Unknown agent types are refused and the refusal lists the accepted set. | Orchestrator |
 | `abort(subagent)` | Cooperatively abort and hard-deny further tool calls. User-requested stops. | Orchestrator |
 | `list()` | List active subagents. | Orchestrator |
 | `todos_open()` | List open tasks from `TODO.md` with their stable id (`T5`) and `accept:` criterion. | All agents |
@@ -185,6 +184,37 @@ The primary never blocks. You stay in the driver's seat the entire time.
 Subagents are one-shot: **spawn → run → reply → destroyed.** The primary is
 woken automatically with the full (capped) result on completion. No
 status-poll tool by design — small LLMs would call it in a loop.
+
+### Work-package size gate
+
+`spawn` measures the package it is about to send — the project context the
+plugin prepends plus the orchestrator's own prompt — against the context
+budget of the agent type it is going to. The figure is an estimate
+(characters divided by four), the same estimator the limits block uses.
+
+- **Above 40 % of the budget** — refused before any session is created. The
+  refusal names the measured size, the budget and the threshold so the
+  caller can split the work into smaller packages.
+- **Above 20 % of the budget** — goes ahead, with a warning line on the
+  spawn result reporting how much of the budget the package took and how
+  much headroom is left for the subagent's own work.
+- **At or under 20 %** — spawns silently on that axis.
+
+A budget of `0` for a type disables the gate for that type: no refusal, no
+warning. The limits block the orchestrator sees lists `off` for a
+disabled type.
+
+A spawn naming an agent type that is neither one of the plugin's own roles
+nor one the project declares in its `config.agent` map is refused, and
+the refusal lists every accepted type so the orchestrator can correct
+itself in place. The same union of names is what the limits block shows.
+
+When a subagent finishes, the completion notice carries a `run-size` line
+that reports the tokens the whole run consumed against the same budget,
+with the spawn-time package figure printed beside it. The run-size
+measures the whole run, not just the package — system prompt, every
+tool result, the model's own output — and the two figures separate an
+oversized prompt from a task that sprawled while it ran.
 
 ### Task tracking that doesn't depend on the model remembering
 

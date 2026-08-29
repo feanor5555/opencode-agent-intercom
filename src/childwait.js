@@ -145,8 +145,8 @@ export function registerChildWaiter(childSessionID, parentSessionID, { timeoutMs
         log("child waiter expired", { childSessionID, parentSessionID, ceiling })
       }
     }, ceiling)
-    // Never pin the opencode event loop on a rescue timer.
-    if (typeof timer.unref === "function") timer.unref()
+    // Keep the rescue timer referenced while its promise is pending.
+    // settleChildWaiter clears it once an outcome arrives.
     record.timer = timer
   }
 

@@ -68,7 +68,6 @@ export function waitForSessionQuiescence(
       log("session quiescence wait timed out", { sessionID, timeoutMs: waitMs })
     }
   }, waitMs)
-  if (typeof timer.unref === "function") timer.unref()
   record.timer = timer
   return promise
 }

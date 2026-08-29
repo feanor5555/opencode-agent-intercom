@@ -24,6 +24,8 @@
 # Functions that set these globals must be called directly in the current shell, never in a
 # pipeline, command substitution, or other subshell: otherwise the state is lost and
 # the server is left orphaned. Redirect output to a file instead of piping through `tee`.
+# `e2e_server_start` enforces this itself — see e2e_require_caller_shell — and
+# refuses to start anything when it finds it is running in a subshell.
 #
 # Failures are reported on stderr and returned as a non-zero status; the
 # functions never exit the caller's shell, so a driver can add its own message
@@ -43,6 +45,35 @@ e2e_fail() { printf '%s\n' "$*" >&2; }
 # The URL a server on <port> answers on. One place, so caller and library never
 # disagree about the host part.
 e2e_server_url() { printf 'http://127.0.0.1:%s' "$1"; }
+
+# ---------- caller-shell guard ---------------------------------------------
+
+# Usage: e2e_require_caller_shell <function_name>
+#
+# Returns 0 when the caller runs in the shell that sourced this library, and 1
+# with a diagnostic when it runs in a subshell — a pipeline stage, a command
+# substitution, a background job, an explicit ( … ).
+#
+# `$$` keeps the pid of the shell the script started as; `$BASHPID` is the pid
+# of the shell executing right now. bash forks for every subshell, so the two
+# are equal in the caller's own shell and differ in every subshell. A subshell's
+# variables and traps die with it, so a server started there is invisible to the
+# caller's E2E_SERVER_PID and to its EXIT trap, and nothing stops it afterwards.
+#
+# The check needs bash: a shell that sets no BASHPID cannot be told apart this
+# way and is let through.
+e2e_require_caller_shell() {
+  local fn="$1"
+  if [ -z "${BASHPID:-}" ] || [ "$BASHPID" = "$$" ]; then
+    return 0
+  fi
+  e2e_fail "$fn: refusing to start a server — this call runs in a subshell (pid $BASHPID), not in the caller's shell (pid $$)."
+  e2e_fail "  A subshell cannot hand E2E_SERVER_PID, E2E_SERVER_PGID or an EXIT trap back to the caller, so the opencode it starts could not be stopped again and would be left running."
+  e2e_fail '  Call it directly in your own shell — not through a pipe (`... | tee log`), not in a command substitution (`$(...)`), not as a background job (`... &`), not inside `( ... )`.'
+  e2e_fail '  To keep a transcript, redirect the call itself: e2e_server_start <port> <project_dir> <log_file> <pid_file> >> run.log 2>&1'
+  e2e_fail '  Or pipe the whole driver instead of the single call, which keeps its state in its own shell: bash test/e2e/run-all.sh 2>&1 | tee run.log'
+  return 1
+}
 
 # ---------- plugin wiring --------------------------------------------------
 
@@ -111,8 +142,14 @@ e2e_build_tui() {
 # makes that process its own session and group leader, which is what lets
 # e2e_server_stop kill the whole group. The cd happens inside that shell, so the
 # caller's own working directory is left alone.
+#
+# Refuses outright when it is not running in the caller's shell: the state it
+# hands back and the trap that would stop the server both stay in the shell that
+# calls it, so a subshell would leak the server it starts.
 e2e_server_start() {
   local port="$1" project_dir="$2" log_file="$3" pid_file="$4"
+
+  e2e_require_caller_shell e2e_server_start || return 1
 
   if [ ! -d "$project_dir" ]; then
     e2e_fail "server start: no such project directory: $project_dir"

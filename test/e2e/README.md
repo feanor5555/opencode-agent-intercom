@@ -21,7 +21,8 @@ that opencode upgrades don't shift the system-prompt composition.
 - `server-lifecycle.sh` — sourced library, not a driver. Holds the four server
   steps `run-all.sh` and `endless-task.sh` share: `e2e_build_tui`,
   `e2e_server_start`, `e2e_server_wait_ready`, `e2e_server_stop`, plus
-  `e2e_plugin_wired`, `e2e_server_alive` and `e2e_server_url`. Covered by
+  `e2e_plugin_wired`, `e2e_server_alive`, `e2e_server_url` and the subshell
+  guard `e2e_require_caller_shell`. Covered by
   `test/e2e-server-lifecycle.test.js`, which drives it against a stub server.
 - `golden/` — reference captures from 2026-05-16 (opencode 1.15.0, omnicoder
   Qwen3.5-9B). Diff fresh `out/*.full*.json` against these to detect drift.
@@ -145,7 +146,7 @@ Run on its own it builds the TUI first, like `run-all.sh`; started *by*
 `run-all.sh` it skips that build, because `E2E_TUI_BUILT=1` is exported once the
 suite has built.
 
-Two things the lifecycle library is deliberate about:
+Three things the lifecycle library is deliberate about:
 
 - **The readiness probe watches the server, not a wrapper.** It starts the
   server as `setsid bash -c 'cd …; echo $$ > pidfile; exec opencode serve …'`,
@@ -155,6 +156,16 @@ Two things the lifecycle library is deliberate about:
 - **A step that does not happen fails loudly.** Every wait ends on the expected
   log line, on an `endless: abandoned at …` line, on the server dying, or on its
   timeout — the last two are `FAIL` with the reason, never a silent pass.
+- **`e2e_server_start` refuses to run in a subshell.** The pid, the process
+  group and the caller's `trap … EXIT` all live in the shell that calls it, so a
+  call inside a pipeline, a command substitution, a background job or `( … )`
+  would start a server nothing can stop again — that leaked a running
+  `opencode serve` twice. The function compares `$BASHPID` against `$$`, and
+  where they differ it starts nothing and returns 1 with the remedy on stderr.
+  Call it directly in your own shell; to keep a transcript, redirect that call
+  to a file (`e2e_server_start … >> run.log 2>&1`) or pipe the whole driver
+  instead of the single call (`bash test/e2e/run-all.sh 2>&1 | tee run.log`),
+  which keeps the state in the driver's own shell and is unaffected.
 
 `ENDLESS_MAX_CYCLES=1` is what keeps the loop from running on: the cycle the
 driver asserts completes, and the next one stops at the ceiling and switches

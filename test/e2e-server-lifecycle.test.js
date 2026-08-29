@@ -184,6 +184,81 @@ echo "REFUSED"
   rmSync(r.dir, { recursive: true, force: true })
 })
 
+// The subshell guard. Every case here runs without the stub on PATH: should the
+// guard ever stop firing, the wrapper still writes its pid file before its `exec
+// opencode` fails, so the missing pid file is what proves nothing was started —
+// and no stray server is left behind by a regression in this very test.
+for (const [what, call] of [
+  ["a pipeline", `e2e_server_start 4599 "$DIR" "$DIR/server.log" "$DIR/pidfile" | cat`],
+  ["a command substitution", `OUT=$(e2e_server_start 4599 "$DIR" "$DIR/server.log" "$DIR/pidfile")`],
+  ["a background job", `e2e_server_start 4599 "$DIR" "$DIR/server.log" "$DIR/pidfile" & wait $!`],
+  ["an explicit subshell", `( e2e_server_start 4599 "$DIR" "$DIR/server.log" "$DIR/pidfile" )`],
+]) {
+  test(`start refuses to run in ${what} instead of leaking the server`, () => {
+    const r = runShell(
+      `set -uo pipefail
+. "$LIB"
+${call} && exit 12
+echo "REFUSED"
+`,
+      { withStub: false },
+    )
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+    assert.match(r.stdout, /REFUSED/)
+    // What went wrong, and what the caller must do instead.
+    assert.match(r.stderr, /e2e_server_start: refusing to start a server/)
+    assert.match(r.stderr, /runs in a subshell \(pid \d+\), not in the caller's shell \(pid \d+\)/)
+    assert.match(r.stderr, /could not be stopped again and would be left running/)
+    assert.match(r.stderr, /Call it directly in your own shell/)
+    assert.match(r.stderr, /not through a pipe/)
+    // Nothing was started: the wrapper never ran, so it wrote no pid file.
+    assert.equal(existsSync(join(r.dir, "pidfile")), false, "a server was started in the subshell")
+    rmSync(r.dir, { recursive: true, force: true })
+  })
+}
+
+test("the guard stays silent for the direct call the drivers make", () => {
+  const port = freePort()
+  const r = runShell(
+    `set -uo pipefail
+. "$LIB"
+e2e_server_start ${port} "$DIR" "$DIR/server.log" "$DIR/pidfile" || exit 11
+e2e_server_wait_ready 30 "$DIR/health.json" || exit 12
+e2e_server_stop || exit 13
+echo "DIRECT_OK"
+`,
+  )
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  assert.match(r.stdout, /DIRECT_OK/)
+  assert.doesNotMatch(r.stderr, /subshell/)
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("piping a whole driver is still allowed — its shell keeps the state", () => {
+  // `bash run-all.sh 2>&1 | tee log` puts the driver itself in a pipeline, but
+  // the driver is its own process: its globals and its trap survive, so the
+  // guard must not fire on the call inside it.
+  const port = freePort()
+  const r = runShell(
+    `set -uo pipefail
+cat > "$DIR/driver.sh" <<'INNER'
+. "$LIB"
+trap 'e2e_server_stop' EXIT
+e2e_server_start ${port} "$DIR" "$DIR/server.log" "$DIR/pidfile" || exit 11
+e2e_server_wait_ready 30 "$DIR/health.json" || exit 12
+echo "DRIVER_OK"
+INNER
+bash "$DIR/driver.sh" | cat
+exit "\${PIPESTATUS[0]}"
+`,
+  )
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  assert.match(r.stdout, /DRIVER_OK/)
+  assert.match(r.stdout, /server stopped \(signalled -\d+\)/)
+  assert.doesNotMatch(r.stderr, /subshell/)
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
 test("stop is a no-op when no server was started, and safe to call twice", () => {
   const r = runShell(
     `set -euo pipefail
@@ -269,6 +344,19 @@ test("the drivers source the library and call it", () => {
     // Nothing that was moved into the library may be left behind inline.
     assert.doesNotMatch(src, /setsid bash -c/, `${name} still starts a server inline`)
     assert.doesNotMatch(src, /kill -TERM/, `${name} still stops a server inline`)
+  }
+})
+
+test("no driver calls the start through a pipe, a substitution or a background job", () => {
+  const e2e = resolve(import.meta.dirname, "e2e")
+  for (const name of ["run-all.sh", "multi-task.sh", "run-task.sh", "endless-task.sh"]) {
+    const src = readFileSync(join(e2e, name), "utf8")
+    for (const line of src.split("\n")) {
+      if (!/^\s*[^#]*\be2e_server_start\b/.test(line)) continue
+      assert.doesNotMatch(line, /(?<!\|)\|(?!\|)/, `${name} pipes e2e_server_start: ${line}`)
+      assert.doesNotMatch(line, /\$\(\s*e2e_server_start/, `${name} substitutes e2e_server_start: ${line}`)
+      assert.doesNotMatch(line, /&\s*$/, `${name} backgrounds e2e_server_start: ${line}`)
+    }
   }
 })
 

@@ -72,6 +72,7 @@ test("the marker is the first non-empty line, leading blank lines and indent tol
 test("the marker accepts common markdown renderings at line start", () => {
   const rendered = [
     "**Blocked:** markdown emphasis with the colon inside",
+    "**Blocked:**",
     "**blocked**: markdown emphasis with the colon outside",
     "__BLOCKED:__ underscore emphasis with the colon inside",
     "__blocked__: underscore emphasis with the colon outside",

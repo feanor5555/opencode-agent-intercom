@@ -22,8 +22,9 @@
     "tui/dist"
   ],
   "scripts": {
-    "check": "for f in src/*.js; do node --check \"$f\" || exit 1; done",
-    "test": "node --test --test-concurrency=1 test/*.test.js"
+    "check": "for f in src/*.js scripts/*.js; do node --check \"$f\" || exit 1; done",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "pin:contract": "node scripts/pin-prompt-contract.js"
   },
   "keywords": [
     "opencode",

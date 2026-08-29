@@ -104,16 +104,117 @@ export const SUBAGENT_OUTLINE_GUIDE =
   "*.json, .env, README.md, AGENTS.md, CLAUDE.md): full `read` is fine. Skip outline.\n---\n"
 
 // The prompt contract: the elements a system prompt has to carry for the
-// mechanics around it to work — the `Blocked:` report a subagent hands up, the
-// `DONE: T<n>` marker the wake hook removes a task on, the orchestrator's spawn
-// protocol, and the delegation block a spawning role needs. The integer is
-// bumped BY HAND whenever one of those elements changes.
+// mechanics around it to work. `CONTRACT_ELEMENTS` below is the definition of
+// which text those elements are; this integer is bumped BY HAND whenever one of
+// them changes in a way that requires something new of a prompt file.
 //
 // `renderDefaultsFile` (promptsfile.js) stamps it into the header comment of
 // every file it writes, and a user file whose stamp is below this number
 // predates the current contract — see detector B in overrides.js. The stamp
 // sits inside the comment that is stripped before the prompt reaches the model.
 export const PROMPT_CONTRACT = 1
+
+// The four contract elements, in the order of the probe table in overrides.js
+// (`PROMPT_FILE_PROBES`), whose ids these are: the `Blocked:` report a subagent
+// hands up, the `DONE: T<n>` marker the wake hook removes a task on, the
+// orchestrator's spawn protocol, and the delegation block a spawning role
+// needs.
+//
+// Each source names one guide constant and the lines of it that carry the
+// element: `select` matches those lines, `null` means the whole block is the
+// element. `name` is the constant's own name, so a pinned line says which block
+// it came from.
+//
+// The table sits on no runtime path. It exists so the contract is defined in
+// the module that owns the text it is made of, and so the exact text can be
+// pinned — `test/fixtures/prompt-contract.json`, written by
+// `scripts/pin-prompt-contract.js` and compared in
+// `test/prompt-file-staleness.test.js`.
+export const CONTRACT_ELEMENTS = Object.freeze([
+  Object.freeze({
+    id: "blocked-contract",
+    sources: Object.freeze([
+      Object.freeze({
+        block: ORCHESTRATION_GUIDE,
+        name: "ORCHESTRATION_GUIDE",
+        select: /`Blocked:`/,
+      }),
+      Object.freeze({
+        block: SUBAGENT_GUIDE_CORE,
+        name: "SUBAGENT_GUIDE_CORE",
+        select: /`Blocked:`/,
+      }),
+      Object.freeze({
+        block: SUBAGENT_NO_SPAWN_GUIDE,
+        name: "SUBAGENT_NO_SPAWN_GUIDE",
+        select: /`Blocked:`/,
+      }),
+      Object.freeze({
+        block: SUBAGENT_DELEGATION_GUIDE,
+        name: "SUBAGENT_DELEGATION_GUIDE",
+        select: /`Blocked:`/,
+      }),
+    ]),
+  }),
+  Object.freeze({
+    id: "done-marker",
+    sources: Object.freeze([
+      Object.freeze({
+        block: ORCHESTRATION_GUIDE,
+        name: "ORCHESTRATION_GUIDE",
+        select: /DONE: T/,
+      }),
+      Object.freeze({
+        block: SUBAGENT_GUIDE_CORE,
+        name: "SUBAGENT_GUIDE_CORE",
+        select: /DONE: T/,
+      }),
+    ]),
+  }),
+  Object.freeze({
+    id: "spawn-protocol",
+    sources: Object.freeze([
+      Object.freeze({
+        block: ORCHESTRATION_GUIDE,
+        name: "ORCHESTRATION_GUIDE",
+        select: /^- [a-z]+\(/,
+      }),
+    ]),
+  }),
+  Object.freeze({
+    id: "delegation-block",
+    sources: Object.freeze([
+      Object.freeze({
+        block: SUBAGENT_DELEGATION_GUIDE,
+        name: "SUBAGENT_DELEGATION_GUIDE",
+        select: null,
+      }),
+    ]),
+  }),
+])
+
+// The rendered text of one contract element: `{ block, line }` per line, in
+// table order, each source block split the way the model reads it. Pinning the
+// RENDERED lines rather than the source literals is what lets a guide constant
+// be re-wrapped across source lines without tripping the pin —
+// SUBAGENT_DELEGATION_GUIDE is written as concatenated literals.
+//
+// An id the table does not carry answers with an empty array; the id-set parity
+// test in test/prompt-file-staleness.test.js is what guards against that going
+// unnoticed.
+export function contractElementText(id) {
+  const element = CONTRACT_ELEMENTS.find((entry) => entry.id === id)
+  if (!element) return []
+  const lines = []
+  for (const source of element.sources) {
+    for (const line of source.block.split("\n")) {
+      if (source.select === null || source.select.test(line)) {
+        lines.push({ block: source.name, line })
+      }
+    }
+  }
+  return lines
+}
 
 // Subagents whose tool gating disables `outline` — they neither read source
 // code nor have the outline tool to call. Skip the outline-discipline block for

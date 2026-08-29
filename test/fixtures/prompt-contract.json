@@ -1,0 +1,89 @@
+{
+  "contract": 1,
+  "elements": {
+    "blocked-contract": [
+      {
+        "block": "ORCHESTRATION_GUIDE",
+        "line": "A reply whose FIRST line starts with `Blocked:` is a decision handed up to you, not a failed run to retry: the subagent hit a problem its prompt did not cover, finished what did not depend on it, and stopped there. Decide what happens about the problem and whether the original task continues; where it continues, spawn a FRESH subagent carrying your decision and the missing facts. Never re-send the same prompt unchanged, and never tell a subagent to work around a blocker it reported."
+      },
+      {
+        "block": "SUBAGENT_GUIDE_CORE",
+        "line": "Blocked: on a problem your prompt does not cover — a blocker, a missing precondition, an ambiguity, a tool that keeps failing, a decision that is not yours to make — stop that step, still finish every part of the task that does not depend on it, and start the FIRST line of your final reply with `Blocked:` naming the problem, what you did complete, and what you need to go on. Do not invent a workaround, do not widen the task, do not drop the step in silence. The orchestrator decides what happens and spawns a fresh subagent if the task continues."
+      },
+      {
+        "block": "SUBAGENT_NO_SPAWN_GUIDE",
+        "line": "You cannot spawn agents. If the task needs another agent, name it and what it should do in your final reply — the orchestrator dispatches it; you never spawn. Where the task cannot go on without that agent, this is a blocker: open the reply with `Blocked:`."
+      },
+      {
+        "block": "SUBAGENT_DELEGATION_GUIDE",
+        "line": "The prompt you send carries NO `T<n>:` prefix: the researcher prepares material for your task, it does not take one over. You get a small quota of these per run (the limits block below names what is left); past it, do the rest yourself and name what is still missing in your final reply — opened with `Blocked:` where the missing material stops the task."
+      }
+    ],
+    "done-marker": [
+      {
+        "block": "ORCHESTRATION_GUIDE",
+        "line": "For task-tracked spawns, tell the subagent to put `DONE: T<n>` on the FIRST or LAST non-empty line of its final reply. The marker must occupy a whole line and match the spawn task id."
+      },
+      {
+        "block": "SUBAGENT_GUIDE_CORE",
+        "line": "If your spawn prompt started with `T<n>:` and you completed the task, put `DONE: T<n>` on the FIRST or LAST non-empty line of your final reply — the wake-hook removes that task from TODO.md for you. If you could not finish, leave that marker off and report as blocked, below."
+      }
+    ],
+    "spawn-protocol": [
+      {
+        "block": "ORCHESTRATION_GUIDE",
+        "line": "- spawn(agent, prompt) — start a subagent non-blocking. One-shot: it replies once then is destroyed. You are woken automatically with its reply."
+      },
+      {
+        "block": "ORCHESTRATION_GUIDE",
+        "line": "- abort(handle) — stop a subagent. Use only when the user asks you to."
+      },
+      {
+        "block": "ORCHESTRATION_GUIDE",
+        "line": "- list() — your active subagents."
+      }
+    ],
+    "delegation-block": [
+      {
+        "block": "SUBAGENT_DELEGATION_GUIDE",
+        "line": ""
+      },
+      {
+        "block": "SUBAGENT_DELEGATION_GUIDE",
+        "line": ""
+      },
+      {
+        "block": "SUBAGENT_DELEGATION_GUIDE",
+        "line": "---"
+      },
+      {
+        "block": "SUBAGENT_DELEGATION_GUIDE",
+        "line": "⤷ agent-intercom: delegating preparatory work."
+      },
+      {
+        "block": "SUBAGENT_DELEGATION_GUIDE",
+        "line": "You may call `spawn(\"researcher\", prompt)` — a `researcher` and nothing else. It is the one role with web tools, so obtaining and summarising web material is what you delegate: current versions, release notes, an error message nobody in this repo has seen, the substance of a long page. You have no web tools of your own."
+      },
+      {
+        "block": "SUBAGENT_DELEGATION_GUIDE",
+        "line": "This is NOT your normal working mode. Spawn only where the work would cost more of your own context than its answer is worth. Never for what `read`, `grep` or `outline` can tell you, never to fetch a file from this repo, and never to hand off your own deliverable — the task you were given stays yours to do and to report."
+      },
+      {
+        "block": "SUBAGENT_DELEGATION_GUIDE",
+        "line": "What you get back: the call BLOCKS until the researcher has finished, and its reply is the result of the call. There is no wake and no second chance to ask — one answer, then that subagent is gone. Delegate a whole question at once."
+      },
+      {
+        "block": "SUBAGENT_DELEGATION_GUIDE",
+        "line": "The prompt you send carries NO `T<n>:` prefix: the researcher prepares material for your task, it does not take one over. You get a small quota of these per run (the limits block below names what is left); past it, do the rest yourself and name what is still missing in your final reply — opened with `Blocked:` where the missing material stops the task."
+      },
+      {
+        "block": "SUBAGENT_DELEGATION_GUIDE",
+        "line": "---"
+      },
+      {
+        "block": "SUBAGENT_DELEGATION_GUIDE",
+        "line": ""
+      }
+    ]
+  }
+}

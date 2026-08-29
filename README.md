@@ -343,7 +343,11 @@ Two kinds of project file can silently displace what this plugin installs:
    is judged by that stamp alone — it is reported once the plugin's
    contract number moves past it. A file with no stamp, which is every
    file written before the stamp existed, is judged by whether its text
-   still carries those four elements.
+   still carries those four elements. What a stamp guarantees is fixed on
+   the plugin's side: the rendered text of the four elements is pinned per
+   contract number in `test/fixtures/prompt-contract.json`, so the number
+   a file carries names a known wording rather than whatever the guides
+   happened to say.
 
 Both kinds are reported through three outlets:
 
@@ -648,15 +652,21 @@ removing every "do it yourself" tool from the primary is the enforcement lever.
   directory per process, so the block the orchestrator sees cannot move
   mid-session. A file a user fixes during the session is reported as
   stale until the next restart.
-- **No automatic bump of the prompt contract when a guide constant
-  changes.** `PROMPT_CONTRACT` is a hand-edited integer in `prompts.js`
-  and the parity test catches a probe going stale, not a contract
-  element being reworded. A change to one of the four elements the
-  contract covers — the `Blocked:` report, the `DONE: T<n>` marker, the
-  orchestrator's `spawn` protocol, or the delegation block — needs the
-  stamp bumped manually for the report to flag every customised file.
+- **The prompt contract's text is pinned; the number is still bumped by
+  hand.** `PROMPT_CONTRACT` is a hand-edited integer in `prompts.js`, and
+  the rendered text of the four elements it covers — the `Blocked:`
+  report, the `DONE: T<n>` marker, the orchestrator's `spawn` protocol,
+  the delegation block — is pinned in
+  `test/fixtures/prompt-contract.json`. Rewording one of them fails
+  `npm test` with the element named, and the decision is the
+  maintainer's: bump the integer and re-pin with `npm run pin:contract`,
+  which reports every customised file below the new number, or re-pin
+  alone for a cosmetic edit, which reports nothing and leaves the
+  re-pinned text visible in the diff. Two things stay uncovered: guide
+  text outside those four elements, and a maintainer who re-pins a real
+  contract change without bumping.
 - **Solo-maintainer surface area.** `pw` daemon, `gen` CLI, Exa SSE parser,
-  ctags subprocess, four opencode hooks. 86 unit tests, no CI against real
+  ctags subprocess, four opencode hooks. 1010 unit tests, no CI against real
   opencode. Bugs are addressed at hobby-project pace.
 
 ## Development

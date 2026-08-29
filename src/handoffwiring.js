@@ -49,14 +49,39 @@ import {
 } from "./client.js"
 import { addTask, listOpen, findTodoFile, TodoFileMissingError } from "./todofile.js"
 import { getSettings, writeEndlessMode } from "./settings.js"
+import { defaultAgentName, DEFAULT_AGENT } from "./agents.js"
+import { knownAgentKinds } from "./config.js"
 import { readPlannedSteps, formatPrimarySummary, writePrimarySummary } from "./project.js"
 import { log, errMsg } from "./log.js"
 
-// Orchestrator agent name passed to the new session in the handoff. The
-// README + package.json declare "orchestrator" as the default primary agent;
-// FLAGGED: a project that overrides `default_agent` in opencode.json will not
-// be honored here — runtime verification required.
-const ORCHESTRATOR_AGENT_NAME = "orchestrator"
+// The agent a replacement primary runs as: whatever this opencode instance
+// starts a primary as — `default_agent`, captured at the `config` hook — so a
+// project that names its own primary is handed one of those back and not an
+// `orchestrator` it never asked for.
+//
+// The name must be one opencode can actually route a session to, and the
+// captured value is only a config string: a `default_agent` naming an agent
+// nothing resolves would fail the kickoff and with it the whole handoff. So a
+// name other than this plugin's own role is confirmed against the resolved
+// agent list first — the same cached read the spawn refusal uses, one request
+// per process, no extra round trip on the handoff path. `DEFAULT_AGENT` needs
+// no confirmation: installAgents writes that role into every config.
+//
+// Unconfirmable means fall back, not fail: knownAgentKinds yields an empty map
+// on a server without the route or a transport error, and replacing the primary
+// with this plugin's own role is what the handoff did before it consulted the
+// name at all.
+export async function handoffAgentName(client) {
+  const name = defaultAgentName()
+  if (name === DEFAULT_AGENT) return name
+  const kinds = await knownAgentKinds(client)
+  if (kinds.has(name)) return name
+  log("handoff: default_agent is not a resolved agent, using the plugin role", {
+    default_agent: name,
+    using: DEFAULT_AGENT,
+  })
+  return DEFAULT_AGENT
+}
 
 // Idle-gated handoff, execution side. Called from the `session.idle` event
 // for EVERY idle session (subagent idles are a cheap no-op: only primary
@@ -100,13 +125,16 @@ export function maybeRunPendingHandoff(client, sessionID) {
 
 // Assembles the dependency object for performPrimaryHandoff — the bridge
 // between the pure handoff sequence (handoff.js) and the live client /
-// registry / project plumbing. Extracted from the transform hook when the
-// trigger moved to the idle event; the content is unchanged.
-function buildPrimaryHandoffDeps(client, sessionID, sessionDir) {
+// registry / project plumbing. Async for one reason: the agent the replacement
+// primary runs as may have to be confirmed against the resolved agent list.
+async function buildPrimaryHandoffDeps(client, sessionID, sessionDir) {
+  // Resolved once for the whole handoff, so the name the deps carry and the
+  // name the kickoff prompt routes to cannot diverge.
+  const agentName = await handoffAgentName(client)
   return {
     primarySessionID: sessionID,
     directory: sessionDir,
-    orchestratorAgentName: ORCHESTRATOR_AGENT_NAME,
+    orchestratorAgentName: agentName,
     getInFlightSubagents: inFlightSubagentsFor,
     getPlannedSteps: readPlannedSteps,
     // The last user goal is fetched from the old primary's own message
@@ -148,7 +176,7 @@ function buildPrimaryHandoffDeps(client, sessionID, sessionDir) {
     promptAsync: (sid, message) =>
       promptSession(client, {
         sessionID: sid,
-        agent: ORCHESTRATOR_AGENT_NAME,
+        agent: agentName,
         prompt: message,
         hideable: true,
       }),
@@ -274,10 +302,10 @@ async function promptOldPrimaryFor(client, primarySessionID, { prompt, looksLike
   }
   return requestDocSummaries({
     fetchResult: async () => (await fetchSnapshot(client, primarySessionID))?.result,
-    sendPrompt: () =>
+    sendPrompt: async () =>
       promptSession(client, {
         sessionID: primarySessionID,
-        agent: ORCHESTRATOR_AGENT_NAME,
+        agent: await handoffAgentName(client),
         prompt,
         hideable: true,
       }),
@@ -355,9 +383,9 @@ export async function maybeRunPendingEndless(client, sessionID) {
     // already was; the text we have is handed back instead, so
     // validateDocSummaries' fallback block lands in the kickoff and the new
     // orchestrator reads the documents itself — it has the context to.
-    performHandoff: ({ extraKickoffBlock, openPointsText }) =>
+    performHandoff: async ({ extraKickoffBlock, openPointsText }) =>
       performPrimaryHandoff({
-        ...buildPrimaryHandoffDeps(client, sessionID, directory),
+        ...(await buildPrimaryHandoffDeps(client, sessionID, directory)),
         extraKickoffBlock,
         promptOldPrimaryForDocSummaries: async () => openPointsText,
       }),

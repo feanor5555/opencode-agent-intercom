@@ -202,7 +202,7 @@ budget, and `recordPrimaryContext` (`src/hooks.js:170`) is a different setting.
 ### 2.6 The `{{limits}}` block
 
 A single `maxContext = X` (`src/hooks.js:466`) is no longer the ceiling.
-`formatLimitsNotice()` (`src/hooks.js:613-644`) lists the budget per spawnable
+`formatLimitsNotice()` (`src/hooks.js:647-677`) lists the budget per spawnable
 type, with each entry carrying the fixed overhead that type's spawns pay
 before the orchestrator's own words and the headroom left over; `0` is shown
 as `off`. The full block:
@@ -292,8 +292,8 @@ Weighed and rejected:
 
 ### 2.8 Agent types known at runtime
 
-- Server: `AGENTS` (`src/agents.js:138-217`) — nine roles — merged into
-  opencode's resolved config by `installAgents` (`src/agents.js:229-244`), where
+- Server: `AGENTS` (`src/agents.js:196-285`) — nine roles — merged into
+  opencode's resolved config by `installAgents` (`src/agents.js:313-328`), where
   a project may add its own or override one. The `spawn` tool's gate reads
   `SPAWNABLE_ROLES` (`src/agents.js:299`), the eight `mode: "subagent"` roles
   minus `orchestrator` — the closed spawnable set is this plugin's own

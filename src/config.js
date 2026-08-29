@@ -83,10 +83,11 @@ async function loadServerAgents(client) {
 }
 
 // Every agent name this opencode instance knows, mapped to what kind of thing
-// it is. None of them is a spawn target — the spawn gate's authority is the
-// plugin's own SPAWNABLE_ROLES (agents.js) — this map exists so a REFUSAL can
-// state the reason that is true of the name instead of reporting every one of
-// them as a name nobody resolves:
+// it is. The map decides nothing: the gate has already decided by the time this
+// is read — a name that reaches it is not spawnable, whatever kind this map
+// gives it, the spawn gate's authority being the plugin's own SPAWNABLE_ROLES
+// (agents.js). This map exists so a REFUSAL can state the reason that is true
+// of the name instead of reporting every one of them as a name nobody resolves:
 //
 //   "primary" — `mode: "primary"` (`build`, `plan`, and opencode's internal
 //     `compaction`/`title`/`summary`, which are primary and hidden both).
@@ -96,6 +97,11 @@ async function loadServerAgents(client) {
 //     an agent opencode would run; it is simply not one of this plugin's roles.
 //
 // A name absent from the map is one nothing resolves at all — a typo.
+//
+// The plugin's own roles are in the map too, installAgents having put them into
+// the resolved config: `orchestrator` as "primary", the eight subagent roles as
+// "hidden". The refusal never reaches them — tools.js classifies a name it
+// finds in AGENTS off AGENTS, before this map is consulted.
 //
 // The server's answer wins over the project config for a name both carry: it is
 // the resolved truth, config plus built-in defaults folded together.

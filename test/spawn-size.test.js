@@ -462,8 +462,36 @@ test("the orchestrator cannot be spawned — it is the primary, not a role to de
   const hooks = await plugin(ctx)
 
   const res = await hooks.tool.spawn.execute({ agent: "orchestrator", prompt: "x" }, toolCtx)
-  assert.match(res.output, /^Spawn refused: "orchestrator" /)
+  assert.match(
+    res.output,
+    /^Spawn refused: "orchestrator" is this plugin's primary role — the one you are running as — not a subagent to delegate to, so no subagent was started\./,
+  )
+  assert.doesNotMatch(
+    res.output,
+    /is not an agent type this project has/,
+    "the plugin installs it — the refusal must not claim otherwise",
+  )
+  assert.doesNotMatch(
+    res.output,
+    /opencode's/,
+    "it is this plugin's own role, not one opencode brings",
+  )
   assert.doesNotMatch(res.output, /Available types: .*\borchestrator\b/)
+  assert.deepEqual(created, [])
+})
+
+test("the orchestrator is refused as the plugin's own role even with no server list", async () => {
+  // The fail-soft path of config.js: `app.agents` is missing, so the kind map
+  // is empty. Classification off AGENTS still names the true reason instead of
+  // reporting the plugin's own role as a name the project does not have.
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+
+  const res = await hooks.tool.spawn.execute({ agent: "orchestrator", prompt: "x" }, toolCtx)
+  assert.match(
+    res.output,
+    /^Spawn refused: "orchestrator" is this plugin's primary role — the one you are running as — not a subagent to delegate to, so no subagent was started\./,
+  )
   assert.deepEqual(created, [])
 })
 
@@ -475,7 +503,7 @@ test("a primary agent the server resolves is refused for being primary, not for 
     const res = await hooks.tool.spawn.execute({ agent, prompt: "do the work" }, toolCtx)
     assert.match(
       res.output,
-      new RegExp(`^Spawn refused: "${agent}" is one of opencode's primary agents, ` +
+      new RegExp(`^Spawn refused: "${agent}" is a primary agent, ` +
         `not a type that can run as a subagent, so no subagent was started\\.`),
     )
     assert.doesNotMatch(
@@ -500,10 +528,13 @@ test("a hidden agent the server resolves is refused for being hidden", async () 
   const res = await hooks.tool.spawn.execute({ agent: "internal", prompt: "x" }, toolCtx)
   assert.match(
     res.output,
-    /^Spawn refused: "internal" is one of opencode's internal hidden agents, not a type that can run as a subagent/,
+    /^Spawn refused: "internal" is a hidden agent, not a type that can run as a subagent, so no subagent was started\./,
   )
   const compaction = await hooks.tool.spawn.execute({ agent: "compaction", prompt: "x" }, toolCtx)
-  assert.match(compaction.output, /^Spawn refused: "compaction" is one of opencode's primary agents/)
+  assert.match(
+    compaction.output,
+    /^Spawn refused: "compaction" is a primary agent, not a type that can run as a subagent, so no subagent was started\./,
+  )
   assert.doesNotMatch(compaction.output, /Available types: .*\bcompaction\b/)
   assert.deepEqual(created, [])
 })

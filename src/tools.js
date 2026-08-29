@@ -35,7 +35,7 @@ import {
 import { registerChildWaiter, settleChildWaiter } from "./childwait.js"
 import { endLiveChildrenOf, waitForSessionQuiescence } from "./teardown.js"
 import { projectContext } from "./project.js"
-import { NESTED_SPAWN_TARGET, SPAWNABLE_ROLES } from "./agents.js"
+import { AGENTS, NESTED_SPAWN_TARGET, SPAWNABLE_ROLES } from "./agents.js"
 import { knownAgentKinds } from "./config.js"
 import {
   getSettings,
@@ -347,12 +347,20 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // correct itself in place, and it states the reason that is true of the
     // name: an agent this opencode instance does resolve is refused for what it
     // is, not as a name the project does not have.
+    //
+    // The plugin's own roles are classified first, from AGENTS, and not from
+    // the server's answer: a name this plugin installs is its own whether or
+    // not the server list can be read, and the fail-soft empty list of
+    // config.js must not turn it into a name nobody has.
     if (!SPAWNABLE_ROLES.includes(args.agent)) {
-      const kind = (await knownAgentKinds(client)).get(args.agent)
+      const kind = Object.hasOwn(AGENTS, args.agent)
+        ? "own"
+        : (await knownAgentKinds(client)).get(args.agent)
       const cause =
         {
-          primary: `"${args.agent}" is one of opencode's primary agents, not a type that can run as a subagent`,
-          hidden: `"${args.agent}" is one of opencode's internal hidden agents, not a type that can run as a subagent`,
+          own: `"${args.agent}" is this plugin's primary role — the one you are running as — not a subagent to delegate to`,
+          primary: `"${args.agent}" is a primary agent, not a type that can run as a subagent`,
+          hidden: `"${args.agent}" is a hidden agent, not a type that can run as a subagent`,
           other: `"${args.agent}" is an agent this opencode instance defines, but not one of the roles this plugin installs — only those can be spawned`,
         }[kind] ?? `"${args.agent}" is not an agent type this project has`
       log("spawn refused: agent type not spawnable", { agent: args.agent, kind: kind ?? "unknown" })

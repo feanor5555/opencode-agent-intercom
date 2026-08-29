@@ -28,7 +28,8 @@ import {
   CTX_TTL_MS,
 } from "./registry.js"
 import { fetchSnapshot, showToast, getSessionDirectory } from "./client.js"
-import { getSettings, primaryContextThreshold } from "./settings.js"
+import { getSettings, primaryContextThreshold, contextBudgetFor } from "./settings.js"
+import { AGENTS } from "./agents.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock } from "./project.js"
 import { log, errMsg } from "./log.js"
@@ -345,7 +346,7 @@ function detectAgentFromSystem(output) {
 // the limit the cache is bypassed so the lockdown triggers as soon as the
 // budget is actually breached.
 async function contextLimitNotice(client, entry) {
-  const maxContext = getSettings().maxContext
+  const maxContext = contextBudgetFor(entry.agent)
   if (maxContext <= 0 || aborted.has(entry.sessionID)) return ""
 
   const now = Date.now()
@@ -452,19 +453,31 @@ async function notifyParentOfDenialLoop(client, entry) {
   })
 }
 
-// One-line block telling the orchestrator the CURRENT runtime limits so the
-// "right-sized chunks" sizing rule in ORCHESTRATION_GUIDE has a concrete
-// number to anchor on. The guide refers to `maxContext` abstractly; the user
-// can change it at runtime via the settings file, so the actual value must be
-// injected fresh per turn. "0" means the budget is disabled.
+// Block telling the orchestrator the CURRENT runtime limits so the
+// "right-sized chunks" sizing rule in ORCHESTRATION_GUIDE has concrete numbers
+// to anchor on. The user can change them at runtime via the settings file, so
+// they are injected fresh per turn.
+//
+// The context budget is a value per agent type, so the block lists one ceiling
+// per role the orchestrator can spawn — the plugin's own roles minus the
+// primary. "off" means that type's budget is disabled, "unlimited" that the
+// subagent cap is.
 function formatLimitsNotice() {
   const s = getSettings()
-  const ctx = s.maxContext > 0 ? `${fmtTokens(s.maxContext)} tokens` : "disabled"
   const sub = s.maxSubagents > 0 ? `${s.maxSubagents}` : "unlimited"
+  const budgets = Object.keys(AGENTS)
+    .filter((agent) => agent !== "orchestrator")
+    .map((agent) => {
+      const budget = contextBudgetFor(agent)
+      return `${agent} ${budget > 0 ? fmtTokens(budget) : "off"}`
+    })
+    .join(" · ")
   return (
     "\n\n---\n📐 agent-intercom: current limits — " +
-    `maxContext = ${ctx}, maxSubagents = ${sub}. ` +
-    "Use these as the actual numbers when applying the right-sized-chunks rule.\n---\n"
+    `maxSubagents = ${sub}.\n` +
+    `Context budget per agent: ${budgets}.\n` +
+    "Use the number of the agent you are spawning when applying the " +
+    "right-sized-chunks rule.\n---\n"
   )
 }
 
@@ -907,7 +920,7 @@ export function createGuardToolExecute(client, permissionGuard) {
           throw new Error(`agent-intercom: ${reason}. This tool is in the agent's deny map.`)
         }
       }
-      const maxContext = getSettings().maxContext
+      const maxContext = contextBudgetFor(entry.agent)
       if (maxContext > 0 && entry.ctxTokens != null && entry.ctxTokens >= maxContext) {
         entry.budgetDenials = (entry.budgetDenials ?? 0) + 1
         const level = entry.stopInjections ?? 0

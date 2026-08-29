@@ -31,7 +31,7 @@
 // tool call from that subagent is hard-denied, locking it down to a text-only
 // handover back to the orchestrator.
 //
-// `maxSubagents` and `maxContext` resolve as file > env var > default: the
+// `maxSubagents` and the legacy `maxContext` fallback resolve as file > env var > default: the
 // companion TUI plugin can change them live by writing
 // ~/.config/opencode/agent-intercom.json — no opencode restart needed.
 //
@@ -40,7 +40,7 @@
 //                                               ~/.cache/opencode-agent-intercom/debug.log
 //   OPENCODE_AGENT_INTERCOM_RESPECT_TASK_PERMS  "1" (default) to honor the caller's
 //                                               `permission.task` allowlist in `spawn`, "0" to ignore it
-//   OPENCODE_AGENT_INTERCOM_MAX_CONTEXT         subagent context budget in tokens (default 40000);
+//   OPENCODE_AGENT_INTERCOM_MAX_CONTEXT         legacy fallback for every agent type without an own `agentContext` entry;
 //                                               "0" disables the wrap-up nudge. Overridden by the
 //                                               settings file if present.
 //   OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS       max subagents one primary may run at once

@@ -18,7 +18,7 @@
 //   {{env}}            opencode's <env> block (cwd, date, platform, git)
 //   {{agents_md}}      project AGENTS.md content (opencode injects)
 //   {{project_md}}     project PROJECT.md content (agent-intercom injects)
-//   {{limits}}         current maxSubagents / maxContext (orchestrator only)
+//   {{limits}}         current maxSubagents + per-agent context budgets (orchestrator only)
 //   {{snapshot}}       list of active subagents (orchestrator only)
 //   {{context_budget}} STOP notice when subagent is over budget
 //   {{abort_notice}}   STOP notice when this session is aborted
@@ -171,7 +171,7 @@ function placeholderLegend(agent) {
   }
   lines.push("{{project_md}}     project PROJECT.md content (agent-intercom injects)")
   if (isOrch) {
-    lines.push("{{limits}}         current maxSubagents / maxContext")
+    lines.push("{{limits}}         current maxSubagents + per-agent context budgets")
     lines.push("{{snapshot}}       list of active subagents")
   } else {
     lines.push("{{context_budget}} STOP notice when this subagent is over budget")

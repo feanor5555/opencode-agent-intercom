@@ -3,6 +3,23 @@
 // companion TUI plugin can change them live by writing the shared JSON file —
 // no opencode restart needed.
 //
+// The context budget is a value PER AGENT TYPE. The file key `agentContext`
+// maps an agent name to its ceiling in whole tokens, and `contextBudgetFor`
+// resolves the value in effect for one type. There is no single user-facing
+// ceiling governing all subagents; a type nobody configured falls back to the
+// built-in table DEFAULT_AGENT_CONTEXT, and a name that table does not know to
+// DEFAULT_MAX_CONTEXT. `0` is a real value at every level and means the budget
+// is disabled for that type.
+//
+// The flat key `maxContext` is legacy-only: it is no longer the ceiling, it is
+// the value for every type without an own `agentContext` entry. A file holding
+// it alone therefore keeps governing every subagent exactly as it did. The env
+// var OPENCODE_AGENT_INTERCOM_MAX_CONTEXT means the same thing one level down
+// — the value for every unconfigured type — and is the only lever a headless
+// run has. `maxContextSource` records which of the three produced the resolved
+// `maxContext`, because "the user set 40000" and "nobody set anything" pick
+// different budgets for a type that has a built-in default.
+//
 // The searxng base URL for `web_search` resolves the same way (file key
 // `searxngUrl` > env OPENCODE_AGENT_INTERCOM_SEARXNG_URL > unset). Unset means
 // searxng is disabled and web_search stays Exa-only.
@@ -28,7 +45,8 @@
 // Shared file path (the TUI plugin hardcodes the same path, it is a separate
 // npm package and cannot import this module):
 //   ~/.config/opencode/agent-intercom.json
-//     { "maxSubagents": N, "maxContext": N, "maxPrimaryContext": N,
+//     { "maxSubagents": N, "agentContext": { "<agent>": N },
+//       "maxContext": N, "maxPrimaryContext": N,
 //       "maxSubagentAgeMs": N, "searxngUrl": "http://host:port",
 //       "exaApiKey": "<key>", "forumBangs": ["!hn", "!lo"],
 //       "postNoticeRetries": N, "postNoticeRetryBackoffMs": N,
@@ -46,7 +64,26 @@ import { log, errMsg } from "./log.js"
 // test/settings-defaults-parity.test.js imports both sides and fails on a
 // divergence.
 export const DEFAULT_MAX_SUBAGENTS = 1
+// The context budget for an agent type the built-in table below does not name —
+// a project's own agent, or a subagent whose type is still provisional. Also
+// the value the legacy flat `maxContext` key falls back to.
 export const DEFAULT_MAX_CONTEXT = 40000
+// The built-in context budget per agent type, in whole tokens. One entry per
+// role the plugin installs (src/agents.js) except `orchestrator`: the budget
+// governs subagents only, the primary is governed by primaryContextThreshold.
+// A type absent here resolves to DEFAULT_MAX_CONTEXT. Exported for the same
+// reason as the scalars above — the TUI carries its own copy and
+// test/settings-defaults-parity.test.js fails on a divergence.
+export const DEFAULT_AGENT_CONTEXT = {
+  planner: 40000,
+  coder: 60000,
+  debugger: 60000,
+  reviewer: 40000,
+  documenter: 40000,
+  researcher: 60000,
+  designer: 30000,
+  gitter: 30000,
+}
 // Threshold (in tokens) at which the orchestrator primary session triggers a
 // context-refresh handoff. Independent of maxContext (which gates subagents).
 // 0 disables auto-handoff entirely.
@@ -130,6 +167,16 @@ function envNum(name, def) {
   return Number.isInteger(n) && n >= 0 ? n : def
 }
 
+// Whether a numeric env var is set to a value envNum would actually use. Only
+// needed where "the user set this number" has to be told apart from "the
+// built-in default happens to be this number" — see maxContextSource.
+function envNumSet(name) {
+  const env = process.env[name]
+  if (env === undefined || env === "") return false
+  const n = Number(env)
+  return Number.isInteger(n) && n >= 0
+}
+
 // Reads a "1"/"0" env var as a boolean, falling back to `def` for anything
 // else — the same discipline the numeric readers use for a bad value.
 function envBool(name, def) {
@@ -146,7 +193,8 @@ function envStr(name, def) {
   return env.trim()
 }
 
-// Current settings: { maxSubagents, maxContext, maxPrimaryContext,
+// Current settings: { maxSubagents, maxContext, maxContextSource, agentContext,
+// maxPrimaryContext,
 // maxSubagentAgeMs, searxngUrl, exaApiKey, forumBangs, postNoticeRetries,
 // postNoticeRetryBackoffMs, endlessMode, endlessContext,
 // endlessQuiesceTimeoutMs, endlessMaxCycles }.
@@ -155,8 +203,13 @@ function envStr(name, def) {
 // exaApiKey is "" when unset (web_search falls back to Exa's anonymous tier).
 // maxSubagentAgeMs is the inactivity watchdog window; 0 disables it.
 // maxPrimaryContext is the orchestrator primary-session context-refresh
-// threshold (tokens); 0 disables auto-handoff. forumBangs is the bang set in
-// effect: DEFAULT_FORUM_BANGS unless the file replaces it. postNoticeRetries
+// threshold (tokens); 0 disables auto-handoff. agentContext is the per-agent
+// context budget map exactly as the file holds it (empty when the file names
+// none) and maxContext is the flat legacy value for every type it does not
+// name — read both through contextBudgetFor rather than directly.
+// maxContextSource is "file", "env" or "default", naming where maxContext came
+// from. forumBangs is the bang set in effect: DEFAULT_FORUM_BANGS unless the
+// file replaces it. postNoticeRetries
 // counts RE-tries (0 = single attempt, no retry). postNoticeRetryBackoffMs is
 // the base delay between attempts (linear, with a small jitter). endlessMode
 // arms the self-restarting orchestrator loop and, while on, makes
@@ -169,6 +222,8 @@ export function getSettings() {
   const resolved = {
     maxSubagents: envNum("OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS", DEFAULT_MAX_SUBAGENTS),
     maxContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_CONTEXT", DEFAULT_MAX_CONTEXT),
+    maxContextSource: envNumSet("OPENCODE_AGENT_INTERCOM_MAX_CONTEXT") ? "env" : "default",
+    agentContext: {},
     maxPrimaryContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT", DEFAULT_MAX_PRIMARY_CONTEXT),
     maxSubagentAgeMs: envNum("OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS", DEFAULT_MAX_SUBAGENT_AGE_MS),
     searxngUrl: envStr("OPENCODE_AGENT_INTERCOM_SEARXNG_URL", ""),
@@ -191,6 +246,20 @@ export function getSettings() {
     }
     if (Number.isInteger(raw?.maxContext) && raw.maxContext >= 0) {
       resolved.maxContext = raw.maxContext
+      resolved.maxContextSource = "file"
+    }
+    // Per-agent context ceilings. A key survives only as a whole non-negative
+    // integer; anything else is dropped silently, the discipline forumBangs
+    // already uses — one garbage entry must not cost the user the rest of the
+    // map. A value that is not a plain object (array, string, null) leaves the
+    // map empty, so every type falls through to the seed or its default.
+    // Nothing is materialised here: a type absent from the file stays absent.
+    if (raw?.agentContext && typeof raw.agentContext === "object" && !Array.isArray(raw.agentContext)) {
+      const perAgent = {}
+      for (const [name, value] of Object.entries(raw.agentContext)) {
+        if (name !== "" && Number.isInteger(value) && value >= 0) perAgent[name] = value
+      }
+      resolved.agentContext = perAgent
     }
     if (Number.isInteger(raw?.maxPrimaryContext) && raw.maxPrimaryContext >= 0) {
       resolved.maxPrimaryContext = raw.maxPrimaryContext
@@ -251,6 +320,31 @@ export function getSettings() {
   // exaApiKey is a secret: log only whether one is in effect, never its value.
   log("settings resolved", { ...resolved, exaApiKey: resolved.exaApiKey ? "<set>" : "" })
   return cache
+}
+
+// The context budget in effect for one agent type, in whole tokens; 0 means
+// the budget is disabled for that type. Order:
+//   1. the type's own `agentContext` entry,
+//   2. the flat legacy `maxContext` from the file,
+//   3. the env var OPENCODE_AGENT_INTERCOM_MAX_CONTEXT,
+//   4. DEFAULT_AGENT_CONTEXT[agent],
+//   5. DEFAULT_MAX_CONTEXT for a name the table does not know.
+// `0` is a real value at every level, never "unset": a 0 at level 1 beats a
+// non-zero default, a 0 at level 2 or 3 disables every unconfigured type.
+// Levels 2 and 3 are the migration path — a file carrying only `maxContext`
+// keeps governing every subagent with the user's number, with no write.
+//
+// Resolved per call, never cached on a registry entry: a freshly spawned
+// subagent is tracked as "subagent" until the spawn tool upgrades it to its
+// real type, and a budget frozen in that window would be the wrong one. The
+// provisional name is simply a name the table does not know (level 5) unless
+// the user gave "subagent" an explicit entry, which is then honoured.
+export function contextBudgetFor(agent) {
+  const s = getSettings()
+  if (Object.hasOwn(s.agentContext, agent)) return s.agentContext[agent]
+  if (s.maxContextSource !== "default") return s.maxContext
+  if (Object.hasOwn(DEFAULT_AGENT_CONTEXT, agent)) return DEFAULT_AGENT_CONTEXT[agent]
+  return DEFAULT_MAX_CONTEXT
 }
 
 // The resolved searxng base URL (file > env > ""), trailing slashes stripped.

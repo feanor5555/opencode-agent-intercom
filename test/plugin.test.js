@@ -883,10 +883,11 @@ test("searxngUrl resolves file > env > empty default", () => {
 })
 
 test("a subagent over the context budget gets a wrap-up instruction injected", async () => {
-  // newest assistant message reports ~50k tokens -> over the 40k default budget
+  // newest assistant message reports ~70k tokens -> over coder's 60k built-in
+  // per-type budget
   const messages = [
     {
-      info: { role: "assistant", tokens: { input: 50000, output: 0, cache: { read: 0, write: 0 } } },
+      info: { role: "assistant", tokens: { input: 70000, output: 0, cache: { read: 0, write: 0 } } },
       parts: [{ type: "text", text: "still working" }],
     },
   ]
@@ -907,10 +908,11 @@ test("a subagent over the context budget gets a wrap-up instruction injected", a
 })
 
 test("ignored STOP injections escalate in tone and notify the primary once — no auto-abort", async () => {
-  // newest assistant message reports ~50k tokens -> over the 40k default budget
+  // newest assistant message reports ~70k tokens -> over coder's 60k built-in
+  // per-type budget
   const messages = [
     {
-      info: { role: "assistant", tokens: { input: 50000, output: 0, cache: { read: 0, write: 0 } } },
+      info: { role: "assistant", tokens: { input: 70000, output: 0, cache: { read: 0, write: 0 } } },
       parts: [{ type: "text", text: "still working" }],
     },
   ]
@@ -988,6 +990,79 @@ test("ignored STOP injections escalate in tone and notify the primary once — n
     0,
     "denial-loop notice was sent more than once",
   )
+})
+
+test("the context budget bites per agent type, not globally", async () => {
+  // 20k of context: over the coder's configured 10k, well under the
+  // researcher's built-in 60k. One budget must not govern the other type.
+  writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 5, agentContext: { coder: 10000 } }))
+  resetSettings()
+  const messages = [
+    {
+      info: { role: "assistant", tokens: { input: 20000, output: 0, cache: { read: 0, write: 0 } } },
+      parts: [{ type: "text", text: "working" }],
+    },
+  ]
+  const { ctx, created } = makeCtx({ messages })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "y" }, toolCtx)
+  const [coderID, researcherID] = created
+
+  const coderOut = { system: ["base"] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: coderID }, coderOut)
+  assert.match(coderOut.system.join(""), /context has reached/i)
+  await assert.rejects(
+    () => hooks["tool.execute.before"]({ tool: "edit", sessionID: coderID, callID: "c1" }),
+    /context budget/i,
+  )
+
+  const researcherOut = { system: ["base"] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: researcherID }, researcherOut)
+  assert.doesNotMatch(researcherOut.system.join(""), /context has reached/i)
+  await hooks["tool.execute.before"]({ tool: "read", sessionID: researcherID, callID: "c2" })
+})
+
+test("a file holding only the flat maxContext still governs every agent type", async () => {
+  // The legacy key is the migration seed: with no agentContext map, its value
+  // is the budget of every type, so 20k of context trips a researcher whose
+  // built-in default (60k) would not have bitten.
+  writeFileSync(settingsFile, JSON.stringify({ maxContext: 10000 }))
+  resetSettings()
+  const messages = [
+    {
+      info: { role: "assistant", tokens: { input: 20000, output: 0, cache: { read: 0, write: 0 } } },
+      parts: [{ type: "text", text: "working" }],
+    },
+  ]
+  const { ctx, created } = makeCtx({ messages })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+
+  const out = { system: ["base"] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: created[0] }, out)
+  assert.match(out.system.join(""), /context has reached/i)
+  assert.match(out.system.join(""), /budget 10.0k/)
+})
+
+test("the orchestrator limits block lists the context budget of every spawnable role", async () => {
+  writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 3, agentContext: { gitter: 0 } }))
+  resetSettings()
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const out = { system: ["base prompt"] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, out)
+  const joined = out.system.join("")
+  assert.match(joined, /current limits — maxSubagents = 3\./)
+  assert.match(joined, /Context budget per agent: /)
+  // built-in per-type default, the configured 0 as "off", and no orchestrator
+  // entry — the budget governs subagents only.
+  assert.match(joined, /coder 60\.0k/)
+  assert.match(joined, /researcher 60\.0k/)
+  assert.match(joined, /designer 30\.0k/)
+  assert.match(joined, /gitter off/)
+  assert.doesNotMatch(joined, /orchestrator \d/)
+  assert.doesNotMatch(joined, /maxContext = /)
 })
 
 test("a subagent under the context budget gets no wrap-up instruction", async () => {

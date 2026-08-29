@@ -35,7 +35,9 @@ import {
 import {
   type LimitKey,
   type Settings,
+  effectiveAgentContext,
   readSettings,
+  stepAgentContext,
   stepSetting,
   toggleEndlessMode,
 } from "./settings-file.ts";
@@ -86,6 +88,12 @@ const LLM_AGENTS = [
   "designer",
   "gitter",
 ];
+// The cycler list of the context-ceiling row while the live agent list from
+// opencode has not landed yet. The budget governs subagents only, so the
+// orchestrator is not in it.
+const CONTEXT_AGENTS_FALLBACK = LLM_AGENTS.filter((a) => a !== "orchestrator");
+// Step of the [-]/[+] buttons on the context-ceiling row, in tokens.
+const CONTEXT_STEP = 5000;
 // The stepping rule of one parameter row plus the label it carries; the rule
 // itself is the store's, which applies it inside its read-modify-write.
 interface LlmParamDef extends LlmParamStep {
@@ -183,6 +191,13 @@ function resolveLlmModel(
 function formatLlmModel(value: ModelRef | null, choices: ModelChoice[]): string {
   if (value === null) return "not set";
   return choices.find((c) => sameModel(c, value))?.label ?? value.modelID;
+}
+
+// Label for a context ceiling: thousands of tokens, or "off" for the 0 that
+// disables the budget for that agent type — the same distinction "unlimited"
+// draws on the subagent cap.
+function formatContextCeiling(tokens: number): string {
+  return tokens === 0 ? "off" : String(tokens / 1000);
 }
 
 function formatLlmValue(value: number | null, decimals: number): string {
@@ -298,28 +313,26 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const [completedCount, setCompletedCount] = createSignal(0);
 
   // Runtime settings, shared with the main plugin via the settings file. The
-  // inputs edit these and auto-save on change.
-  const initialSettings = readSettings();
-  const [maxSubagents, setMaxSubagents] = createSignal(initialSettings.maxSubagents);
-  const [maxContext, setMaxContext] = createSignal(initialSettings.maxContext);
-  const [endlessMode, setEndlessModeSignal] = createSignal(initialSettings.endlessMode);
-  const [endlessContext, setEndlessContext] = createSignal(initialSettings.endlessContext);
+  // inputs edit these and auto-save on change. One signal for the whole
+  // resolved state: the context row needs three of its members at once to work
+  // out the ceiling in effect, and every store call hands the whole state back
+  // anyway.
+  const [settings, setSettingsState] = createSignal<Settings>(readSettings());
+  const maxSubagents = (): number => settings().maxSubagents;
+  const endlessMode = (): boolean => settings().endlessMode;
+  const endlessContext = (): number => settings().endlessContext;
 
   // Every store call hands back the whole merged file state, so one place puts
-  // it into the signals — the panel then shows the true file state, including
+  // it into the signal — the panel then shows the true file state, including
   // the keys the write did not touch.
   const showSettings = (s: Settings): void => {
-    setMaxSubagents(s.maxSubagents);
-    setMaxContext(s.maxContext);
-    setEndlessModeSignal(s.endlessMode);
-    setEndlessContext(s.endlessContext);
+    setSettingsState(s);
   };
 
   // Step a setting by delta and save. Deltas are in the setting's own unit:
-  // subagents ±1, context ±5000 tokens, endless context ±10000 tokens (= 5k
-  // resp. 10k on the display). All three are clamped at 0. maxSubagents=0 means
-  // "no cap" (unlimited concurrent subagents); maxContext=0 means "no budget"
-  // (lockdown disabled); endlessContext=0 arms no endless cycle.
+  // subagents ±1, endless context ±10000 tokens (= 10k on the display). Both
+  // are clamped at 0. maxSubagents=0 means "no cap" (unlimited concurrent
+  // subagents); endlessContext=0 arms no endless cycle.
   const adjustSetting = (key: LimitKey, delta: number): void => {
     // Read-modify-write inside the store: the file may have been edited outside
     // the panel since the last read, so the base value comes from the file and
@@ -382,11 +395,17 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // The model side of the same fetch: what opencode resolved as each agent's
   // model, shown when the user has chosen none.
   const [opencodeModels, setOpencodeModels] = createSignal<Record<string, ModelRef>>({});
+  // The spawnable agents of the same fetch — every one this instance resolved
+  // that is not the primary, so a project's own agents are editable too. Empty
+  // until the first successful fetch; the context row falls back to the
+  // hardcoded list until then.
+  const [subagentNames, setSubagentNames] = createSignal<string[]>([]);
   const refreshOpencodeDefaults = async (): Promise<void> => {
     try {
       const res = await api.client.app.agents({});
       const list = ((res as { data?: unknown[] })?.data ?? []) as Array<{
         name?: string;
+        mode?: string;
         temperature?: number;
         topP?: number;
         model?: unknown;
@@ -394,8 +413,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       }>;
       const map: OpencodeDefaults = {};
       const models: Record<string, ModelRef> = {};
+      const spawnable: string[] = [];
       for (const a of list) {
         if (!a || typeof a.name !== "string") continue;
+        if (a.mode !== "primary") spawnable.push(a.name);
         const resolvedModel = toModelRef(a.model);
         if (resolvedModel) models[a.name] = resolvedModel;
         const entry: Record<string, number> = {};
@@ -416,6 +437,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       if (!disposed) {
         setOpencodeDefaults(map);
         setOpencodeModels(models);
+        setSubagentNames(spawnable);
       }
     } catch {
       // best-effort — leave previous defaults in place
@@ -467,6 +489,32 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     setLlmAgentIdx((i) => (i + delta + LLM_AGENTS.length) % LLM_AGENTS.length);
     refreshFileState();
     void refreshOpencodeDefaults();
+  };
+
+  // The agent whose context ceiling the row above the endless switch edits.
+  // The list is the live one where the fetch has landed and the hardcoded one
+  // until then; it never shrinks to nothing, so the index always resolves. The
+  // modulo keeps a stale index inside a list that shrank between two fetches.
+  const [contextAgentIdx, setContextAgentIdx] = createSignal(0);
+  const contextAgents = (): string[] => {
+    const live = subagentNames();
+    return live.length > 0 ? live : CONTEXT_AGENTS_FALLBACK;
+  };
+  const currentContextAgent = (): string => {
+    const list = contextAgents();
+    return list[contextAgentIdx() % list.length];
+  };
+  const cycleContextAgent = (delta: number): void => {
+    const size = contextAgents().length;
+    setContextAgentIdx((i) => (i + delta + size) % size);
+    refreshFileState();
+  };
+
+  // Step the selected agent's context ceiling and save. The first such step
+  // migrates the file — see stepAgentContext — so the cycler's whole list goes
+  // with it: those are the types whose effective ceiling is frozen.
+  const adjustAgentContext = (delta: number): void => {
+    showSettings(stepAgentContext(currentContextAgent(), delta, contextAgents()));
   };
 
   // Walk the pick list by one. Position and write are one read-modify-write in
@@ -923,7 +971,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             onOpen={openSubagent}
             onAbort={(id: string) => void abortSubagent(id)}
             maxSubagents={maxSubagents}
-            maxContext={maxContext}
+            settings={settings}
+            contextAgent={currentContextAgent}
+            onCycleContextAgent={cycleContextAgent}
+            onAdjustContext={adjustAgentContext}
             endlessMode={endlessMode}
             endlessContext={endlessContext}
             onAdjust={adjustSetting}
@@ -1011,7 +1062,12 @@ function SubagentPanel(props: {
   onOpen: (id: string) => void;
   onAbort: (id: string) => void;
   maxSubagents: () => number;
-  maxContext: () => number;
+  // The whole resolved settings state: the context row works its ceiling out of
+  // three of its members at once.
+  settings: () => Settings;
+  contextAgent: () => string;
+  onCycleContextAgent: (delta: number) => void;
+  onAdjustContext: (delta: number) => void;
   endlessMode: () => boolean;
   endlessContext: () => number;
   onAdjust: (key: LimitKey, delta: number) => void;
@@ -1268,16 +1324,50 @@ function SubagentPanel(props: {
               {"[+]"}
             </text>
           </box>
+          {/* Context ceiling of one agent type: the [<]/[>] cycler picks the
+              type, the row under it steps that type's own ceiling. ★ marks a
+              type carrying a value of its own; without one the row shows the
+              inherited ceiling, and [-] below zero drops the own value so the
+              inherited one shows again. "off" is a ceiling of 0, i.e. no budget
+              for that type. */}
           <box flexDirection="row">
-            <text fg={props.theme.textMuted}>{rowLabel("max Token(k)")}</text>
-            <text fg={props.theme.accent} {...holdRepeat(() => props.onAdjust("maxContext", -5000))}>
-              {"[-]"}
+            <text fg={props.theme.textMuted}>{rowLabel("agent")}</text>
+            <text fg={props.theme.accent} onMouseDown={() => props.onCycleContextAgent(-1)}>
+              {"[<]"}
             </text>
-            <text fg={props.theme.text}>{numCell(props.maxContext() / 1000)}</text>
-            <text fg={props.theme.accent} {...holdRepeat(() => props.onAdjust("maxContext", 5000))}>
-              {"[+]"}
+            <text fg={props.theme.text}>{fitCell(props.contextAgent(), AGENT_NAME_W)}</text>
+            <text fg={props.theme.accent} onMouseDown={() => props.onCycleContextAgent(1)}>
+              {"[>]"}
             </text>
           </box>
+          {(() => {
+            const ceiling = createMemo(() =>
+              effectiveAgentContext(props.settings(), props.contextAgent()),
+            );
+            return (
+              <box flexDirection="row">
+                <text fg={props.theme.textMuted}>{rowLabel("max Token(k)")}</text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat(() => props.onAdjustContext(-CONTEXT_STEP))}
+                >
+                  {"[-]"}
+                </text>
+                <text fg={props.theme.text}>
+                  {numCell(formatContextCeiling(ceiling().value))}
+                </text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat(() => props.onAdjustContext(CONTEXT_STEP))}
+                >
+                  {"[+]"}
+                </text>
+                <Show when={ceiling().source === "agent"}>
+                  <text fg={props.theme.success}>{" ★"}</text>
+                </Show>
+              </box>
+            );
+          })()}
           <box flexDirection="row">
             <text fg={props.theme.textMuted}>{rowLabel("endless")}</text>
             <text

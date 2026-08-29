@@ -58,8 +58,12 @@ After restarting opencode, two things still have to happen before the
    and the right sidebar (its own column beside the content, not an
    overlay) shows `Subagents (N)` with `● N running · ✓ M done` counters,
    agent rows with an `x` abort control and an age, plus `max subagents`
-   and `max Token(k)` steppers, and collapsed `TUI settings` / `LLM params`
-   / `Prompts` sections. opencode 1.18.25 offers no layout choice — the
+   and a per-agent-type context ceiling: an agent cycler and the selected
+   type's ceiling in k tokens (with `★` marking a type that has its own
+   value and `off` for a ceiling of `0`; stepping a type's own value below
+   zero drops the entry so it falls back to the inherited ceiling again),
+   and collapsed `TUI settings` / `LLM params` / `Prompts` sections.
+   opencode 1.18.25 offers no layout choice — the
    SDK's `layout` field is `"auto" | "stretch"` and marked deprecated with
    "Always uses stretch layout", and `tui.json` has no `sidebar` block,
    no width, no position. The column takes its width from the content
@@ -215,8 +219,16 @@ installed by the command above. Surfaces the live subagent snapshot and
 exposes every runtime knob:
 
 - **Subagent list** — open-session, abort (✕), keyboard navigation.
-- **`max subagents [-N+]`** and **`max Token(k) [-N+]`** — write
-  `~/.config/opencode/agent-intercom.json`, picked up within ~2 s.
+- **`max subagents [-N+]`** and a per-agent-type context ceiling —
+  an agent cycler plus the selected type's ceiling in k tokens, with `★`
+  marking a type with its own value and `off` for a ceiling of `0`.
+  Writes `~/.config/opencode/agent-intercom.json` as
+  `"agentContext": { "<agent>": tokens }`, picked up within ~2 s.
+  A type with no entry of its own falls back to the flat legacy
+  `maxContext` key in the same file, then to the env var
+  `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT`, then to a built-in per-type
+  default, then to 40 000. `0` is a real value at every level and means
+  the budget is disabled for that type.
 - **`thinking [on/off]`** / **`tool details [on/off]`** — opencode's
   built-in visibility toggles.
 - **Per-agent LLM sampling** — temperature, top-p/top-k, max-tokens, plus

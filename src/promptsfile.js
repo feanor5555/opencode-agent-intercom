@@ -47,17 +47,10 @@ export const PROMPTS_DIRNAME = ".opencode/agent-intercom"
 // side-by-side comparison. The plugin does NOT read these.
 export const OPENCODE_DEFAULTS_SUBDIR = "_opencode-defaults"
 
-export const AGENT_NAMES = [
-  "orchestrator",
-  "planner",
-  "coder",
-  "debugger",
-  "reviewer",
-  "documenter",
-  "researcher",
-  "designer",
-  "gitter",
-]
+// Every role the plugin installs, the orchestrator included: each one gets a
+// template file. Derived from AGENTS so a role added or removed there cannot
+// drift out of the template set.
+export const AGENT_NAMES = Object.keys(AGENTS)
 
 // Which subagents get an outline-discipline block in their default template
 // (mirrors hooks.js OUTLINE_DISABLED_AGENTS, inverted).

@@ -25,7 +25,7 @@ import {
   TODO_TOOLS,
   timeoutSubagent,
 } from "../src/hooks.js"
-import { AGENTS } from "../src/agents.js"
+import { AGENTS, SPAWNABLE_ROLES } from "../src/agents.js"
 import { setParamsPath, resetCache as resetLlmParams } from "../src/llmparams.js"
 import { setModelsPath, resetCache as resetLlmModels } from "../src/llmmodel.js"
 import {
@@ -1355,6 +1355,25 @@ test("the config hook installs the plugin's agent roles", async () => {
   assert.equal(config.agent.orchestrator.permission.edit, "deny")
   // and it is made the startup primary
   assert.equal(config.default_agent, "orchestrator")
+})
+
+test("every subagent role is hidden, the orchestrator is not", async () => {
+  // `hidden` keeps a role out of the TUI's `@` autocomplete and the agent
+  // switcher: the roles are the orchestrator's to spawn, not the user's to
+  // address. The orchestrator stays visible — opencode refuses to start
+  // without a selectable non-subagent agent.
+  for (const [name, def] of Object.entries(AGENTS)) {
+    assert.equal(def.hidden, def.mode === "subagent" ? true : undefined, `${name} visibility`)
+  }
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const config = {}
+  await hooks.config(config)
+  assert.equal(config.agent.orchestrator.hidden, undefined)
+  for (const name of SPAWNABLE_ROLES) assert.equal(config.agent[name].hidden, true)
+  // Being hidden is a visibility flag, not a spawn gate: the closed positive
+  // list is what the spawn tool reads, and every hidden role is on it.
+  assert.equal(SPAWNABLE_ROLES.length, 8)
 })
 
 test("no role definition carries a sampling parameter — temperature starts unset", async () => {

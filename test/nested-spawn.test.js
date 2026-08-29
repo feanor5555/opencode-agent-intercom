@@ -34,7 +34,7 @@ import { resetProjectContext } from "../src/project.js"
 import { createPermissionGuard, resetPermissionGuardCache } from "../src/config.js"
 import { setSettingsPath, resetSettings, getSettings } from "../src/settings.js"
 import { hasLiveChildren, settleChildWaiter } from "../src/childwait.js"
-import { AGENTS } from "../src/agents.js"
+import { AGENTS, NESTED_SPAWN_TARGET, SPAWNABLE_ROLES } from "../src/agents.js"
 
 // The two sides of the S6 grant. Held here as well as in test/plugin.test.js
 // because the gate and the permission map are two different things to get
@@ -271,6 +271,32 @@ test("a permitted caller may spawn a researcher and nothing else", async () => {
   }
   assert.deepEqual(created, [], "a refused target creates no session")
   assert.equal(entryForSession("ses_planner").nestedSpawns, 0, "a refused target costs no quota")
+})
+
+test("the closed type gate leaves the nested researcher target alone", async () => {
+  // The spawn gate accepts only the plugin's own roles and every role now
+  // carries `hidden: true`. The researcher is one of them, so the one target a
+  // nested spawn may name passes the gate untouched.
+  assert.ok(SPAWNABLE_ROLES.includes(NESTED_SPAWN_TARGET), "the target is a plugin role")
+  assert.equal(AGENTS[NESTED_SPAWN_TARGET].hidden, true, "and it is hidden all the same")
+
+  const { ctx, created } = makeCtx({
+    messages: assistantReply("the answer"),
+    agentConfig: configAllowingSpawn("planner"),
+  })
+  const hooks = await plugin(ctx)
+  const callerCtx = subagentCaller("ses_planner", "planner")
+
+  const pending = hooks.tool.spawn.execute(
+    { agent: NESTED_SPAWN_TARGET, prompt: "look it up" },
+    callerCtx,
+  )
+  const childID = await until(() => created[0], "the child session")
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: childID } } })
+
+  const res = await pending
+  assert.doesNotMatch(res.output, /Spawn refused/)
+  assert.match(res.output, /the answer/)
 })
 
 test("a nested spawn carrying a task-id prefix is refused", async () => {

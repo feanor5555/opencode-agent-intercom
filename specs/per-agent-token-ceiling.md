@@ -294,10 +294,12 @@ Weighed and rejected:
 
 - Server: `AGENTS` (`src/agents.js:138-217`) — nine roles — merged into
   opencode's resolved config by `installAgents` (`src/agents.js:229-244`), where
-  a project may add its own or override one. The `spawn` tool takes any
-  `args.agent` string (`src/tools.js:247,264,277`), so the real set is **open**
-  — which is exactly why `contextBudgetFor` needs the unknown-name fallback of
-  2.2 and why nothing is materialised on read.
+  a project may add its own or override one. The `spawn` tool's gate reads
+  `SPAWNABLE_ROLES` (`src/agents.js:299`), the eight `mode: "subagent"` roles
+  minus `orchestrator` — the closed spawnable set is this plugin's own
+  roles, nothing else. `contextBudgetFor` keeps its unknown-name fallback of
+  2.2 for any read path that is not the spawn gate (e.g. a per-type editor
+  iterating types the project added), and nothing is materialised on read.
 - TUI: the live merged list from `api.client.app.agents({})`
   (`tui/src/tui.tsx:387`), each record carrying `name` and `mode`
   (SDK `types.gen.d.ts:1399-1402`). So yes — a per-type editor can list them,

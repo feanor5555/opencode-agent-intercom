@@ -232,10 +232,11 @@ A budget of `0` for a type disables the gate for that type: no refusal, no
 warning. The limits block the orchestrator sees lists `off` for a
 disabled type.
 
-A spawn naming an agent type that is neither one of the plugin's own roles
-nor one the project declares in its `config.agent` map is refused, and
-the refusal lists every accepted type so the orchestrator can correct
-itself in place. The same union of names is what the limits block shows.
+A `spawn` may name one of the plugin's own eight subagent roles and
+nothing else. Any other name is refused — including an agent the project
+declares in its `config.agent` map and opencode's own `general`/`explore` —
+and the refusal states why that particular name is not a target and lists
+the eight. The same closed list is what the limits block shows.
 
 When a subagent finishes, the completion notice carries a `run-size` line
 that reports the tokens the whole run consumed against the same budget,

@@ -35,8 +35,8 @@ import {
 import { registerChildWaiter, settleChildWaiter } from "./childwait.js"
 import { endLiveChildrenOf, waitForSessionQuiescence } from "./teardown.js"
 import { projectContext } from "./project.js"
-import { AGENTS, NESTED_SPAWN_TARGET } from "./agents.js"
-import { projectAgentNames, spawnableAgentNames, unspawnableAgentKinds } from "./config.js"
+import { NESTED_SPAWN_TARGET, SPAWNABLE_ROLES } from "./agents.js"
+import { knownAgentKinds } from "./config.js"
 import {
   getSettings,
   contextBudgetFor,
@@ -281,23 +281,6 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     return fromSession || toolCtx?.directory || factoryDirectory
   }
 
-  // Every agent type a spawn may legally name: the roles the plugin installs,
-  // the ones the project's own opencode config defines, and the ones the server
-  // itself reports as spawnable — non-primary, non-hidden, which is how
-  // opencode's own `general` and `explore` get in without appearing in
-  // `config.agent`. The project half is kept alongside it because a config
-  // agent declared with opencode's default `mode: "all"` is a legal spawn
-  // target too, and because it still answers when the server list is empty.
-  // Both reads are cached at module scope in config.js, so this costs one
-  // request each per process. Every member carries a visible ceiling in the
-  // orchestrator's limits block, which is built from the same union.
-  async function availableAgents() {
-    const names = new Set(Object.keys(AGENTS))
-    for (const name of await projectAgentNames(client)) names.add(name)
-    for (const name of await spawnableAgentNames(client)) names.add(name)
-    return names
-  }
-
   async function spawnHandler(args, toolCtx) {
     // Who is calling? A session that has a registry entry is a subagent — the
     // classification the whole plugin uses — and its spawn is a NESTED one:
@@ -349,29 +332,34 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     trackPrimary(toolCtx.sessionID)
     const directory = await dirFor(toolCtx)
 
-    // Agent-type gate. A name nothing spawnable answers to would otherwise be
-    // handed to opencode's own agent resolution and run against
-    // DEFAULT_MAX_CONTEXT — a budget the orchestrator was never shown, since
-    // the limits block lists only the types named here. The sizing rule the
-    // orchestrator is given would then be applied to a number that is not the
-    // one in force, so a typo is refused instead. The refusal names every type
-    // that IS available, so the orchestrator can correct itself in place, and
-    // it states the reason that is true of the name: a primary or hidden agent
-    // the server does resolve is refused for what it is, not as a name the
-    // project does not have.
-    const available = await availableAgents()
-    if (!available.has(args.agent)) {
-      const kind = (await unspawnableAgentKinds(client)).get(args.agent)
-      const cause = kind
-        ? `"${args.agent}" is one of opencode's ${
-            kind === "primary" ? "primary agents" : "internal hidden agents"
-          }, not a type that can run as a subagent`
-        : `"${args.agent}" is not an agent type this project has`
+    // Agent-type gate: a CLOSED positive list — this plugin's own subagent
+    // roles (SPAWNABLE_ROLES, agents.js) and nothing else.
+    //
+    // Anything outside it is refused however well opencode itself resolves the
+    // name. An agent a project defines to wrap a model carries none of this
+    // plugin's role prompt and none of its permission map, so spawned it would
+    // be an unbounded agent with a full tool set; and, not being in the limits
+    // block, it would run against a DEFAULT_MAX_CONTEXT budget the orchestrator
+    // was never shown, so the sizing rule it is given would be applied to a
+    // number that is not the one in force. A typo lands here too.
+    //
+    // The refusal names every type that IS available, so the orchestrator can
+    // correct itself in place, and it states the reason that is true of the
+    // name: an agent this opencode instance does resolve is refused for what it
+    // is, not as a name the project does not have.
+    if (!SPAWNABLE_ROLES.includes(args.agent)) {
+      const kind = (await knownAgentKinds(client)).get(args.agent)
+      const cause =
+        {
+          primary: `"${args.agent}" is one of opencode's primary agents, not a type that can run as a subagent`,
+          hidden: `"${args.agent}" is one of opencode's internal hidden agents, not a type that can run as a subagent`,
+          other: `"${args.agent}" is an agent this opencode instance defines, but not one of the roles this plugin installs — only those can be spawned`,
+        }[kind] ?? `"${args.agent}" is not an agent type this project has`
       log("spawn refused: agent type not spawnable", { agent: args.agent, kind: kind ?? "unknown" })
       return {
         output:
           `Spawn refused: ${cause}, so no subagent was started. Available types: ` +
-          `${[...available].sort().join(", ")}. Re-spawn with one of them — pick by the ` +
+          `${[...SPAWNABLE_ROLES].sort().join(", ")}. Re-spawn with one of them — pick by the ` +
           `deliverable you want back.`,
       }
     }
@@ -874,7 +862,9 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
         "Optional first-line prefix `T<n>:` (taken from TODO.md) opts in to wake-hook auto-tick — " +
         "omit for ad-hoc questions and status checks.",
       args: {
-        agent: z.string().describe("Subagent name (coder, planner, researcher, …)"),
+        agent: z
+          .string()
+          .describe(`Subagent role — one of: ${SPAWNABLE_ROLES.join(", ")}`),
         prompt: z.string().describe("Task for the subagent — name the outcome, not the steps"),
         description: z.string().optional().describe("Short title for the subagent session"),
       },

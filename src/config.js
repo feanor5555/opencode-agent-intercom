@@ -41,10 +41,11 @@ async function loadConfig(client) {
 }
 
 // The agent names the project's own opencode config defines. Read from the
-// same module-level cached config the permission guard uses, so the spawn-time
-// agent-type check and the orchestrator's limits block cost no extra request.
-// Empty when the config carries no `agent` map — a project that defines none.
-export async function projectAgentNames(client) {
+// same module-level cached config the permission guard uses, so classifying a
+// refused name costs no extra request. Empty when the config carries no `agent`
+// map — a project that defines none. Module-private: a project's agents are not
+// spawn targets, they only need naming when a spawn of one is refused.
+async function projectAgentNames(client) {
   const config = await loadConfig(client)
   const agents = config?.agent
   if (!agents || typeof agents !== "object" || Array.isArray(agents)) return []
@@ -81,30 +82,29 @@ async function loadServerAgents(client) {
   return serverAgentsCache
 }
 
-// An agent the server resolves is a legal spawn target only if it can actually
-// run as a one-shot subagent. Excluded: `mode: "primary"` (`build`, `plan`) —
-// spawned as a subagent it would carry a primary's tool set, since the plugin's
-// schema strip applies only to its own roles — and `hidden` (`compaction`,
-// `title`, `summary`), opencode's internal agents, which are not delegation
-// targets.
-function isSpawnable(agent) {
-  return agent.mode !== "primary" && agent.hidden !== true
-}
-
-// The server-resolved agent names a spawn may name.
-export async function spawnableAgentNames(client) {
-  return (await loadServerAgents(client)).filter(isSpawnable).map((a) => a.name)
-}
-
-// The server-resolved agent names a spawn may NOT name, each mapped to why:
-// "primary" or "hidden". Lets the refusal state the reason that is true of the
-// name — the project HAS `build`, it just cannot be run as a subagent — instead
-// of reporting it as a name nobody resolves.
-export async function unspawnableAgentKinds(client) {
+// Every agent name this opencode instance knows, mapped to what kind of thing
+// it is. None of them is a spawn target — the spawn gate's authority is the
+// plugin's own SPAWNABLE_ROLES (agents.js) — this map exists so a REFUSAL can
+// state the reason that is true of the name instead of reporting every one of
+// them as a name nobody resolves:
+//
+//   "primary" — `mode: "primary"` (`build`, `plan`, and opencode's internal
+//     `compaction`/`title`/`summary`, which are primary and hidden both).
+//   "hidden"  — `hidden: true` on a non-primary agent.
+//   "other"   — a name the project's config defines or the server otherwise
+//     resolves (`general`, `explore`, a model wrapper the project added). It is
+//     an agent opencode would run; it is simply not one of this plugin's roles.
+//
+// A name absent from the map is one nothing resolves at all — a typo.
+//
+// The server's answer wins over the project config for a name both carry: it is
+// the resolved truth, config plus built-in defaults folded together.
+export async function knownAgentKinds(client) {
   const kinds = new Map()
+  for (const name of await projectAgentNames(client)) kinds.set(name, "other")
   for (const agent of await loadServerAgents(client)) {
-    if (isSpawnable(agent)) continue
-    kinds.set(agent.name, agent.mode === "primary" ? "primary" : "hidden")
+    const kind = agent.mode === "primary" ? "primary" : agent.hidden === true ? "hidden" : "other"
+    kinds.set(agent.name, kind)
   }
   return kinds
 }

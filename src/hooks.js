@@ -59,8 +59,7 @@ import {
   PACKAGE_WARN_SHARE,
   PACKAGE_REFUSE_SHARE,
 } from "./settings.js"
-import { AGENTS, NESTED_SPAWN_TARGET, mayDelegate } from "./agents.js"
-import { projectAgentNames, spawnableAgentNames } from "./config.js"
+import { NESTED_SPAWN_TARGET, SPAWNABLE_ROLES, mayDelegate } from "./agents.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
 import { log, errMsg } from "./log.js"
@@ -281,12 +280,6 @@ export function createTransformSystem(client) {
           sessionDir,
           projectMd,
           agentsMd: slices.agentsMd || "",
-          // The same union the spawn gate accepts (src/tools.js availableAgents),
-          // so no type the orchestrator may spawn is missing its budget here.
-          spawnableAgents: [
-            ...(await projectAgentNames(client)),
-            ...(await spawnableAgentNames(client)),
-          ],
         })
       } else if (delegates) {
         // A delegating subagent gets its own, much smaller block: it has to
@@ -635,12 +628,12 @@ async function notifyParentOfDenialLoop(client, entry) {
 // they are injected fresh per turn.
 //
 // The context budget is a value per agent type, so the block lists one ceiling
-// per role the orchestrator can spawn — the plugin's own roles minus the
-// primary, plus every agent the project's own config defines, plus every agent
-// the server reports as spawnable (non-primary, non-hidden, which is how
-// opencode's own `general` and `explore` appear). That is the same set `spawn`
-// accepts. "off" means that type's budget is disabled, "unlimited" that the
-// subagent cap is.
+// per role the orchestrator can spawn — SPAWNABLE_ROLES, this plugin's own
+// subagent roles, which is exactly the closed set the spawn gate accepts
+// (src/tools.js). An agent the project's config or the opencode server
+// additionally resolves is not spawnable and gets no budget line here, or the
+// orchestrator would read the line as an offer. "off" means that type's budget
+// is disabled, "unlimited" that the subagent cap is.
 //
 // Each entry carries the fixed overhead that type's spawns pay before the
 // orchestrator's own words and the headroom left over, so a package sized
@@ -651,17 +644,11 @@ async function notifyParentOfDenialLoop(client, entry) {
 // tells the orchestrator the user cannot read the notices it receives: the
 // completion notice is then the only copy of a subagent's result and nothing
 // renders it, so the orchestrator is the channel to the user.
-function formatLimitsNotice({
-  sessionDir,
-  projectMd = "",
-  agentsMd = "",
-  spawnableAgents = [],
-} = {}) {
+function formatLimitsNotice({ sessionDir, projectMd = "", agentsMd = "" } = {}) {
   const s = getSettings()
   const sub = s.maxSubagents > 0 ? `${s.maxSubagents}` : "unlimited"
   const snapshot = projectContext(sessionDir)
-  const budgets = [...new Set([...Object.keys(AGENTS), ...spawnableAgents])]
-    .filter((agent) => agent !== "orchestrator")
+  const budgets = SPAWNABLE_ROLES
     .map((agent) => {
       const budget = contextBudgetFor(agent)
       if (budget <= 0) return `${agent} off`

@@ -14,11 +14,11 @@
 // rather than near them.
 //
 // The same file covers the two other halves of the sizing path: the agent-type
-// gate (`spawn` accepts the plugin's own roles, the project's, and the ones the
-// server reports as spawnable — refusing a primary or hidden agent for what it
-// is and anything else by name) and the limits block the orchestrator reads before it
-// writes a prompt, which renders each budget with its fixed overhead and the
-// headroom left over.
+// gate (`spawn` accepts the plugin's own subagent roles and NOTHING else —
+// refusing an agent opencode does resolve for what it is, be it a primary, a
+// hidden internal or a project's own agent, and anything else by name) and the
+// limits block the orchestrator reads before it writes a prompt, which renders
+// each budget with its fixed overhead and the headroom left over.
 //
 // Run: node --test --test-timeout=5000 test/spawn-size.test.js
 
@@ -36,6 +36,7 @@ import { setSettingsPath, resetSettings, PACKAGE_WARN_SHARE, PACKAGE_REFUSE_SHAR
 import { resetPermissionGuardCache } from "../src/config.js"
 import { completionNotice } from "../src/notices.js"
 import { estimateTokens } from "../src/format.js"
+import { SPAWNABLE_ROLES } from "../src/agents.js"
 
 const fixtureDir = mkdtempSync(join(tmpdir(), "intercom-size-"))
 writeFileSync(join(fixtureDir, "package.json"), JSON.stringify({ name: "fixture-proj" }))
@@ -378,18 +379,51 @@ test("an unknown agent type is refused by name, with the available types listed"
   assert.equal(entryForSession("ses_sub1"), undefined)
 })
 
-test("an agent the project's own config defines is spawnable and is listed as available", async () => {
+test("the available types are the plugin's eight subagent roles and nothing else", async () => {
+  const { ctx } = makeCtx({
+    agentConfig: { scribe: { description: "writes" } },
+    serverAgents: OPENCODE_BUILTINS,
+  })
+  const hooks = await plugin(ctx)
+
+  const res = await hooks.tool.spawn.execute({ agent: "cod3r", prompt: "x" }, toolCtx)
+  const listed = /Available types: ([^.]+)\./.exec(res.output)[1].split(", ")
+  assert.deepEqual(listed, [...SPAWNABLE_ROLES].sort())
+  assert.deepEqual(
+    [...SPAWNABLE_ROLES].sort(),
+    ["coder", "debugger", "designer", "documenter", "gitter", "planner", "researcher", "reviewer"],
+  )
+})
+
+test("every one of the plugin's roles spawns", async () => {
+  withSettings({ maxSubagents: 0 }) // unlimited: all eight run in one go
+  const { ctx, created } = makeCtx({ serverAgents: OPENCODE_BUILTINS })
+  const hooks = await plugin(ctx)
+
+  for (const agent of SPAWNABLE_ROLES) {
+    const res = await hooks.tool.spawn.execute({ agent, prompt: "do the work" }, toolCtx)
+    assert.match(res.output, new RegExp(`Spawned subagent "${agent}#\\d+"`))
+  }
+  assert.equal(created.length, SPAWNABLE_ROLES.length)
+})
+
+test("an agent the project's own config defines is refused for not being a plugin role", async () => {
   const { ctx, created } = makeCtx({ agentConfig: { scribe: { description: "writes" } } })
   const hooks = await plugin(ctx)
 
-  const ok = await hooks.tool.spawn.execute({ agent: "scribe", prompt: "write it up" }, toolCtx)
-  assert.match(ok.output, /Spawned subagent "scribe#1"/)
-  assert.deepEqual(created, ["ses_sub1"])
-
-  const refused = await hooks.tool.spawn.execute({ agent: "scrybe", prompt: "write it up" }, toolCtx)
-  assert.match(refused.output, /Spawn refused: "scrybe"/)
-  assert.match(refused.output, /Available types: .*\bscribe\b/)
-  assert.deepEqual(created, ["ses_sub1"], "the typo created nothing")
+  const res = await hooks.tool.spawn.execute({ agent: "scribe", prompt: "write it up" }, toolCtx)
+  assert.match(
+    res.output,
+    /^Spawn refused: "scribe" is an agent this opencode instance defines, but not one of the roles this plugin installs — only those can be spawned, so no subagent was started\./,
+  )
+  assert.doesNotMatch(
+    res.output,
+    /is not an agent type this project has/,
+    "the project HAS it — the refusal must not claim otherwise",
+  )
+  assert.doesNotMatch(res.output, /Available types: .*\bscribe\b/)
+  assert.deepEqual(created, [], "no session was created")
+  assert.equal(entryForSession("ses_sub1"), undefined)
 })
 
 // opencode's own agent table as the server reports it (1.18.25,
@@ -406,18 +440,31 @@ const OPENCODE_BUILTINS = [
   { name: "summary", mode: "primary", hidden: true, builtIn: true },
 ]
 
-test("a subagent the server resolves is spawnable though the project config never names it", async () => {
-  withSettings({ maxSubagents: 2 }) // both built-in subagents run in one go
+test("a subagent the server resolves is refused for not being a plugin role", async () => {
   const { ctx, created } = makeCtx({ serverAgents: OPENCODE_BUILTINS })
   const hooks = await plugin(ctx)
 
-  const res = await hooks.tool.spawn.execute({ agent: "general", prompt: "look into it" }, toolCtx)
-  assert.match(res.output, /Spawned subagent "general#1"/)
-  assert.deepEqual(created, ["ses_sub1"])
+  for (const agent of ["general", "explore"]) {
+    const res = await hooks.tool.spawn.execute({ agent, prompt: "look into it" }, toolCtx)
+    assert.match(
+      res.output,
+      new RegExp(
+        `^Spawn refused: "${agent}" is an agent this opencode instance defines, but not one of ` +
+          `the roles this plugin installs`,
+      ),
+    )
+  }
+  assert.deepEqual(created, [], "opencode's own subagents are not spawn targets")
+})
 
-  const explore = await hooks.tool.spawn.execute({ agent: "explore", prompt: "sweep it" }, toolCtx)
-  assert.match(explore.output, /Spawned subagent "explore#1"/)
-  assert.deepEqual(created, ["ses_sub1", "ses_sub2"])
+test("the orchestrator cannot be spawned — it is the primary, not a role to delegate to", async () => {
+  const { ctx, created } = makeCtx({ serverAgents: OPENCODE_BUILTINS })
+  const hooks = await plugin(ctx)
+
+  const res = await hooks.tool.spawn.execute({ agent: "orchestrator", prompt: "x" }, toolCtx)
+  assert.match(res.output, /^Spawn refused: "orchestrator" /)
+  assert.doesNotMatch(res.output, /Available types: .*\borchestrator\b/)
+  assert.deepEqual(created, [])
 })
 
 test("a primary agent the server resolves is refused for being primary, not for being unknown", async () => {
@@ -436,7 +483,7 @@ test("a primary agent the server resolves is refused for being primary, not for 
       /is not an agent type this project has/,
       "the project HAS it — the refusal must not claim otherwise",
     )
-    assert.match(res.output, /Available types: .*\bgeneral\b/, "the reachable types are still named")
+    assert.match(res.output, /Available types: .*\bcoder\b/, "the reachable types are still named")
   }
   assert.deepEqual(created, [], "no session was created for either primary")
   assert.equal(entryForSession("ses_sub1"), undefined)
@@ -449,7 +496,7 @@ test("a hidden agent the server resolves is refused for being hidden", async () 
   const hooks = await plugin(ctx)
 
   // `compaction` is hidden AND primary; `internal` is hidden alone, so the
-  // hidden half of the filter is pinned independently of the mode half.
+  // hidden half of the classification is pinned independently of the mode half.
   const res = await hooks.tool.spawn.execute({ agent: "internal", prompt: "x" }, toolCtx)
   assert.match(
     res.output,
@@ -461,9 +508,10 @@ test("a hidden agent the server resolves is refused for being hidden", async () 
   assert.deepEqual(created, [])
 })
 
-test("a client with no app namespace leaves the accepted set at the plugin's and the project's", async () => {
-  // Every other unit-test mock client has no `app`. The reader must fail soft
-  // to an empty list rather than throw, or it takes the whole spawn path down.
+test("a client with no app namespace still gates on the plugin's roles", async () => {
+  // Every other unit-test mock client has no `app`. The classifier must fail
+  // soft to an empty list rather than throw, or it takes the whole spawn path
+  // down — and the closed list decides regardless of what it can read.
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
 
@@ -474,7 +522,7 @@ test("a client with no app namespace leaves the accepted set at the plugin's and
   assert.deepEqual(created, ["ses_sub1"])
 })
 
-test("an app.agents that fails leaves the accepted set at the plugin's and the project's", async () => {
+test("an app.agents that fails still gates on the plugin's roles", async () => {
   const { ctx, created } = makeCtx({ agentConfig: { scribe: {} } })
   ctx.client.app = {
     agents: async () => {
@@ -483,8 +531,11 @@ test("an app.agents that fails leaves the accepted set at the plugin's and the p
   }
   const hooks = await plugin(ctx)
 
-  const ok = await hooks.tool.spawn.execute({ agent: "scribe", prompt: "x" }, toolCtx)
-  assert.match(ok.output, /Spawned subagent "scribe#1"/, "the spawn path survives the failure")
+  const ok = await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
+  assert.match(ok.output, /Spawned subagent "coder#1"/, "the spawn path survives the failure")
+  // The config half of the classification still answers, the server half does not.
+  const scribe = await hooks.tool.spawn.execute({ agent: "scribe", prompt: "x" }, toolCtx)
+  assert.match(scribe.output, /^Spawn refused: "scribe" is an agent this opencode instance defines/)
   const refused = await hooks.tool.spawn.execute({ agent: "explore", prompt: "x" }, toolCtx)
   assert.match(refused.output, /^Spawn refused: "explore" is not an agent type this project has/)
   assert.deepEqual(created, ["ses_sub1"])
@@ -549,7 +600,7 @@ test("a disabled budget stays 'off' and gets no headroom figure", async () => {
   assert.equal(limitsEntry(block, "gitter"), null)
 })
 
-test("the limits block lists the project's own agents and the server's beside the plugin's", async () => {
+test("the limits block lists the plugin's roles and nothing else", async () => {
   const { ctx } = makeCtx({
     agentConfig: { scribe: {}, orchestrator: {} },
     serverAgents: OPENCODE_BUILTINS,
@@ -557,24 +608,24 @@ test("the limits block lists the project's own agents and the server's beside th
   const hooks = await plugin(ctx)
 
   const block = await limitsBlock(hooks)
-  // DEFAULT_MAX_CONTEXT = 40000 for a type the built-in table does not name.
-  assert.equal(limitsEntry(block, "scribe").budget, 40000)
-  assert.equal(limitsEntry(block, "general").budget, 40000, "an accepted built-in carries a budget")
-  assert.equal(limitsEntry(block, "explore").budget, 40000)
+  for (const agent of SPAWNABLE_ROLES) {
+    assert.ok(limitsEntry(block, agent), `${agent} carries a budget`)
+  }
   assert.doesNotMatch(block, /orchestrator \d/, "the primary is not a spawnable subagent")
-  assert.equal(block.match(/coder \d/g).length, 1, "a type both sides name is listed once")
-  // The block is the union the gate accepts — nothing the gate refuses gets a
-  // budget in it, or the orchestrator would read it as spawnable.
-  for (const refused of ["build", "plan", "compaction", "title", "summary"]) {
+  assert.equal(block.match(/coder \d/g).length, 1, "each role is listed once")
+  // The block is the closed list the gate accepts — nothing the gate refuses
+  // gets a budget in it, or the orchestrator would read it as spawnable.
+  for (const refused of ["scribe", "general", "explore", "build", "plan", "compaction", "title", "summary"]) {
     assert.equal(limitsEntry(block, refused), null, `${refused} is not offered as a budget`)
   }
 })
 
-test("without a server agent list the limits block is the union it was before", async () => {
+test("the limits block does not depend on the server list", async () => {
   const { ctx } = makeCtx({ agentConfig: { scribe: {} } })
   const hooks = await plugin(ctx)
 
   const block = await limitsBlock(hooks)
-  assert.equal(limitsEntry(block, "scribe").budget, 40000)
+  for (const agent of SPAWNABLE_ROLES) assert.ok(limitsEntry(block, agent), `${agent} is listed`)
+  assert.equal(limitsEntry(block, "scribe"), null)
   assert.equal(limitsEntry(block, "general"), null)
 })

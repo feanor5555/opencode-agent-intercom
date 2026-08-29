@@ -185,6 +185,14 @@ const NO_WEB_ACCESS = {
 // The 9 roles. `permission` maps tools a role must not have to `deny`; everything
 // else stays enabled by default (incl. the intercom tools and any MCP tools). The
 // runtime guard in hooks.js still hard-enforces the primary-only restriction.
+//
+// Every subagent role carries `hidden: true`: the roles are the orchestrator's
+// to spawn, not the user's to address. `hidden` keeps a name out of the TUI's
+// `@` autocomplete and the agent switcher, so the user selects the
+// orchestrator and delegation runs through it. It is a VISIBILITY flag only —
+// neither opencode's own task catalog nor this plugin's spawn gate reads it
+// (the gate's authority is SPAWNABLE_ROLES below). `orchestrator` stays
+// visible: opencode refuses to start without a non-subagent agent to select.
 export const AGENTS = {
   orchestrator: {
     description:
@@ -203,6 +211,7 @@ export const AGENTS = {
     description:
       "Writes concept/design documents. Plans but does not implement. Version and compatibility facts come from a researcher.",
     mode: "subagent",
+    hidden: true,
     permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
     prompt: PLANNER_PROMPT,
   },
@@ -210,6 +219,7 @@ export const AGENTS = {
     description:
       "Implements code changes in thin vertical slices, runs build/test commands, verifies before reporting back.",
     mode: "subagent",
+    hidden: true,
     permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS },
     prompt: CODER_PROMPT,
   },
@@ -217,6 +227,7 @@ export const AGENTS = {
     description:
       "Diagnoses build/test/runtime errors. Finds the root cause but does not fix it itself.",
     mode: "subagent",
+    hidden: true,
     permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, edit: "deny", write: "deny" },
     prompt: DEBUGGER_PROMPT,
   },
@@ -224,6 +235,7 @@ export const AGENTS = {
     description:
       "Critical developer. Reviews code against best practices, clean code, performance. Writes a review document in reviews/, changes no source code.",
     mode: "subagent",
+    hidden: true,
     permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
     prompt: REVIEWER_PROMPT,
   },
@@ -231,6 +243,7 @@ export const AGENTS = {
     description:
       "Writes user/API documentation (README, usage, changelog). Reads the actual code, invents nothing.",
     mode: "subagent",
+    hidden: true,
     permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
     prompt: DOCUMENTER_PROMPT,
   },
@@ -238,6 +251,7 @@ export const AGENTS = {
     description:
       "Web research. Searches via the custom `web_search` tool (Exa AI backend, wired by this plugin) and, for lived user experience from forums and Q&A sites, the custom `forum_search` tool, never curl/wget. Never recalls URLs from memory.",
     mode: "subagent",
+    hidden: true,
     permission: {
       ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN,
       read: "deny", edit: "deny", write: "deny", bash: "deny",
@@ -251,6 +265,7 @@ export const AGENTS = {
     description:
       "Generates images (UI mockups, screen designs, icons, illustrations, hero graphics) from a written brief. Saves files to disk; does not write source code.",
     mode: "subagent",
+    hidden: true,
     permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS, outline: "deny" },
     prompt: DESIGNER_PROMPT,
   },
@@ -258,6 +273,7 @@ export const AGENTS = {
     description:
       "Handles repository operations (commits, branches, rebases, tags, PR descriptions) matching the project's existing git style. Does not edit source code.",
     mode: "subagent",
+    hidden: true,
     permission: {
       ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN,
       edit: "deny", write: "deny", webfetch: "deny", websearch: "deny", web_search: "deny",
@@ -267,6 +283,24 @@ export const AGENTS = {
     prompt: GITTER_PROMPT,
   },
 }
+
+// The closed set of agent types a spawn may name — this plugin's own subagent
+// roles and nothing else. Derived from AGENTS rather than listed by hand, so a
+// role added or removed above moves the gate with it; `orchestrator` falls out
+// on its `mode: "primary"` and is therefore not spawnable.
+//
+// This set is the whole authority of the spawn gate (tools.js) and of the
+// per-type budgets the orchestrator is shown (hooks.js). What a project's own
+// opencode config defines and what the server additionally resolves are NOT
+// spawn targets: an agent that merely wraps a model carries none of this
+// plugin's role prompt, none of its permission map and no context budget of
+// its own, and the schema strip that gates a role's tools applies only to the
+// roles here.
+export const SPAWNABLE_ROLES = Object.freeze(
+  Object.entries(AGENTS)
+    .filter(([, def]) => def.mode === "subagent")
+    .map(([name]) => name),
+)
 
 // Merges the plugin's roles into a project's resolved config and makes the
 // orchestrator the default primary. Non-destructive field-wise merge: the

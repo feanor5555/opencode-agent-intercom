@@ -46,10 +46,14 @@ import {
   isAbortArmed,
 } from "./abort-arming.ts";
 import {
+  AGENT_NAMES,
   type LimitKey,
+  PROMPT_AGENT_FILES,
+  SPAWNABLE_ROLES,
   type Settings,
   effectiveAgentContext,
   readSettings,
+  spawnableAgentNames,
   stepAgentContext,
   stepSetting,
   toggleEndlessMode,
@@ -80,32 +84,6 @@ const ABORT_COMMAND = "agent-intercom.abort-selected";
 // workflow is the project root. Run `npx opencode-agent-intercom-init-prompts`
 // to seed the directory with defaults (one .md per agent).
 const PROMPTS_DIR_PATH = join(process.cwd(), ".opencode", "agent-intercom");
-const PROMPT_AGENT_FILES = [
-  "orchestrator.md",
-  "planner.md",
-  "coder.md",
-  "debugger.md",
-  "reviewer.md",
-  "documenter.md",
-  "researcher.md",
-  "designer.md",
-  "gitter.md",
-];
-const LLM_AGENTS = [
-  "orchestrator",
-  "planner",
-  "coder",
-  "debugger",
-  "reviewer",
-  "documenter",
-  "researcher",
-  "designer",
-  "gitter",
-];
-// The cycler list of the context-ceiling row while the live agent list from
-// opencode has not landed yet. The budget governs subagents only, so the
-// orchestrator is not in it.
-const CONTEXT_AGENTS_FALLBACK = LLM_AGENTS.filter((a) => a !== "orchestrator");
 // Step of the [-]/[+] buttons on the context-ceiling row, in tokens.
 const CONTEXT_STEP = 5000;
 // The stepping rule of one parameter row plus the label it carries; the rule
@@ -382,14 +360,14 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const [promptsExpanded, setPromptsExpanded] = createSignal(false);
 
   // LLM-parameter overrides, shared with the main plugin's chat.params hook.
-  // Cycling through LLM_AGENTS lets the user tune one role at a time without
+  // Cycling through AGENT_NAMES lets the user tune one role at a time without
   // inflating the UI to a grid.
   const [llmParams, setLlmParams] = createSignal<LlmParams>(readLlmParams());
   // Per-agent model choice, shared with the main plugin's chat.message hook.
   const [llmModels, setLlmModels] = createSignal<LlmModels>(readLlmModels());
   const [llmExpanded, setLlmExpanded] = createSignal(false);
   const [llmAgentIdx, setLlmAgentIdx] = createSignal(0);
-  const currentLlmAgent = (): string => LLM_AGENTS[llmAgentIdx()];
+  const currentLlmAgent = (): string => AGENT_NAMES[llmAgentIdx()];
 
   // The three files are shared with the main plugin and are hand-edited, so the
   // copies seeded at mount go stale. Re-read them on the same timer that
@@ -420,10 +398,11 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // The model side of the same fetch: what opencode resolved as each agent's
   // model, shown when the user has chosen none.
   const [opencodeModels, setOpencodeModels] = createSignal<Record<string, ModelRef>>({});
-  // The spawnable agents of the same fetch — every one this instance resolved
-  // that is not the primary, so a project's own agents are editable too. Empty
-  // until the first successful fetch; the context row falls back to the
-  // hardcoded list until then.
+  // The spawnable agents of the same fetch — the plugin's own subagent roles
+  // this instance actually resolved, and nothing else: the spawn gate refuses
+  // every other name, so a ceiling for one would govern nothing. Empty until
+  // the first successful fetch; the context row falls back to SPAWNABLE_ROLES
+  // until then.
   const [subagentNames, setSubagentNames] = createSignal<string[]>([]);
   const refreshOpencodeDefaults = async (): Promise<void> => {
     try {
@@ -438,10 +417,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       }>;
       const map: OpencodeDefaults = {};
       const models: Record<string, ModelRef> = {};
-      const spawnable: string[] = [];
       for (const a of list) {
         if (!a || typeof a.name !== "string") continue;
-        if (a.mode !== "primary") spawnable.push(a.name);
         const resolvedModel = toModelRef(a.model);
         if (resolvedModel) models[a.name] = resolvedModel;
         const entry: Record<string, number> = {};
@@ -462,7 +439,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       if (!disposed) {
         setOpencodeDefaults(map);
         setOpencodeModels(models);
-        setSubagentNames(spawnable);
+        setSubagentNames(spawnableAgentNames(list));
       }
     } catch {
       // best-effort — leave previous defaults in place
@@ -511,19 +488,19 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const modelChoicesTimer = setInterval(refreshModelChoices, 60_000);
 
   const cycleLlmAgent = (delta: number): void => {
-    setLlmAgentIdx((i) => (i + delta + LLM_AGENTS.length) % LLM_AGENTS.length);
+    setLlmAgentIdx((i) => (i + delta + AGENT_NAMES.length) % AGENT_NAMES.length);
     refreshFileState();
     void refreshOpencodeDefaults();
   };
 
   // The agent whose context ceiling the row above the endless switch edits.
-  // The list is the live one where the fetch has landed and the hardcoded one
+  // The list is the live one where the fetch has landed and the full role set
   // until then; it never shrinks to nothing, so the index always resolves. The
   // modulo keeps a stale index inside a list that shrank between two fetches.
   const [contextAgentIdx, setContextAgentIdx] = createSignal(0);
   const contextAgents = (): string[] => {
     const live = subagentNames();
-    return live.length > 0 ? live : CONTEXT_AGENTS_FALLBACK;
+    return live.length > 0 ? live : SPAWNABLE_ROLES;
   };
   const currentContextAgent = (): string => {
     const list = contextAgents();

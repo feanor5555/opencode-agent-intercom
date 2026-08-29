@@ -9,6 +9,16 @@
 // as booleans, the kind whose validator differs from the integer rule the
 // others share.
 //
+// The role set itself is pinned the same way. The plugin derives it once, from
+// AGENTS in src/agents.js: AGENT_NAMES (src/promptsfile.js) is every installed
+// role, SPAWNABLE_ROLES (src/agents.js) is the spawn gate's closed set. The
+// sidebar carries its own copy in tui/src/settings-file.ts and builds the
+// prompt-file set, the ceiling cycler and the budget table out of it, so a role
+// added to AGENTS that never reached the sidebar would give the user a spawn
+// gate and a budget line the panel cannot show — and a name the sidebar offered
+// beyond the set would let them tune a ceiling the gate refuses to spawn
+// against.
+//
 // The per-agent context budget is pinned the same way, over the whole
 // resolution chain: the plugin resolves it in contextBudgetFor and the sidebar
 // in effectiveAgentContext, and a type whose ceiling the two disagree on would
@@ -22,6 +32,8 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { SPAWNABLE_ROLES } from "../src/agents.js"
+import { AGENT_NAMES } from "../src/promptsfile.js"
 import {
   DEFAULT_AGENT_CONTEXT,
   DEFAULT_ENDLESS_CONTEXT,
@@ -36,6 +48,7 @@ import {
   setSettingsPath,
 } from "../src/settings.js"
 import {
+  AGENT_NAMES as TUI_AGENT_NAMES,
   DEFAULT_AGENT_CONTEXT as TUI_DEFAULT_AGENT_CONTEXT,
   DEFAULT_ENDLESS_CONTEXT as TUI_DEFAULT_ENDLESS_CONTEXT,
   DEFAULT_ENDLESS_MODE as TUI_DEFAULT_ENDLESS_MODE,
@@ -43,8 +56,11 @@ import {
   DEFAULT_MAX_CONTEXT as TUI_DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_NESTED_SPAWNS as TUI_DEFAULT_MAX_NESTED_SPAWNS,
   DEFAULT_MAX_SUBAGENTS as TUI_DEFAULT_MAX_SUBAGENTS,
+  PROMPT_AGENT_FILES,
+  SPAWNABLE_ROLES as TUI_SPAWNABLE_ROLES,
   effectiveAgentContext,
   readSettings,
+  spawnableAgentNames,
   setSettingsPath as setTuiSettingsPath,
 } from "../tui/src/settings-file.ts"
 
@@ -113,6 +129,61 @@ test("the two modules carry the same built-in defaults", () => {
   assert.equal(DEFAULT_HIDE_CHATTER, TUI_DEFAULT_HIDE_CHATTER)
   assert.equal(DEFAULT_MAX_NESTED_SPAWNS, TUI_DEFAULT_MAX_NESTED_SPAWNS)
   assert.deepEqual(DEFAULT_AGENT_CONTEXT, TUI_DEFAULT_AGENT_CONTEXT)
+})
+
+test("the two modules carry the same role set", () => {
+  assert.deepEqual(TUI_AGENT_NAMES, AGENT_NAMES)
+  assert.deepEqual(TUI_SPAWNABLE_ROLES, [...SPAWNABLE_ROLES])
+})
+
+test("the budget table names exactly the spawnable roles", () => {
+  assert.deepEqual(Object.keys(DEFAULT_AGENT_CONTEXT), [...SPAWNABLE_ROLES])
+  assert.deepEqual(Object.keys(TUI_DEFAULT_AGENT_CONTEXT), [...SPAWNABLE_ROLES])
+})
+
+test("there is one prompt template file per installed role", () => {
+  assert.deepEqual(
+    PROMPT_AGENT_FILES,
+    AGENT_NAMES.map((name) => `${name}.md`),
+  )
+})
+
+// The sidebar's ceiling cycler is fed from opencode's own agent listing, which
+// resolves far more than this plugin's roles — its primaries, the hidden
+// helpers, and every model wrapper a project declares. Only the spawnable roles
+// may reach the cycler: a ceiling for any other name would govern nothing,
+// because the spawn gate refuses that name, and the first ceiling edit writes
+// the whole cycler list into the settings file.
+test("the ceiling list keeps only the spawnable roles of an opencode listing", () => {
+  const listing = [
+    { name: "build", mode: "primary" },
+    { name: "orchestrator", mode: "primary" },
+    { name: "general", mode: "subagent" },
+    { name: "coder", mode: "subagent" },
+    { name: "m3", mode: "subagent" },
+    { name: "researcher", mode: "subagent" },
+  ]
+  assert.deepEqual(spawnableAgentNames(listing), ["coder", "researcher"])
+})
+
+test("the ceiling list survives a listing that is missing fields", () => {
+  assert.deepEqual(spawnableAgentNames([]), [])
+  assert.deepEqual(
+    spawnableAgentNames([null, {}, { mode: "subagent" }, { name: "planner" }]),
+    ["planner"],
+  )
+})
+
+// A role the plugin installs is spawnable and gets a ceiling row as soon as
+// opencode reports it, whatever mode the listing gives it — the gate reads the
+// name, not the mode. The orchestrator is the one installed role that is not
+// spawnable and must never appear.
+test("every spawnable role of a full listing reaches the ceiling list", () => {
+  const listing = AGENT_NAMES.map((name) => ({
+    name,
+    mode: name === "orchestrator" ? "primary" : "subagent",
+  }))
+  assert.deepEqual(spawnableAgentNames(listing), [...SPAWNABLE_ROLES])
 })
 
 test("with neither file nor env both resolve the built-in defaults", () => {

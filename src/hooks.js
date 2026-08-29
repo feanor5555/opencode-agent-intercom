@@ -66,7 +66,7 @@ import {
 import { loadCustomPrompt, applyCustomPrompt } from "./promptsfile.js"
 import { tokens as fmtTokens, ageSeconds, estimateTokens } from "./format.js"
 import { postParentNotice, teardownSubagent } from "./teardown.js"
-import { settleChildWaiter } from "./childwait.js"
+import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
 import { completionNotice, errorNotice, denialLoopNotice } from "./notices.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
 import { maybeRunPendingHandoff, maybeRunPendingEndless } from "./handoffwiring.js"
@@ -811,6 +811,27 @@ async function onSessionIdle({ sessionID }, client) {
   const wake = await registryMutex.runExclusive(() => {
     const e = entryForSession(sessionID)
     if (!e || aborted.has(sessionID) || e.timedOut || e.errored || e.dispatched) return null
+    // A subagent that is blocked on a child of its own has NOT finished: an
+    // idle event reaching us here is the session falling quiet around a tool
+    // call that has not returned, not the one-shot reply this path exists to
+    // deliver. Taking it would post a premature (empty) result to the parent,
+    // free the slot, and delete a session whose DELETE then cascades over the
+    // live child — the child's answer would never reach the very session that
+    // asked for it.
+    //
+    // Left completely untouched, not latched: `dispatched` is a one-way claim
+    // and `status = "idle"` would make the watchdog skip this entry for good.
+    // When the child settles, the tool call returns, the session speaks again
+    // and goes idle a second time — that idle finds no live children and runs
+    // the normal path. If the child never settles, the waiter's own ceiling
+    // and the watchdog are what end it.
+    if (hasLiveChildren(sessionID)) {
+      log("idle held: subagent is waiting on a live child", {
+        handle: e.handle,
+        sessionID,
+      })
+      return null
+    }
     e.status = "idle"
     if (!e.parentID) return null
     // Latch BEFORE removal so any other path that runs under the same mutex

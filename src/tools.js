@@ -26,8 +26,11 @@ import {
   releasePendingTaskId,
   isTaskIdPending,
   isEndlessFrozen,
+  rootPrimaryFor,
+  spawnCapDecision,
 } from "./registry.js"
 import { settleChildWaiter } from "./childwait.js"
+import { endLiveChildrenOf } from "./teardown.js"
 import { projectContext } from "./project.js"
 import { AGENTS } from "./agents.js"
 import { projectAgentNames, spawnableAgentNames, unspawnableAgentKinds } from "./config.js"
@@ -194,10 +197,10 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
   async function spawnHandler(args, toolCtx) {
     // Only the orchestrator delegates. A caller that already has a registry
     // entry is a subagent — refuse with a friendly tool result (not a throw,
-    // which small models retry into a loop) and do NOT trackPrimary it: doing
-    // so would misregister the subagent's own session as an orchestrator
-    // primary. The subagent reports the need in its final reply; the
-    // orchestrator decides and spawns. Checked BEFORE trackPrimary.
+    // which small models retry into a loop). The subagent reports the need in
+    // its final reply; the orchestrator decides and spawns. Checked BEFORE
+    // trackPrimary, which additionally refuses any session that has a registry
+    // entry, so a subagent caller can never be misregistered as a primary.
     if (entryForSession(toolCtx.sessionID)) {
       log("spawn refused: caller is a subagent", { sessionID: toolCtx.sessionID })
       return {
@@ -220,7 +223,12 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // `spawn failed: <this text>`, so what the model sees is the text either
     // way; the throw is what makes the refusal a failed tool call rather than
     // a successful one with a refusal in it.
-    if (isEndlessFrozen(toolCtx.sessionID)) {
+    //
+    // Asked of the caller's ROOT primary, not of the caller: the latch sets
+    // hold primary session ids only, so a nested caller asking about its own
+    // id would always be told "not frozen" and would keep spawning through the
+    // freeze. For a primary caller rootPrimaryFor is the identity.
+    if (isEndlessFrozen(rootPrimaryFor(toolCtx.sessionID))) {
       log("spawn refused: endless cycle in progress", { sessionID: toolCtx.sessionID })
       throw new Error(
         "Endless mode is saving this session's open points and replacing it with a fresh " +
@@ -336,23 +344,22 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       const maxSubagents = getSettings().maxSubagents
       // Atomic cap-check-and-reserve: any await between count and reserve would
       // let parallel spawn() calls in the same turn all observe "active < cap"
-      // and bypass the limit. countActiveSubagents includes pendingSpawns, so
-      // the synchronous reserve() that follows makes the slot visible to any
-      // later spawn() in the same micro-batch.
+      // and bypass the limit. spawnCapDecision counts synchronously and
+      // includes pendingSpawns, so the synchronous reserve() that follows makes
+      // the slot visible to any later spawn() in the same micro-batch.
       //
-      // The cap is GLOBAL across all orchestrator primaries in this process —
-      // see countActiveSubagents in registry.js. We pass toolCtx.sessionID for
-      // signature compatibility, but the value is ignored.
-      if (maxSubagents > 0) {
-        const active = countActiveSubagents(toolCtx.sessionID)
-        if (active >= maxSubagents) {
-          log("spawn refused: subagent limit", { active, limit: maxSubagents })
-          return {
-            output:
-              `Subagent limit reached (${active}/${maxSubagents} running globally across all ` +
-              `orchestrator sessions). Wait for one to finish — you are woken automatically — or ` +
-              `abort one with abort(handle) before spawning again.`,
-          }
+      // The cap is GLOBAL across all orchestrator primaries in this process,
+      // and it gates a spawn made by a PRIMARY only: a nested spawn is admitted
+      // unconditionally and still counted, because the caller already holds the
+      // slot it would be told to wait for (see spawnCapDecision in registry.js).
+      const cap = spawnCapDecision(toolCtx.sessionID, maxSubagents)
+      if (cap.refused) {
+        log("spawn refused: subagent limit", { active: cap.active, limit: maxSubagents })
+        return {
+          output:
+            `Subagent limit reached (${cap.active}/${maxSubagents} running globally across all ` +
+            `orchestrator sessions). Wait for one to finish — you are woken automatically — or ` +
+            `abort one with abort(handle) before spawning again.`,
         }
       }
       reservePendingSpawn(toolCtx.sessionID)
@@ -501,6 +508,25 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     try {
       if (await removeEntry(entry.sessionID, { clearAborted: false })) {
         log("removed aborted subagent", { handle: entry.handle, sessionID: entry.sessionID })
+      }
+      // Child-first, the same ordering teardownSubagent keeps: this handler
+      // ends a subagent WITHOUT going through that helper, so the precondition
+      // on deleteSession — no live children, or the DELETE cascades over a
+      // session still streaming — has to be met here too. A no-op for a leaf
+      // subagent, which is every subagent today.
+      //
+      // Placed AFTER the settle above and after removeEntry, and BEFORE the
+      // delete: the session blocked on the subagent being aborted is freed
+      // first and does not wait out the children's teardown, while the aborted
+      // subagent's own children are gone before its rows are.
+      try {
+        await endLiveChildrenOf(client, entry.sessionID, { label: "abort" })
+      } catch (err) {
+        log("abort: ending live children failed", {
+          handle: entry.handle,
+          sessionID: entry.sessionID,
+          err: errMsg(err),
+        })
       }
       const ok = await deleteSession(client, entry.sessionID)
       if (ok) log("deleted opencode session (aborted)", { handle: entry.handle, sessionID: entry.sessionID })

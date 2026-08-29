@@ -143,9 +143,14 @@ export function forgetSessionDirectory(sessionID) {
 // 1.17.15), and if a reparented subagent is still streaming its final reply,
 // the cascade wipes its rows mid-write → `FOREIGN KEY constraint failed`,
 // `session.error` instead of `session.idle`, and the deterministic auto-tick
-// is skipped. Subagent teardown is safe here (subagents have no children); the
-// primary-handoff path must ARCHIVE the old primary instead — see
-// `archiveSession`.
+// is skipped. The primary-handoff path must ARCHIVE the old primary instead —
+// see `archiveSession`.
+//
+// On the subagent side the precondition is no longer free: a subagent that
+// spawned a child of its own has live children like anything else. It is
+// ENFORCED instead — `endLiveChildrenOf` in teardown.js ends a session's live
+// children immediately before every delete on that path, and the abort tool
+// does the same before its own delete.
 export async function deleteSession(client, sessionID) {
   try {
     await client.session.delete({ path: { id: sessionID } })

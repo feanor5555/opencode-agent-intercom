@@ -6,11 +6,18 @@
 import {
   routeParentNotice,
   removeEntry,
+  entryForSession,
   reservePendingDelivery,
   releasePendingDelivery,
 } from "./registry.js"
-import { postNotice, showToast, deleteSession, forgetSessionDirectory } from "./client.js"
-import { settleChildWaiter } from "./childwait.js"
+import {
+  postNotice,
+  showToast,
+  deleteSession,
+  abortSession,
+  forgetSessionDirectory,
+} from "./client.js"
+import { settleChildWaiter, liveChildSessionIDs } from "./childwait.js"
 import { aborted } from "./state.js"
 import { log, errMsg } from "./log.js"
 
@@ -33,6 +40,70 @@ export async function postParentNotice(client, parentID, notice) {
     log("parent notice re-routed to handoff successor", { parentID, target: routed.target })
   }
   await postNotice(client, routed.target, notice)
+}
+
+// Ends every live child of `sessionID` before that session is deleted, and
+// returns the child session ids it ended.
+//
+// The precondition on `deleteSession` (see its doc-comment in client.js) is
+// that the session has no live children: opencode's DELETE cascades
+// recursively over child sessions, and a child still streaming its final reply
+// has its rows wiped mid-write — `FOREIGN KEY constraint failed`, a
+// `session.error` in place of `session.idle`, and the deterministic auto-tick
+// skipped. That precondition used to hold for free, because a subagent had no
+// children. A nested spawn falsifies it, so it is now ENFORCED here rather
+// than assumed: every path that deletes a session ends its children first.
+//
+// Per child: a cooperative abort (so a streaming child stops before its rows
+// go), then the ordinary teardown — which settles the child's waiter, removes
+// its entry and deletes its session, and, through this same function, ends its
+// own children first. No parent notice: the session that would be woken is the
+// one being torn down.
+//
+// `seen` bounds the mutual recursion. The delegation design bounds the depth
+// structurally at one level, but a parentID cycle from a reparent race must
+// not spin here, and the cost of the guard is one Set.
+export async function endLiveChildrenOf(client, sessionID, { label = "", seen } = {}) {
+  const children = liveChildSessionIDs(sessionID)
+  if (children.length === 0) return []
+  const tag = label ? `${label}: ` : ""
+  const visited = seen ?? new Set([sessionID])
+  const ended = []
+  for (const childSessionID of children) {
+    if (visited.has(childSessionID)) continue
+    visited.add(childSessionID)
+    const child = entryForSession(childSessionID)
+    log(`${tag}ending live child before its parent's delete`, {
+      parentSessionID: sessionID,
+      childSessionID,
+      handle: child?.handle,
+    })
+    try {
+      await abortSession(client, childSessionID)
+    } catch (err) {
+      log(`${tag}child abort failed`, { childSessionID, err: errMsg(err) })
+    }
+    await teardownSubagent(
+      client,
+      {
+        sessionID: childSessionID,
+        handle: child?.handle,
+        parentID: sessionID,
+        agent: child?.agent,
+      },
+      {
+        outcome: {
+          status: "ended",
+          detail: "its parent was torn down",
+        },
+        markAborted: true,
+        label: label || "child-first",
+        seen: visited,
+      },
+    )
+    ended.push(childSessionID)
+  }
+  return ended
 }
 
 // Shared teardown for a finished / errored / timed-out subagent. Runs the
@@ -76,6 +147,12 @@ export async function postParentNotice(client, parentID, notice) {
 // the only one that has a RESULT to hand over — and its second settle here is
 // the no-op that keeps the guarantee unconditional. A caller that names no
 // outcome settles as "ended".
+//
+// Being that choke point is also why the child-first step sits here: every
+// ending path deletes through this function, so ending this session's own live
+// children just before the delete is what keeps opencode's recursive DELETE
+// cascade off a session that is still streaming. `seen` is passed only by that
+// recursion (see endLiveChildrenOf).
 export async function teardownSubagent(
   client,
   { sessionID, handle, parentID, agent },
@@ -86,6 +163,7 @@ export async function teardownSubagent(
     entryRemoved = false,
     label = "",
     outcome = null,
+    seen = undefined,
   } = {},
 ) {
   const tag = label ? `${label}: ` : ""
@@ -113,6 +191,14 @@ export async function teardownSubagent(
       if (await removeEntry(sessionID, { clearAborted: false })) {
         log(`${tag}removed subagent`, { handle, sessionID })
       }
+    }
+    // Child-first: the delete below cascades recursively over child sessions,
+    // so anything this session is still waiting on has to be ended before it
+    // fires. A no-op for a leaf subagent, which is every subagent today.
+    try {
+      await endLiveChildrenOf(client, sessionID, { label, seen })
+    } catch (err) {
+      log(`${tag}ending live children failed`, { handle, sessionID, err: errMsg(err) })
     }
     try {
       const ok = await deleteSession(client, sessionID)

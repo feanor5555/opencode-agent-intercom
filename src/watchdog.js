@@ -21,6 +21,8 @@
 import { registry, aborted } from "./state.js"
 import { getSettings } from "./settings.js"
 import { abortSession } from "./client.js"
+import { entryForSession } from "./registry.js"
+import { liveChildSessionIDs } from "./childwait.js"
 import { teardownSubagent } from "./teardown.js"
 import { timeoutNotice } from "./notices.js"
 import { log, errMsg } from "./log.js"
@@ -76,6 +78,27 @@ export async function sweepWatchdog() {
     // session.idle fires just before the entry is removed; if a stray idle
     // sneaks through the gap, `entry.status === "idle"` covers it.
     if (entry.status === "idle") continue
+    // A subagent blocked on a child of its own emits no events: every event of
+    // the run belongs to the CHILD's session, so `lastActivityAt` stands still
+    // for as long as the child works, and a child that outlives the inactivity
+    // window would time out its own parent — which then cascades a DELETE over
+    // the very child it was waiting for. Waiting on a live child IS activity.
+    //
+    // The exemption is bounded by that child being watchdogged itself: it only
+    // holds while at least one live child is a tracked entry this same sweep
+    // walks, so the parent can be held open no longer than the child can, and a
+    // waiter left behind by a child that has vanished from the registry frees
+    // the parent to be reaped normally.
+    //
+    // Bumping `lastActivityAt` rather than just skipping is what makes the
+    // exemption safe on the other side: when the child ends, the parent gets
+    // its tool result back and starts an LLM call that may not emit for a few
+    // seconds, and a stale timestamp from before the whole child run would
+    // otherwise have the next sweep reap it instantly.
+    if (isWaitingOnWatchdoggedChild(entry.sessionID)) {
+      entry.lastActivityAt = now
+      continue
+    }
     const last = entry.lastActivityAt ?? entry.spawnedAt
     if (now - last <= maxAge) continue
 
@@ -83,6 +106,17 @@ export async function sweepWatchdog() {
     entry.timedOut = true
     await timeoutSubagent(entry, maxAge, now - last)
   }
+}
+
+// True when `sessionID` is blocked on at least one live child that is itself a
+// tracked subagent — i.e. one this same watchdog will reap if it hangs. That
+// bound is the whole point: an exemption that also covered an untracked child
+// would be an exemption nothing could ever lift.
+export function isWaitingOnWatchdoggedChild(sessionID) {
+  for (const childSessionID of liveChildSessionIDs(sessionID)) {
+    if (entryForSession(childSessionID)) return true
+  }
+  return false
 }
 
 // Performs the actual timeout for one entry: abort the opencode session,

@@ -101,6 +101,11 @@ const DEFAULT_MAX_PRIMARY_CONTEXT = 80000
 // 90 s is the default — long enough that a healthy long-running subagent
 // (which keeps emitting events) is never tripped, short enough that a hung
 // LLM call doesn't silently pin a slot for the life of the process.
+// One subagent is silent and healthy: one blocked on a live child of its own,
+// whose events all belong to the child's session. The sweep treats waiting on
+// a watchdogged child as activity (see isWaitingOnWatchdoggedChild), so this
+// window measures the CHILD, and the parent outlives it by construction.
+// It also sets the child-waiter's own rescue ceiling — see childwait.js.
 const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
 // Built-in searxng bang set for `forum_search`, each engine verified to answer
 // on its bang. Four of the five return thread URLs on their own site —

@@ -33,8 +33,51 @@ import { forgetSessionDirectory } from "./client.js"
 export { registryMutex }
 
 // Marks a session as one that has used this plugin's tools.
+//
+// A session that HAS a registry entry is a subagent, and a subagent is never a
+// primary: the whole plugin classifies by exactly that test (the tool guard in
+// hooks.js checks `entryForSession` before its primary branch, and
+// `onSessionCreated` auto-registers a child only under a primary parent). A
+// subagent that reaches a tool which tracks its caller — the spawn tool, once
+// a nested spawn is admitted — would otherwise put its own session id into
+// `primarySessions` for the life of the process, where it would make every
+// session it creates look like a top-level subagent and survive its own
+// teardown. Refusing it here is the source-side half of that; the cleanup half
+// is in removeEntry / removeEntryLocked.
 export function trackPrimary(sessionID) {
-  if (sessionID) primarySessions.add(sessionID)
+  if (!sessionID) return
+  if (bySession.has(sessionID)) return
+  primarySessions.add(sessionID)
+}
+
+// The primary session at the root of `sessionID`'s spawn chain: walk
+// `entry.parentID` up and return the id at which the chain stops — a session
+// with no registry entry, which is a primary since only subagents are ever
+// registered, or (defensively) a tracked entry that carries no parentID. For a
+// primary the walk stops at once, so every caller can pass its own session id
+// unconditionally.
+//
+// This is what makes a primary-keyed decision reach a nested caller. The
+// endless-mode spawn freeze is the case in hand: its latch sets are keyed on
+// primary session ids only, so `isEndlessFrozen(subagentSessionID)` is always
+// false and a subagent would spawn straight through a freeze whose purpose is
+// to let the cycle reach quiesce.
+//
+// The walk is bounded twice: by a `seen` set, so a parentID cycle (which the
+// spawn path cannot produce, but a reparent race could) returns instead of
+// spinning, and by the chain simply running out of entries. Returns undefined
+// only for a falsy argument.
+export function rootPrimaryFor(sessionID) {
+  if (!sessionID) return undefined
+  const seen = new Set()
+  let current = sessionID
+  while (!seen.has(current)) {
+    seen.add(current)
+    const entry = entryForSession(current)
+    if (!entry?.parentID) return current
+    current = entry.parentID
+  }
+  return current
 }
 
 export function isPrimary(sessionID) {
@@ -192,6 +235,33 @@ export function countActiveSubagents(primaryID) {
   return n
 }
 
+// The cap decision for one spawn call, in one synchronous read so the caller
+// can reserve its slot with no await between counting and reserving.
+//
+// The rule: the cap GATES a spawn from a primary only; a spawn made by a
+// subagent is admitted unconditionally and is still COUNTED. Counting is what
+// keeps the orchestrator's slot figure, the quiesce predicate and the endless
+// cycle honest about a nested run — `countActiveSubagents` is untouched and
+// sees every entry in the process regardless of who spawned it.
+//
+// Gating a nested spawn would be a deadlock, not a brake: the default
+// `maxSubagents` is 1 (settings.js), the caller already occupies the only
+// slot, and the refusal it would get — wait for one to finish — names the very
+// thing it is itself. What bounds a nested run instead is the per-run quota
+// and the one-level depth bound of the delegation design.
+//
+// `nested` is the caller being a tracked subagent; `active` is reported back so
+// the refusal can name the figure it was decided on.
+export function spawnCapDecision(callerSessionID, maxSubagents) {
+  const active = countActiveSubagents()
+  const nested = Boolean(entryForSession(callerSessionID))
+  return {
+    active,
+    nested,
+    refused: maxSubagents > 0 && !nested && active >= maxSubagents,
+  }
+}
+
 // Atomically reserve a global concurrency slot (synchronous, no awaits
 // between caller's cap-check and this call). Caller MUST pair every reserve()
 // with exactly one releasePendingSpawn() — typically in a `finally` so an
@@ -325,6 +395,9 @@ export async function removeEntry(sessionID, { clearAborted = true } = {}) {
     if (entry) releaseHandle(entry.agent, parseHandleNumber(handle))
     registry.delete(handle)
     bySession.delete(sessionID)
+    // A subagent that used a caller-tracking tool must not leave its session id
+    // behind in primarySessions once its entry is gone — see trackPrimary.
+    primarySessions.delete(sessionID)
     if (clearAborted) aborted.delete(sessionID)
     return true
   })
@@ -347,6 +420,8 @@ export function removeEntryLocked(sessionID) {
   if (entry) releaseHandle(entry.agent, parseHandleNumber(handle))
   registry.delete(handle)
   bySession.delete(sessionID)
+  // Same primary-set cleanup as removeEntry — see trackPrimary.
+  primarySessions.delete(sessionID)
   aborted.delete(sessionID)
   return true
 }

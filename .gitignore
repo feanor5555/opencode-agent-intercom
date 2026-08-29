@@ -1,5 +1,8 @@
 node_modules/
 *.log
+
+# run artefacts under work/ stay visible so leftovers are noticed
+!work/**/*.log
 CLAUDE.md
 .DS_Store
 .npmrc

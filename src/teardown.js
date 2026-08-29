@@ -31,6 +31,27 @@ import { log, errMsg } from "./log.js"
 // (routeParentNotice in registry.js), so it cannot tear against the handoff's
 // own drain transitions.
 export async function postParentNotice(client, parentID, notice) {
+  // A wake notice is for a PRIMARY. A parent that is itself a subagent got its
+  // child through the blocking nested spawn, where the child's ending IS the
+  // return value of the parent's own `spawn` tool call — so the same ending
+  // posted into its session would reach it twice, once as the tool result it
+  // asked for and once as a message it never asked for. The second copy is not
+  // merely redundant: while the parent is blocked it cannot act on it, its
+  // tokens count against the parent's own context budget, and after the parent
+  // is unblocked the only thing left in its one-shot life is the reply it is
+  // already writing.
+  //
+  // Checked here rather than at each of the three notice paths (completion in
+  // hooks.js, error/timeout in teardownSubagent below, the denial-loop notice
+  // in hooks.js) because this function is the one door all three go through and
+  // the rule is the same for all three. Inert for every subagent today: a
+  // parentID only becomes a subagent's id through a nested spawn.
+  if (entryForSession(parentID)) {
+    log("parent notice dropped: the parent is a subagent and takes its child's ending as a tool result", {
+      parentID,
+    })
+    return
+  }
   const routed = routeParentNotice(parentID, notice)
   if (routed.buffered) {
     log("parent notice buffered during primary handoff", { parentID })

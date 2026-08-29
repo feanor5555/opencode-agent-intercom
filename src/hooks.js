@@ -773,8 +773,22 @@ export function createEventHandler(client) {
   }
 }
 
+// A session created under a parent this plugin knows is one of ours, and gets
+// its registry entry at once rather than waiting for `spawn` to reach
+// upsertSession after its own promptSession await.
+//
+// "A parent this plugin knows" is two cases, and both must be here. A PRIMARY
+// parent is the orchestrator's own spawn (and a native `task` child under it).
+// A SUBAGENT parent — one that has a registry entry — is a nested spawn: the
+// caller is blocked inside its `spawn` call, and until this entry exists its
+// live child is not a tracked one, which is precisely the condition the
+// watchdog exemption is bounded by (isWaitingOnWatchdoggedChild). In that
+// window the parent's own silence would count against it and the sweep could
+// reap the very session waiting for this child. Registering here closes the
+// window at the earliest moment the child's id exists.
 function onSessionCreated({ info }) {
-  if (!info?.id || !info.parentID || !isPrimary(info.parentID)) return
+  if (!info?.id || !info.parentID) return
+  if (!isPrimary(info.parentID) && !entryForSession(info.parentID)) return
   const existed = Boolean(entryForSession(info.id))
   const entry = upsertSession(info.id, { prompt: info.title ?? "", parentID: info.parentID })
   if (!existed) log("auto-registered subagent", { handle: entry.handle, sessionID: info.id })

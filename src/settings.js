@@ -58,6 +58,7 @@
 //       "postNoticeRetries": N, "postNoticeRetryBackoffMs": N,
 //       "endlessMode": true|false, "endlessContext": N,
 //       "endlessQuiesceTimeoutMs": N, "endlessMaxCycles": N,
+//       "maxNestedSpawns": N,
 //       "hideChatter": true|false }
 
 import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs"
@@ -107,6 +108,21 @@ const DEFAULT_MAX_PRIMARY_CONTEXT = 80000
 // window measures the CHILD, and the parent outlives it by construction.
 // It also sets the child-waiter's own rescue ceiling — see childwait.js.
 const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
+// How many subagents ONE subagent run may start (a nested spawn). Delegation
+// exists for preparatory work whose answer the caller then uses — summarising a
+// long document, a broad lookup — not as a working mode, so the ceiling is
+// deliberately small. It is a per-RUN ceiling counted on the caller's registry
+// entry, which lives exactly as long as its one-shot run, so it resets with
+// every fresh subagent and never has to be cleared.
+//
+// It counts ADMITTED spawns, not successful ones: the failure mode this bounds
+// is a small model looping, and a loop that fails every time would be unbounded
+// under a success-only count.
+//
+// 0 disables nesting entirely and is the escape hatch for a user who does not
+// want it — with it set, a nested spawn is refused before any session is
+// created. Not shared with the TUI, which shows no nesting figure.
+const DEFAULT_MAX_NESTED_SPAWNS = 2
 // Built-in searxng bang set for `forum_search`, each engine verified to answer
 // on its bang. Four of the five return thread URLs on their own site —
 // stackoverflow, askubuntu, superuser, hackernews; lobste.rs is carried as a
@@ -217,7 +233,7 @@ function envStr(name, def) {
 // maxPrimaryContext,
 // maxSubagentAgeMs, searxngUrl, exaApiKey, forumBangs, postNoticeRetries,
 // postNoticeRetryBackoffMs, endlessMode, endlessContext,
-// endlessQuiesceTimeoutMs, endlessMaxCycles, hideChatter }.
+// endlessQuiesceTimeoutMs, endlessMaxCycles, maxNestedSpawns, hideChatter }.
 // Cached for TTL_MS so the hot paths (spawn, every subagent transform) don't
 // stat the file constantly. searxngUrl is "" when unset (searxng disabled).
 // exaApiKey is "" when unset (web_search falls back to Exa's anonymous tier).
@@ -236,6 +252,8 @@ function envStr(name, def) {
 // endlessContext the primary threshold in effect; endlessQuiesceTimeoutMs
 // bounds a cycle's wait for the last subagent and endlessMaxCycles the maximum
 // number of cycles one process runs; 0 disables the cycle ceiling.
+// maxNestedSpawns is how many subagents one subagent run may start; 0 disables
+// nesting.
 // hideChatter hides the plugin's own postings from the transcript while
 // leaving them in the model's payload.
 export function getSettings() {
@@ -260,6 +278,7 @@ export function getSettings() {
       DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS,
     ),
     endlessMaxCycles: envNum("OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES", DEFAULT_ENDLESS_MAX_CYCLES),
+    maxNestedSpawns: envNum("OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS", DEFAULT_MAX_NESTED_SPAWNS),
     hideChatter: envBool("OPENCODE_AGENT_INTERCOM_HIDE_CHATTER", DEFAULT_HIDE_CHATTER),
   }
   try {
@@ -325,6 +344,9 @@ export function getSettings() {
     }
     if (Number.isInteger(raw?.endlessMaxCycles) && raw.endlessMaxCycles >= 0) {
       resolved.endlessMaxCycles = raw.endlessMaxCycles
+    }
+    if (Number.isInteger(raw?.maxNestedSpawns) && raw.maxNestedSpawns >= 0) {
+      resolved.maxNestedSpawns = raw.maxNestedSpawns
     }
     if (typeof raw?.hideChatter === "boolean") {
       resolved.hideChatter = raw.hideChatter

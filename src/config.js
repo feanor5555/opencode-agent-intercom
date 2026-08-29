@@ -1,14 +1,16 @@
-// Honors each caller's `permission.task` allowlist in `spawn`, and re-enforces
+// Honors each caller's `permission.task` allowlist in `spawn`, re-enforces
 // each subagent's `permission.<tool> = "deny"` map at the runtime tool guard
 // (defense in depth — the schema strip in agents.js hides denied tools from
 // the LLM, but a project override or future opencode change could re-expose
-// them).
+// them), and resolves `permission.spawn` for the nested-spawn gate, where the
+// map is the decision rather than a second line of defence.
 //
 // The custom `spawn` tool sits outside opencode's native `permission.task`
 // enforcement, so it would otherwise bypass the allowlist. We deliberately
 // honor it anyway. Disable with OPENCODE_AGENT_INTERCOM_RESPECT_TASK_PERMS="0".
 
 import { unwrap } from "./client.js"
+import { AGENTS } from "./agents.js"
 import { log, errMsg } from "./log.js"
 
 const RESPECT_TASK_PERMS = process.env.OPENCODE_AGENT_INTERCOM_RESPECT_TASK_PERMS !== "0"
@@ -159,7 +161,49 @@ export function createPermissionGuard(client) {
     }
   }
 
-  return { checkTaskPermission, checkToolPermission }
+  // Whether `callerAgent` may make a NESTED spawn — one whose caller is itself
+  // a subagent. Returns null when it may, a reason string when it may not.
+  //
+  // Fail-CLOSED, and that is the one thing separating it from
+  // checkToolPermission above. That check is a defence-in-depth re-deny sitting
+  // behind a schema strip which has already hidden the tool from the model, so
+  // a config it cannot read costs nothing and it answers "allowed". Here the
+  // permission map IS the decision — the schema strip is the model's view of
+  // its own tool list, not a caller-side gate, and no third layer stands behind
+  // this one — so an unreadable config, a role the config does not carry and a
+  // role this plugin does not define all have to resolve to "no".
+  //
+  // Resolution, absence deciding differently at each rung:
+  //   1. the live config's `agent.<role>.permission.spawn` when it carries a
+  //      decision — a project override is honoured in both directions, the way
+  //      checkToolPermission honours one;
+  //   2. otherwise this plugin's own role definition, read with opencode's
+  //      semantics: an explicit "deny" denies, an ABSENT key allows (that
+  //      absence is exactly how the delegating roles are granted `spawn`);
+  //   3. otherwise — a role neither side defines — deny. A project's own agent
+  //      type can therefore not nest; the orchestrator spawns for it.
+  async function checkSpawnPermission(callerAgent) {
+    if (!callerAgent) return "the calling agent could not be identified"
+    let decision
+    try {
+      const config = await loadConfig(client)
+      decision = config?.agent?.[callerAgent]?.permission?.spawn
+    } catch (err) {
+      log("checkSpawnPermission: config read failed", errMsg(err))
+    }
+    if (decision === undefined && Object.hasOwn(AGENTS, callerAgent)) {
+      decision = AGENTS[callerAgent].permission?.spawn ?? "allow"
+    }
+    if (decision === undefined) {
+      return `agent "${callerAgent}" is not a role this plugin defines, so it cannot spawn`
+    }
+    if (decision === "deny") {
+      return `agent "${callerAgent}" is not permitted to call "spawn" (permission.spawn)`
+    }
+    return null
+  }
+
+  return { checkTaskPermission, checkToolPermission, checkSpawnPermission }
 }
 
 // `permission.task` is either a bare decision string or a per-agent map with an

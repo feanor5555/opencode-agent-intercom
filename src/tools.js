@@ -28,8 +28,10 @@ import {
   isEndlessFrozen,
   rootPrimaryFor,
   spawnCapDecision,
+  nestedQuotaDecision,
+  chargeNestedSpawn,
 } from "./registry.js"
-import { settleChildWaiter } from "./childwait.js"
+import { registerChildWaiter, settleChildWaiter } from "./childwait.js"
 import { endLiveChildrenOf } from "./teardown.js"
 import { projectContext } from "./project.js"
 import { AGENTS } from "./agents.js"
@@ -131,6 +133,107 @@ function packageSizeVerdict(agent, fullPrompt) {
   return { estimate, budget, refusal: "", notice: "" }
 }
 
+// The only agent type a NESTED spawn — one whose caller is itself a subagent —
+// may name. `researcher` is the carve-out of the delegation rule: web access is
+// concentrated in it, so it is the one thing another role cannot do for itself.
+//
+// It is also what bounds the nesting depth at exactly one level, structurally,
+// with no counter and no walk of the session tree: the researcher role is
+// itself denied `spawn` (agents.js), so a nested child can never have children
+// of its own. Every teardown therefore has to consider one generation of
+// children, never a tree.
+const NESTED_SPAWN_TARGET = "researcher"
+
+// The refusal a nested spawn gets, or "" when it passes. Covers the three
+// checks that decide before anything is reserved or created; the per-run quota
+// is checked separately, next to the charge that consumes it, so the two stay
+// in one synchronous block.
+async function nestedSpawnRefusal(permissionGuard, callerEntry, args, callerSessionID) {
+  // May this ROLE delegate at all? The per-role `permission.spawn` map is the
+  // whole lever — a role that carries `spawn: "deny"` gets exactly the refusal
+  // it got when no subagent could spawn at all, so a non-delegating role sees
+  // no change whatever. checkSpawnPermission resolves it fail-closed
+  // (config.js): an unreadable config or an unknown role denies.
+  const denied = await permissionGuard.checkSpawnPermission(callerEntry.agent)
+  if (denied) {
+    log("spawn refused: caller is a subagent", {
+      sessionID: callerSessionID,
+      agent: callerEntry.agent,
+      reason: denied,
+    })
+    return (
+      "You are a subagent — you cannot spawn other agents. If this task needs another " +
+      "agent, name it and what it should do in your final reply; the orchestrator decides " +
+      "and spawns it."
+    )
+  }
+  // Which target? One only, and the refusal names it, in the same shape as the
+  // agent-type gate below: a returned refusal that says what IS available, not
+  // a throw, because a throw is what small models retry into a loop.
+  if (args.agent !== NESTED_SPAWN_TARGET) {
+    log("spawn refused: nested target is not the researcher", {
+      sessionID: callerSessionID,
+      agent: args.agent,
+    })
+    return (
+      `Spawn refused: a subagent may spawn a "${NESTED_SPAWN_TARGET}" and nothing else — you ` +
+      `asked for a "${args.agent}". Delegation from a subagent exists for the one thing you ` +
+      `cannot do yourself: web search and fetching. For anything else, name the agent and what ` +
+      `it should do in your final reply; the orchestrator decides and spawns it.`
+    )
+  }
+  // No task id. The `T<n>` prefix drives the TODO.md auto-tick, and a nested
+  // run is preparation for the caller's task, not a task of its own: left in,
+  // the child's `DONE: T<n>` would tick a task the orchestrator is still
+  // tracking against the caller, and the caller would report done on work it
+  // has not finished.
+  const taskId = extractTaskId(args.prompt)
+  if (taskId) {
+    log("spawn refused: nested spawn carries a task id", {
+      sessionID: callerSessionID,
+      taskId,
+    })
+    return (
+      `Spawn refused: a nested spawn carries no task id, and this prompt starts with ` +
+      `"${taskId}". The ${NESTED_SPAWN_TARGET} prepares material for YOUR task — the TODO.md ` +
+      `entry for ${taskId} stays yours to finish and to mark. Re-spawn with the prefix removed.`
+    )
+  }
+  return ""
+}
+
+// The tool result of a nested `spawn`: what the blocked caller gets back the
+// moment its child ends. EVERY ending renders, not just the good one — the
+// caller asked a question inside a tool call and has to be told either the
+// answer or why there is none, or it sits on an empty result it cannot read.
+function nestedSpawnOutput(outcome, handle, agent) {
+  const who = `${handle} (${agent})`
+  if (outcome.status === "completed") {
+    const cost = outcome.ctxTokens
+      ? ` It used ~${fmtTokens(outcome.ctxTokens)} tokens of its own context getting there.`
+      : ""
+    return (
+      `${who} finished and is gone. Its reply:\n\n${outcome.result || "(it replied with nothing)"}` +
+      `\n\nThat is everything it will ever say.${cost} Work from it — it cannot be asked again.`
+    )
+  }
+  const cause =
+    {
+      error: "failed",
+      aborted: "was aborted",
+      timeout: "was timed out for inactivity",
+      expired: "has not reported back in time and may still be running",
+      ended: "was ended before it could reply",
+      abandoned: "was dropped when the plugin's state was reset",
+    }[outcome.status] ?? "ended without a result"
+  const why = outcome.detail ? ` — ${outcome.detail}` : ""
+  return (
+    `${who} ${cause}${why}. You have no result from it. Carry on with what you can do ` +
+    `yourself and state plainly in your final reply what is still missing, so the orchestrator ` +
+    `can get it.`
+  )
+}
+
 const z = tool.schema
 
 // Wraps a tool handler so any thrown error becomes a friendly output string
@@ -195,20 +298,26 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
   }
 
   async function spawnHandler(args, toolCtx) {
-    // Only the orchestrator delegates. A caller that already has a registry
-    // entry is a subagent — refuse with a friendly tool result (not a throw,
-    // which small models retry into a loop). The subagent reports the need in
-    // its final reply; the orchestrator decides and spawns. Checked BEFORE
-    // trackPrimary, which additionally refuses any session that has a registry
-    // entry, so a subagent caller can never be misregistered as a primary.
-    if (entryForSession(toolCtx.sessionID)) {
-      log("spawn refused: caller is a subagent", { sessionID: toolCtx.sessionID })
-      return {
-        output:
-          "You are a subagent — you cannot spawn other agents. If this task needs another " +
-          "agent, name it and what it should do in your final reply; the orchestrator decides " +
-          "and spawns it.",
-      }
+    // Who is calling? A session that has a registry entry is a subagent — the
+    // classification the whole plugin uses — and its spawn is a NESTED one:
+    // gated by the three checks below instead of by "subagents do not spawn",
+    // and, once admitted, BLOCKING. The child's ending becomes this call's tool
+    // result, so the caller never ends its turn while its child runs and stays
+    // the one-shot leaf every downstream assumption is written against.
+    //
+    // Checked BEFORE trackPrimary, which additionally refuses any session that
+    // has a registry entry, so a subagent caller can never be misregistered as
+    // a primary.
+    const callerEntry = entryForSession(toolCtx.sessionID)
+    const nested = Boolean(callerEntry)
+    if (nested) {
+      const refusal = await nestedSpawnRefusal(
+        permissionGuard,
+        callerEntry,
+        args,
+        toolCtx.sessionID,
+      )
+      if (refusal) return { output: refusal }
     }
     // The endless-mode spawn freeze. From the moment the latch is set until
     // the cycle ends, no new subagent starts: between the latch and quiesce the
@@ -341,6 +450,34 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     let entry
     let reservedSpawn = false
     try {
+      // The per-run nested quota, checked before the cap because the cap does
+      // not gate a nested spawn at all (spawnCapDecision) — this is what bounds
+      // a delegating run instead. Check and charge sit in the same synchronous
+      // block, with no await between them, so two spawn calls in one turn
+      // cannot both pass on the same figure. Charged on admission: a spawn that
+      // then fails to start has still been made, and the failure mode the quota
+      // exists against is a model that keeps trying.
+      if (nested) {
+        const quota = nestedQuotaDecision(toolCtx.sessionID, getSettings().maxNestedSpawns)
+        if (quota.refused) {
+          log("spawn refused: nested quota", {
+            sessionID: toolCtx.sessionID,
+            used: quota.used,
+            limit: quota.limit,
+          })
+          return {
+            output: quota.disabled
+              ? `Spawn refused: nested spawns are switched off for this installation ` +
+                `(maxNestedSpawns = 0). Do what you can yourself and name in your final reply ` +
+                `what you still need; the orchestrator decides and spawns it.`
+              : `Spawn refused: you have already started ${quota.used} of the ${quota.limit} ` +
+                `${NESTED_SPAWN_TARGET} spawns one subagent run gets, and the quota does not ` +
+                `reset. Do the rest of the work yourself and name in your final reply what is ` +
+                `still missing; the orchestrator decides and spawns it.`,
+          }
+        }
+        chargeNestedSpawn(toolCtx.sessionID)
+      }
       const maxSubagents = getSettings().maxSubagents
       // Atomic cap-check-and-reserve: any await between count and reserve would
       // let parallel spawn() calls in the same turn all observe "active < cap"
@@ -372,6 +509,20 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       })
       if (!sessionID) return { output: "Failed to create subagent session." }
 
+      // The waiter goes up here — after the child's id exists, BEFORE the child
+      // is prompted — and at no later point. A child cannot end before it has
+      // been prompted, so this window is closed; register after promptSession
+      // and the child's own idle path may already have run, found no waiter,
+      // posted its result to the caller as a wake notice and torn the session
+      // down, after which this handler would block on something that is gone.
+      //
+      // From this moment the caller counts as having a live child: its idle is
+      // held, its silence does not count against the watchdog, and its session
+      // is not deleted out from under the child. Every path that ends the child
+      // settles the waiter, and the waiter carries its own rescue ceiling.
+      let childResult
+      if (nested) childResult = registerChildWaiter(sessionID, toolCtx.sessionID)
+
       // The child session now exists at the opencode level. If anything below
       // throws (typically promptSession), guard() would catch it and report an
       // error — but the orphaned session (plus any provisional registry entry
@@ -385,6 +536,17 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
         // the subagent does not start blind.
         await promptSession(client, { sessionID, agent: args.agent, prompt: fullPrompt })
       } catch (err) {
+        // Drop the waiter with the same failure, first and unconditionally. It
+        // is not a blocked caller that is being freed here — this handler IS
+        // the caller and it is about to throw — but a waiter left in the map
+        // would make the caller look like a session with a live child for the
+        // rest of its run: its idle held, its silence excused, its teardown
+        // waiting on a child that was never prompted.
+        settleChildWaiter(sessionID, {
+          status: "error",
+          agent: args.agent,
+          detail: `the child session was never prompted: ${errMsg(err)}`,
+        })
         try {
           await removeEntry(sessionID)
           await deleteSession(client, sessionID)
@@ -425,6 +587,48 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       }
       log("spawned", { handle: entry.handle, sessionID, agent: args.agent, taskId, directory })
       showToast(client, { title: "agent-intercom", message: `spawned ${entry.handle}` })
+
+      // The nested spawn blocks here: this tool call does not return until the
+      // child has ended, and the child's ending is what it returns. That is the
+      // whole mechanism — the caller never goes idle with a live child, so the
+      // one-shot lifecycle invariant stays literally true for it and every
+      // ending path keeps working on the machinery it already had.
+      if (nested) {
+        // Hand the reservation back BEFORE blocking. From here the slot is
+        // owned by the child's registry entry; holding this handler's
+        // reservation for the child's whole run would count the child twice —
+        // in the global cap figure the orchestrator is shown, and in the
+        // quiesce predicate an endless cycle waits on, which would then never
+        // reach zero. The `finally` below sees reservedSpawn=false and does not
+        // release a second time.
+        if (reservedSpawn) {
+          releasePendingSpawn(toolCtx.sessionID)
+          reservedSpawn = false
+        }
+        log("nested spawn: caller blocks until its child ends", {
+          caller: toolCtx.sessionID,
+          callerAgent: callerEntry.agent,
+          handle: entry.handle,
+          sessionID,
+        })
+        const outcome = await childResult
+        log("nested spawn: child ended", {
+          handle: entry.handle,
+          sessionID,
+          status: outcome.status,
+          waitedMs: outcome.waitedMs,
+        })
+        return {
+          output: nestedSpawnOutput(outcome, entry.handle, args.agent),
+          metadata: {
+            handle: entry.handle,
+            sessionID,
+            agent: args.agent,
+            nested: true,
+            status: outcome.status,
+          },
+        }
+      }
       return {
         output:
           `Spawned subagent "${entry.handle}" (session ${sessionID}). It runs in the background — ` +

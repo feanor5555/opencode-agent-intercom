@@ -262,6 +262,43 @@ export function spawnCapDecision(callerSessionID, maxSubagents) {
   }
 }
 
+// The per-run nested-spawn quota decision for one spawn call, and the charge
+// that consumes a unit of it. Kept beside spawnCapDecision because the two are
+// the same kind of thing — a synchronous read the caller acts on with no await
+// in between — and because the quota, not the cap, is what bounds a nested
+// run: the cap deliberately does not gate one (see spawnCapDecision).
+//
+// `used` counts spawns ADMITTED by this run, not ones that went on to succeed.
+// The failure mode the quota exists against is a small model looping, and a
+// loop whose spawns all fail would be unbounded under a success-only count.
+//
+// A caller with no registry entry is a primary; it has no per-run quota and is
+// never refused here. `limit <= 0` refuses every nested spawn — that is the
+// escape hatch of `maxNestedSpawns: 0`, and `disabled` lets the refusal say so
+// rather than report a count the user cannot raise by waiting.
+export function nestedQuotaDecision(callerSessionID, maxNestedSpawns) {
+  const entry = entryForSession(callerSessionID)
+  if (!entry) return { used: 0, limit: maxNestedSpawns, disabled: false, refused: false }
+  const used = entry.nestedSpawns ?? 0
+  return {
+    used,
+    limit: maxNestedSpawns,
+    disabled: maxNestedSpawns <= 0,
+    refused: maxNestedSpawns <= 0 || used >= maxNestedSpawns,
+  }
+}
+
+// Charges one unit of the caller's per-run quota and returns the new total.
+// Synchronous and called in the same block as nestedQuotaDecision, before any
+// await, so parallel spawn calls in one turn cannot both read the pre-charge
+// figure. A no-op returning 0 for a primary caller, which has no quota.
+export function chargeNestedSpawn(callerSessionID) {
+  const entry = entryForSession(callerSessionID)
+  if (!entry) return 0
+  entry.nestedSpawns = (entry.nestedSpawns ?? 0) + 1
+  return entry.nestedSpawns
+}
+
 // Atomically reserve a global concurrency slot (synchronous, no awaits
 // between caller's cap-check and this call). Caller MUST pair every reserve()
 // with exactly one releasePendingSpawn() — typically in a `finally` so an
@@ -1035,6 +1072,13 @@ function createEntry(sessionID, agent, prompt, parentID, taskId, directory, pack
     // Latch: true after notifyParentOfDenialLoop has fired for this subagent
     // so the parent isn't spammed every subsequent over-budget turn.
     notifiedParentOfLoop: false,
+    // How many nested spawns this subagent run has been ADMITTED so far. The
+    // per-run quota (maxNestedSpawns) is checked against it in the spawn gate
+    // and it is charged there, in the same synchronous block, so two spawn
+    // calls in one turn cannot both pass on the same figure. Counted per RUN
+    // because the entry lives exactly as long as the one-shot run does: a fresh
+    // subagent starts at 0 and nothing ever has to reset it.
+    nestedSpawns: 0,
     // Latch: set true the instant sweepWatchdog decides this subagent has
     // timed out, BEFORE we call signalAbort / postNotice / removeEntry.
     // Used to keep the watchdog and the normal onSessionIdle path from both

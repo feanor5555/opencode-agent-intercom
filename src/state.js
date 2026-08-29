@@ -166,6 +166,12 @@ export const endlessProgress = { lastOpenTasks: null, stalledCycles: 0 }
 // parent of a waited child may be a primary, which has no entry at all.
 export const pendingChildResults = new Map()
 
+// sessionID -> record for an abort/error teardown waiting for the session's
+// post-abort cleanup to finish. The record's promise resolves when the matching
+// `session.idle` event arrives or its bounded rescue timer expires. Kept here so
+// resetState can release a waiter without importing teardown.js.
+export const pendingSessionQuiescence = new Map()
+
 // sessionID -> drain object { oldID, newID, notices: [] }. A drain is opened
 // at the START of an orchestrator handoff (beginHandoffDrain) and keyed under
 // the OLD primary's id; once the new session exists it is ALSO keyed under
@@ -232,6 +238,10 @@ export function resetState() {
     record.settle({ status: "abandoned", detail: "process state reset" })
   }
   pendingChildResults.clear()
+  for (const record of pendingSessionQuiescence.values()) {
+    record.settle("abandoned")
+  }
+  pendingSessionQuiescence.clear()
   lastPrimaryTool.clear()
   primaryCtx.clear()
   pendingHandoffs.clear()

@@ -33,7 +33,7 @@ import {
   chargeNestedRun,
 } from "./registry.js"
 import { registerChildWaiter, settleChildWaiter } from "./childwait.js"
-import { endLiveChildrenOf } from "./teardown.js"
+import { endLiveChildrenOf, waitForSessionQuiescence } from "./teardown.js"
 import { projectContext } from "./project.js"
 import { AGENTS, NESTED_SPAWN_TARGET } from "./agents.js"
 import { projectAgentNames, spawnableAgentNames, unspawnableAgentKinds } from "./config.js"
@@ -695,6 +695,9 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // it) and return rather than throw, so the model keeps working.
     if (!entry || entry.parentID !== toolCtx.sessionID) return unknown(args.subagent)
 
+    // Register before the cooperative abort yields. If opencode emits the
+    // session.idle event quickly, it must still open the delete gate below.
+    const quiescence = waitForSessionQuiescence(entry.sessionID)
     aborted.add(entry.sessionID)
     entry.status = "aborted"
     // This handler ends a subagent WITHOUT going through teardownSubagent, so
@@ -715,11 +718,11 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // sessions (`if (!entry || aborted.has(sessionID)) return`), so without
     // this branch the registry/bySession entry and the opencode session would
     // leak for the lifetime of the opencode process. Keep the abort marker in
-    // place across removeEntry + deleteSession (clearAborted: false) so a
-    // tool call still in flight is hard-denied as aborted throughout teardown,
-    // not misclassified as a primary once the registry entry is gone. The
-    // finally drops the marker so the Set never grows unbounded. All
-    // operations are best-effort.
+    // place across removeEntry + the quiescence wait + deleteSession
+    // (clearAborted: false) so a tool call still in flight is hard-denied as
+    // aborted throughout teardown, not misclassified as a primary once the
+    // registry entry is gone. The finally drops the marker so the Set never
+    // grows unbounded. All operations are best-effort.
     try {
       if (await removeEntry(entry.sessionID, { clearAborted: false })) {
         log("removed aborted subagent", { handle: entry.handle, sessionID: entry.sessionID })
@@ -741,6 +744,13 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
           handle: entry.handle,
           sessionID: entry.sessionID,
           err: errMsg(err),
+        })
+      }
+      const quiescenceReason = await quiescence
+      if (quiescenceReason === "timeout") {
+        log("abort: session quiescence timed out; deleting", {
+          handle: entry.handle,
+          sessionID: entry.sessionID,
         })
       }
       const ok = await deleteSession(client, entry.sessionID)

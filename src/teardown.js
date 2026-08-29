@@ -18,8 +18,71 @@ import {
   forgetSessionDirectory,
 } from "./client.js"
 import { settleChildWaiter, liveChildSessionIDs } from "./childwait.js"
-import { aborted } from "./state.js"
+import { aborted, pendingSessionQuiescence } from "./state.js"
 import { log, errMsg } from "./log.js"
+
+// Maximum time an abort/error teardown waits for opencode to emit the idle event
+// that follows its own cleanup writes. The timeout keeps deletion bounded when
+// opencode does not emit that event after an abort.
+export const SESSION_QUIESCE_TIMEOUT_MS = 1000
+
+// Registers a wait before an abort/error teardown yields to any network I/O.
+// The matching session.idle event resolves it early; the bounded fallback keeps
+// a session from being retained forever when opencode emits no idle event.
+export function waitForSessionQuiescence(
+  sessionID,
+  timeoutMs = SESSION_QUIESCE_TIMEOUT_MS,
+) {
+  if (!sessionID) return Promise.resolve("timeout")
+  const existing = pendingSessionQuiescence.get(sessionID)
+  if (existing) return existing.promise
+
+  let resolve
+  const promise = new Promise((r) => {
+    resolve = r
+  })
+  const record = {
+    promise,
+    timer: null,
+    settled: false,
+    settle(reason) {
+      if (record.settled) return false
+      record.settled = true
+      if (record.timer) {
+        clearTimeout(record.timer)
+        record.timer = null
+      }
+      resolve(reason)
+      return true
+    },
+  }
+  pendingSessionQuiescence.set(sessionID, record)
+
+  const waitMs = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : SESSION_QUIESCE_TIMEOUT_MS
+  const timer = setTimeout(() => {
+    if (pendingSessionQuiescence.get(sessionID) !== record) return
+    pendingSessionQuiescence.delete(sessionID)
+    if (record.settle("timeout")) {
+      log("session quiescence wait timed out", { sessionID, timeoutMs: waitMs })
+    }
+  }, waitMs)
+  if (typeof timer.unref === "function") timer.unref()
+  record.timer = timer
+  return promise
+}
+
+// Resolves the pending wait for exactly this session. The event handler calls
+// this before its normal idle bookkeeping, because an aborted entry is already
+// absent from the registry by the time the event arrives.
+export function signalSessionIdle(sessionID) {
+  if (!sessionID) return false
+  const record = pendingSessionQuiescence.get(sessionID)
+  if (!record) return false
+  pendingSessionQuiescence.delete(sessionID)
+  return record.settle("idle")
+}
 
 // Routes a parent notice through the handoff delivery router before posting.
 // EVERY parent-notice path (subagent completion, error, timeout, denial-loop)
@@ -128,19 +191,20 @@ export async function endLiveChildrenOf(client, sessionID, { label = "", seen } 
 }
 
 // Shared teardown for a finished / errored / timed-out subagent. Runs the
-// sequence that used to be spelled out three times (onSessionIdle,
-// onSessionError, timeoutSubagent): post the wake notice to the parent
-// (best-effort), remove the registry entry, delete the underlying opencode
-// session, and forget its directory cache.
+// sequence used by onSessionIdle, onSessionError, and timeoutSubagent: post the
+// wake notice to the parent (best-effort), remove the registry entry, delete the
+// underlying opencode session, and forget its directory cache. Abort/error
+// paths wait for the session's own cleanup to quiesce before the delete.
 //
 // `markAborted` mirrors the errored/timeout paths: it adds the session to the
 // `aborted` set FIRST and keeps that marker in place across
-// removeEntry(clearAborted:false) + deleteSession, dropping it only in the
-// `finally`. That keeps guardToolExecute hard-denying any in-flight tool call
-// that races the teardown (instead of misclassifying the session as a primary
-// once its registry entry is gone), and guarantees the set never grows
-// unbounded even if deleteSession throws. The idle path never marks aborted
-// (a clean one-shot completion is not an abort), so it passes markAborted:false.
+// removeEntry(clearAborted:false), the quiescence wait, and deleteSession,
+// dropping it only in the `finally`. That keeps guardToolExecute hard-denying
+// any in-flight tool call that races the teardown (instead of misclassifying
+// the session as a primary once its registry entry is gone), and guarantees the
+// set never grows unbounded even if deleteSession throws. The idle path never
+// marks aborted (a clean one-shot completion is not an abort), so it passes
+// markAborted:false.
 //
 // `entryRemoved` is the idle path's genuine divergence: it already removed its
 // registry entry INSIDE the wake-race mutex, before any network I/O, so
@@ -188,6 +252,9 @@ export async function teardownSubagent(
   } = {},
 ) {
   const tag = label ? `${label}: ` : ""
+  // Register before the first await. An abort can emit session.idle while the
+  // notice, child teardown, or abort request is still in flight.
+  const quiescence = markAborted ? waitForSessionQuiescence(sessionID) : null
   reservePendingDelivery()
   if (markAborted) aborted.add(sessionID)
   try {
@@ -220,6 +287,12 @@ export async function teardownSubagent(
       await endLiveChildrenOf(client, sessionID, { label, seen })
     } catch (err) {
       log(`${tag}ending live children failed`, { handle, sessionID, err: errMsg(err) })
+    }
+    if (quiescence) {
+      const reason = await quiescence
+      if (reason === "timeout") {
+        log(`${tag}session quiescence timed out; deleting`, { handle, sessionID })
+      }
     }
     try {
       const ok = await deleteSession(client, sessionID)

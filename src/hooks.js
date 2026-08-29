@@ -74,7 +74,7 @@ import {
 } from "./prompts.js"
 import { loadCustomPrompt, applyCustomPrompt } from "./promptsfile.js"
 import { tokens as fmtTokens, ageSeconds, estimateTokens, percent } from "./format.js"
-import { postParentNotice, teardownSubagent } from "./teardown.js"
+import { postParentNotice, teardownSubagent, signalSessionIdle } from "./teardown.js"
 import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
 import { completionNotice, errorNotice, denialLoopNotice } from "./notices.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
@@ -898,6 +898,10 @@ function onSessionStatus({ sessionID, status }) {
 // true AND removeEntry has already run (so entryForSession returns undefined).
 // Either guard alone is sufficient; both together make the intent explicit.
 async function onSessionIdle({ sessionID }, client) {
+  // Resolve an abort/error teardown's delete gate before normal idle handling.
+  // The entry may already be removed and marked aborted, so this must happen
+  // before the registry lookup below.
+  signalSessionIdle(sessionID)
   // CRITICAL SECTION: read all delivery-target fields from the
   // registry and remove the entry from the registry under the same mutex,
   // then release the lock BEFORE any network I/O (postNotice/fetchSnapshot).

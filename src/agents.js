@@ -315,6 +315,14 @@ export const AGENTS = {
 // plugin's role prompt, none of its permission map and no context budget of
 // its own, and the schema strip that gates a role's tools applies only to the
 // roles here.
+//
+// The set comes from this module's own AGENTS table, so a project entry that
+// overrides one of these roles' `mode` does not move it: the override is
+// reported, the role stays spawnable, and the sidebar's ceiling list
+// (spawnableAgentNames in tui/src/settings-file.ts) filters on the same set. The
+// gate and that list both read the role name; neither consults the resolved
+// `mode`.
+
 // The primary role this plugin ships. Written into `default_agent` when the
 // project set none, and the fallback of defaultAgentName() below — one source
 // for both, so the two can never drift apart.

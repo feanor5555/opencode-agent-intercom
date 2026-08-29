@@ -154,12 +154,16 @@ test("there is one prompt template file per installed role", () => {
 // may reach the cycler: a ceiling for any other name would govern nothing,
 // because the spawn gate refuses that name, and the first ceiling edit writes
 // the whole cycler list into the settings file.
+//
+// The `mode` the listing reports decides nothing: a project may override an
+// installed role's `mode` to `primary`, and the gate still accepts the name, so
+// the row stays. `coder` below is that case.
 test("the ceiling list keeps only the spawnable roles of an opencode listing", () => {
   const listing = [
     { name: "build", mode: "primary" },
     { name: "orchestrator", mode: "primary" },
     { name: "general", mode: "subagent" },
-    { name: "coder", mode: "subagent" },
+    { name: "coder", mode: "primary" },
     { name: "m3", mode: "subagent" },
     { name: "researcher", mode: "subagent" },
   ]

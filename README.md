@@ -325,7 +325,11 @@ Two kinds of project file can silently displace what this plugin installs:
    names wins over them. A `read: allow` line still wins; a project map
    that names no key expresses nothing to overlay. The deny keys the
    project did not relax are listed in the report as "this plugin's
-   deny stays in force for …".
+   deny stays in force for …". Overriding `mode` on one of the plugin's
+   roles changes what opencode's own agent switcher and `task` catalog
+   show; it does not make the role unspawnable and does not remove its
+   context-ceiling row in the sidebar, because the spawn gate and that
+   list both read the plugin's own role set and neither consults `mode`.
 2. **A customised prompt file under
    `.opencode/agent-intercom/<agent>.md`** that predates a change to the
    plugin's prompt contract. The prompt contract covers the four elements

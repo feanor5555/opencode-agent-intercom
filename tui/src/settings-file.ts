@@ -107,13 +107,19 @@ export const SPAWNABLE_ROLES = AGENT_NAMES.filter(
 // than the plugin's roles — its own primaries, its hidden helpers, and every
 // model wrapper a project declares — and none of those is a spawn target, so
 // none of them gets a ceiling row.
+//
+// Membership in SPAWNABLE_ROLES is the only filter, because that set is exactly
+// what the spawn gate accepts (src/tools.js). The `mode` a listing entry carries
+// is not read: a project may override one of the plugin's roles to
+// `mode: "primary"`, and that moves neither the gate nor this list — it is
+// reported through the override register instead. The orchestrator has no
+// ceiling row whatever mode it is reported with, since it is not in the set.
 export function spawnableAgentNames(
   agents: Array<{ name?: string; mode?: string }>,
 ): string[] {
   const names: string[] = [];
   for (const agent of agents) {
     if (!agent || typeof agent.name !== "string") continue;
-    if (agent.mode === "primary") continue;
     if (!SPAWNABLE_ROLES.includes(agent.name)) continue;
     names.push(agent.name);
   }

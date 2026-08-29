@@ -20,7 +20,11 @@ import { join } from "node:path"
 import plugin from "../src/index.js"
 import { resetState } from "../src/state.js"
 import { resetTurnNotices } from "../src/hooks.js"
-import { resetOverrides, overrideBlock } from "../src/overrides.js"
+import {
+  resetOverrides,
+  recordAgentEntryOverride,
+  overrideBlock,
+} from "../src/overrides.js"
 import { resetProjectContext } from "../src/project.js"
 import { setSettingsPath, resetSettings } from "../src/settings.js"
 import { resetPermissionGuardCache } from "../src/config.js"
@@ -108,6 +112,27 @@ test("a finding reaches the primary in the stable system element and names role 
   assert.ok(out.system[0].includes(coderFile), "the file the entry came from is named")
   assert.match(out.system[0], /Tell the user about this in your next answer/)
   assert.match(out.system[0], /this is a report, not a blocker/)
+})
+
+test("a primary receives only findings from its session project", async () => {
+  recordAgentEntryOverride({
+    agent: "coder",
+    fields: ["prompt"],
+    file: join(fixtureDir, ".opencode", "agent", "coder.md"),
+    directory: fixtureDir,
+  })
+  recordAgentEntryOverride({
+    agent: "coder",
+    fields: ["prompt"],
+    file: "/project-b/.opencode/agent/coder.md",
+    directory: "/project-b",
+  })
+
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const out = await primaryTransform(hooks)
+  assert.ok(out.system[0].includes(fixtureDir))
+  assert.doesNotMatch(out.system[0], /\/project-b\/\.opencode\/agent\/coder\.md/)
 })
 
 test("the toast fires once per process, on the primary transform", async () => {

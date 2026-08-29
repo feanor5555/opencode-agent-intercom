@@ -65,15 +65,8 @@ import { overrideBlock, overrideToastText } from "./overrides.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
 import { log, errMsg } from "./log.js"
-import {
-  ABORT_NOTICE,
-  ORCHESTRATION_GUIDE,
-  SUBAGENT_GUIDE_CORE,
-  SUBAGENT_DELEGATION_GUIDE,
-  SUBAGENT_NO_SPAWN_GUIDE,
-  SUBAGENT_OUTLINE_GUIDE,
-} from "./prompts.js"
-import { loadCustomPrompt, applyCustomPrompt } from "./promptsfile.js"
+import { ABORT_NOTICE, guideBlocks } from "./prompts.js"
+import { loadCustomPrompt, applyCustomPrompt, scanPromptFiles } from "./promptsfile.js"
 import { tokens as fmtTokens, ageSeconds, estimateTokens, percent } from "./format.js"
 import { postParentNotice, teardownSubagent, signalSessionIdle } from "./teardown.js"
 import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
@@ -102,14 +95,9 @@ const PRIMARY_TOOLS = new Set([
 // The other two subagents (researcher, gitter) get no TODO tools at all: they
 // hand off whatever they find to the others, who manage the list.
 export const TODO_TOOLS = new Set(["todos_open", "todo_done", "todo_add", "todo_edit"])
-const TODO_AGENTS = new Set([
+export const TODO_AGENTS = new Set([
   "planner", "coder", "debugger", "reviewer", "documenter", "designer",
 ])
-
-// Subagents whose tool gating disables `outline` — they neither read source
-// code nor have the outline tool to call. Skip the outline-discipline block
-// for them so the system prompt doesn't push a tool they can't use.
-const OUTLINE_DISABLED_AGENTS = new Set(["designer", "gitter"])
 
 // Subagents that get AGENTS.md content preserved in their system prompt.
 // Others strip the ~17 KB block — they can still `read` AGENTS.md on demand
@@ -155,7 +143,7 @@ const BUDGET_NOTIFY_AFTER = 3
 //
 //   [0] <role prompt — preserved from opencode>
 //       <AGENTS.md project state — only for agents that benefit from it>
-//       <plugin guide — SUBAGENT_GUIDE_CORE [+ OUTLINE], or ORCHESTRATION_GUIDE>
+//       <plugin guide — prompts.js guideBlocks() for this role>
 //       <PROJECT.md block>
 //       <limits — orchestrator only>
 //   [1] <env — cwd / worktree / platform / date / git flag>
@@ -293,25 +281,45 @@ export function createTransformSystem(client) {
         })
       }
 
+      // The plugin's own guide blocks for this role. One value for both paths:
+      // the auto-assembled prompt pushes it, and a user's prompt file gets it
+      // under `{{guide}}` — a file that carries the token therefore holds the
+      // CURRENT contract instead of the wording it was rendered from, which is
+      // what keeps a freshly written file from going stale.
+      const guide = guideBlocks({
+        primary: !isSubagent,
+        agent: agentName,
+        delegates,
+      })
+
+      // Detector B (overrides.js): the prompt files this project has on disk,
+      // judged against the current contract. Eager and once per directory —
+      // `scanPromptFiles` holds the claim — so the finding set is complete
+      // before the block below is rendered for the first time, and so no fs
+      // work lands on the per-request path.
+      if (!isSubagent && sessionDir) scanPromptFiles(sessionDir)
+
       // Outlets two and three of the override report (overrides.js): a toast
       // once per process and a block in the primary's system prompt naming
       // every finding and telling the orchestrator to pass it on. Report only —
       // nothing here refuses anything.
       //
-      // Primary only. A subagent cannot reach the user, and its own directory's
-      // findings are in this block already: the register is process-wide.
+      // Primary only. A subagent cannot reach the user. Select findings by the
+      // primary's project directory so a process serving multiple projects
+      // cannot put another project's file path in this block.
       //
       // The block belongs in the STABLE element (and to the custom path, after
-      // the template): its text depends on the finding set alone, so it holds
-      // its bytes across the turns of a session and costs no breakpoint per
-      // turn. The toast is fired from the same place so a user with a TUI
+      // the template): its text depends on the selected finding set alone, so
+      // it holds its bytes across the turns of a session and costs no breakpoint
+      // per turn. The toast is fired from the same place so a user with a TUI
       // attached sees it at once instead of only in the next answer; showToast
       // is best-effort and a `serve` instance without a TUI drops it.
       let overrideNotice = ""
       if (!isSubagent) {
-        overrideNotice = overrideBlock()
+        const overrideScope = sessionDir ?? null
+        overrideNotice = overrideBlock(overrideScope)
         if (overrideNotice) {
-          const toast = overrideToastText()
+          const toast = overrideToastText(overrideScope)
           if (toast) {
             showToast(client, { title: "agent-intercom", message: toast, variant: "warning" })
           }
@@ -339,6 +347,7 @@ export function createTransformSystem(client) {
           env: slices.env || "",
           agents_md: keepAgentsMd ? slices.agentsMd || "" : "",
           project_md: projectMd,
+          guide,
           limits,
           snapshot: "",
           context_budget: "",
@@ -357,21 +366,14 @@ export function createTransformSystem(client) {
       const guideParts = []
       if (isSubagent) {
         if (!aborted.has(sessionID)) {
-          guideParts.push(SUBAGENT_GUIDE_CORE)
-          // Exactly one of the two delegation blocks, always: the spawn rule
-          // is not in CORE because it differs per role, so leaving both out
-          // would leave a subagent with nothing said about spawning at all.
-          guideParts.push(delegates ? SUBAGENT_DELEGATION_GUIDE : SUBAGENT_NO_SPAWN_GUIDE)
-          if (!OUTLINE_DISABLED_AGENTS.has(entry.agent)) {
-            guideParts.push(SUBAGENT_OUTLINE_GUIDE)
-          }
+          guideParts.push(guide)
           if (projectMd) guideParts.push(projectMd)
           // Last, because the delegation block above points at it for the
           // quota figure and the researcher budget. Empty unless `delegates`.
           if (limits) guideParts.push(limits)
         }
       } else {
-        guideParts.push(ORCHESTRATION_GUIDE)
+        guideParts.push(guide)
         if (projectMd) guideParts.push(projectMd)
         guideParts.push(limits)
         guideParts.push(overrideNotice)
@@ -792,13 +794,17 @@ function formatDelegationLimitsNotice(agent, sessionID, { projectMd, agentsMd, s
 // it is built from the caller's live registry entry, which does not exist on
 // the turn this estimate is made, and at ~150 tokens it moves no verdict.
 function fixedOverheadFor(agent, { projectMd, agentsMd, snapshot }) {
-  let text = SUBAGENT_GUIDE_CORE + projectMd + snapshot
-  // The delegation block a role is actually given — the two differ by ~250
+  // The same assembly the transform injects, so the estimate cannot count a
+  // block the subagent is not given: the delegation block a role actually gets
+  // depends on the nesting setting too, and the two blocks differ by ~250
   // tokens, which is real against a 40k budget.
-  text += mayDelegate(agent) && getSettings().maxNestedSpawns > 0
-    ? SUBAGENT_DELEGATION_GUIDE
-    : SUBAGENT_NO_SPAWN_GUIDE
-  if (!OUTLINE_DISABLED_AGENTS.has(agent)) text += SUBAGENT_OUTLINE_GUIDE
+  let text =
+    guideBlocks({
+      agent,
+      delegates: mayDelegate(agent) && getSettings().maxNestedSpawns > 0,
+    }) +
+    projectMd +
+    snapshot
   if (AGENTS_MD_SUBAGENTS.has(agent)) text += agentsMd
   return estimateTokens(text)
 }

@@ -40,8 +40,14 @@ const nestedDir = join(projectDir, "nested")
 mkdirSync(nestedDir)
 writeFileSync(plannerFile, "Project planner.\n")
 
+const secondProjectDir = mkdtempSync(join(tmpdir(), "intercom-override-second-"))
+mkdirSync(join(secondProjectDir, ".opencode", "agent"), { recursive: true })
+const secondCoderFile = join(secondProjectDir, ".opencode", "agent", "coder.md")
+writeFileSync(secondCoderFile, "Project coder in the second project.\n")
+
 after(() => {
   rmSync(projectDir, { recursive: true, force: true })
+  rmSync(secondProjectDir, { recursive: true, force: true })
 })
 
 beforeEach(() => {
@@ -115,6 +121,27 @@ test("a prompt-only entry reports `prompt` and names the file it came from", () 
   assert.deepEqual([...finding.fields], ["prompt"], "only what actually differs is named")
   assert.equal(finding.file, coderFile)
   assert.equal(finding.detail, "", "nothing was taken away, so no permission clause")
+})
+
+test("the same agent collision in two project configs stays scoped", () => {
+  installAgents(
+    { agent: { coder: mdAgent({ prompt: "Project coder." }) } },
+    { directory: projectDir },
+  )
+  installAgents(
+    { agent: { coder: mdAgent({ prompt: "Project coder in the second project." }) } },
+    { directory: secondProjectDir },
+  )
+
+  assert.deepEqual(
+    overrideFindings(projectDir).map((finding) => finding.file),
+    [coderFile],
+  )
+  assert.deepEqual(
+    overrideFindings(secondProjectDir).map((finding) => finding.file),
+    [secondCoderFile],
+  )
+  assert.equal(overrideFindings().length, 2, "both project findings remain in the process register")
 })
 
 test("a project temperature stays intact without becoming a plugin override", () => {

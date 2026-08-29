@@ -449,10 +449,17 @@ function classifyCollision(base, projectEntry) {
 // A finding with no displaced field is no finding: the entry carries what this
 // plugin would have written anyway (the shape a second run over the merged
 // config produces), and nothing of the role was displaced.
+function projectScope(directory, worktree) {
+  return typeof worktree === "string" && worktree.length > 0 && worktree !== "/"
+    ? worktree
+    : directory
+}
+
 function reportCollision(name, base, projectEntry, directory, worktree) {
   const { fields, keptDenies } = classifyCollision(base, projectEntry)
   if (fields.length === 0) return
   const file = locateAgentFile(directory, name, worktree)
+  const scope = projectScope(directory, worktree)
   // The generated wording covers the fields; the one thing it cannot say is
   // what the per-key merge held on to, so that clause is added here — and only
   // where the project map took something away, since a map that names no key
@@ -461,8 +468,8 @@ function reportCollision(name, base, projectEntry, directory, worktree) {
     fields.includes("permission") && keptDenies.length
       ? `a project agent entry replaces ${fields.join(", ")}; this plugin's deny stays in force for ${keptDenies.join(", ")}`
       : ""
-  if (recordAgentEntryOverride({ kind: "agent-entry", agent: name, fields, file, detail })) {
-    log("override: project agent entry", { agent: name, fields, keptDenies, file })
+  if (recordAgentEntryOverride({ kind: "agent-entry", agent: name, fields, file, detail, directory: scope })) {
+    log("override: project agent entry", { agent: name, fields, keptDenies, file, directory: scope })
   }
 }
 
@@ -483,8 +490,9 @@ function reportCollision(name, base, projectEntry, directory, worktree) {
 //
 // Every collision is recorded in the override register and logged; nothing is
 // refused, removed or rewritten. `directory` and `worktree` are the instance
-// paths the plugin was loaded for and are used only to name the file a finding
-// came from. The worktree matters when the instance starts in a nested folder.
+// paths the plugin was loaded for. The worktree identifies the project when the
+// instance starts in a nested folder; a non-git worktree of `/` falls back to
+// the instance directory. They also let the finding name its source file.
 //
 // An explicit `default_agent` the project set is respected. `default_agent` is
 // the opencode config key that picks the startup primary (falls back to "build"

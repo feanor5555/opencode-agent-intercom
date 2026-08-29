@@ -59,6 +59,33 @@ test("a repeated identical detection adds no second line", () => {
   assert.equal(overrideBlock().match(/^- coder:/gm).length, 1, "one line per role, not two")
 })
 
+test("the same role in two projects keeps separate findings and blocks", () => {
+  recordAgentEntryOverride({
+    agent: "coder",
+    fields: ["prompt"],
+    file: "/project-a/.opencode/agent/coder.md",
+    directory: "/project-a",
+  })
+  recordAgentEntryOverride({
+    agent: "coder",
+    fields: ["model"],
+    file: "/project-b/.opencode/agent/coder.md",
+    directory: "/project-b",
+  })
+
+  assert.deepEqual(
+    overrideFindings("/project-a").map((finding) => [finding.agent, finding.file]),
+    [["coder", "/project-a/.opencode/agent/coder.md"]],
+  )
+  assert.deepEqual(
+    overrideFindings("/project-b").map((finding) => [finding.agent, finding.file]),
+    [["coder", "/project-b/.opencode/agent/coder.md"]],
+  )
+  assert.match(overrideBlock("/project-a"), /project-a/)
+  assert.doesNotMatch(overrideBlock("/project-a"), /project-b/)
+  assert.equal(overrideFindings().length, 2, "the process register retains both projects")
+})
+
 test("a re-detection with different content replaces the finding, still one line", () => {
   recordPromptFileOverride({
     agent: "coder",

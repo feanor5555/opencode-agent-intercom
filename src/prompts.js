@@ -102,3 +102,42 @@ export const SUBAGENT_OUTLINE_GUIDE =
   "function body is 20–80 lines, so size the window to the construct.\n" +
   "Config, data, and short doc files (package.json, pyproject.toml, Cargo.toml, *.yaml, *.toml, " +
   "*.json, .env, README.md, AGENTS.md, CLAUDE.md): full `read` is fine. Skip outline.\n---\n"
+
+// The prompt contract: the elements a system prompt has to carry for the
+// mechanics around it to work — the `Blocked:` report a subagent hands up, the
+// `DONE: T<n>` marker the wake hook removes a task on, the orchestrator's spawn
+// protocol, and the delegation block a spawning role needs. The integer is
+// bumped BY HAND whenever one of those elements changes.
+//
+// `renderDefaultsFile` (promptsfile.js) stamps it into the header comment of
+// every file it writes, and a user file whose stamp is below this number
+// predates the current contract — see detector B in overrides.js. The stamp
+// sits inside the comment that is stripped before the prompt reaches the model.
+export const PROMPT_CONTRACT = 1
+
+// Subagents whose tool gating disables `outline` — they neither read source
+// code nor have the outline tool to call. Skip the outline-discipline block for
+// them so the system prompt doesn't push a tool they can't use.
+export const OUTLINE_DISABLED_AGENTS = new Set(["designer", "gitter"])
+
+// The guide blocks one agent is given, in the order they are injected. One
+// assembly for three call sites — the auto-assembled system prompt, the
+// `{{guide}}` placeholder of a user's prompt file, and the spawn-size overhead
+// estimate — so a prompt file and the prompt it replaces cannot describe
+// different contracts, and the estimate cannot count blocks the transform does
+// not inject.
+//
+// `delegates` is the runtime answer, not the role's map alone: with nested
+// spawning switched off installation-wide a role that may delegate still
+// cannot, and is told so.
+export function guideBlocks({ primary = false, agent = "", delegates = false } = {}) {
+  if (primary) return ORCHESTRATION_GUIDE
+  return (
+    SUBAGENT_GUIDE_CORE +
+    // Exactly one of the two, always: the spawn rule is not in CORE because it
+    // differs per role, so leaving both out would leave a subagent with nothing
+    // said about spawning at all.
+    (delegates ? SUBAGENT_DELEGATION_GUIDE : SUBAGENT_NO_SPAWN_GUIDE) +
+    (OUTLINE_DISABLED_AGENTS.has(agent) ? "" : SUBAGENT_OUTLINE_GUIDE)
+  )
+}

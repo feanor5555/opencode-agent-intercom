@@ -27,6 +27,8 @@ import { recordSessionAgent, sessionAgentName, forgetPrimary } from "../src/regi
 import { installAgents, defaultAgentName, DEFAULT_AGENT } from "../src/agents.js"
 import { setSettingsPath, resetSettings } from "../src/settings.js"
 import { resetProjectContext } from "../src/project.js"
+import { PROMPT_CONTRACT } from "../src/prompts.js"
+import { CONTRACT_STAMP_KEY } from "../src/overrides.js"
 
 const fixtureDir = mkdtempSync(join(tmpdir(), "intercom-agentid-"))
 writeFileSync(join(fixtureDir, "package.json"), JSON.stringify({ name: "fixture-proj" }))
@@ -36,9 +38,20 @@ setSettingsPath(join(fixtureDir, "agent-intercom.json"))
 
 // Per-agent prompt templates, so the transform test can prove WHICH file the
 // resolved name picks.
+//
+// `orchestrator.md` carries a current contract stamp in its header comment:
+// it is one of the plugin's own roles, so the prompt-file scan (detector B)
+// reads it, and a bare template would be reported as predating the contract —
+// which would append the override block to the prompt asserted below. The
+// comment is stripped before the prompt is assembled, so the file still
+// substitutes to its one line. `build.md` needs none: the scan covers the
+// plugin's nine roles and `build` is not one of them.
 const promptsDir = join(fixtureDir, ".opencode", "agent-intercom")
 mkdirSync(promptsDir, { recursive: true })
-writeFileSync(join(promptsDir, "orchestrator.md"), "TEMPLATE FOR ORCHESTRATOR")
+writeFileSync(
+  join(promptsDir, "orchestrator.md"),
+  `<!-- ${CONTRACT_STAMP_KEY}: ${PROMPT_CONTRACT} -->\nTEMPLATE FOR ORCHESTRATOR`,
+)
 writeFileSync(join(promptsDir, "build.md"), "TEMPLATE FOR BUILD")
 
 beforeEach(() => {

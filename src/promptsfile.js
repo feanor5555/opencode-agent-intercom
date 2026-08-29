@@ -19,6 +19,8 @@
 //   {{agents_md}}      project AGENTS.md content (opencode injects)
 //   {{project_md}}     project PROJECT.md content (agent-intercom injects)
 //   {{limits}}         current maxSubagents + per-agent context budgets (orchestrator only)
+//   {{guide}}          the plugin's guide blocks for this role, as the
+//                      auto-assembled prompt would inject them
 //
 // The live active-subagent snapshot, the over-budget STOP notice and the
 // abort notice are NOT template-controlled: they are delivered as a message
@@ -26,6 +28,12 @@
 // and the provider's cached prefix holds. `{{snapshot}}`, `{{context_budget}}`
 // and `{{abort_notice}}` still substitute to the empty string, so a file
 // written before they were retired keeps working.
+//
+// `{{guide}}` is what keeps a file from going stale: the guide blocks are
+// substituted at call time from the constants in prompts.js, so a change to the
+// contract reaches a file that carries the token. A file with the guide text
+// inlined instead — every file written before this token existed — freezes the
+// contract it was rendered from, which is what `scanPromptFiles` below reports.
 //
 // Hot-reload: the loader is mtime-keyed. Editing a file in any editor busts
 // the cache on the next stat(); the companion TUI's "reload" button bumps
@@ -35,11 +43,13 @@ import { readFileSync, statSync, mkdirSync, writeFileSync, existsSync } from "no
 import { join } from "node:path"
 import { log, errMsg } from "./log.js"
 import { AGENTS } from "./agents.js"
+import { PROMPT_CONTRACT } from "./prompts.js"
 import {
-  ORCHESTRATION_GUIDE,
-  SUBAGENT_GUIDE_CORE,
-  SUBAGENT_OUTLINE_GUIDE,
-} from "./prompts.js"
+  classifyPromptFile,
+  claimPromptFileScan,
+  recordPromptFileOverride,
+  CONTRACT_STAMP_KEY,
+} from "./overrides.js"
 
 export const PROMPTS_DIRNAME = ".opencode/agent-intercom"
 // Read-only reference files showing what opencode would inject WITHOUT this
@@ -52,8 +62,11 @@ export const OPENCODE_DEFAULTS_SUBDIR = "_opencode-defaults"
 // drift out of the template set.
 export const AGENT_NAMES = Object.keys(AGENTS)
 
-// Which subagents get an outline-discipline block in their default template
-// (mirrors hooks.js OUTLINE_DISABLED_AGENTS, inverted).
+// Which subagents the plugin gives the outline-discipline block to (mirrors
+// prompts.js OUTLINE_DISABLED_AGENTS, inverted, minus the orchestrator, which is
+// not a subagent). The active template gets that block through `{{guide}}`; this
+// set is what the read-only opencode-defaults reference file names in its
+// what-the-plugin-adds note.
 const HAS_OUTLINE = new Set([
   "planner",
   "coder",
@@ -122,10 +135,19 @@ export function loadCustomPrompt(directory, agent) {
   return raw
 }
 
-// Strip a single top-of-file HTML comment block so the file can carry an
-// author-facing note that does not bleed into the LLM prompt.
+// A single top-of-file HTML comment block: the author-facing note, and the only
+// place the contract stamp is read from.
+const FRONTMATTER_COMMENT = /^\s*<!--([\s\S]*?)-->\s*/
+
+// Strip the comment so it does not bleed into the LLM prompt.
 function stripFrontmatterComment(s) {
-  return String(s).replace(/^\s*<!--[\s\S]*?-->\s*/, "")
+  return String(s).replace(FRONTMATTER_COMMENT, "")
+}
+
+// The comment's contents, or the empty string when the file opens with none.
+function frontmatterComment(s) {
+  const m = FRONTMATTER_COMMENT.exec(String(s))
+  return m ? m[1] : ""
 }
 
 // Substitute {{key}} tokens. Keys are case-insensitive [a-z_][a-z0-9_]*.
@@ -143,6 +165,40 @@ export function substitutePrompt(template, vars) {
 // substitute placeholders. Returns the assembled system-prompt string.
 export function applyCustomPrompt(template, vars) {
   return substitutePrompt(stripFrontmatterComment(template), vars)
+}
+
+// Detector B: the prompt files this project has on disk, judged against the
+// current prompt contract (overrides.js). Findings go into the same register the
+// config-hook detector writes to and out through the same three outlets — the
+// debug log here, the toast and the primary's system-prompt block in hooks.js.
+// Report only: nothing is refused and no file is touched.
+//
+// Eager and once per directory, at the first primary system transform. The claim
+// is held by the register so the scan cannot become per-request work, and so the
+// finding set is complete before the first block is rendered.
+//
+// Reads through `loadCustomPrompt`, so the scan shares the loader's mtime cache
+// and costs one stat per role on a directory whose files are already loaded.
+export function scanPromptFiles(directory) {
+  if (!claimPromptFileScan(directory)) return
+  for (const agent of AGENT_NAMES) {
+    try {
+      const raw = loadCustomPrompt(directory, agent)
+      if (raw === null) continue
+      const { missing, detail } = classifyPromptFile(agent, {
+        header: frontmatterComment(raw),
+        body: stripFrontmatterComment(raw),
+      })
+      if (!missing.length) continue
+      const filePath = getPromptFilePath(directory, agent)
+      if (recordPromptFileOverride({ agent, missing, detail, file: filePath, directory })) {
+        log("override: stale prompt file", { agent, missing, file: filePath, directory })
+      }
+    } catch (err) {
+      // A single unreadable file must not cost the other eight their scan.
+      log("promptsfile scan failed", { directory, agent, err: errMsg(err) })
+    }
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -166,6 +222,7 @@ function placeholderLegend(agent) {
   if (HAS_AGENTS_MD.has(agent)) {
     lines.push("{{agents_md}}      project AGENTS.md content (opencode injects)")
   }
+  lines.push("{{guide}}          the plugin's guide blocks for this role")
   lines.push("{{project_md}}     project PROJECT.md content (agent-intercom injects)")
   if (isOrch) {
     lines.push("{{limits}}         current maxSubagents + per-agent context budgets")
@@ -181,21 +238,23 @@ export function renderDefaultsFile(agent) {
   const isOrch = agent === "orchestrator"
   const def = AGENTS[agent]
   const role = stripVisualSeparators(def?.prompt ?? "").trim()
-  const guide = stripVisualSeparators(
-    isOrch ? ORCHESTRATION_GUIDE : SUBAGENT_GUIDE_CORE,
-  ).trim()
-  const outline = HAS_OUTLINE.has(agent)
-    ? stripVisualSeparators(SUBAGENT_OUTLINE_GUIDE).trim()
-    : null
 
   const header =
     `<!--\n` +
     ` System prompt for the ${agent} agent. This file is read on every LLM\n` +
     ` call (mtime-cached) and REPLACES the auto-assembled prompt. Edit freely.\n` +
+    ` ${CONTRACT_STAMP_KEY}: ${PROMPT_CONTRACT}\n` +
     ` Placeholder tokens are substituted at call time:\n${placeholderLegend(agent)}\n` +
     ` Remove a token to drop that section entirely. Unknown tokens are left in\n` +
     ` place so typos stay visible. This HTML comment is stripped before the\n` +
     ` prompt reaches the model.\n` +
+    ` {{guide}} carries the plugin's own guide blocks for this role — the\n` +
+    ` subagent or orchestration discipline, the delegation block and, where the\n` +
+    ` role has the tool, the reading discipline. It is substituted from the\n` +
+    ` plugin's constants on every call, so this file keeps the CURRENT contract\n` +
+    ` as the plugin is updated. Pasting that text in place of the token freezes\n` +
+    ` it at today's wording instead, which is the point of doing so — the\n` +
+    ` plugin then reports the file as predating the contract.\n` +
     ` The live subagent snapshot, the over-budget STOP notice and the abort\n` +
     ` notice are not placeholders here: they are delivered as a message on the\n` +
     ` turn they apply to, which keeps this prompt byte-stable and the\n` +
@@ -204,8 +263,7 @@ export function renderDefaultsFile(agent) {
 
   const parts = [header, role, "\n\n{{env}}\n"]
   if (HAS_AGENTS_MD.has(agent)) parts.push("\n{{agents_md}}\n")
-  parts.push("\n", guide, "\n")
-  if (outline) parts.push("\n", outline, "\n")
+  parts.push("\n{{guide}}\n")
   parts.push("\n{{project_md}}\n")
   if (isOrch) parts.push("\n{{limits}}\n")
   return parts.join("")

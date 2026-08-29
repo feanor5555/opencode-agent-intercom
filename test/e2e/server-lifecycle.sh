@@ -21,6 +21,10 @@
 #                     exported, so a driver started by another driver that
 #                     already built does not build a second time
 #
+# Functions that set these globals must be called directly in the current shell, never in a
+# pipeline, command substitution, or other subshell: otherwise the state is lost and
+# the server is left orphaned. Redirect output to a file instead of piping through `tee`.
+#
 # Failures are reported on stderr and returned as a non-zero status; the
 # functions never exit the caller's shell, so a driver can add its own message
 # and its own exit code.

@@ -32,6 +32,7 @@ import {
   sameModel,
   setLlmModel,
 } from "./llm-models-file.ts";
+import { composeSubagentLabel, truncate } from "./subagent-label.ts";
 import {
   type LimitKey,
   type Settings,
@@ -125,7 +126,7 @@ const numCell = (n: number | string, w = NUM_W): string =>
 // Fixed-width left-aligned cell; anything longer is cut with a trailing "…" so
 // a long model name cannot push the [>] button off the sidebar.
 const fitCell = (s: string, w: number): string =>
-  ` ${(s.length > w ? s.slice(0, w - 1) + "…" : s).padEnd(w)} `;
+  ` ${truncate(s, w).padEnd(w)} `;
 
 // One entry of the flat pick list built from `client.config.providers()`:
 // the model reference plus the label the row shows for it.
@@ -1207,12 +1208,40 @@ function SubagentPanel(props: {
     if (real !== props.listFocused()) props.setListFocused(real);
   };
 
+  // The columns the panel occupies. The host gives the slot no width and the
+  // box takes the one its parent stretches it to, so the only place that width
+  // exists is the laid-out renderable itself; it is read off the box and kept
+  // in a signal the rows size their label against. Undefined until the first
+  // layout has run, which is the label module's fallback case.
+  const [panelWidth, setPanelWidth] = createSignal<number | undefined>(
+    undefined,
+  );
+  const syncWidth = (): void => {
+    const w = listBox?.width;
+    if (typeof w === "number" && w > 0 && w !== panelWidth()) setPanelWidth(w);
+  };
+
+  // Both mirrors run off the box's own render pass, which is the one moment
+  // focus and layout are settled.
+  const syncPanelState = (): void => {
+    syncFocus();
+    syncWidth();
+  };
+
   const Row = (rowProps: { entry: SubagentEntry }) => {
     const selected = createMemo(
       () => props.selectedID() === rowProps.entry.sessionID,
     );
     const age = createMemo(() =>
       formatAge(props.nowMs() - rowProps.entry.createdAt),
+    );
+    const label = createMemo(() =>
+      composeSubagentLabel(
+        rowProps.entry,
+        props.llmModels(),
+        props.modelChoices(),
+        panelWidth(),
+      ),
     );
     // A busy/retry subagent's dot alternates filled/hollow on the pulse timer
     // so you can see it is still working; finished/aborted dots stay static.
@@ -1245,7 +1274,7 @@ function SubagentPanel(props: {
             {`${marker()} `}
           </text>
           <text fg={props.theme.text} onMouseDown={openThis}>
-            {rowProps.entry.handle}
+            {label()}
           </text>
           <text fg={props.theme.textMuted}> </text>
           <text fg={props.theme.error} onMouseDown={abortThis}>
@@ -1279,7 +1308,7 @@ function SubagentPanel(props: {
       focusable
       focused={props.listFocused()}
       onKeyDown={handleKeyDown}
-      renderBefore={syncFocus}
+      renderBefore={syncPanelState}
     >
       <Show when={currentSub()}>
         {(sub: () => SubagentEntry) => (

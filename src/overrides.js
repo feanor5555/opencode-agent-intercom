@@ -9,8 +9,8 @@
 //   - the prompt-file scan, for a `.opencode/agent-intercom/<agent>.md`
 //     template that predates a change to the prompt contract — `prompt-file`.
 //
-// Three consumers read it: the debug log at detection, a once-per-process
-// toast, and a block in the primary's stable system prompt telling the
+// Three consumers read it: the debug log at detection, a toast fired once per
+// project, and a block in the primary's stable system prompt telling the
 // orchestrator to report the finding to the user. The register itself never
 // refuses anything and never touches a user's file — it only records what was
 // found so those three can say it.
@@ -34,8 +34,12 @@ import { PROMPT_CONTRACT } from "./prompts.js"
 // while the same role in another project remains an independent finding.
 const findings = new Map()
 
-// Whether overrideToastText() has already handed its one-shot body out.
-let toastShown = false
+// The project scopes overrideToastText() has already handed its one-shot body
+// out for. A Set and not a flag, keyed exactly as the findings are: one process
+// serving two projects owes each of them its own toast, and a single latch
+// would spend the first project's toast on behalf of the second, whose user
+// would then never be told at all.
+const toastedScopes = new Set()
 
 const KIND_AGENT_ENTRY = "agent-entry"
 const KIND_PROMPT_FILE = "prompt-file"
@@ -132,6 +136,10 @@ export function recordPromptFileOverride(finding) {
 
 // Whether anything has been found in this process, or in one project when a
 // directory is supplied.
+//
+// A test seam like resetOverrides, not a plugin path: the delivery side asks
+// `overrideBlock(scope) !== ""`, because it needs the text anyway and a
+// separate emptiness question would be a second answer to the same thing.
 export function hasFindings(directory) {
   return (arguments.length ? overrideFindings(directory) : overrideFindings()).length > 0
 }
@@ -195,18 +203,19 @@ export function overrideBlock(directory) {
 }
 
 // The one-shot toast body, or null when there is nothing to report in the
-// selected project or the toast has already been handed out in this process.
+// selected project or that project's toast has already been handed out.
 // The title and the variant belong to the call site; this is the message alone.
 // With no directory argument, all findings are counted for process-level tests.
 export function overrideToastText(directory) {
   const all = arguments.length ? overrideFindings(directory) : overrideFindings()
-  if (all.length === 0 || toastShown) return null
+  const scope = scopeOf(directory) ?? ""
+  if (all.length === 0 || toastedScopes.has(scope)) return null
   const overridden = all.filter((f) => f.kind === KIND_AGENT_ENTRY).length
   const stale = all.length - overridden
   const parts = []
   if (overridden) parts.push(`${overridden} role${overridden === 1 ? "" : "s"} overridden by project files`)
   if (stale) parts.push(`${stale} prompt file${stale === 1 ? "" : "s"} out of date`)
-  toastShown = true
+  toastedScopes.add(scope)
   return `${parts.join(", ")} — see the orchestrator's first answer`
 }
 
@@ -349,11 +358,11 @@ export function claimPromptFileScan(directory) {
   return true
 }
 
-// Test seam: clears the register, the one-shot toast latch and the record of
+// Test seam: clears the register, the per-project toast latches and the record of
 // which directories have been scanned, mirroring `resetState` in state.js. Not part of the plugin contract — opencode never
 // calls this.
 export function resetOverrides() {
   findings.clear()
-  toastShown = false
+  toastedScopes.clear()
   scannedDirectories.clear()
 }

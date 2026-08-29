@@ -50,6 +50,7 @@ import {
   resetEndlessProgress,
   nestedQuotaDecision,
   sessionAgentName,
+  rememberPrimaryDirectory,
   CTX_TTL_MS,
 } from "./registry.js"
 import { fetchSnapshot, showToast, getSessionDirectory } from "./client.js"
@@ -171,7 +172,25 @@ export function createTransformSystem(client) {
 
       const entry = entryForSession(sessionID)
       const isSubagent = Boolean(entry)
-      const agentName = isSubagent ? entry.agent : resolvePrimaryAgent(sessionID, output)
+
+      // Resolve the session's directory so we can inject the project-spec block.
+      // Subagents already have it on their registry entry (captured at spawn);
+      // primaries are looked up via the session API (cached per session).
+      const sessionDir = isSubagent
+        ? entry.directory
+        : await getSessionDirectory(client, sessionID)
+
+      // The project a PRIMARY belongs to, held for the whole session (see
+      // registry.rememberPrimaryDirectory). Everything keyed by project reads
+      // this and not `sessionDir` directly, so one failed `session.get` cannot
+      // move the scope — and with it the stable system-prompt element — for a
+      // turn: the override block selects its findings by it, the prompt-file
+      // scan runs under it, and the last rung of the agent chain answers with
+      // THIS project's `default_agent`. Null for a subagent (its findings ride
+      // the primary's block) and while no turn has ever resolved a directory.
+      const primaryScope = isSubagent ? null : rememberPrimaryDirectory(sessionID, sessionDir)
+
+      const agentName = isSubagent ? entry.agent : resolvePrimaryAgent(sessionID, output, primaryScope)
 
       // Decide whether this agent gets AGENTS.md
       const keepAgentsMd = isSubagent
@@ -180,13 +199,6 @@ export function createTransformSystem(client) {
 
       // Parse opencode's combined system into the three slices we care about.
       const slices = parseOpencodeSystem(output.system)
-
-      // Resolve the session's directory so we can inject the project-spec block.
-      // Subagents already have it on their registry entry (captured at spawn);
-      // primaries are looked up via the session API (cached per session).
-      const sessionDir = isSubagent
-        ? entry.directory
-        : await getSessionDirectory(client, sessionID)
 
       // Build the runtime parts once — both the auto-assembled path and the
       // custom-template path need them. Only blocks that hold their text
@@ -297,7 +309,7 @@ export function createTransformSystem(client) {
       // `scanPromptFiles` holds the claim — so the finding set is complete
       // before the block below is rendered for the first time, and so no fs
       // work lands on the per-request path.
-      if (!isSubagent && sessionDir) scanPromptFiles(sessionDir)
+      if (primaryScope) scanPromptFiles(primaryScope)
 
       // Outlets two and three of the override report (overrides.js): a toast
       // once per process and a block in the primary's system prompt naming
@@ -306,7 +318,15 @@ export function createTransformSystem(client) {
       //
       // Primary only. A subagent cannot reach the user. Select findings by the
       // primary's project directory so a process serving multiple projects
-      // cannot put another project's file path in this block.
+      // cannot put another project's file path in this block. The scan above
+      // records under the same key the block selects by, and detector A files
+      // its findings under the instance directory opencode also writes into
+      // `session.directory` — one key on both sides of the report.
+      //
+      // With no scope at all — no turn of this session has resolved a directory
+      // yet — nothing is rendered and nothing is toasted. There is no project to
+      // report on, and a block selected under a null scope would show findings
+      // that carry no directory to a session that has one.
       //
       // The block belongs in the STABLE element (and to the custom path, after
       // the template): its text depends on the selected finding set alone, so
@@ -315,11 +335,10 @@ export function createTransformSystem(client) {
       // attached sees it at once instead of only in the next answer; showToast
       // is best-effort and a `serve` instance without a TUI drops it.
       let overrideNotice = ""
-      if (!isSubagent) {
-        const overrideScope = sessionDir ?? null
-        overrideNotice = overrideBlock(overrideScope)
+      if (primaryScope) {
+        overrideNotice = overrideBlock(primaryScope)
         if (overrideNotice) {
-          const toast = overrideToastText(overrideScope)
+          const toast = overrideToastText(primaryScope)
           if (toast) {
             showToast(client, { title: "agent-intercom", message: toast, variant: "warning" })
           }
@@ -537,17 +556,21 @@ function parseOpencodeSystem(systemArr) {
 // 2. The `# Role:` header of the prompt this plugin wrote. Correct whenever the
 //    plugin's own prompt is intact, and the only source for a session whose
 //    first request arrived by a path that skipped createUserMessage.
-// 3. The `default_agent` captured at the `config` hook. What opencode starts a
-//    primary as when nothing else says otherwise.
+// 3. The `default_agent` captured at the `config` hook OF THIS PROJECT —
+//    `directory` is the session's project scope and picks it. What opencode
+//    starts a primary as when nothing else says otherwise. Passing the scope
+//    matters in a process serving two projects: the value is captured once per
+//    plugin instance, and without the key the last instance to load would name
+//    the other project's primary here.
 //
 // The name is not cosmetic: it selects the user's per-agent prompt template
 // (`.opencode/agent-intercom/<agentName>.md`), so a primary called something
 // other than the plugin's own default loads ITS file, not the orchestrator's.
-export function resolvePrimaryAgent(sessionID, output) {
+export function resolvePrimaryAgent(sessionID, output, directory) {
   return (
     sessionAgentName(sessionID) ??
     detectAgentFromSystem(output) ??
-    defaultAgentName()
+    defaultAgentName(directory)
   )
 }
 

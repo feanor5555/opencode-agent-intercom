@@ -22,6 +22,7 @@ import {
   endlessCooldowns,
   endlessProgress,
   sessionAgent,
+  primaryDirectory,
 } from "./state.js"
 // client.js does NOT import registry.js (verified — it only imports log /
 // settings / pluginmsg), so importing forgetSessionDirectory here creates no
@@ -109,6 +110,9 @@ export function forgetPrimary(sessionID) {
   // The turn's agent name goes with it: recorded per turn by the chat.message
   // hook, and a deleted session never has another turn.
   sessionAgent.delete(sessionID)
+  // The project directory held for this primary dies with it too — same reason
+  // as the directory cache above, and the same one-entry-per-live-primary bound.
+  primaryDirectory.delete(sessionID)
   // Handoff bookkeeping for the OLD primary dies with it: clear the
   // in-progress latch (this is the success-path release — the failure path
   // is releaseHandoff) and any pending flag the doc-summary turn's transform
@@ -749,6 +753,29 @@ export function recordSessionAgent(sessionID, agent) {
 // that skipped createUserMessage — the caller falls through to its next rung).
 export function sessionAgentName(sessionID) {
   return sessionAgent.get(sessionID) ?? null
+}
+
+// The project scope of a primary session, held for the session's whole life.
+//
+// Called on every primary transform with whatever `getSessionDirectory` just
+// answered: a non-empty directory is remembered the first time it is seen, and
+// whatever was remembered is what comes back. So a `session.get` that fails
+// with a transport error — it answers `undefined` and caches nothing — does not
+// take the scope away from the turns that follow it. Returns null only while no
+// turn of this session has ever resolved a directory; the caller then renders no
+// override block at all rather than one selected under a null scope, which would
+// pick up findings recorded with no directory and show them to a project they do
+// not belong to.
+//
+// This is what keeps the block's bytes still: the block lives in the cached
+// stable system-prompt element, and a scope that moved between two turns of one
+// session would move the element with it.
+export function rememberPrimaryDirectory(sessionID, directory) {
+  if (typeof sessionID !== "string" || sessionID.length === 0) return null
+  if (typeof directory === "string" && directory.length > 0 && !primaryDirectory.has(sessionID)) {
+    primaryDirectory.set(sessionID, directory)
+  }
+  return primaryDirectory.get(sessionID) ?? null
 }
 
 // ----------------------------------------------------------------------------

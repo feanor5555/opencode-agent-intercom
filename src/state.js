@@ -97,15 +97,29 @@ export const lastPrimaryTool = new Map()
 // removeEntryLocked, mirroring lastPrimaryTool.
 export const sessionAgent = new Map()
 
-// The `default_agent` value this process resolved at the `config` hook, or
-// null before that hook has run. Written by installAgents, which is also what
-// puts the plugin's own default there when the project set none, so this holds
-// whatever opencode will actually start a primary as. Last rung of the primary
-// identification chain in hooks.js.
+// instance directory ("" when the hook ran without one) -> the `default_agent`
+// value that project resolved at the `config` hook. Written by installAgents,
+// which is also what puts the plugin's own default there when the project set
+// none, so this holds whatever opencode will actually start that project's
+// primary as. Last rung of the primary identification chain in hooks.js.
 //
-// Wrapped in an object for the same reason as pendingSpawns (resetState
-// reassigns the field, importers share the one live reference).
-export const resolvedDefaultAgent = { name: null }
+// Keyed by directory rather than held as one value because the `config` hook
+// runs once per plugin instance, i.e. once per project: with two projects in
+// one process a single slot would answer every session with the name the last
+// hook to run captured. Read through agents.js `defaultAgentName(directory)`.
+export const defaultAgentByDirectory = new Map()
+
+// primary sessionID -> the project directory that session was first resolved
+// to. `getSessionDirectory` answers `undefined` on a transport error and caches
+// nothing, so a failed `session.get` would otherwise collapse the primary's
+// project scope to null for that turn: the override block would render empty
+// and the stable system-prompt element would move its bytes mid-session — the
+// one thing that element must never do. Written on the first primary transform
+// that resolves a directory and read by every later one.
+//
+// One short string per live primary; pruned in forgetPrimary, mirroring
+// sessionAgent and the directory cache in client.js.
+export const primaryDirectory = new Map()
 
 // sessionID -> { tokens:number|undefined, lastFetchAt:number }.
 // Cached context-token measurement for primary (non-subagent) sessions. The
@@ -270,7 +284,8 @@ export function resetState() {
   pendingSessionQuiescence.clear()
   lastPrimaryTool.clear()
   sessionAgent.clear()
-  resolvedDefaultAgent.name = null
+  defaultAgentByDirectory.clear()
+  primaryDirectory.clear()
   primaryCtx.clear()
   pendingHandoffs.clear()
   handoffInProgress.clear()

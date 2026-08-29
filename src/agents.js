@@ -34,7 +34,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 // state.js imports nothing, so this cannot close an import cycle.
-import { resolvedDefaultAgent } from "./state.js"
+import { defaultAgentByDirectory } from "./state.js"
 // overrides.js imports nothing at all — the register is pure and locating the
 // offending file is this module's job, not the register's.
 import { recordAgentEntryOverride } from "./overrides.js"
@@ -347,7 +347,7 @@ const OVERRIDABLE_FIELDS = [
 // merge keeps the plugin's map whole and the classifier sees no change — which
 // is also what a re-run of installAgents over its own output must see, since by
 // then the entry carries the merged object.
-function permissionKeys(value) {
+function permissionMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null
   return value
 }
@@ -419,7 +419,7 @@ function locateAgentFile(directory, name, worktree) {
 // thing on every re-run.
 function classifyCollision(base, projectEntry) {
   const fields = []
-  const projectPermission = permissionKeys(projectEntry.permission)
+  const projectPermission = permissionMap(projectEntry.permission)
   for (const field of OVERRIDABLE_FIELDS) {
     if (field === "permission") {
       if (
@@ -449,17 +449,21 @@ function classifyCollision(base, projectEntry) {
 // A finding with no displaced field is no finding: the entry carries what this
 // plugin would have written anyway (the shape a second run over the merged
 // config produces), and nothing of the role was displaced.
-function projectScope(directory, worktree) {
-  return typeof worktree === "string" && worktree.length > 0 && worktree !== "/"
-    ? worktree
-    : directory
-}
-
+//
+// The finding is scoped by `directory` — the instance directory this plugin
+// was loaded for — and by nothing else, because that is the key the reader
+// filters on: the block in hooks.js selects findings by the PRIMARY SESSION's
+// `session.directory`, which opencode writes from the very same instance
+// directory (`ctx.directory`), not from the worktree. Scoping by the worktree
+// instead would file every finding of a nested instance under the git root and
+// the block, filtering on the instance directory, would match none of them. The
+// worktree still reaches locateAgentFile, where it does belong: a nested
+// instance's agent file sits at the project root.
 function reportCollision(name, base, projectEntry, directory, worktree) {
   const { fields, keptDenies } = classifyCollision(base, projectEntry)
   if (fields.length === 0) return
   const file = locateAgentFile(directory, name, worktree)
-  const scope = projectScope(directory, worktree)
+  const scope = directory ?? null
   // The generated wording covers the fields; the one thing it cannot say is
   // what the per-key merge held on to, so that clause is added here — and only
   // where the project map took something away, since a map that names no key
@@ -490,9 +494,11 @@ function reportCollision(name, base, projectEntry, directory, worktree) {
 //
 // Every collision is recorded in the override register and logged; nothing is
 // refused, removed or rewritten. `directory` and `worktree` are the instance
-// paths the plugin was loaded for. The worktree identifies the project when the
-// instance starts in a nested folder; a non-git worktree of `/` falls back to
-// the instance directory. They also let the finding name its source file.
+// paths the plugin was loaded for. `directory` is the project key of everything
+// recorded here — opencode writes it into `session.directory`, which is what
+// the report's reading side filters on. `worktree` names no scope; it only
+// widens the search for the file a finding points at, so an instance started in
+// a nested folder still finds the agent file at the project root.
 //
 // An explicit `default_agent` the project set is respected. `default_agent` is
 // the opencode config key that picks the startup primary (falls back to "build"
@@ -520,27 +526,48 @@ export function installAgents(config, { directory, worktree } = {}) {
     // denies are the base and each tool key the project names wins over them.
     // Idempotent: re-running just re-applies the same merge.
     const merged = { ...base, ...projectEntry }
-    const projectPermission = projectEntry ? permissionKeys(projectEntry.permission) : null
+    const projectPermission = projectEntry ? permissionMap(projectEntry.permission) : null
     if (base.permission || projectPermission) {
       merged.permission = { ...base.permission, ...projectPermission }
     }
     config.agent[name] = merged
   }
   if (!config.default_agent) config.default_agent = DEFAULT_AGENT
-  // Capture what the primary of this instance is actually called. It is the
-  // last rung of the primary identification chain in hooks.js: a session with
-  // no recorded `chat.message` agent and no `# Role:` header left in its
-  // prompt is whatever opencode starts a primary as, which is this value.
-  resolvedDefaultAgent.name =
+  // Capture what the primary of THIS project is actually called, under the
+  // instance directory the hook ran for. It is the last rung of the primary
+  // identification chain in hooks.js: a session with no recorded `chat.message`
+  // agent and no `# Role:` header left in its prompt is whatever opencode
+  // starts a primary as, which is this value.
+  //
+  // Keyed by directory because the `config` hook runs once per plugin instance,
+  // i.e. once per project: a process serving two projects runs it twice, and a
+  // single slot would hand every session the name the LAST hook happened to
+  // capture — the other project's primary.
+  const captured =
     typeof config.default_agent === "string" && config.default_agent.length > 0
       ? config.default_agent
       : null
+  if (captured) defaultAgentByDirectory.set(directoryKey(directory), captured)
+  else defaultAgentByDirectory.delete(directoryKey(directory))
 }
 
-// The name the primary of this opencode instance runs under: the
-// `default_agent` captured at the `config` hook, or the plugin's own default
-// before that hook has run (installAgents writes exactly that value when the
-// project set none).
-export function defaultAgentName() {
-  return resolvedDefaultAgent.name ?? DEFAULT_AGENT
+function directoryKey(directory) {
+  return typeof directory === "string" && directory.length > 0 ? directory : ""
+}
+
+// The name the primary of one project runs under: the `default_agent` captured
+// at that project's `config` hook, or the plugin's own default before any hook
+// has run (installAgents writes exactly that value when the project set none).
+//
+// `directory` is the session's project directory. A directory no `config` hook
+// captured — a session created with a `?directory=` of its own, or a caller
+// that has none in hand — falls back to the single captured value while this
+// process serves ONE project, which is the case the whole plugin was built for.
+// With two projects captured there is no such answer, and the plugin's own role
+// is reported rather than the other project's primary.
+export function defaultAgentName(directory) {
+  const own = defaultAgentByDirectory.get(directoryKey(directory))
+  if (own) return own
+  if (defaultAgentByDirectory.size === 1) return [...defaultAgentByDirectory.values()][0]
+  return DEFAULT_AGENT
 }

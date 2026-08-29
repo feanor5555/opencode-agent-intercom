@@ -92,7 +92,10 @@ export default async (ctx) => {
     // what it displaces is recorded in the override register and reported to
     // the user, and the per-tool-key permission merge is the one field where
     // the plugin's denies survive an override that named no key. `directory`
-    // only let findings name the file they came from.
+    // is the project a finding and this instance's `default_agent` are filed
+    // under — the same value opencode puts in `session.directory`, so the
+    // report reaches the sessions it belongs to; `worktree` only widens the
+    // search for the file a finding names.
     config: async (config) => {
       try {
         installAgents(config, { directory, worktree })

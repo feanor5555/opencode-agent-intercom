@@ -66,9 +66,14 @@ the handoff's goal scan, with a text-prefix backstop (`src/pluginmsg.js:98-102`)
 ### 1.4 Model-only paths, already invisible
 
 `experimental.chat.system.transform` (`src/index.js:110-117`, `src/hooks.js:133-282`)
-rewrites `output.system` wholesale. The abort notice, the orchestration and subagent guides,
-the project block, the limits block and the live subagent snapshot travel there and never
-enter `session.messages`. They are out of scope: they are already invisible.
+rewrites `output.system` wholesale. The orchestration and subagent guides, the project
+block and the limits block travel there and never enter `session.messages`. The
+active-subagent snapshot, the abort notice and the subagent over-budget STOP notice are
+delivered by `createTransformMessages` (`src/hooks.js:363-414`) as a synthetic text part
+on the last user message — the same mechanism opencode uses for its own per-turn
+reminders — so the system prompt keeps a byte-identical cached prefix across turns and
+only the breakpoint on the trailing messages misses. They are out of scope: they are
+already invisible.
 
 ### 1.5 The sidebar, and what it can and cannot do
 

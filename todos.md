@@ -9,6 +9,5 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- Make sure prompt caching is not degraded by the system-prompt injection this plugin performs.
 - Check whether the orchestrator respects the maximum context size of a subagent and does not cut work packages that are too large for it.
 - Make `test/e2e/server-lifecycle.sh` detect and refuse being called from a subshell rather than relying on its header comment. A `tee` pipeline around `e2e_server_start` has orphaned a server twice in separate runs; in the second case the operator had read the header warning and piped it anyway, so the comment is not sufficient. `e2e_server_start` should fail loudly when it finds it is not running in the caller's shell.

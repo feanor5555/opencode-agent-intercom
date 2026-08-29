@@ -4,8 +4,31 @@
 // The notice builders live in notices.js, the shared subagent teardown +
 // parent-notice delivery in teardown.js, the inactivity watchdog in
 // watchdog.js, and the primary-handoff wiring in handoffwiring.js — this file
-// keeps the three hook factories (transform / event / guard) plus their
-// close helpers.
+// keeps the four hook factories (system transform / messages transform /
+// event / guard) plus their close helpers.
+//
+// Provider-side prompt caching bounds what the split between the two transform
+// hooks buys. Providers match a cached prefix by exact content in the order
+// tools → system → messages, so a byte that differs anywhere in the system
+// prompt re-processes the tool definitions and the system prompt with it, and
+// every later breakpoint — including the ones on the trailing messages — misses
+// too. That is why every block whose text moves from turn to turn is delivered
+// by the messages hook and the system prompt carries stable text only.
+//
+// The lifetime of the entry is five minutes: opencode writes
+// `cacheControl: { type: "ephemeral" }` with no `ttl` field, which is
+// Anthropic's default, measured from the request that writes or reads the
+// entry and refreshed by each read. So a stable prefix produces a hit only
+// between turns closer together than that. An orchestrator that spawns a
+// subagent, ends its turn and is woken minutes later starts cold whatever this
+// file does; the gain is in back-to-back turns and in the steps of one tool
+// loop. The one-hour TTL that would cover the longer wait is priced per write
+// and is not set here.
+//
+// The xAI path gets no marker from opencode at all — its provider map has no
+// `xai` key — because xAI caching is automatic and matches on the leading
+// message prefix. Prefix stability is the only lever that path has, and it is
+// the same lever.
 
 import { aborted, registry, lastPrimaryTool } from "./state.js"
 import {
@@ -116,16 +139,27 @@ const BUDGET_NOTIFY_AFTER = 3
 // `output.system` array wholesale with one combined string we control, rather
 // than appending — opencode otherwise injects ~150 chars of model-identity
 // boilerplate plus the full AGENTS.md (~17 KB) into every call regardless of
-// whether the agent needs it. The new layout:
+// whether the agent needs it. The layout is two elements:
 //
-//   <role prompt — preserved from opencode>
-//   <AGENTS.md project state — only for agents that benefit from it>
-//   <plugin guide — SUBAGENT_GUIDE_CORE [+ OUTLINE], or ORCHESTRATION_GUIDE>
-//   <limits + snapshot — orchestrator only>
+//   [0] <role prompt — preserved from opencode>
+//       <AGENTS.md project state — only for agents that benefit from it>
+//       <plugin guide — SUBAGENT_GUIDE_CORE [+ OUTLINE], or ORCHESTRATION_GUIDE>
+//       <PROJECT.md block>
+//       <limits — orchestrator only>
+//   [1] <env — cwd / worktree / platform / date / git flag>
 //
-// We keep opencode's `<env>` block (cwd / date / platform) intact since it's
-// small and useful; we drop the "You are powered by the model named …" line
-// (zero signal) and conditionally drop the AGENTS.md inject.
+// Both elements carry a cache breakpoint: opencode marks the first two system
+// messages, and one array element becomes one system message. `env` stands on
+// its own because it is the only block here that can change by itself — a
+// calendar-day rollover, a cwd or worktree change — and as its own element
+// those events cost the ~80 tokens of `env` instead of invalidating the whole
+// stable mass in element [0]. Nothing in either element varies from turn to
+// turn: the active-subagent snapshot, the over-budget STOP notice and the
+// abort notice are delivered by transformMessages instead.
+//
+// We keep opencode's `<env>` block intact since it's small and useful; we drop
+// the "You are powered by the model named …" line (zero signal) and
+// conditionally drop the AGENTS.md inject.
 //
 // Returns the hook bound to a client (needed for the context-budget check,
 // which reads the subagent's live message history).
@@ -155,15 +189,13 @@ export function createTransformSystem(client) {
         : await getSessionDirectory(client, sessionID)
 
       // Build the runtime parts once — both the auto-assembled path and the
-      // custom-template path need them.
-      const abortNotice = aborted.has(sessionID) ? ABORT_NOTICE : ""
+      // custom-template path need them. Only blocks that hold their text
+      // across the turns of a session belong here; `limits` qualifies because
+      // it re-reads the settings file, whose content moves on a user edit and
+      // not otherwise.
       const projectMd = projectMdBlock(sessionDir) || ""
       let limits = ""
-      let snapshot = ""
-      let ctxBudget = ""
-      if (isSubagent) {
-        ctxBudget = await contextLimitNotice(client, entry)
-      } else {
+      if (!isSubagent) {
         // Primary (non-subagent) turn. Measurement only — record the current
         // context-token count, TTL-guarded via shouldRefreshPrimary. No
         // threshold check, no handoff trigger; that's a later slice.
@@ -226,13 +258,23 @@ export function createTransformSystem(client) {
           }
         }
         limits = formatLimitsNotice()
-        snapshot = formatSubagentSnapshot(sessionID) || ""
       }
 
       // User-editable per-agent template: `<sessionDir>/.opencode/agent-intercom/<agent>.md`.
       // When present, it REPLACES the auto-assembled prompt wholesale, with
       // `{{placeholder}}` tokens for the runtime parts the user chose to keep.
       // Caches by mtime so the per-turn cost is one stat() call.
+      //
+      // `snapshot`, `context_budget` and `abort_notice` are retired tokens: the
+      // blocks they named are delivered by transformMessages and are not
+      // template-controlled. They keep substituting to the empty string so an
+      // already-written file degrades to the current behaviour instead of
+      // showing the model a literal `{{snapshot}}` — substitutePrompt leaves an
+      // unknown key in place by design.
+      //
+      // The user's template owns the whole layout, so this path emits ONE
+      // element: `{{env}}` sits wherever the file puts it and cannot be split
+      // off into its own system message.
       const customTemplate = sessionDir ? loadCustomPrompt(sessionDir, agentName) : null
       if (customTemplate) {
         const result = applyCustomPrompt(customTemplate, {
@@ -240,9 +282,9 @@ export function createTransformSystem(client) {
           agents_md: keepAgentsMd ? slices.agentsMd || "" : "",
           project_md: projectMd,
           limits,
-          snapshot,
-          context_budget: ctxBudget,
-          abort_notice: abortNotice,
+          snapshot: "",
+          context_budget: "",
+          abort_notice: "",
         })
         output.system.length = 0
         output.system.push(result)
@@ -251,7 +293,6 @@ export function createTransformSystem(client) {
 
       // No custom file → auto-assemble as before.
       const guideParts = []
-      if (abortNotice) guideParts.push(abortNotice)
       if (isSubagent) {
         if (!aborted.has(sessionID)) {
           guideParts.push(SUBAGENT_GUIDE_CORE)
@@ -260,25 +301,115 @@ export function createTransformSystem(client) {
           }
           if (projectMd) guideParts.push(projectMd)
         }
-        if (ctxBudget) guideParts.push(ctxBudget)
       } else {
         guideParts.push(ORCHESTRATION_GUIDE)
         if (projectMd) guideParts.push(projectMd)
         guideParts.push(limits)
-        if (snapshot) guideParts.push(snapshot)
       }
 
-      const combined =
+      const stable =
         slices.role +
-        slices.env +
         (keepAgentsMd ? slices.agentsMd : "") +
         guideParts.join("")
+      // Mutate the array opencode handed us. It keeps its own reference to it
+      // and never reads a property back off the output object, so assigning
+      // `output.system = [...]` would be a silent no-op.
       output.system.length = 0
-      output.system.push(combined)
+      output.system.push(stable)
+      // Second element only when there is one to make: parseOpencodeSystem
+      // returns an empty `env` whenever opencode's markers are absent, and an
+      // empty system message is worth nothing to either the model or the cache.
+      if (slices.env) output.system.push(slices.env)
     } catch (err) {
       log("transform error", errMsg(err))
       // never break the session
     }
+  }
+}
+
+// Rendered active-subagent snapshot per primary session, keyed by the id of
+// the user message it hangs off. One entry per primary; the id changes with
+// every new user turn and the stale text is overwritten with it.
+const snapshotByTurn = new Map()
+
+// Test seam: the map is process-wide state that outlives a single session.
+export function resetTurnNotices() {
+  snapshotByTurn.clear()
+}
+
+// The snapshot for one user turn of a primary, rendered once and reused for
+// every step of that turn's tool loop.
+//
+// Re-rendering per step would be wrong twice over. The block hangs off the LAST
+// USER message, which in a multi-step loop already has assistant and tool
+// messages behind it — moving its text moves the prefix of the loop's own
+// history, so every step would re-read what the step before it just wrote.
+// And `ageSeconds(e.spawnedAt)` moves every second, so it would move on
+// essentially every step. The orchestrator reads the figure to decide whether
+// to spawn or abort, which it does once per turn, so a per-turn value is also
+// the right resolution.
+function snapshotForTurn(primaryID, userMessageID) {
+  const cached = snapshotByTurn.get(primaryID)
+  if (cached && cached.messageID === userMessageID) return cached.text
+  const text = formatSubagentSnapshot(primaryID) || ""
+  snapshotByTurn.set(primaryID, { messageID: userMessageID, text })
+  return text
+}
+
+// Marks the text part this plugin pushes, so a second pass over the same array
+// replaces its own part instead of appending a duplicate.
+const TURN_NOTICE_SUFFIX = "-agent-intercom-turn"
+
+// Delivers the blocks whose text moves from turn to turn: the abort notice, the
+// primary's active-subagent snapshot, and the subagent's over-budget STOP
+// notice. They ride on the LAST USER message as a synthetic text part — the
+// same mechanism opencode uses for its own per-turn reminders — rather than in
+// the system prompt, so that the cached prefix (tool definitions plus system
+// prompt) stays byte-identical across the turns of a session.
+//
+// The cost is deliberate and is the cheapest one available: the breakpoint on
+// the trailing messages misses, while everything ahead of it — tools, system
+// prompt and all prior history — still matches.
+//
+// The array is the per-request copy opencode transforms and never writes back,
+// so the push is in memory only and nothing is persisted to the session.
+//
+// The hook's `input` is empty, so the session is read off the message itself,
+// the same field opencode's own reminder code reads.
+export function createTransformMessages(client) {
+  return async function transformMessages(messages) {
+    if (!Array.isArray(messages)) return
+    const userMessage = messages.findLast((m) => m?.info?.role === "user")
+    if (!userMessage || !Array.isArray(userMessage.parts)) return
+    const sessionID = userMessage.info.sessionID
+    if (!sessionID) return
+
+    const entry = entryForSession(sessionID)
+    // The over-budget notice is NOT memoised per turn, unlike the snapshot: it
+    // counts the LLM turns on which the subagent has seen the stop sign, and a
+    // subagent is one-shot — it lives its whole life under a single user
+    // message. Keyed on that id the counter would stand still at 1 and the
+    // one-shot parent notice at BUDGET_NOTIFY_AFTER would never fire. Its
+    // escalation is the point of the block, and the session it belongs to is
+    // one to three turns from ending, so the prefix it moves is short.
+    const volatile = entry
+      ? await contextLimitNotice(client, entry)
+      : snapshotForTurn(sessionID, userMessage.info.id)
+    const text = (aborted.has(sessionID) ? ABORT_NOTICE : "") + volatile
+    if (!text) return
+
+    const id = userMessage.info.id + TURN_NOTICE_SUFFIX
+    const part = {
+      id,
+      messageID: userMessage.info.id,
+      sessionID,
+      type: "text",
+      text,
+      synthetic: true,
+    }
+    const existing = userMessage.parts.findIndex((p) => p?.id === id)
+    if (existing >= 0) userMessage.parts[existing] = part
+    else userMessage.parts.push(part)
   }
 }
 

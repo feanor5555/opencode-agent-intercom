@@ -19,9 +19,13 @@
 //   {{agents_md}}      project AGENTS.md content (opencode injects)
 //   {{project_md}}     project PROJECT.md content (agent-intercom injects)
 //   {{limits}}         current maxSubagents + per-agent context budgets (orchestrator only)
-//   {{snapshot}}       list of active subagents (orchestrator only)
-//   {{context_budget}} STOP notice when subagent is over budget
-//   {{abort_notice}}   STOP notice when this session is aborted
+//
+// The live active-subagent snapshot, the over-budget STOP notice and the
+// abort notice are NOT template-controlled: they are delivered as a message
+// part on the turn they belong to, so that the system prompt stays byte-stable
+// and the provider's cached prefix holds. `{{snapshot}}`, `{{context_budget}}`
+// and `{{abort_notice}}` still substitute to the empty string, so a file
+// written before they were retired keeps working.
 //
 // Hot-reload: the loader is mtime-keyed. Editing a file in any editor busts
 // the cache on the next stat(); the companion TUI's "reload" button bumps
@@ -172,11 +176,7 @@ function placeholderLegend(agent) {
   lines.push("{{project_md}}     project PROJECT.md content (agent-intercom injects)")
   if (isOrch) {
     lines.push("{{limits}}         current maxSubagents + per-agent context budgets")
-    lines.push("{{snapshot}}       list of active subagents")
-  } else {
-    lines.push("{{context_budget}} STOP notice when this subagent is over budget")
   }
-  lines.push("{{abort_notice}}   STOP notice when this session is aborted")
   return lines.map((l) => `   ${l}`).join("\n")
 }
 
@@ -203,6 +203,10 @@ export function renderDefaultsFile(agent) {
     ` Remove a token to drop that section entirely. Unknown tokens are left in\n` +
     ` place so typos stay visible. This HTML comment is stripped before the\n` +
     ` prompt reaches the model.\n` +
+    ` The live subagent snapshot, the over-budget STOP notice and the abort\n` +
+    ` notice are not placeholders here: they are delivered as a message on the\n` +
+    ` turn they apply to, which keeps this prompt byte-stable and the\n` +
+    ` provider's cached prefix valid. They cannot be turned off from this file.\n` +
     `-->\n\n`
 
   const parts = [header, role, "\n\n{{env}}\n"]
@@ -210,13 +214,7 @@ export function renderDefaultsFile(agent) {
   parts.push("\n", guide, "\n")
   if (outline) parts.push("\n", outline, "\n")
   parts.push("\n{{project_md}}\n")
-  if (isOrch) {
-    parts.push("\n{{limits}}\n")
-    parts.push("\n{{snapshot}}\n")
-  } else {
-    parts.push("\n{{context_budget}}\n")
-  }
-  parts.push("\n{{abort_notice}}\n")
+  if (isOrch) parts.push("\n{{limits}}\n")
   return parts.join("")
 }
 
@@ -246,11 +244,13 @@ export function renderOpencodeDefaultFile(agent) {
     "  - {{project_md}} block (the full PROJECT.md content, agent-intercom injects)",
   ]
   if (agent === "orchestrator") {
-    addNotes.push("  - {{limits}} and {{snapshot}} blocks (orchestrator only)")
-  } else {
-    addNotes.push("  - {{context_budget}} STOP notice when over the token budget")
+    addNotes.push("  - the {{limits}} block (orchestrator only)")
   }
-  addNotes.push("  - {{abort_notice}} STOP notice when the session is aborted")
+  addNotes.push(
+    "  - a per-turn message part carrying the live subagent snapshot, the" +
+      " over-budget STOP notice and the abort notice (delivered on the message" +
+      " list, not in the system prompt)",
+  )
 
   const header =
     `<!--\n` +

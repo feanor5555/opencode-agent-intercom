@@ -19,7 +19,12 @@ import { getSessionDirectory } from "../src/client.js"
 import { resetProjectContext } from "../src/project.js"
 import { setSettingsPath, resetSettings, getSearxngUrl, getSettings } from "../src/settings.js"
 import { resetPermissionGuardCache } from "../src/config.js"
-import { rewritePendingTools, TODO_TOOLS, timeoutSubagent } from "../src/hooks.js"
+import {
+  rewritePendingTools,
+  resetTurnNotices,
+  TODO_TOOLS,
+  timeoutSubagent,
+} from "../src/hooks.js"
 import { AGENTS } from "../src/agents.js"
 import { setParamsPath, resetCache as resetLlmParams } from "../src/llmparams.js"
 import { setModelsPath, resetCache as resetLlmModels } from "../src/llmmodel.js"
@@ -30,6 +35,7 @@ import {
   mergeAndDedup,
 } from "../src/searchcore.js"
 import { setCtagsProbe, probeCtags } from "../src/outline.js"
+import { renderDefaultsFile, applyCustomPrompt } from "../src/promptsfile.js"
 
 // outline tests need a working `universal-ctags` binary on PATH or in
 // ~/.local/bin. CI/dev machines may not have it; in that case those tests are
@@ -68,6 +74,7 @@ setSettingsPath(settingsFile)
 // straight from state.js — index.js must stay single-export (see note there).
 beforeEach(() => {
   resetState()
+  resetTurnNotices()
   resetProjectContext()
   resetPermissionGuardCache()
   rmSync(settingsFile, { force: true })
@@ -138,6 +145,22 @@ function makeCtx({ taskPerm, agentPerm, messages = [] } = {}) {
 }
 
 const toolCtx = { sessionID: "ses_primary", agent: "orchestrator", messageID: "m1" }
+
+// Drives `experimental.chat.messages.transform` the way opencode does — with a
+// message list whose last user message belongs to `sessionID` — and returns the
+// text the plugin pushed onto it, or "" when it pushed nothing. This is where
+// the per-turn blocks live: the abort notice, the primary's active-subagent
+// snapshot and the subagent's over-budget STOP notice.
+async function turnNotice(hooks, sessionID, messageID = "msg_user1") {
+  const messages = [
+    { info: { id: messageID, role: "user", sessionID }, parts: [{ type: "text", text: "task" }] },
+  ]
+  await hooks["experimental.chat.messages.transform"]({}, { messages })
+  return messages[0].parts
+    .filter((part) => part.synthetic)
+    .map((part) => part.text)
+    .join("")
+}
 
 test("spawn registers a subagent and returns a friendly handle", async () => {
   const { ctx, created, prompted } = makeCtx()
@@ -279,6 +302,7 @@ test("abort cleanup removes the entry: the transform hook does NOT inject ABORTE
   const out = { system: ["base prompt"] }
   await hooks["experimental.chat.system.transform"]({ sessionID: subID }, out)
   assert.doesNotMatch(out.system.join(""), /ABORTED/)
+  assert.doesNotMatch(await turnNotice(hooks, subID), /ABORTED/)
 })
 
 test("session.error teardown keeps the abort marker until deleteSession is through: an in-flight tool call is denied as ABORTED, not misclassified as a primary", async () => {
@@ -595,14 +619,18 @@ test("transform hook injects the orchestration protocol into a primary session",
   assert.match(out.system.join(""), /spawn\(agent, prompt\)/)
 })
 
-test("transform hook shows a primary a live snapshot of its spawned subagents", async () => {
+test("the messages hook shows a primary a live snapshot of its spawned subagents", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  const notice = await turnNotice(hooks, "ses_primary")
+  assert.match(notice, /active subagents across all orchestrator sessions/i)
+  assert.match(notice, /researcher#1 \(researcher\)/)
+
+  // and never in the system prompt, which must hold its bytes across turns
   const out = { system: ["base prompt"] }
   await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, out)
-  assert.match(out.system.join(""), /active subagents across all orchestrator sessions/i)
-  assert.match(out.system.join(""), /researcher#1 \(researcher\)/)
+  assert.doesNotMatch(out.system.join(""), /active subagents across all orchestrator sessions/i)
 })
 
 test("list filters subagents by the caller's parentID — no cross-primary leakage", async () => {
@@ -895,10 +923,9 @@ test("a subagent over the context budget gets a wrap-up instruction injected", a
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
 
-  const out = { system: ["base prompt"] }
-  await hooks["experimental.chat.system.transform"]({ sessionID: created[0] }, out)
-  assert.match(out.system.join(""), /context has reached/i)
-  assert.match(out.system.join(""), /tool calls are now DISABLED/i)
+  const notice = await turnNotice(hooks, created[0])
+  assert.match(notice, /context has reached/i)
+  assert.match(notice, /tool calls are now DISABLED/i)
 
   // and over budget, the tool-execute guard hard-denies every tool call
   await assert.rejects(
@@ -922,12 +949,11 @@ test("ignored STOP injections escalate in tone and notify the primary once — n
   const subID = created[0]
   const spawnNotice = notices.length // baseline so we can find later additions
 
-  // Turn 1: transformSystem injects the first STOP (warning 1/3), then the
+  // Turn 1: the messages hook injects the first STOP (warning 1/3), then the
   // LLM still emits a tool call which is denied. No parent notice yet.
-  const sys1 = { system: ["base"] }
-  await hooks["experimental.chat.system.transform"]({ sessionID: subID }, sys1)
-  assert.match(sys1.system.join(""), /warning 1\/3/i)
-  assert.match(sys1.system.join(""), /Done:/)
+  const turn1 = await turnNotice(hooks, subID)
+  assert.match(turn1, /warning 1\/3/i)
+  assert.match(turn1, /Done:/)
   await assert.rejects(
     () => hooks["tool.execute.before"]({ tool: "edit", sessionID: subID, callID: "c1" }),
     /context budget/i,
@@ -938,10 +964,9 @@ test("ignored STOP injections escalate in tone and notify the primary once — n
   )
 
   // Turn 2: warning 2/3 (SECOND WARNING). Still no parent notice.
-  const sys2 = { system: ["base"] }
-  await hooks["experimental.chat.system.transform"]({ sessionID: subID }, sys2)
-  assert.match(sys2.system.join(""), /SECOND WARNING/)
-  assert.match(sys2.system.join(""), /warning 2\/3/i)
+  const turn2 = await turnNotice(hooks, subID)
+  assert.match(turn2, /SECOND WARNING/)
+  assert.match(turn2, /warning 2\/3/i)
   await assert.rejects(
     () => hooks["tool.execute.before"]({ tool: "edit", sessionID: subID, callID: "c2" }),
     /SECOND WARNING/,
@@ -951,11 +976,13 @@ test("ignored STOP injections escalate in tone and notify the primary once — n
     "denial-loop notice fired after only two ignored STOPs",
   )
 
-  // Turn 3: warning 3/3 (FINAL) AND the parent is notified (once).
-  const sys3 = { system: ["base"] }
-  await hooks["experimental.chat.system.transform"]({ sessionID: subID }, sys3)
-  assert.match(sys3.system.join(""), /FINAL WARNING/)
-  assert.match(sys3.system.join(""), /warning 3\/3/i)
+  // Turn 3: warning 3/3 (FINAL) AND the parent is notified (once). The counter
+  // ticks per LLM call, not per user message: a subagent is one-shot and lives
+  // its whole life under the same user message, so the escalation has to run
+  // without one arriving.
+  const turn3 = await turnNotice(hooks, subID)
+  assert.match(turn3, /FINAL WARNING/)
+  assert.match(turn3, /warning 3\/3/i)
   await assert.rejects(
     () => hooks["tool.execute.before"]({ tool: "edit", sessionID: subID, callID: "c3" }),
     /FINAL/,
@@ -978,8 +1005,7 @@ test("ignored STOP injections escalate in tone and notify the primary once — n
 
   // Turn 4: still over budget, still calling tools. Parent must NOT be notified again.
   const noticesBefore = notices.length
-  const sys4 = { system: ["base"] }
-  await hooks["experimental.chat.system.transform"]({ sessionID: subID }, sys4)
+  await turnNotice(hooks, subID)
   await assert.rejects(
     () => hooks["tool.execute.before"]({ tool: "edit", sessionID: subID, callID: "c4" }),
     /FINAL/,
@@ -1009,17 +1035,13 @@ test("the context budget bites per agent type, not globally", async () => {
   await hooks.tool.spawn.execute({ agent: "researcher", prompt: "y" }, toolCtx)
   const [coderID, researcherID] = created
 
-  const coderOut = { system: ["base"] }
-  await hooks["experimental.chat.system.transform"]({ sessionID: coderID }, coderOut)
-  assert.match(coderOut.system.join(""), /context has reached/i)
+  assert.match(await turnNotice(hooks, coderID), /context has reached/i)
   await assert.rejects(
     () => hooks["tool.execute.before"]({ tool: "edit", sessionID: coderID, callID: "c1" }),
     /context budget/i,
   )
 
-  const researcherOut = { system: ["base"] }
-  await hooks["experimental.chat.system.transform"]({ sessionID: researcherID }, researcherOut)
-  assert.doesNotMatch(researcherOut.system.join(""), /context has reached/i)
+  assert.doesNotMatch(await turnNotice(hooks, researcherID), /context has reached/i)
   await hooks["tool.execute.before"]({ tool: "read", sessionID: researcherID, callID: "c2" })
 })
 
@@ -1039,10 +1061,9 @@ test("a file holding only the flat maxContext still governs every agent type", a
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
 
-  const out = { system: ["base"] }
-  await hooks["experimental.chat.system.transform"]({ sessionID: created[0] }, out)
-  assert.match(out.system.join(""), /context has reached/i)
-  assert.match(out.system.join(""), /budget 10.0k/)
+  const notice = await turnNotice(hooks, created[0])
+  assert.match(notice, /context has reached/i)
+  assert.match(notice, /budget 10.0k/)
 })
 
 test("the orchestrator limits block lists the context budget of every spawnable role", async () => {
@@ -1087,7 +1108,7 @@ test("the limits block tells the orchestrator its notices are hidden, only while
   assert.doesNotMatch(offOut.system.join(""), /hidden from the user's screen/)
 })
 
-test("a subagent under the context budget gets no wrap-up instruction", async () => {
+test("a subagent under the context budget gets no per-turn notice at all", async () => {
   const messages = [
     {
       info: { role: "assistant", tokens: { input: 500, output: 50, cache: { read: 0, write: 0 } } },
@@ -1098,9 +1119,7 @@ test("a subagent under the context budget gets no wrap-up instruction", async ()
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
 
-  const out = { system: ["base prompt"] }
-  await hooks["experimental.chat.system.transform"]({ sessionID: created[0] }, out)
-  assert.doesNotMatch(out.system.join(""), /WRAP UP/)
+  assert.equal(await turnNotice(hooks, created[0]), "")
 })
 
 test("an empty subagent snapshot is not re-fetched on every tool call (fetch timestamp advances even with no tokens)", async () => {
@@ -1120,8 +1139,8 @@ test("an empty subagent snapshot is not re-fetched on every tool call (fetch tim
 
   // Two transforms back-to-back (well within CTX_TTL_MS). The first fetches;
   // the second must be served from the cache the timestamp now guards.
-  await hooks["experimental.chat.system.transform"]({ sessionID: subID }, { system: ["base"] })
-  await hooks["experimental.chat.system.transform"]({ sessionID: subID }, { system: ["base"] })
+  await turnNotice(hooks, subID)
+  await turnNotice(hooks, subID)
   assert.equal(fetchCalls, 1, "empty snapshot was re-fetched on the second call")
 })
 
@@ -2075,4 +2094,177 @@ test("rewritePendingTools is null-safe", () => {
     rewritePendingTools([{ info: { role: "assistant" }, parts: [{ type: "tool", state: null }] }]),
     0,
   )
+})
+
+
+// ---------------------------------------------------------------------------
+// System-prompt / message split. The system prompt carries only text that holds
+// its bytes across the turns of a session, so the provider's cached prefix —
+// tool definitions plus system prompt — keeps matching; everything that moves
+// per turn is delivered on the message list instead.
+
+// A system string shaped the way opencode assembles one: role prompt, the
+// model-identity boilerplate, the <env> block, then the AGENTS.md inject.
+// parseOpencodeSystem needs all three markers to produce non-empty slices.
+function opencodeSystem({ date = "Sat Aug 29 2026", cwd = "/tmp/proj" } = {}) {
+  return (
+    "# Role: Orchestrator\nYou coordinate.\n\n" +
+    "You are powered by the model named test. The exact model ID is p/test\n" +
+    "Here is some useful information about the environment you are running in:\n" +
+    `<env>\n  Working directory: ${cwd}\n  Today's date: ${date}\n</env>\n` +
+    "Instructions from: /tmp/proj/AGENTS.md\nProject conventions here.\n"
+  )
+}
+
+test("the system prompt is two elements: the stable mass, then env on its own", async () => {
+  // opencode marks the first two system messages for caching and one array
+  // element becomes one system message, so both elements get a breakpoint.
+  // env stands alone because it is the only block on the stable side that can
+  // change by itself — a date rollover or a cwd change then costs the env
+  // element instead of the whole mass behind it.
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const out = { system: [opencodeSystem()] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, out)
+
+  assert.equal(out.system.length, 2, "expected exactly two system elements")
+  assert.match(out.system[0], /# Role: Orchestrator/)
+  assert.match(out.system[0], /Project conventions here/)
+  assert.match(out.system[0], /orchestration protocol/i)
+  assert.match(out.system[0], /current limits — maxSubagents/)
+  assert.doesNotMatch(out.system[0], /<env>/, "env leaked into the stable element")
+
+  assert.match(out.system[1], /<env>/)
+  assert.match(out.system[1], /Today's date: Sat Aug 29 2026/)
+  assert.doesNotMatch(out.system[1], /# Role: Orchestrator/)
+
+  // the model-identity boilerplate is dropped from both
+  assert.doesNotMatch(out.system.join(""), /You are powered by the model named/)
+})
+
+test("a date or cwd change moves the env element only; the stable element holds its bytes", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const day1 = { system: [opencodeSystem()] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, day1)
+  const day2 = { system: [opencodeSystem({ date: "Sun Aug 30 2026", cwd: "/tmp/other" })] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, day2)
+
+  assert.equal(day2.system[0], day1.system[0], "the stable element moved with the date")
+  assert.notEqual(day2.system[1], day1.system[1])
+})
+
+test("nothing turn-varying leaks into the stable system element", async () => {
+  // The orchestrator's normal working state: a subagent running, its snapshot
+  // changing on every turn. The system prompt must come out byte-identical.
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+  const idle = { system: [opencodeSystem()] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, idle)
+
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  assert.match(await turnNotice(hooks, "ses_primary", "msg_a"), /researcher#1/)
+
+  const busy = { system: [opencodeSystem()] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, busy)
+  assert.deepEqual(busy.system, idle.system, "spawning a subagent changed the system prompt")
+
+  // and the same for a subagent driven over its budget: the STOP notice is on
+  // the message list, so its prompt does not move either.
+  const subID = created[0]
+  const before = { system: [opencodeSystem()] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: subID }, before)
+  entryForSession(subID).ctxTokens = 900000
+  entryForSession(subID).lastTokensFetchAt = Date.now()
+  assert.match(await turnNotice(hooks, subID, "msg_b"), /context has reached/i)
+  const after = { system: [opencodeSystem()] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: subID }, after)
+  assert.deepEqual(after.system, before.system, "the STOP notice moved the system prompt")
+})
+
+test("the snapshot is rendered once per user turn and re-rendered on the next one", async () => {
+  // Every step of a multi-step tool loop runs the messages hook again. The
+  // block hangs off the last user message, which by then has assistant and
+  // tool messages behind it, so re-rendering it mid-loop would move the prefix
+  // of the loop's own history.
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  const subID = created[0]
+
+  const step1 = await turnNotice(hooks, "ses_primary", "msg_turn1")
+  assert.match(step1, /\? ctx/, "the fresh subagent should have no token count yet")
+
+  entryForSession(subID).ctxTokens = 12345
+  const step2 = await turnNotice(hooks, "ses_primary", "msg_turn1")
+  assert.equal(step2, step1, "the snapshot was re-rendered inside one user turn")
+
+  const nextTurn = await turnNotice(hooks, "ses_primary", "msg_turn2")
+  assert.match(nextTurn, /12.3k ctx/, "the next user turn did not pick up the new figure")
+})
+
+test("the abort notice rides on the message list, not the system prompt", async () => {
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  const subID = created[0]
+  aborted.add(subID)
+
+  assert.match(await turnNotice(hooks, subID), /ABORTED/)
+  const out = { system: [opencodeSystem()] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: subID }, out)
+  assert.doesNotMatch(out.system.join(""), /ABORTED/)
+})
+
+test("the per-turn notice is pushed once even if the same message array is transformed twice", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  const messages = [
+    { info: { id: "msg_u", role: "user", sessionID: "ses_primary" }, parts: [] },
+  ]
+  await hooks["experimental.chat.messages.transform"]({}, { messages })
+  await hooks["experimental.chat.messages.transform"]({}, { messages })
+  const synthetic = messages[0].parts.filter((part) => part.synthetic)
+  assert.equal(synthetic.length, 1, "the notice was appended twice")
+  assert.equal(synthetic[0].messageID, "msg_u")
+  assert.equal(synthetic[0].sessionID, "ses_primary")
+  assert.equal(synthetic[0].type, "text")
+})
+
+test("the messages hook is a noop without a user message to hang the notice off", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  const messages = [{ info: { id: "msg_a", role: "assistant", sessionID: "ses_primary" }, parts: [] }]
+  await hooks["experimental.chat.messages.transform"]({}, { messages })
+  assert.equal(messages[0].parts.length, 0)
+  // and null-safe on the shapes opencode can hand us
+  await hooks["experimental.chat.messages.transform"]({}, {})
+  await hooks["experimental.chat.messages.transform"]({}, { messages: [null, {}, { info: {} }] })
+})
+
+test("the default prompt file no longer advertises the retired placeholders", async () => {
+  // The three blocks are delivered as a message and are not template-controlled.
+  for (const agent of ["orchestrator", "coder"]) {
+    const file = renderDefaultsFile(agent)
+    assert.doesNotMatch(file, /\{\{snapshot\}\}/, `${agent} file still writes {{snapshot}}`)
+    assert.doesNotMatch(file, /\{\{context_budget\}\}/)
+    assert.doesNotMatch(file, /\{\{abort_notice\}\}/)
+    assert.match(file, /\{\{env\}\}/)
+    assert.match(file, /\{\{project_md\}\}/)
+    assert.match(file, /delivered as a message on the/)
+  }
+  assert.match(renderDefaultsFile("orchestrator"), /\{\{limits\}\}/)
+})
+
+test("a user file written before the placeholders were retired degrades to empty, not to a raw token", async () => {
+  // substitutePrompt leaves an UNKNOWN key in place so typos stay visible, so
+  // the three keys must keep being supplied — as the empty string.
+  const rendered = applyCustomPrompt("head {{snapshot}}{{context_budget}}{{abort_notice}} tail", {
+    snapshot: "",
+    context_budget: "",
+    abort_notice: "",
+  })
+  assert.equal(rendered, "head  tail")
 })

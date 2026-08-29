@@ -53,6 +53,7 @@ import { createPermissionGuard } from "./config.js"
 import { createTools } from "./tools.js"
 import {
   createTransformSystem,
+  createTransformMessages,
   createEventHandler,
   createGuardToolExecute,
   rewritePendingTools,
@@ -81,6 +82,7 @@ export default async (ctx) => {
 
   const permissionGuard = createPermissionGuard(client)
   const transformSystem = createTransformSystem(client)
+  const transformMessages = createTransformMessages(client)
 
   return {
     // Inject the plugin's agent roles (orchestrator + 8 subagents) into the
@@ -115,11 +117,19 @@ export default async (ctx) => {
         log("reqlog system error", err?.message ?? String(err))
       }
     },
+    // Two jobs on the message list: repair pending tool-parts left behind by a
+    // denied tool call, and deliver the per-turn notices that stay out of the
+    // system prompt so the cached prefix holds — see hooks.js.
     "experimental.chat.messages.transform": async (input, output) => {
       try {
         rewritePendingTools(output?.messages)
       } catch (err) {
         log("rewritePendingTools error", err?.message ?? String(err))
+      }
+      try {
+        await transformMessages(output?.messages)
+      } catch (err) {
+        log("transformMessages error", err?.message ?? String(err))
       }
       try {
         captureMessages(input, output)

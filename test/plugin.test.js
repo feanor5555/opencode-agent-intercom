@@ -1179,16 +1179,33 @@ test("the limits block tells the orchestrator its notices are hidden, only while
   assert.doesNotMatch(offOut.system.join(""), /hidden from the user's screen/)
 })
 
-test("a subagent under the context budget gets no per-turn notice at all", async () => {
-  const messages = [
-    {
-      info: { role: "assistant", tokens: { input: 500, output: 50, cache: { read: 0, write: 0 } } },
-      parts: [{ type: "text", text: "working" }],
-    },
-  ]
-  const { ctx, created } = makeCtx({ messages })
+// The message the plugin hangs on a subagent's turn carries at most two things:
+// the over-budget STOP notice and, for a role that may delegate, the
+// nested-spawn quota left. Under the budget the first is absent, so a
+// delegating role is left with exactly the quota line and a non-delegating one
+// with no synthetic part at all.
+const UNDER_BUDGET_MESSAGES = [
+  {
+    info: { role: "assistant", tokens: { input: 500, output: 50, cache: { read: 0, write: 0 } } },
+    parts: [{ type: "text", text: "working" }],
+  },
+]
+
+test("a delegating subagent under the context budget gets the quota line and nothing else", async () => {
+  const { ctx, created } = makeCtx({ messages: UNDER_BUDGET_MESSAGES })
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
+
+  assert.match(
+    await turnNotice(hooks, created[0]),
+    /^\n\n---\n⤷ agent-intercom: nested spawns left this run: \d+ of \d+\. The quota does not reset\.\n---\n$/,
+  )
+})
+
+test("a non-delegating subagent under the context budget gets no per-turn notice at all", async () => {
+  const { ctx, created } = makeCtx({ messages: UNDER_BUDGET_MESSAGES })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
 
   assert.equal(await turnNotice(hooks, created[0]), "")
 })

@@ -152,7 +152,9 @@ const BUDGET_NOTIFY_AFTER = 3
 //       <AGENTS.md project state — only for agents that benefit from it>
 //       <plugin guide — prompts.js guideBlocks() for this role>
 //       <PROJECT.md block>
-//       <limits — orchestrator only>
+//       <limits — the orchestrator's, or the reduced block for a delegating
+//                 subagent>
+//       <override findings — primary only>
 //   [1] <env — cwd / worktree / platform / date / git flag>
 //
 // Both elements carry a cache breakpoint: opencode marks the first two system
@@ -160,9 +162,21 @@ const BUDGET_NOTIFY_AFTER = 3
 // its own because it is the only block here that can change by itself — a
 // calendar-day rollover, a cwd or worktree change — and as its own element
 // those events cost the ~80 tokens of `env` instead of invalidating the whole
-// stable mass in element [0]. Nothing in either element varies from turn to
-// turn: the active-subagent snapshot, the over-budget STOP notice and the
-// abort notice are delivered by transformMessages instead.
+// stable mass in element [0].
+//
+// Nothing in either element varies from turn to turn, on either branch. What
+// moves inside a session is delivered by transformMessages on the last user
+// message instead: the primary's active-subagent snapshot, the subagent's
+// over-budget STOP notice, the abort notice, and a delegating subagent's
+// remaining nested-spawn quota — the one figure that counts down as the run
+// spends it. Both branches are pinned as such in
+// test/system-prompt-stability.test.js.
+//
+// The blocks that stay here move only where a person moves them: a settings
+// edit, a PROJECT.md or AGENTS.md edit, a prompt file appearing or changing.
+// The PROJECT.md block and the limits block are read under the latched
+// `primaryScope` (`scopeDir` below) and not under this turn's directory
+// lookup, so a failed `session.get` cannot move them either.
 //
 // We keep opencode's `<env>` block intact since it's small and useful; we drop
 // the "You are powered by the model named …" line (zero signal) and
@@ -196,6 +210,17 @@ export function createTransformSystem(client) {
       // the primary's block) and while no turn has ever resolved a directory.
       const primaryScope = isSubagent ? null : rememberPrimaryDirectory(sessionID, sessionDir)
 
+      // The directory every project-derived block of the STABLE element is read
+      // under. For a primary that is the latched scope, not this turn's lookup:
+      // `getSessionDirectory` caches successes only and answers undefined when
+      // `session.get` fails, so reading the raw lookup would collapse the
+      // PROJECT.md block to "" and the limits block's fixed-overhead figures to
+      // their no-PROJECT.md values for that one turn, and restore them on the
+      // next — two invalidations of element [0] for an error the user never
+      // sees. For a subagent it is the entry's own directory, captured at spawn
+      // and never re-looked-up.
+      const scopeDir = primaryScope ?? sessionDir
+
       const agentName = isSubagent ? entry.agent : resolvePrimaryAgent(sessionID, output, primaryScope)
 
       // Decide whether this agent gets AGENTS.md
@@ -211,16 +236,10 @@ export function createTransformSystem(client) {
       // across the turns of a session belong here; `limits` qualifies because
       // it re-reads the settings file, whose content moves on a user edit and
       // not otherwise.
-      const projectMd = projectMdBlock(sessionDir) || ""
+      const projectMd = projectMdBlock(scopeDir) || ""
       // Whether THIS subagent gets the delegation guide and the reduced limits
-      // block that goes with it. Two conditions, both necessary: the role must
-      // allow `spawn`, and nesting must not be switched off installation-wide.
-      // With `maxNestedSpawns = 0` every nested spawn is refused before a
-      // session is created, so a role that may delegate still cannot — it is
-      // told it does not delegate, which is what is true of it, and neither
-      // block is paid for.
-      const delegates =
-        isSubagent && mayDelegate(entry.agent) && getSettings().maxNestedSpawns > 0
+      // block that goes with it.
+      const delegates = isSubagent && delegatesNested(entry.agent)
       let limits = ""
       if (!isSubagent) {
         // Primary (non-subagent) turn. Measurement only — record the current
@@ -285,17 +304,19 @@ export function createTransformSystem(client) {
           }
         }
         limits = formatLimitsNotice({
-          sessionDir,
+          sessionDir: scopeDir,
           projectMd,
           agentsMd: slices.agentsMd || "",
         })
       } else if (delegates) {
         // A delegating subagent gets its own, much smaller block: it has to
         // size a researcher package and it has never seen the orchestrator's.
-        limits = formatDelegationLimitsNotice(entry.agent, sessionID, {
+        // The quota figure is not in it — that one counts down inside the run
+        // and rides on the last user message (nestedQuotaNotice).
+        limits = formatDelegationLimitsNotice(entry.agent, {
           projectMd,
           agentsMd: slices.agentsMd || "",
-          snapshot: projectContext(sessionDir),
+          snapshot: projectContext(scopeDir),
         })
       }
 
@@ -402,7 +423,7 @@ export function createTransformSystem(client) {
           guideParts.push(guide)
           if (projectMd) guideParts.push(projectMd)
           // Last, because the delegation block above points at it for the
-          // quota figure and the researcher budget. Empty unless `delegates`.
+          // researcher's budget. Empty unless `delegates`.
           if (limits) guideParts.push(limits)
         }
       } else {
@@ -466,8 +487,9 @@ function snapshotForTurn(primaryID, userMessageID) {
 const TURN_NOTICE_SUFFIX = "-agent-intercom-turn"
 
 // Delivers the blocks whose text moves from turn to turn: the abort notice, the
-// primary's active-subagent snapshot, and the subagent's over-budget STOP
-// notice. They ride on the LAST USER message as a synthetic text part — the
+// primary's active-subagent snapshot, the subagent's over-budget STOP notice
+// and a delegating subagent's remaining nested-spawn quota. They ride on the
+// LAST USER message as a synthetic text part — the
 // same mechanism opencode uses for its own per-turn reminders — rather than in
 // the system prompt, so that the cached prefix (tool definitions plus system
 // prompt) stays byte-identical across the turns of a session.
@@ -497,9 +519,22 @@ export function createTransformMessages(client) {
     // one-shot parent notice at BUDGET_NOTIFY_AFTER would never fire. Its
     // escalation is the point of the block, and the session it belongs to is
     // one to three turns from ending, so the prefix it moves is short.
-    const volatile = entry
-      ? await contextLimitNotice(client, entry)
-      : snapshotForTurn(sessionID, userMessage.info.id)
+    //
+    // The quota line is not memoised either, for the plainer reason that it is
+    // the figure that moves: it counts down as the run spends its quota, and a
+    // value held per user message would stand still for the subagent's whole
+    // life. An ABORTED subagent is told to stop and call no further tool, so it
+    // is not handed a spawn allowance on the way out — the same gate
+    // contextLimitNotice applies to itself.
+    let volatile
+    if (entry) {
+      volatile = await contextLimitNotice(client, entry)
+      if (!aborted.has(sessionID) && delegatesNested(entry.agent)) {
+        volatile += nestedQuotaNotice(sessionID)
+      }
+    } else {
+      volatile = snapshotForTurn(sessionID, userMessage.info.id)
+    }
     const text = (aborted.has(sessionID) ? ABORT_NOTICE : "") + volatile
     if (!text) return
 
@@ -774,13 +809,28 @@ function formatLimitsNotice({ sessionDir, projectMd = "", agentsMd = "" } = {}) 
   )
 }
 
+// Whether a subagent of this role actually delegates: two conditions, both
+// necessary — the role must allow `spawn`, and nesting must not be switched off
+// installation-wide. With `maxNestedSpawns = 0` every nested spawn is refused
+// before a session is created, so a role that may delegate still cannot: it is
+// told it does not delegate, which is what is true of it, and neither the
+// delegation guide nor the limits block nor the quota line is paid for.
+//
+// One predicate for both halves of what a delegating subagent is told — the
+// system prompt's guide-and-limits choice and the quota line on the message —
+// so the two cannot come apart and hand a role a figure for a quota it was
+// never told it has.
+function delegatesNested(agent) {
+  return mayDelegate(agent) && getSettings().maxNestedSpawns > 0
+}
+
 // The reduced limits block a DELEGATING subagent is shown, in place of the
 // orchestrator's. It is built only on the primary branch above, so without
 // this a planner sizing a researcher package would be working from numbers it
 // has never seen — its own ceiling, what a researcher costs, and the shares at
 // which the size gate warns and refuses are all invisible to it otherwise.
 //
-// Four things and nothing more (the primary's block also carries maxSubagents,
+// Three things and nothing more (the primary's block also carries maxSubagents,
 // every spawnable type's budget and the hideChatter sentence — none of which a
 // subagent can act on):
 //   - its own context budget, the ceiling its run is enforced against;
@@ -789,16 +839,18 @@ function formatLimitsNotice({ sessionDir, projectMd = "", agentsMd = "" } = {}) 
 //     renders an entry so the two read as one number;
 //   - the two package shares, which the gate applies to a nested spawn the same
 //     way it applies them to the orchestrator's (packageSizeVerdict sizes
-//     against the TARGET type's budget, whoever the caller is);
-//   - how much of the per-run nested quota is left, counted down live from the
-//     caller's own registry entry.
-function formatDelegationLimitsNotice(agent, sessionID, { projectMd, agentsMd, snapshot }) {
-  const s = getSettings()
+//     against the TARGET type's budget, whoever the caller is).
+//
+// All three are settings- and file-derived, so the block holds its bytes for
+// the life of the run and belongs in the cached element. The fourth figure a
+// delegating subagent needs — how much of the per-run nested quota is left —
+// counts down WITHIN the run off the caller's registry entry, so it rides on
+// the last user message instead (nestedQuotaNotice, delivered by
+// transformMessages).
+function formatDelegationLimitsNotice(agent, { projectMd, agentsMd, snapshot }) {
   const own = contextBudgetFor(agent)
   const target = NESTED_SPAWN_TARGET
   const budget = contextBudgetFor(target)
-  const quota = nestedQuotaDecision(sessionID, s.maxNestedSpawns)
-  const left = Math.max(0, quota.limit - quota.used)
   const targetLine =
     budget <= 0
       ? `${target} off (no context budget set — the package gate does not size against it)`
@@ -816,8 +868,29 @@ function formatDelegationLimitsNotice(agent, sessionID, { projectMd, agentsMd, s
     "words, the third the headroom left of the budget for your prompt and its work.\n" +
     `Size your spawn prompt against that budget: keep it at or under ${percent(PACKAGE_WARN_SHARE)} ` +
     `of it; over ${percent(PACKAGE_REFUSE_SHARE)} the spawn is REFUSED and no subagent starts. ` +
-    "Pass bulk material as a file path, never pasted inline.\n" +
-    `Nested spawns left this run: ${left} of ${quota.limit}. The quota does not reset.\n---\n`
+    "Pass bulk material as a file path, never pasted inline.\n---\n"
+  )
+}
+
+// The one figure of a delegating subagent's limits that moves inside its run:
+// how much of the per-run nested quota is left. `chargeNestedSpawn` increments
+// the counter this reads on every admitted nested spawn, so the first LLM call
+// after a researcher returns renders a lower number — which is why the line is
+// delivered on the last user message and not in the system prompt, where it
+// would invalidate the tool definitions and the whole stable element behind it
+// once per nested spawn.
+//
+// The line stands on its own there rather than under the limits block's
+// heading, so it names itself. It is rendered only for a caller the delegation
+// block was built for — a subagent whose role may delegate, with nesting
+// switched on — so the figure reaches exactly the roles that were told they
+// have a quota.
+function nestedQuotaNotice(sessionID) {
+  const quota = nestedQuotaDecision(sessionID, getSettings().maxNestedSpawns)
+  const left = Math.max(0, quota.limit - quota.used)
+  return (
+    "\n\n---\n⤷ agent-intercom: nested spawns left this run: " +
+    `${left} of ${quota.limit}. The quota does not reset.\n---\n`
   )
 }
 

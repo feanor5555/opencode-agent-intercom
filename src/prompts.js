@@ -71,8 +71,10 @@ export const SUBAGENT_NO_SPAWN_GUIDE =
 // name, that it is not the normal working mode, and what comes back.
 //
 // The quota FIGURE is not in here: this block is static and the quota is a
-// runtime setting that also counts down within a run. The limits block built
-// per turn in hooks.js carries the number that is left.
+// runtime setting that also counts down within a run. Because it moves inside
+// the run it is not in the system prompt either — `nestedQuotaNotice` in
+// hooks.js delivers the number that is left on the last user message, beside
+// the over-budget notice.
 export const SUBAGENT_DELEGATION_GUIDE =
   "\n\n---\n⤷ agent-intercom: delegating preparatory work.\n" +
   "You may call `spawn(\"researcher\", prompt)` — a `researcher` and nothing else. It is the one " +
@@ -87,8 +89,8 @@ export const SUBAGENT_DELEGATION_GUIDE =
   "result of the call. There is no wake and no second chance to ask — one answer, then that " +
   "subagent is gone. Delegate a whole question at once.\n" +
   "The prompt you send carries NO `T<n>:` prefix: the researcher prepares material for your task, " +
-  "it does not take one over. You get a small quota of these per run (the limits block below " +
-  "names what is left); past it, do the rest yourself and name what is still missing in your " +
+  "it does not take one over. You get a small quota of these per run (you are told each turn " +
+  "what is left of it); past it, do the rest yourself and name what is still missing in your " +
   "final reply — opened with `Blocked:` where the missing material stops the task.\n---\n"
 
 // Outline+read discipline. Injected only for subagents that actually have the

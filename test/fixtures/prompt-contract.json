@@ -16,7 +16,7 @@
       },
       {
         "block": "SUBAGENT_DELEGATION_GUIDE",
-        "line": "The prompt you send carries NO `T<n>:` prefix: the researcher prepares material for your task, it does not take one over. You get a small quota of these per run (the limits block below names what is left); past it, do the rest yourself and name what is still missing in your final reply — opened with `Blocked:` where the missing material stops the task."
+        "line": "The prompt you send carries NO `T<n>:` prefix: the researcher prepares material for your task, it does not take one over. You get a small quota of these per run (you are told each turn what is left of it); past it, do the rest yourself and name what is still missing in your final reply — opened with `Blocked:` where the missing material stops the task."
       }
     ],
     "done-marker": [
@@ -66,7 +66,7 @@
       },
       {
         "block": "SUBAGENT_DELEGATION_GUIDE",
-        "line": "The prompt you send carries NO `T<n>:` prefix: the researcher prepares material for your task, it does not take one over. You get a small quota of these per run (the limits block below names what is left); past it, do the rest yourself and name what is still missing in your final reply — opened with `Blocked:` where the missing material stops the task."
+        "line": "The prompt you send carries NO `T<n>:` prefix: the researcher prepares material for your task, it does not take one over. You get a small quota of these per run (you are told each turn what is left of it); past it, do the rest yourself and name what is still missing in your final reply — opened with `Blocked:` where the missing material stops the task."
       },
       {
         "block": "SUBAGENT_DELEGATION_GUIDE",

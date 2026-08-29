@@ -8,7 +8,10 @@
 //     system prompt, picked by whether that role may delegate AND whether
 //     nesting is switched on at all;
 //   - the reduced limits block a delegating role is shown in place of the
-//     orchestrator's, and its four figures;
+//     orchestrator's, and its three figures;
+//   - the remaining nested-spawn quota, which is NOT one of them: it counts
+//     down inside the run, so it rides on the last user message instead of the
+//     cached system prompt;
 //   - the accounting: `nestedRuns` / `nestedTokens` on the caller's entry, and
 //     the `⤷ nested:` line they produce on the caller's own completion notice.
 //
@@ -21,7 +24,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import plugin from "../src/index.js"
-import { resetState } from "../src/state.js"
+import { resetState, aborted } from "../src/state.js"
 import { entryForSession, upsertSession, chargeNestedRun } from "../src/registry.js"
 import { resetTurnNotices } from "../src/hooks.js"
 import { _stopWatchdogForTests } from "../src/watchdog.js"
@@ -137,6 +140,19 @@ async function systemPromptFor(hooks, sessionID) {
   return out.system.join("")
 }
 
+// The per-turn text the plugin hangs off the last user message of a session —
+// where the blocks that move inside a run live. The quota line is one of them.
+async function turnNotice(hooks, sessionID, messageID = "msg_user1") {
+  const messages = [
+    { info: { id: messageID, role: "user", sessionID }, parts: [{ type: "text", text: "task" }] },
+  ]
+  await hooks["experimental.chat.messages.transform"]({}, { messages })
+  return messages[0].parts
+    .filter((part) => part.synthetic)
+    .map((part) => part.text)
+    .join("")
+}
+
 // ---- the grant -------------------------------------------------------------
 
 test("mayDelegate is derived from the permission maps and matches the grant", () => {
@@ -199,7 +215,14 @@ test("with maxNestedSpawns: 0 a granted role is told it does not delegate", asyn
   const prompt = await systemPromptFor(hooks, "ses_planner")
   assert.ok(prompt.includes(SUBAGENT_NO_SPAWN_GUIDE))
   assert.ok(!prompt.includes(SUBAGENT_DELEGATION_GUIDE))
-  assert.doesNotMatch(prompt, /Nested spawns left this run/)
+  assert.doesNotMatch(prompt, /nested spawns left this run/i)
+  // And not on the message either: the quota line and the block that explains
+  // it are switched off by the one condition, so a role told it does not
+  // delegate is not handed a count of spawns it cannot make.
+  assert.doesNotMatch(
+    await turnNotice(hooks, "ses_planner"),
+    /nested spawns left this run/i,
+  )
 })
 
 test("the primary gets neither block — both are subagent-only", async () => {
@@ -213,7 +236,7 @@ test("the primary gets neither block — both are subagent-only", async () => {
 
 // ---- the reduced limits block ---------------------------------------------
 
-test("a delegating role's limits block carries its four figures and nothing more", async () => {
+test("a delegating role's limits block carries its three figures and nothing more", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   subagentCaller("ses_planner", "planner")
@@ -233,11 +256,24 @@ test("a delegating role's limits block carries its four figures and nothing more
   // 3. the two package shares the size gate applies to a nested spawn too.
   assert.match(prompt, new RegExp(`at or under ${percent(PACKAGE_WARN_SHARE)}`))
   assert.match(prompt, new RegExp(`over ${percent(PACKAGE_REFUSE_SHARE)} the spawn is REFUSED`))
-  // 4. the quota left this run.
-  assert.match(prompt, /Nested spawns left this run: 2 of 2\. The quota does not reset\./)
+  // And NOT the quota: it is the one figure that moves inside the run, so it is
+  // kept out of the element the provider caches.
+  assert.doesNotMatch(prompt, /nested spawns left this run/i)
   // Nothing from the orchestrator's own block: a subagent can act on none of it.
   assert.doesNotMatch(prompt, /coder \d/, "no full per-type budget table")
   assert.doesNotMatch(prompt, /hideChatter/)
+})
+
+// ---- the quota line: on the message, not in the system prompt --------------
+
+test("the quota line reaches a delegating role on the last user message", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  subagentCaller("ses_planner", "planner")
+
+  const notice = await turnNotice(hooks, "ses_planner")
+  assert.match(notice, /agent-intercom: nested spawns left this run: 2 of 2\./)
+  assert.match(notice, /The quota does not reset\./)
 })
 
 test("the quota figure counts down live within the run", async () => {
@@ -248,13 +284,46 @@ test("the quota figure counts down live within the run", async () => {
   const hooks = await plugin(ctx)
   const callerCtx = subagentCaller("ses_planner", "planner")
 
+  assert.match(await turnNotice(hooks, "ses_planner"), /nested spawns left this run: 2 of 2\./)
+
   const pending = hooks.tool.spawn.execute({ agent: "researcher", prompt: "q" }, callerCtx)
   const childID = await until(() => created[0], "the child session")
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: childID } } })
   await pending
 
-  const prompt = await systemPromptFor(hooks, "ses_planner")
-  assert.match(prompt, /Nested spawns left this run: 1 of 2\./)
+  // Same user message id: the count-down may not be memoised per turn, or a
+  // one-shot subagent — which lives its whole life under one user message —
+  // would keep reading the figure it was given before it spent anything.
+  assert.match(await turnNotice(hooks, "ses_planner"), /nested spawns left this run: 1 of 2\./)
+  // And the system prompt did not move with it — that is the whole point of
+  // where the line now sits.
+  assert.doesNotMatch(await systemPromptFor(hooks, "ses_planner"), /nested spawns left this run/i)
+})
+
+test("a non-delegating role gets no quota line on its message", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  subagentCaller("ses_designer", "designer")
+
+  assert.doesNotMatch(await turnNotice(hooks, "ses_designer"), /nested spawns left this run/i)
+})
+
+test("the primary gets no quota line — the per-run quota is a subagent's", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+
+  assert.doesNotMatch(await turnNotice(hooks, PRIMARY), /nested spawns left this run/i)
+})
+
+test("an aborted delegating subagent is not handed a spawn allowance on the way out", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  subagentCaller("ses_planner", "planner")
+  aborted.add("ses_planner")
+
+  const notice = await turnNotice(hooks, "ses_planner")
+  assert.match(notice, /ABORTED/)
+  assert.doesNotMatch(notice, /nested spawns left this run/i)
 })
 
 test("a non-delegating role gets no limits block at all", async () => {

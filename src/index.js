@@ -73,7 +73,7 @@ import { log } from "./log.js"
 // directly — it must never be re-exported from here.
 
 export default async (ctx) => {
-  const { client, directory, serverUrl } = ctx
+  const { client, directory, worktree, serverUrl } = ctx
   log("agent-intercom initialized")
 
   // The TUI view switch after a handoff posts `/tui/select-session` where the
@@ -92,10 +92,10 @@ export default async (ctx) => {
     // what it displaces is recorded in the override register and reported to
     // the user, and the per-tool-key permission merge is the one field where
     // the plugin's denies survive an override that named no key. `directory`
-    // only lets a finding name the file it came from.
+    // only let findings name the file they came from.
     config: async (config) => {
       try {
-        installAgents(config, { directory })
+        installAgents(config, { directory, worktree })
       } catch (err) {
         log("config hook error", err?.message ?? String(err))
       }

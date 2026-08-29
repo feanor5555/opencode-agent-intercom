@@ -15,7 +15,8 @@
 
 import test, { beforeEach, after } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs"
+import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -35,6 +36,8 @@ writeFileSync(coderFile, "---\nmode: subagent\n---\n\nProject coder.\n")
 // are probed.
 mkdirSync(join(projectDir, ".opencode", "agents"), { recursive: true })
 const plannerFile = join(projectDir, ".opencode", "agents", "planner.md")
+const nestedDir = join(projectDir, "nested")
+mkdirSync(nestedDir)
 writeFileSync(plannerFile, "Project planner.\n")
 
 after(() => {
@@ -112,6 +115,51 @@ test("a prompt-only entry reports `prompt` and names the file it came from", () 
   assert.deepEqual([...finding.fields], ["prompt"], "only what actually differs is named")
   assert.equal(finding.file, coderFile)
   assert.equal(finding.detail, "", "nothing was taken away, so no permission clause")
+})
+
+test("a project temperature stays intact without becoming a plugin override", () => {
+  const temperature = 0.15
+  const config = { agent: { coder: mdAgent({ temperature }) } }
+  installAgents(config, { directory: projectDir })
+  assert.equal(config.agent.coder.temperature, temperature, "the project value is preserved")
+  assert.equal(findingFor("coder"), null, "the plugin does not define temperature")
+})
+
+test("a nested instance finds a project agent at the worktree root", () => {
+  const config = { agent: { coder: mdAgent({ prompt: "Project coder." }) } }
+  installAgents(config, { directory: nestedDir, worktree: projectDir })
+  assert.equal(findingFor("coder")?.file, coderFile)
+})
+
+test("the same collision through nested and root instances logs once", () => {
+  const home = mkdtempSync(join(tmpdir(), "intercom-override-log-"))
+  const detectorUrl = new URL("../src/agents.js", import.meta.url).href
+  const script = `
+    import { installAgents } from ${JSON.stringify(detectorUrl)}
+    const config = { agent: { coder: { permission: {}, prompt: "Project coder." } } }
+    installAgents(config, { directory: ${JSON.stringify(nestedDir)}, worktree: ${JSON.stringify(projectDir)} })
+    installAgents(config, { directory: ${JSON.stringify(projectDir)}, worktree: ${JSON.stringify(projectDir)} })
+  `
+  try {
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: home,
+        XDG_CONFIG_HOME: join(home, "config"),
+        OPENCODE_AGENT_INTERCOM_DEBUG: "1",
+      },
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const logPath = join(home, ".cache", "opencode-agent-intercom", "debug.log")
+    const lines = readFileSync(logPath, "utf8")
+      .split("\n")
+      .filter((line) => line.includes("override: project agent entry"))
+    assert.equal(lines.length, 1, "one collision must produce one log line")
+    assert.ok(lines[0].includes(`"file":${JSON.stringify(coderFile)}`), "the log names the project file")
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
 test("the `agents/` spelling is probed too", () => {

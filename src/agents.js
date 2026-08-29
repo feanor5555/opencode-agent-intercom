@@ -11,8 +11,8 @@
 // already defines — through `.opencode/agent/<name>.md` or an `opencode.json`
 // entry, both of which opencode folds into `config.agent` before this plugin
 // sees it — the project's value wins for `prompt`, `description`, `model`,
-// `mode`, `hidden`, `color` and `temperature`. `permission` is the one
-// exception: it merges per TOOL KEY, so a project map that names no key at all
+// `mode`, `hidden` and `color`. `permission` is the one exception: it merges
+// per TOOL KEY, so a project map that names no key at all
 // (opencode materialises an empty one on every markdown agent, which is
 // indistinguishable from an unset one) cannot silently hand a role back the
 // tools this plugin denies it. Every such collision is recorded in the override
@@ -340,7 +340,6 @@ const OVERRIDABLE_FIELDS = [
   "mode",
   "hidden",
   "color",
-  "temperature",
 ]
 
 // A project `permission` value the per-key merge can read: an object, and not
@@ -363,20 +362,26 @@ function sameValue(a, b) {
   }
 }
 
-// The markdown file a project agent entry could have come from, or null. Four
-// candidates in opencode's own order — the project's `.opencode/agent/` and its
-// `agents/` spelling, then the same two under the global opencode config dir.
+// The markdown file a project agent entry could have come from, or null. Probe
+// the instance directory and (for a nested working directory) its worktree
+// root, each with opencode's `.opencode/agent/` and `agents/` spellings, then
+// the same two under the global opencode config dir.
 // Best-effort by construction: an entry written straight into `opencode.json`
 // has no file, and `null` is the honest answer for it. The resolved agent
 // carries no origin field, so this probe is the only way to name the file at
 // all.
-function locateAgentFile(directory, name) {
+function locateAgentFile(directory, name, worktree) {
   try {
     const candidates = []
-    if (typeof directory === "string" && directory.length > 0) {
+    const roots = []
+    for (const root of [directory, worktree]) {
+      if (typeof root !== "string" || root.length === 0 || root === "/") continue
+      if (!roots.includes(root)) roots.push(root)
+    }
+    for (const root of roots) {
       candidates.push(
-        join(directory, ".opencode", "agent", `${name}.md`),
-        join(directory, ".opencode", "agents", `${name}.md`),
+        join(root, ".opencode", "agent", `${name}.md`),
+        join(root, ".opencode", "agents", `${name}.md`),
       )
     }
     const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config")
@@ -444,10 +449,10 @@ function classifyCollision(base, projectEntry) {
 // A finding with no displaced field is no finding: the entry carries what this
 // plugin would have written anyway (the shape a second run over the merged
 // config produces), and nothing of the role was displaced.
-function reportCollision(name, base, projectEntry, directory) {
+function reportCollision(name, base, projectEntry, directory, worktree) {
   const { fields, keptDenies } = classifyCollision(base, projectEntry)
   if (fields.length === 0) return
-  const file = locateAgentFile(directory, name)
+  const file = locateAgentFile(directory, name, worktree)
   // The generated wording covers the fields; the one thing it cannot say is
   // what the per-key merge held on to, so that clause is added here — and only
   // where the project map took something away, since a map that names no key
@@ -477,14 +482,15 @@ function reportCollision(name, base, projectEntry, directory) {
 // only the one nobody can express.
 //
 // Every collision is recorded in the override register and logged; nothing is
-// refused, removed or rewritten. `directory` is the project directory the
-// plugin was loaded for and is used only to name the file a finding came from.
+// refused, removed or rewritten. `directory` and `worktree` are the instance
+// paths the plugin was loaded for and are used only to name the file a finding
+// came from. The worktree matters when the instance starts in a nested folder.
 //
 // An explicit `default_agent` the project set is respected. `default_agent` is
 // the opencode config key that picks the startup primary (falls back to "build"
 // when unset), and the value that ends up there is captured for
 // defaultAgentName(). Mutates `config` in place.
-export function installAgents(config, { directory } = {}) {
+export function installAgents(config, { directory, worktree } = {}) {
   if (!config || typeof config !== "object") return
   if (!config.agent || typeof config.agent !== "object") config.agent = {}
   for (const [name, def] of Object.entries(AGENTS)) {
@@ -500,7 +506,7 @@ export function installAgents(config, { directory } = {}) {
     // The pre-existing entry IS the collision — opencode folds a markdown agent
     // and an `opencode.json` entry into `config.agent` before this hook runs.
     // Costs a handful of property reads and no request.
-    if (projectEntry) reportCollision(name, base, projectEntry, directory)
+    if (projectEntry) reportCollision(name, base, projectEntry, directory, worktree)
     // Plugin role as base, overlaid by whatever fields the project already set
     // (user wins per top-level key), except `permission`, where the plugin's
     // denies are the base and each tool key the project names wins over them.

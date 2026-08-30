@@ -19,13 +19,13 @@ that opencode upgrades don't shift the system-prompt composition.
   below.
 - `run-all.sh` — runs the 8 single-agent tests, the multi-agent test and the
   endless-mode cycle. Owns the server the first ten use: builds the TUI, starts
-  a fresh `opencode serve` in the configured project (default
+  a fresh `opencode serve` in the configured directory (default
   `/home/user/testopencode`), and stops it again on the way out.
 - `server-lifecycle.sh` — sourced library, not a driver. Holds the four server
   steps `run-all.sh` and `endless-task.sh` share: `e2e_build_tui`,
   `e2e_server_start`, `e2e_server_wait_ready`, `e2e_server_stop`, plus
-  `e2e_plugin_wired`, `e2e_server_alive`, `e2e_server_url` and the subshell
-  guard `e2e_require_caller_shell`. Covered by
+  `e2e_plugin_wired` (global and project wiring alike), `e2e_server_alive`,
+  `e2e_server_url` and the subshell guard `e2e_require_caller_shell`. Covered by
   `test/e2e-server-lifecycle.test.js`, which drives it against a stub server.
 - `golden/` — reference captures from 2026-05-16 (opencode 1.15.0, omnicoder
   Qwen3.5-9B). Diff fresh `out/*.full*.json` against these to detect drift.
@@ -76,18 +76,33 @@ OPENCODE_URL=http://127.0.0.1:4567 \
 it a free one with `RUN_ALL_PORT` or stop the other server. Its own server log,
 pid file and health capture land in `out/00-suite.*`.
 
-**The project the server runs in has to wire the plugin.** opencode loads the
-server half only from the project's own `opencode.json` `plugin` array or a
-drop-in under `.opencode/plugin/`; an unwired project yields a server with no
-`spawn` tool and no diagnostic saying so. `run-all.sh` therefore checks its
-`PROJECT_DIR` — `/home/user/testopencode` by default — before it starts anything, and exits
-`2` with the remedy if the wiring is absent:
+**The plugin has to be wired where the server will read it.** A server that
+loads neither half comes up with no `spawn` tool and no diagnostic saying so, so
+`run-all.sh` checks the wiring before it starts anything and exits `2` with the
+remedy if it finds none. `e2e_plugin_wired` accepts four forms, and one is
+enough:
+
+| scope | form |
+|---|---|
+| global | `plugin` array of `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json` naming the plugin root |
+| global | a drop-in under `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugin/` or `plugins/` |
+| project | `plugin` array of `$PROJECT_DIR/opencode.json` naming the plugin root |
+| project | a drop-in under `$PROJECT_DIR/.opencode/plugin/` or `plugins/` |
 
 ```json
 { "plugin": ["/home/user/opencode-agent-intercom"] }
 ```
 
-`endless-task.sh` makes the same check against `ENDLESS_PROJECT_DIR`.
+On this machine the wiring is global — that entry stands in
+`~/.config/opencode/opencode.json` (and the TUI half's in
+`~/.config/opencode/tui.json`) — so the check passes in any directory, the
+`PROJECT_DIR` default `/home/user/testopencode` included, which carries no
+`opencode.json` of its own. The default is kept for what it still decides: the
+server's working directory and the `?directory=` every session is created with,
+which is what keeps subagent reads on real paths (see "Known caveats").
+
+`endless-task.sh` and `nested-task.sh` make the same check against
+`ENDLESS_PROJECT_DIR` and `NESTED_PROJECT_DIR`.
 
 Settings used for the golden references:
 - `~/.config/opencode/agent-intercom.json` → `maxSubagents: 8, maxContext: 130000`

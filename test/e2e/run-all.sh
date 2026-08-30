@@ -53,11 +53,12 @@ if curl -fsS -m 3 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
   exit 2
 fi
 
-# The server picks this plugin up only from the project it runs in. Checked
-# before anything is started: an unwired project yields a server without the
-# `spawn` tool, and every driver below would fail with nothing saying why.
+# The server picks this plugin up from the global opencode config or from the
+# project it runs in. Checked before anything is started: with neither wired,
+# the server comes up without the `spawn` tool and every driver below would
+# fail with nothing saying why.
 if ! e2e_plugin_wired "$PLUGIN_ROOT" "$PROJECT"; then
-  echo "$PROJECT does not wire $PLUGIN_ROOT — add \"plugin\": [\"$PLUGIN_ROOT\"] to $PROJECT/opencode.json, or drop a loader into $PROJECT/.opencode/plugin/. Point PROJECT_DIR at a project that has one." >&2
+  echo "neither $PROJECT nor ${XDG_CONFIG_HOME:-$HOME/.config}/opencode wires $PLUGIN_ROOT — add \"plugin\": [\"$PLUGIN_ROOT\"] to ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json to wire it for every directory, or to $PROJECT/opencode.json for this project alone, or drop a loader into $PROJECT/.opencode/plugin/. Point PROJECT_DIR at a project that has one." >&2
   exit 2
 fi
 

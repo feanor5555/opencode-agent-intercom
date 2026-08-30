@@ -344,27 +344,72 @@ e2e_build_tui /nonexistent-plugin-root
   rmSync(r.dir, { recursive: true, force: true })
 })
 
-test("e2e_plugin_wired accepts both project-scoped forms and refuses neither", () => {
+// The plugin is wired either into the project the server runs in or into the
+// user's global opencode config, where it is in force in every directory. All
+// four forms count, and only a setup with none of them is unwired. Every case
+// runs under an XDG_CONFIG_HOME of its own, so the machine's real global config
+// decides nothing here.
+test("e2e_plugin_wired accepts the two project-scoped and the two global forms, and refuses none", () => {
   const r = runShell(
     `set -uo pipefail
 . "$LIB"
-mkdir -p "$DIR/bare" "$DIR/json" "$DIR/dropin/.opencode/plugins" "$DIR/other"
+mkdir -p "$DIR/bare" "$DIR/json" "$DIR/jsonc" "$DIR/dropin/.opencode/plugins" "$DIR/other" \
+         "$DIR/cfg-empty/opencode" "$DIR/cfg-json/opencode" "$DIR/cfg-jsonc/opencode" \
+         "$DIR/cfg-dropin/opencode/plugin"
 printf '{"plugin":["/opt/the-plugin"]}\n' > "$DIR/json/opencode.json"
+printf '{"plugin":["/opt/the-plugin"]}\n' > "$DIR/jsonc/opencode.jsonc"
 printf '{"plugin":["/opt/somewhere-else"]}\n' > "$DIR/other/opencode.json"
 : > "$DIR/dropin/.opencode/plugins/loader.js"
-e2e_plugin_wired /opt/the-plugin "$DIR/json"   && echo "JSON=yes"   || echo "JSON=no"
-e2e_plugin_wired /opt/the-plugin "$DIR/dropin" && echo "DROPIN=yes" || echo "DROPIN=no"
-e2e_plugin_wired /opt/the-plugin "$DIR/bare"   && echo "BARE=yes"   || echo "BARE=no"
-e2e_plugin_wired /opt/the-plugin "$DIR/other"  && echo "OTHER=yes"  || echo "OTHER=no"
+printf '{"plugin":["/opt/the-plugin"]}\n' > "$DIR/cfg-json/opencode/opencode.json"
+printf '{"plugin":["/opt/the-plugin"]}\n' > "$DIR/cfg-jsonc/opencode/opencode.jsonc"
+: > "$DIR/cfg-dropin/opencode/plugin/loader.ts"
+
+probe() { # <xdg_config_home> <project_dir> <label>
+  XDG_CONFIG_HOME="$1" e2e_plugin_wired /opt/the-plugin "$2" && echo "$3=yes" || echo "$3=no"
+}
+probe "$DIR/cfg-empty"  "$DIR/json"   PROJECT_JSON
+probe "$DIR/cfg-empty"  "$DIR/jsonc"  PROJECT_JSONC
+probe "$DIR/cfg-empty"  "$DIR/dropin" PROJECT_DROPIN
+probe "$DIR/cfg-json"   "$DIR/bare"   GLOBAL_JSON
+probe "$DIR/cfg-jsonc"  "$DIR/bare"   GLOBAL_JSONC
+probe "$DIR/cfg-dropin" "$DIR/bare"   GLOBAL_DROPIN
+probe "$DIR/cfg-json"   "$DIR/other"  GLOBAL_OVER_OTHER
+probe "$DIR/cfg-empty"  "$DIR/bare"   BARE
+probe "$DIR/cfg-empty"  "$DIR/other"  OTHER
 `,
     { withStub: false },
   )
   assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
-  assert.match(r.stdout, /JSON=yes/)
-  assert.match(r.stdout, /DROPIN=yes/)
+  // Wired: either project-scoped form, either global form, and a project whose
+  // own config names another plugin while the global config names this one.
+  assert.match(r.stdout, /PROJECT_JSON=yes/)
+  assert.match(r.stdout, /PROJECT_JSONC=yes/)
+  assert.match(r.stdout, /PROJECT_DROPIN=yes/)
+  assert.match(r.stdout, /GLOBAL_JSON=yes/)
+  assert.match(r.stdout, /GLOBAL_JSONC=yes/)
+  assert.match(r.stdout, /GLOBAL_DROPIN=yes/)
+  assert.match(r.stdout, /GLOBAL_OVER_OTHER=yes/)
+  // Unwired: nothing anywhere, and a plugin path that matches neither config.
   assert.match(r.stdout, /BARE=no/)
   assert.match(r.stdout, /OTHER=no/)
   rmSync(r.dir, { recursive: true, force: true })
+})
+
+// A genuinely unwired setup must be told about all three remedies, the global
+// one included — the drivers are the only place that message is printed.
+test("every remediation message for an unwired setup names the global config too", () => {
+  const e2e = resolve(import.meta.dirname, "e2e")
+  for (const name of ["run-all.sh", "endless-task.sh", "nested-task.sh"]) {
+    const src = readFileSync(join(e2e, name), "utf8")
+    const message = src
+      .split("\n")
+      .filter((l) => l.includes("$PLUGIN_ROOT") && (l.includes("die ") || l.includes("echo ")))
+      .join("\n")
+    assert.ok(message, `${name} prints no wiring remedy`)
+    assert.match(message, /XDG_CONFIG_HOME:-\$HOME\/\.config\}\/opencode\/opencode\.json/, `${name}: no global remedy`)
+    assert.match(message, /opencode\.json/, `${name}: no project opencode.json remedy`)
+    assert.match(message, /\.opencode\/plugin\//, `${name}: no drop-in remedy`)
+  }
 })
 
 test("the drivers source the library and call it", () => {

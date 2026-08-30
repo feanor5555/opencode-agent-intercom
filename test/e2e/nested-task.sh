@@ -46,8 +46,8 @@
 #   OUT_DIR=/somewhere/kept bash test/e2e/nested-task.sh
 #
 # Parameters (env, all with defaults chosen so one run is quick and cheap):
-#   NESTED_PROJECT_DIR /home/user/testopencode  project whose opencode.json wires
-#                      this plugin by absolute path; the server runs in it and
+#   NESTED_PROJECT_DIR /home/user/testopencode  directory this plugin is wired
+#                      into, globally or by its own opencode.json; the server runs in it and
 #                      every session is created with ?directory= pointing at it.
 #                      Its own name, not PROJECT_DIR, so run-all.sh's value for
 #                      the message-tree drivers cannot redirect this run
@@ -414,7 +414,7 @@ command -v opencode >/dev/null || die "opencode is not on PATH"
 
 PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
 e2e_plugin_wired "$PLUGIN_ROOT" "$PROJECT_DIR" ||
-  die "$PROJECT_DIR wires neither $PLUGIN_ROOT in its opencode.json plugin array nor a drop-in under .opencode/plugin/ — the run would observe a server without this plugin"
+  die "$PLUGIN_ROOT is wired nowhere the server would read it — name it in the plugin array of ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json for every directory, or of $PROJECT_DIR/opencode.json for this project alone, or drop a loader into $PROJECT_DIR/.opencode/plugin/ — as it stands the run would observe a server without this plugin"
 
 if curl -fsS -m 3 "$BASE/global/health" >/dev/null 2>&1; then
   die "something already answers on $BASE — choose another NESTED_PORT"

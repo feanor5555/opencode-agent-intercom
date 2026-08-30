@@ -79,20 +79,32 @@ e2e_require_caller_shell() {
 
 # Usage: e2e_plugin_wired <plugin_root> <project_dir>
 #
-# True when <project_dir> wires <plugin_root> into the server half, in one of
-# the two project-scoped forms opencode accepts: a `plugin` entry naming the
-# path in the project's opencode.json, or a drop-in under .opencode/plugin/ or
-# .opencode/plugins/. A server started in a project that wires neither drops the
-# plugin without a diagnostic, so every driver would then fail on a missing
-# `spawn` tool with nothing saying why.
+# True when a server started in <project_dir> loads <plugin_root> into its
+# server half, in one of the four forms opencode accepts. Project-scoped, in
+# force for that project alone: a `plugin` entry naming the path in
+# <project_dir>/opencode.json or opencode.jsonc, or a drop-in under
+# <project_dir>/.opencode/plugin/ or .opencode/plugins/. Global, in force in
+# every directory including one with no project config at all: the same
+# `plugin` entry in ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json or
+# opencode.jsonc, or a drop-in under that config directory's plugin/ or
+# plugins/. A server started where none of the four holds drops the plugin
+# without a diagnostic, so every driver would then fail on a missing `spawn`
+# tool with nothing saying why.
 e2e_plugin_wired() {
-  local plugin_root="$1" project_dir="$2" f
-  if [ -f "$project_dir/opencode.json" ] && grep -qF "$plugin_root" "$project_dir/opencode.json"; then
-    return 0
-  fi
+  local plugin_root="$1" project_dir="$2" config_home f
+  config_home="${XDG_CONFIG_HOME:-${HOME:-}/.config}/opencode"
+  for f in "$project_dir"/opencode.json{,c} "$config_home"/opencode.json{,c}; do
+    if [ -f "$f" ] && grep -qF "$plugin_root" "$f"; then
+      return 0
+    fi
+  done
   for f in "$project_dir"/.opencode/plugin/*.ts "$project_dir"/.opencode/plugin/*.js \
-           "$project_dir"/.opencode/plugins/*.ts "$project_dir"/.opencode/plugins/*.js; do
-    [ -e "$f" ] && return 0
+           "$project_dir"/.opencode/plugins/*.ts "$project_dir"/.opencode/plugins/*.js \
+           "$config_home"/plugin/*.ts "$config_home"/plugin/*.js \
+           "$config_home"/plugins/*.ts "$config_home"/plugins/*.js; do
+    if [ -e "$f" ]; then
+      return 0
+    fi
   done
   return 1
 }

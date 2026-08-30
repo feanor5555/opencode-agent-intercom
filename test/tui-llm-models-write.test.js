@@ -13,7 +13,9 @@ import { chmodSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  EFFORT_LADDER,
   cycleLlmModel,
+  cycleLlmVariant,
   readLlmModels,
   setLlmModel,
   setLlmModelsPath,
@@ -106,6 +108,7 @@ test("only the pair is stored, not the label the pick list carries", () => {
 
   assert.deepEqual(merged.coder, { providerID: "anthropic", modelID: "opus" })
   assert.equal("label" in merged.coder, false)
+  assert.equal("variant" in merged.coder, false)
   assert.deepEqual(onDisk(), merged)
 })
 
@@ -178,6 +181,7 @@ test("only the pair is stored when the cycle lands on a pick-list entry", () => 
 
   assert.deepEqual(merged.coder, { providerID: "anthropic", modelID: "opus" })
   assert.equal("label" in merged.coder, false)
+  assert.equal("variant" in merged.coder, false)
   assert.deepEqual(onDisk(), merged)
 })
 
@@ -210,4 +214,159 @@ test("dropping an agent that has nothing on disk leaves the file untouched", () 
 
   assert.deepEqual(merged, { reviewer: { providerID: "openai", modelID: "gpt-5" } })
   assert.equal(readFileSync(file, "utf8"), before)
+})
+
+// --- the reasoning effort stored beside the pair -----------------------------
+
+const OPUS = { providerID: "anthropic", modelID: "opus" }
+
+test("the ladder is the one the effort row cycles, default first", () => {
+  assert.deepEqual([...EFFORT_LADDER], ["default", "low", "medium", "high"])
+})
+
+test("an entry without an effort reads exactly as it did before", () => {
+  writeFileSync(file, JSON.stringify({ coder: OPUS }))
+
+  assert.deepEqual(readLlmModels(), { coder: OPUS })
+})
+
+test("a stored effort rides through the read beside its pair", () => {
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "high" } }))
+
+  assert.deepEqual(readLlmModels(), { coder: { ...OPUS, variant: "high" } })
+})
+
+test("a nonsense variant in the file is dropped by the read", () => {
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "ludicrous" } }))
+
+  assert.deepEqual(readLlmModels(), { coder: OPUS })
+})
+
+test("a nonsense variant in the file is dropped by the write that merges over it", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({
+      coder: { ...OPUS, variant: "ludicrous" },
+      reviewer: { providerID: "openai", modelID: "gpt-5", variant: 7 },
+    }),
+  )
+
+  const merged = cycleLlmVariant("coder", 1, OPUS)
+
+  assert.deepEqual(merged, {
+    coder: { ...OPUS, variant: "low" },
+    reviewer: { providerID: "openai", modelID: "gpt-5" },
+  })
+  assert.deepEqual(onDisk(), merged)
+})
+
+test("a variant of \"default\" in the file is dropped: default is the absent key", () => {
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "default" } }))
+
+  assert.deepEqual(readLlmModels(), { coder: OPUS })
+})
+
+test("the effort steps from the value the file holds, not from the panel's copy", () => {
+  // Mount: the panel reads "low" into its signal.
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "low" } }))
+  assert.deepEqual(readLlmModels(), { coder: { ...OPUS, variant: "low" } })
+
+  // Changed outside the panel while the sidebar still shows "low".
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "medium" } }))
+
+  const merged = cycleLlmVariant("coder", 1, OPUS)
+
+  assert.deepEqual(merged, { coder: { ...OPUS, variant: "high" } })
+  assert.deepEqual(onDisk(), merged)
+})
+
+test("stepping past the top of the ladder wraps to default", () => {
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "high" } }))
+
+  const merged = cycleLlmVariant("coder", 1, OPUS)
+
+  assert.deepEqual(merged, { coder: OPUS })
+  assert.equal("variant" in merged.coder, false)
+  assert.deepEqual(onDisk(), merged)
+})
+
+test("landing on default deletes only the variant and keeps the pair", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({
+      coder: { ...OPUS, variant: "low" },
+      reviewer: { providerID: "openai", modelID: "gpt-5", variant: "high" },
+    }),
+  )
+
+  const merged = cycleLlmVariant("coder", -1, OPUS)
+
+  assert.deepEqual(merged, {
+    coder: OPUS,
+    reviewer: { providerID: "openai", modelID: "gpt-5", variant: "high" },
+  })
+  assert.deepEqual(onDisk(), merged)
+})
+
+test("stepping back from default lands on the top of the ladder", () => {
+  writeFileSync(file, JSON.stringify({ coder: OPUS }))
+
+  const merged = cycleLlmVariant("coder", -1, OPUS)
+
+  assert.deepEqual(merged, { coder: { ...OPUS, variant: "high" } })
+  assert.deepEqual(onDisk(), merged)
+})
+
+test("an effort on an agent with no entry materialises the resolved pair", () => {
+  writeFileSync(file, JSON.stringify({ reviewer: { providerID: "openai", modelID: "gpt-5" } }))
+
+  const merged = cycleLlmVariant("coder", 1, OPUS)
+
+  assert.deepEqual(merged, {
+    coder: { ...OPUS, variant: "low" },
+    reviewer: { providerID: "openai", modelID: "gpt-5" },
+  })
+  assert.deepEqual(onDisk(), merged)
+})
+
+test("landing on default for an agent with no entry leaves the file untouched", () => {
+  writeFileSync(file, JSON.stringify({ reviewer: { providerID: "openai", modelID: "gpt-5" } }))
+  const before = readFileSync(file, "utf8")
+
+  // Four steps from "default" come back to it, and the agent has no entry to
+  // strip a key from, so nothing is materialised.
+  const merged = cycleLlmVariant("coder", 4, OPUS)
+
+  assert.equal("coder" in merged, false)
+  assert.equal(readFileSync(file, "utf8"), before)
+})
+
+test("a model cycle after an effort drops the effort with the model it was chosen for", () => {
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "high" } }))
+
+  const merged = cycleLlmModel("coder", 1, CHOICES)
+
+  assert.deepEqual(merged, { coder: { providerID: "anthropic", modelID: "sonnet" } })
+  assert.equal("variant" in merged.coder, false)
+  assert.deepEqual(onDisk(), merged)
+})
+
+test("setting the model directly after an effort drops the effort too", () => {
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "high" } }))
+
+  const merged = setLlmModel("coder", { providerID: "openai", modelID: "gpt-5" })
+
+  assert.deepEqual(merged, { coder: { providerID: "openai", modelID: "gpt-5" } })
+  assert.deepEqual(onDisk(), merged)
+})
+
+test("an effort write that cannot reach the disk leaves the panel on the file's state", { skip: rootSkip }, () => {
+  writeFileSync(file, JSON.stringify({ coder: OPUS }))
+  chmodSync(file, 0o444)
+
+  const merged = cycleLlmVariant("coder", 1, OPUS)
+
+  assert.deepEqual(onDisk(), { coder: OPUS })
+  assert.deepEqual(merged, { coder: OPUS })
+  chmodSync(file, 0o644)
 })

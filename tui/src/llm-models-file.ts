@@ -26,7 +26,26 @@ export interface ModelRef {
   modelID: string;
 }
 
-export type LlmModels = Record<string, ModelRef>;
+// The reasoning-effort values the effort row cycles, in cycle order.
+// "default" means no override: the entry then carries no `variant` and the
+// model's own default effort stands. One ladder for every model — every
+// provider family the plugin maps takes low/medium/high.
+export const EFFORT_LADDER = ["default", "low", "medium", "high"] as const;
+
+export type EffortValue = (typeof EFFORT_LADDER)[number];
+
+// An entry as it stands in the file: the model pair, plus the optional effort
+// override. `variant` is absent for "default".
+export interface ModelEntry extends ModelRef {
+  variant?: string;
+}
+
+export type LlmModels = Record<string, ModelEntry>;
+
+// A stored effort the plugin will act on: a ladder member other than
+// "default", which is stored as the absence of the key.
+const isStoredVariant = (v: unknown): v is EffortValue =>
+  typeof v === "string" && v !== "default" && (EFFORT_LADDER as readonly string[]).includes(v);
 
 export const isModelRef = (v: unknown): v is ModelRef => {
   const r = v as ModelRef | undefined;
@@ -49,11 +68,17 @@ export function setLlmModelsPath(p: string): void {
 }
 
 // Keep only usable pairs, so a hand-edited file cannot put a half-entry on
-// screen that the plugin then ignores. The next write persists the cleanup.
+// screen that the plugin then ignores. An effort rides along only when it is a
+// ladder member the plugin acts on; anything else, and an old file that carries
+// no effort at all, reads as the bare pair. The next write persists the cleanup.
 function filterModels(raw: Record<string, unknown>): LlmModels {
   const out: LlmModels = {};
   for (const [agent, ref] of Object.entries(raw)) {
-    if (isModelRef(ref)) out[agent] = { providerID: ref.providerID, modelID: ref.modelID };
+    if (!isModelRef(ref)) continue;
+    const entry: ModelEntry = { providerID: ref.providerID, modelID: ref.modelID };
+    const variant = (ref as ModelEntry).variant;
+    if (isStoredVariant(variant)) entry.variant = variant;
+    out[agent] = entry;
   }
   return out;
 }
@@ -124,6 +149,32 @@ export function cycleLlmModel(
       return true;
     }
     models[agent] = { providerID: pick.providerID, modelID: pick.modelID };
+    return true;
+  });
+}
+
+// Walks EFFORT_LADDER by one from the position the file holds for that agent at
+// this moment, so an effort set outside the panel is stepped from rather than
+// overwritten. Landing on "default" deletes only the `variant` key and leaves
+// the pair in place; landing anywhere else stores `model` with the new effort,
+// materialising the pair where the agent had no entry — the effort then names
+// the model it was chosen for. Returns the merged state for the signal.
+export function cycleLlmVariant(
+  agent: string,
+  delta: number,
+  model: ModelRef,
+): LlmModels {
+  return applyLlmModels((models) => {
+    const own = models[agent];
+    const at = isStoredVariant(own?.variant) ? EFFORT_LADDER.indexOf(own.variant) : 0;
+    const size = EFFORT_LADDER.length;
+    const variant = EFFORT_LADDER[(at + delta + size) % size];
+    if (variant === "default") {
+      if (own === undefined || own.variant === undefined) return false;
+      delete own.variant;
+      return true;
+    }
+    models[agent] = { providerID: model.providerID, modelID: model.modelID, variant };
     return true;
   });
 }

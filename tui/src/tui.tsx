@@ -26,7 +26,9 @@ import {
 import {
   type LlmModels,
   type ModelRef,
+  EFFORT_LADDER,
   cycleLlmModel,
+  cycleLlmVariant,
   isModelRef,
   readLlmModels,
   sameModel,
@@ -135,9 +137,13 @@ const fitCell = (s: string, w: number): string =>
   ` ${truncate(s, w).padEnd(w)} `;
 
 // One entry of the flat pick list built from `client.config.providers()`:
-// the model reference plus the label the row shows for it.
+// the model reference, the label the row shows for it, and the two
+// capabilities the model row badges — everything else the provider list
+// carries is dropped.
 interface ModelChoice extends ModelRef {
   label: string;
+  vision: boolean;
+  reasoning: boolean;
 }
 
 // Normalise what an agent record carries as its model. The runtime `Agent` type
@@ -150,6 +156,27 @@ function toModelRef(v: unknown): ModelRef | null {
     if (slash > 0 && slash < v.length - 1) {
       return { providerID: v.slice(0, slash), modelID: v.slice(slash + 1) };
     }
+  }
+  return null;
+}
+
+// The reasoning effort opencode resolved for an agent, read out of the
+// provider options it merged for that agent. Every provider family names the
+// key differently, so the first string any of the known names carries wins, in
+// this order. Lowercased, because the ladder the panel shows is lowercase.
+function probeAgentEffort(opts: Record<string, unknown>): string | null {
+  const nested = (key: string): Record<string, unknown> | undefined => {
+    const v = opts[key];
+    return typeof v === "object" && v !== null ? (v as Record<string, unknown>) : undefined;
+  };
+  const candidates: unknown[] = [
+    opts.reasoningEffort,
+    opts.effort,
+    nested("reasoning")?.effort,
+    nested("thinkingConfig")?.thinkingLevel,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.length > 0) return c.toLowerCase();
   }
   return null;
 }
@@ -199,6 +226,54 @@ function resolveLlmModel(
 function formatLlmModel(value: ModelRef | null, choices: ModelChoice[]): string {
   if (value === null) return "not set";
   return choices.find((c) => sameModel(c, value))?.label ?? value.modelID;
+}
+
+// The two capability glyphs of the model row, in the order they are rendered.
+// The letter carries the meaning and the colour only reinforces it, so the row
+// reads correctly with colour off; all four glyphs are ASCII.
+//   V / R  the resolved model is in the pick list and has the capability
+//   -      it is in the pick list and has not
+//   ?      it is not in the pick list, so nothing is known about it
+//   space  there is no resolved model at all
+function modelBadges(
+  value: ModelRef | null,
+  choices: ModelChoice[],
+): { vision: string; reasoning: string } {
+  if (value === null) return { vision: " ", reasoning: " " };
+  const hit = choices.find((c) => sameModel(c, value));
+  if (hit === undefined) return { vision: "?", reasoning: "?" };
+  return { vision: hit.vision ? "V" : "-", reasoning: hit.reasoning ? "R" : "-" };
+}
+
+// What the effort row shows for an agent, and whether its cycler is live.
+// Priority, the one the other rows use:
+//   1. the effort stored for this agent   — shown with ★
+//   2. the effort opencode resolved       — shown without ★
+//   3. "default"
+// The row goes inert where the ladder cannot be offered: a resolved model
+// known to have no reasoning, an unknown model, or none. A stored effort stays
+// visible in the unknown case rather than turning silently into "default".
+function resolveLlmEffort(
+  models: LlmModels,
+  efforts: Record<string, string>,
+  choices: ModelChoice[],
+  agent: string,
+  model: ModelRef | null,
+): { text: string; source: "agent" | "opencode" | null; live: boolean } {
+  const stored = models[agent]?.variant;
+  const hit = model === null ? undefined : choices.find((c) => sameModel(c, model));
+  if (hit === undefined || !hit.reasoning) {
+    if (hit === undefined && stored !== undefined) {
+      return { text: stored, source: "agent", live: false };
+    }
+    return { text: "n/a", source: null, live: false };
+  }
+  if (stored !== undefined) return { text: stored, source: "agent", live: true };
+  const inherited = efforts[agent];
+  if (typeof inherited === "string" && inherited.length > 0) {
+    return { text: inherited, source: "opencode", live: true };
+  }
+  return { text: EFFORT_LADDER[0], source: null, live: true };
 }
 
 // Label for a context ceiling: thousands of tokens, or "off" for the 0 that
@@ -388,6 +463,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // The model side of the same fetch: what opencode resolved as each agent's
   // model, shown when the user has chosen none.
   const [opencodeModels, setOpencodeModels] = createSignal<Record<string, ModelRef>>({});
+  // The effort side of the same fetch: the reasoning effort opencode resolved
+  // per agent, shown on the effort row when the file holds none. Its own signal
+  // rather than a key of OpencodeDefaults, which is typed to numbers.
+  const [opencodeEfforts, setOpencodeEfforts] = createSignal<Record<string, string>>({});
   // The spawnable agents of the same fetch — the plugin's own subagent roles
   // this instance actually resolved, and nothing else: the spawn gate refuses
   // every other name, so a ceiling for one would govern nothing. Empty until
@@ -407,6 +486,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       }>;
       const map: OpencodeDefaults = {};
       const models: Record<string, ModelRef> = {};
+      const efforts: Record<string, string> = {};
       for (const a of list) {
         if (!a || typeof a.name !== "string") continue;
         const resolvedModel = toModelRef(a.model);
@@ -424,11 +504,14 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         pick("min_p", "min_p");
         if (entry.min_p === undefined) pick("min_p", "minP");
         pick("repeat_penalty", "repeat_penalty");
+        const effort = probeAgentEffort(opts);
+        if (effort !== null) efforts[a.name] = effort;
         map[a.name] = entry;
       }
       if (!disposed) {
         setOpencodeDefaults(map);
         setOpencodeModels(models);
+        setOpencodeEfforts(efforts);
         setSubagentNames(spawnableAgentNames(list));
       }
     } catch {
@@ -453,7 +536,15 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       const providers = ((res as { data?: { providers?: unknown[] } })?.data?.providers ??
         []) as Array<{
         id?: string;
-        models?: Record<string, { id?: string; providerID?: string; name?: string }>;
+        models?: Record<
+          string,
+          {
+            id?: string;
+            providerID?: string;
+            name?: string;
+            capabilities?: { reasoning?: boolean; input?: { image?: boolean } };
+          }
+        >;
       }>;
       const list: ModelChoice[] = [];
       for (const p of providers) {
@@ -462,7 +553,15 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
           const modelID = m?.id;
           if (typeof providerID !== "string" || typeof modelID !== "string") continue;
           if (providerID === "" || modelID === "") continue;
-          list.push({ providerID, modelID, label: m?.name || modelID });
+          list.push({
+            providerID,
+            modelID,
+            label: m?.name || modelID,
+            // Strict tests: a provider list without the block reads as "no
+            // capability" rather than as unknown.
+            vision: m?.capabilities?.input?.image === true,
+            reasoning: m?.capabilities?.reasoning === true,
+          });
         }
       }
       list.sort(
@@ -521,6 +620,19 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // overwritten, and the merged result is what the signal shows from here on.
   const cycleModel = (delta: number): void => {
     setLlmModels(cycleLlmModel(currentLlmAgent(), delta, modelChoices()));
+  };
+
+  // Walk the effort ladder by one for the selected agent. The model the effort
+  // was chosen for is written with it, so an agent still on opencode's own
+  // model gains the full entry — and its ★ on the model row — in the same step.
+  // Position and write are one read-modify-write in the store, as on the model
+  // row. Without a resolved model there is nothing to pin the effort to; the
+  // row's buttons are inert in that state anyway.
+  const cycleEffort = (delta: number): void => {
+    const agent = currentLlmAgent();
+    const model = resolveLlmModel(llmModels(), opencodeModels(), agent).value;
+    if (model === null) return;
+    setLlmModels(cycleLlmVariant(agent, delta, model));
   };
 
   const adjustLlmParam = (def: LlmParamDef, delta: number): void => {
@@ -1178,6 +1290,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             opencodeModels={opencodeModels}
             modelChoices={modelChoices}
             onCycleLlmModel={cycleModel}
+            opencodeEfforts={opencodeEfforts}
+            onCycleLlmEffort={cycleEffort}
             llmExpanded={llmExpanded}
             onToggleLlm={toggleLlm}
             llmAgent={currentLlmAgent}
@@ -1279,6 +1393,8 @@ function SubagentPanel(props: {
   opencodeModels: () => Record<string, ModelRef>;
   modelChoices: () => ModelChoice[];
   onCycleLlmModel: (delta: number) => void;
+  opencodeEfforts: () => Record<string, string>;
+  onCycleLlmEffort: (delta: number) => void;
   llmExpanded: () => boolean;
   onToggleLlm: () => void;
   llmAgent: () => string;
@@ -1817,31 +1933,74 @@ function SubagentPanel(props: {
             const resolvedModel = createMemo(() =>
               resolveLlmModel(props.llmModels(), props.opencodeModels(), props.llmAgent()),
             );
+            const badges = createMemo(() =>
+              modelBadges(resolvedModel().value, props.modelChoices()),
+            );
+            const effort = createMemo(() =>
+              resolveLlmEffort(
+                props.llmModels(),
+                props.opencodeEfforts(),
+                props.modelChoices(),
+                props.llmAgent(),
+                resolvedModel().value,
+              ),
+            );
+            const badgeColour = (glyph: string) =>
+              glyph === "V" || glyph === "R" ? props.theme.success : props.theme.textMuted;
             return (
-              <box flexDirection="row">
-                <text fg={props.theme.textMuted}>{rowLabel("model")}</text>
-                <text
-                  fg={props.theme.accent}
-                  {...holdRepeat(() => props.onCycleLlmModel(-1))}
-                >
-                  {"[<]"}
-                </text>
-                <text fg={props.theme.text}>
-                  {fitCell(
-                    formatLlmModel(resolvedModel().value, props.modelChoices()),
-                    MODEL_NAME_W,
-                  )}
-                </text>
-                <text
-                  fg={props.theme.accent}
-                  {...holdRepeat(() => props.onCycleLlmModel(1))}
-                >
-                  {"[>]"}
-                </text>
-                <Show when={resolvedModel().source === "agent"}>
-                  <text fg={props.theme.success}>{" ★"}</text>
-                </Show>
-              </box>
+              <>
+                <box flexDirection="row">
+                  <text fg={props.theme.textMuted}>{rowLabel("model")}</text>
+                  <text
+                    fg={props.theme.accent}
+                    {...holdRepeat(() => props.onCycleLlmModel(-1))}
+                  >
+                    {"[<]"}
+                  </text>
+                  <text fg={props.theme.text}>
+                    {fitCell(
+                      formatLlmModel(resolvedModel().value, props.modelChoices()),
+                      MODEL_NAME_W,
+                    )}
+                  </text>
+                  <text
+                    fg={props.theme.accent}
+                    {...holdRepeat(() => props.onCycleLlmModel(1))}
+                  >
+                    {"[>]"}
+                  </text>
+                  {/* Two columns whether or not the ★ is there, so the badge
+                      cell beside it never shifts sideways. */}
+                  <text fg={props.theme.success}>
+                    {resolvedModel().source === "agent" ? " ★" : "  "}
+                  </text>
+                  {/* Vision and reasoning of the model under the cursor, one
+                      <text> each so the two carry their own colour. */}
+                  <text fg={badgeColour(badges().vision)}>{` ${badges().vision}`}</text>
+                  <text fg={badgeColour(badges().reasoning)}>{badges().reasoning}</text>
+                </box>
+                {/* Reasoning effort for the same agent. Inert — muted buttons,
+                    no handler — where the model cannot take one or is unknown. */}
+                <box flexDirection="row">
+                  <text fg={props.theme.textMuted}>{rowLabel("effort")}</text>
+                  <text
+                    fg={effort().live ? props.theme.accent : props.theme.textMuted}
+                    {...(effort().live ? holdRepeat(() => props.onCycleLlmEffort(-1)) : {})}
+                  >
+                    {"[<]"}
+                  </text>
+                  <text fg={props.theme.text}>{fitCell(effort().text, MODEL_NAME_W)}</text>
+                  <text
+                    fg={effort().live ? props.theme.accent : props.theme.textMuted}
+                    {...(effort().live ? holdRepeat(() => props.onCycleLlmEffort(1)) : {})}
+                  >
+                    {"[>]"}
+                  </text>
+                  <text fg={props.theme.success}>
+                    {effort().source === "agent" ? " ★" : "  "}
+                  </text>
+                </box>
+              </>
             );
           })()}
           <box flexDirection="row">

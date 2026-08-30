@@ -12,15 +12,24 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { chatParamsHook, resolveForAgent, setParamsPath, resetCache } from "../src/llmparams.js"
+import { setModelsPath } from "../src/llmmodel.js"
 
 const dir = mkdtempSync(join(tmpdir(), "llmparams-"))
 const file = join(dir, "llm-params.json")
+// The hook has a second source — the per-agent reasoning effort in
+// llm-models.json (see test/llm-effort-apply.test.js). These cases are about
+// the params file alone, so the reader is pointed at an empty file of our own:
+// without it the tests would read the developer's real ~/.config file and the
+// exact `output.options` assertions below would depend on it.
+const modelsFile = join(dir, "llm-models.json")
+writeFileSync(modelsFile, "{}")
 
 after(() => rmSync(dir, { recursive: true, force: true }))
 
 beforeEach(() => {
   rmSync(file, { force: true })
   setParamsPath(file)
+  setModelsPath(modelsFile)
 })
 
 // Writes the params file and drops the mtime cache, so a rewrite inside the

@@ -499,12 +499,34 @@ exposes every runtime knob:
 - **Per-agent model** — `model [<name>]` cycles the models this opencode
   instance has configured (`/config/providers`, i.e. config + auth +
   `opencode.json` overrides), with a `not set` slot in front of the first
-  entry that hands the agent back to opencode's own model. Writes
-  `~/.config/opencode/llm-models.json` as
-  `{"<agent>": {"providerID": "…", "modelID": "…"}}`; the `chat.message` hook
-  applies it by setting `output.message.model`. Its own file, because the
-  sampling params file is a number-valued map whose unknown keys are
-  forwarded to the provider.
+  entry that hands the agent back to opencode's own model. Two ASCII
+  capability columns follow the `★` slot: `V` for vision
+  (`capabilities.input.image`) and `R` for reasoning
+  (`capabilities.reasoning`), `-` when the model is on the pick list but
+  lacks the capability, `?` when it is not in the pick list, and a blank
+  when nothing is resolved. Writes `~/.config/opencode/llm-models.json` as
+  `{"<agent>": {"providerID": "…", "modelID": "…", "variant": "…"}}` (the
+  `variant` key is optional and absent for the plain pair); the
+  `chat.message` hook applies it by setting `output.message.model`. Its
+  own file, because the sampling params file is a number-valued map whose
+  unknown keys are forwarded to the provider.
+  An `effort [<value>]` row sits directly under the model row and sets
+  the reasoning effort for that agent over a fixed ladder
+  `default → low → medium → high`. `default` is the absence of a stored
+  value; `low`/`medium`/`high` write the entry's optional `variant` key.
+  The row is inert and muted where the resolved model has no reasoning
+  capability, where the model is not on the pick list, or where no model
+  is resolved. Setting an effort pins the model at the same time
+  (`{providerID, modelID, variant}`); changing the model clears the
+  effort. The effort is applied per request through the `chat.params`
+  hook, which translates the value into the provider family's own option
+  key — `reasoningEffort` for `@ai-sdk/openai` / `@ai-sdk/openai-compatible`
+  / `@ai-sdk/azure` / `@ai-sdk/xai`; `effort` for `@ai-sdk/anthropic` /
+  `@ai-sdk/google-vertex-anthropic`; `thinkingConfig.thinkingLevel`
+  (with `includeThoughts: true`) for `@ai-sdk/google` /
+  `@ai-sdk/google-vertex`; `reasoning.effort` for
+  `@openrouter/ai-sdk-provider`; nothing for any other family. Keys
+  already set in `llm-params.json` win over the ladder.
   The choice is applied by two hooks that share the same stored pair. The
   `config` hook writes it into `config.agent[<name>].model` (the
   `providerID/modelID` form opencode resolves an agent's model from), so

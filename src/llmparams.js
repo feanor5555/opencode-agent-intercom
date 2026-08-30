@@ -10,11 +10,20 @@
 // role definitions in src/agents.js set no sampling parameters), the request
 // carries no such field at all rather than a 0 or a null. No global fallback —
 // each agent is configured individually.
+//
+// The hook carries a second, smaller source: the reasoning effort stored per
+// agent in ~/.config/opencode/llm-models.json beside the model choice. It is
+// translated for the model's provider family (src/reasoningeffort.js) and
+// merged into `output.options` after the params file, which wins on a shared
+// key. `chat.params` is the only hook that can carry it — neither a user
+// message nor an agent config field has a place for a variant.
 
 import { readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { log, errMsg } from "./log.js"
+import { resolveEffortForAgent } from "./llmmodel.js"
+import { effortOptions } from "./reasoningeffort.js"
 
 let paramsFile = join(homedir(), ".config", "opencode", "llm-params.json")
 
@@ -65,11 +74,30 @@ export function resolveForAgent(agent) {
   return { ...role }
 }
 
+// Creates `output.options` on first use — opencode hands the hook an output
+// whose `options` is undefined until someone assigns it.
+function optionsOf(output) {
+  if (!output.options || typeof output.options !== "object") output.options = {}
+  return output.options
+}
+
 // The hook itself. opencode calls it with input.{sessionID, agent, model, ...}
 // and a mutable output.{temperature, topP, topK, maxOutputTokens, options}.
+//
+// Two sources feed it, in this order: the params file, then the reasoning
+// effort stored in llm-models.json. The params file wins on any key both would
+// write — it is the hand-edit escape hatch and has to stay able to override the
+// ladder.
 export function chatParamsHook(input, output) {
+  if (!output || typeof output !== "object") return
+  applyParamsFile(input, output)
+  applyEffort(input, output)
+}
+
+// The params file half: each key of `file[agent]` onto the field opencode
+// models it as, or into `output.options` where it models none.
+function applyParamsFile(input, output) {
   const resolved = resolveForAgent(input?.agent)
-  if (!resolved || Object.keys(resolved).length === 0) return
   for (const [key, value] of Object.entries(resolved)) {
     if (value === undefined || value === null) continue
     const topField = TOP_LEVEL_KEYS[key]
@@ -78,14 +106,27 @@ export function chatParamsHook(input, output) {
       continue
     }
     if (OPTION_KEYS.has(key)) {
-      if (!output.options || typeof output.options !== "object") output.options = {}
-      output.options[key] = value
+      optionsOf(output)[key] = value
       continue
     }
     // Unknown key — let it through via options so an advanced user can pass
     // arbitrary llama.cpp fields by editing the file directly.
-    if (!output.options || typeof output.options !== "object") output.options = {}
-    output.options[key] = value
+    optionsOf(output)[key] = value
+  }
+}
+
+// The reasoning-effort half: the agent's stored effort, translated for the
+// provider family of the model this request runs on, merged key by key into
+// `output.options`. A key already standing there — set by the params file
+// above, or by opencode itself — is left as it is, and where the effort
+// resolves to nothing at all `output.options` is not even created.
+function applyEffort(input, output) {
+  const patch = effortOptions(resolveEffortForAgent(input?.agent), input?.model)
+  if (!patch) return
+  const options = optionsOf(output)
+  for (const [key, value] of Object.entries(patch)) {
+    if (Object.hasOwn(options, key)) continue
+    options[key] = value
   }
 }
 

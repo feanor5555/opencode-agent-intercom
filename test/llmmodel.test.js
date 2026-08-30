@@ -16,6 +16,7 @@ import {
   chatMessageHook,
   applyModelChoices,
   resolveModelForAgent,
+  resolveEffortForAgent,
   setModelsPath,
   resetCache,
 } from "../src/llmmodel.js"
@@ -342,4 +343,77 @@ test("a malformed displaced value is not put back as a half pair", () => {
   const output = outputWithModel("coder", "openai", "gpt-5")
   chatMessageHook({ agent: "coder" }, output)
   assert.deepEqual(output.message.model, { providerID: "openai", modelID: "gpt-5" })
+})
+
+// --- the reasoning effort stored beside the pair --------------------------
+//
+// An entry may carry one optional key, `variant`, holding the reasoning effort
+// the TUI's effort row set. Neither hook above may notice it: it travels
+// through `chat.params` instead. What matters here is that the pair comes out
+// of the same entry untouched, and that only the three ladder values are ever
+// handed on — a hand-edited file must not be able to name a fourth.
+
+test("the pair is returned unchanged when a variant sits beside it", () => {
+  writeModels({ coder: { providerID: "anthropic", modelID: "claude-sonnet-4-5", variant: "high" } })
+  assert.deepEqual(resolveModelForAgent("coder"), {
+    providerID: "anthropic",
+    modelID: "claude-sonnet-4-5",
+  })
+  const output = freshOutput("coder")
+  chatMessageHook({ agent: "coder" }, output)
+  assert.deepEqual(output.message.model, {
+    providerID: "anthropic",
+    modelID: "claude-sonnet-4-5",
+  })
+})
+
+test("a variant does not reach config.agent[name].model either", () => {
+  writeModels({ coder: { providerID: "anthropic", modelID: "claude-sonnet-4-5", variant: "low" } })
+  const config = freshConfig()
+  applyModelChoices(config)
+  assert.equal(config.agent.coder.model, "anthropic/claude-sonnet-4-5")
+  assert.deepEqual(Object.keys(config.agent.coder).sort(), ["model", "permission", "prompt"])
+})
+
+test("each ladder value is read back as it stands", () => {
+  for (const variant of ["low", "medium", "high"]) {
+    writeModels({ coder: { providerID: "anthropic", modelID: "claude-x", variant } })
+    assert.equal(resolveEffortForAgent("coder"), variant)
+  }
+})
+
+test("an entry without a variant has no effort", () => {
+  writeModels({ coder: { providerID: "anthropic", modelID: "claude-x" } })
+  assert.equal(resolveEffortForAgent("coder"), null)
+})
+
+test("a variant outside the ladder is not handed on", () => {
+  // `default` is stored as the absence of the key; anything else is a
+  // hand-edit and reads as no effort at all.
+  for (const variant of ["default", "ultra", "", "HIGH", " high", 3, null, {}, ["high"]]) {
+    writeModels({ coder: { providerID: "anthropic", modelID: "claude-x", variant } })
+    assert.equal(resolveEffortForAgent("coder"), null, `variant ${JSON.stringify(variant)}`)
+  }
+})
+
+test("the effort is resolved per agent, with no file and no entry reading as none", () => {
+  assert.equal(resolveEffortForAgent("coder"), null) // no file at all
+  writeModels({ planner: { providerID: "anthropic", modelID: "claude-x", variant: "high" } })
+  assert.equal(resolveEffortForAgent("coder"), null)
+  assert.equal(resolveEffortForAgent("planner"), "high")
+  assert.equal(resolveEffortForAgent(""), null)
+  assert.equal(resolveEffortForAgent(undefined), null)
+})
+
+test("a non-object entry has no effort rather than throwing", () => {
+  writeModels({ coder: "anthropic/claude-x", planner: 5, reviewer: null })
+  for (const agent of ["coder", "planner", "reviewer", "constructor", "__proto__"]) {
+    assert.equal(resolveEffortForAgent(agent), null, agent)
+  }
+})
+
+test("an unparseable models file yields no effort", () => {
+  writeFileSync(file, "{ not json")
+  resetCache()
+  assert.equal(resolveEffortForAgent("coder"), null)
 })

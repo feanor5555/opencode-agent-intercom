@@ -25,6 +25,12 @@
 // cannot be reconstructed and removing the choice takes effect at the next
 // opencode start.
 //
+// An entry may carry one optional key beside the pair, `variant`: the reasoning
+// effort for that agent. Neither hook here applies it — no message and no
+// agent config field can hold one — it is read by `resolveEffortForAgent` and
+// applied per request by `chatParamsHook` (src/llmparams.js) through
+// `output.options`.
+//
 // This is deliberately a separate file from llm-params.json: that one is typed
 // `Record<agent, Record<key, number>>` and `chatParamsHook` forwards every key
 // it does not recognise into `output.options`, which goes straight into the
@@ -80,6 +86,27 @@ export function resolveModelForAgent(agent) {
   const { providerID, modelID } = entry
   if (!nonEmptyString(providerID) || !nonEmptyString(modelID)) return null
   return { providerID, modelID }
+}
+
+// The reasoning-effort ladder steps that mean an override. `default` is stored
+// as the absence of a `variant` key, so it is not a member here.
+const EFFORT_VALUES = new Set(["low", "medium", "high"])
+
+// For an agent name, return the reasoning effort stored beside its model pair
+// — `"low"`, `"medium"` or `"high"` — or null where the entry carries no
+// `variant`, or one outside that set. The closed set is what keeps a
+// hand-edited file from putting an arbitrary string into a provider request:
+// `chatParamsHook` merges the result through `src/reasoningeffort.js`, which
+// only knows these three.
+//
+// Independent of the model pair: an entry whose pair is unusable can still
+// carry an effort, and it then applies to whatever model opencode resolved.
+export function resolveEffortForAgent(agent) {
+  if (!nonEmptyString(agent)) return null
+  const entry = readModels()[agent]
+  if (!entry || typeof entry !== "object") return null
+  const { variant } = entry
+  return typeof variant === "string" && EFFORT_VALUES.has(variant) ? variant : null
 }
 
 // Splits the `providerID/modelID` string form `config.agent[<name>].model`

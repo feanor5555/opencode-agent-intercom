@@ -199,13 +199,14 @@ export const endlessCooldowns = new Map()
 export const endlessPauses = new Map()
 
 // Cross-cycle progress bookkeeping for the no-progress bound. NOT keyed by
-// session id: each cycle replaces the primary, so the count has to survive the
-// replacement to be comparable at all. `lastOpenTasks` is the open-task count
-// the cycle FOUND in the todo file, before it wrote its own points (null
-// before the first cycle), `stalledCycles` counts consecutive cycles whose
-// count did not fall. Wrapped in an object for the same reason as
-// pendingSpawns (resetState reassigns the fields, importers share the one live
-// reference).
+// session id: each cycle replaces the primary, so the record has to survive the
+// replacement to be comparable at all. `lastOpenTitles` is the array of
+// normalised open-task titles the cycle LEFT in the todo file, after it wrote
+// its own points (null before the first cycle), `stalledCycles` counts
+// consecutive cycles from which not one of those titles had disappeared by the
+// time the next cycle read the file. Wrapped in an object for the same reason
+// as pendingSpawns (resetState reassigns the fields, importers share the one
+// live reference).
 //
 // The record is PROCESS-GLOBAL, not per orchestrator chain: two orchestrators
 // running endless cycles in one process interleave their counts into one
@@ -214,7 +215,7 @@ export const endlessPauses = new Map()
 // every primary turn that observes the mode switched off — so re-arming the
 // mode always starts from a fresh streak rather than inheriting the one that
 // switched it off.
-export const endlessProgress = { lastOpenTasks: null, stalledCycles: 0 }
+export const endlessProgress = { lastOpenTitles: null, stalledCycles: 0 }
 
 // childSessionID -> waiter record { childSessionID, parentSessionID, promise,
 //                                   createdAt, settled, timer, settle }.
@@ -323,6 +324,6 @@ export function resetState() {
   endlessInProgress.clear()
   endlessCooldowns.clear()
   endlessPauses.clear()
-  endlessProgress.lastOpenTasks = null
+  endlessProgress.lastOpenTitles = null
   endlessProgress.stalledCycles = 0
 }

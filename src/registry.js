@@ -1547,28 +1547,32 @@ export function isQuiesced(sessionID) {
   )
 }
 
-// Records the open-task count a cycle FOUND in the todo file — the file as the
-// previous cycle's orchestrator left it, before this cycle wrote its own
-// points into it — and reports how many consecutive cycles have failed to
-// lower it. A count that fell resets the streak; a count equal to or above the
-// previous one raises it. The first cycle of a process has nothing to compare
-// against and never counts as stalled. The no-progress bound switches endless
-// mode off at 2.
+// The cross-cycle progress record, as a set difference over normalised task
+// titles. `openTitlesFound` is what this cycle read from the todo file BEFORE
+// its own write, `openTitlesLeft` what stands in it AFTER — the list the next
+// cycle will be measured against.
 //
-// It has to be the count BEFORE the write: the count after it includes the
-// points this cycle just saved and is taken before the new orchestrator has
-// done anything, so a productive loop that finishes what it inherited and
-// saves a comparable number of fresh points would show a flat count and stop
-// itself at the third cycle.
-export function recordEndlessCycle(openTasks) {
-  const previous = endlessProgress.lastOpenTasks
-  if (typeof previous === "number" && openTasks >= previous) {
-    endlessProgress.stalledCycles += 1
-  } else {
-    endlessProgress.stalledCycles = 0
+// A cycle is stalled when not one of the titles the previous cycle handed over
+// has left the file: `completed` counts the handed-over titles that are gone,
+// and any of them being gone resets the streak. What the cycle ADDED does not
+// enter the verdict — a cycle that finished one task and discovered five is
+// progress, a cycle that finished nothing is a stall whatever it saved. Titles
+// rather than ids because `nextFreeIdFrom` (src/todofile.js) reuses the id of a
+// removed task, so an id-keyed measure would read a completed-then-reused id as
+// still open. The first cycle of a process has nothing to compare against and
+// never counts as stalled; `completed` is null for it. The no-progress bound
+// pauses the mode at 2.
+export function recordEndlessCycle(openTitlesFound, openTitlesLeft) {
+  const previous = endlessProgress.lastOpenTitles
+  let completed = null
+  if (Array.isArray(previous)) {
+    const found = new Set(openTitlesFound || [])
+    completed = previous.filter((title) => !found.has(title)).length
+    if (completed > 0) endlessProgress.stalledCycles = 0
+    else endlessProgress.stalledCycles += 1
   }
-  endlessProgress.lastOpenTasks = openTasks
-  return { stalledCycles: endlessProgress.stalledCycles, previousOpenTasks: previous }
+  endlessProgress.lastOpenTitles = Array.isArray(openTitlesLeft) ? [...openTitlesLeft] : null
+  return { stalledCycles: endlessProgress.stalledCycles, completed }
 }
 
 // Clears the cross-cycle progress record. Called on every primary turn that
@@ -1580,7 +1584,7 @@ export function recordEndlessCycle(openTasks) {
 // saying why. The record is process-global, so any primary observing the mode
 // off clears it.
 export function resetEndlessProgress() {
-  endlessProgress.lastOpenTasks = null
+  endlessProgress.lastOpenTitles = null
   endlessProgress.stalledCycles = 0
 }
 

@@ -461,9 +461,15 @@ its per-turn limits block. Only the sidebar's toggle writes `endlessMode`.
    session". A restart into an empty todo
    file would produce a session with nothing to do, which would idle, be woken by nothing, and
    sit at the start of a fresh context forever.
-2. **No progress.** The plugin records the open-task count at the end of each cycle. If two
-   consecutive cycles end with a count that has not fallen, endless mode pauses itself with a
-   warning toast naming the count. This bound fires AFTER the replacement, so the pause goes
+2. **No progress.** The plugin records, at the end of each cycle, the set of normalised open
+   task titles the cycle LEFT in the todo file, and compares it against the set the next cycle
+   FINDS there before its own write. A cycle counts as stalled only when not one of the titles
+   the previous cycle handed over has left the file; what the cycle added does not enter the
+   verdict, so a cycle that finished one task and discovered five is progress and a cycle that
+   finished nothing is a stall whatever it saved. Titles rather than ids, because
+   `nextFreeIdFrom` (`src/todofile.js`) reuses the id of a removed task. If two consecutive
+   cycles are stalled, endless mode pauses itself with a warning toast naming the open-task
+   count. This bound fires AFTER the replacement, so the pause goes
    on the NEW primary — pausing the session just retired would bound nothing. This is the bound against the failure the whole
    mode invites: an orchestrator that saves the same points every 250 000 tokens and never
    finishes one.
@@ -538,12 +544,15 @@ One line per cycle transition, on the existing `log` helper (`src/log.js`):
 endless: scheduled sessionID=<id> ctx=<n> threshold=<n>
 endless: quiesced after <ms>ms, activeAtStart=<n>
 endless: saved <n> point(s) as T<a>,T<b>,… confirmed=<n> file=<name>
-endless: cycle <k>/<max> complete, new session <id>, open tasks <before>→<after>
+endless: cycle <k>/<max> complete, new session <id>, open tasks <before>→<after> completed=<n>
 endless: abandoned at <stage> — <reason>
 ```
 
-The `open tasks <before>→<after>` field is what §3.6's no-progress bound reads, so the bound
-is a property of every run rather than of someone remembering to look.
+The `completed=<n>` field is what §3.6's no-progress bound reads — the number of the previous
+cycle's open tasks that had left the file by the time this cycle read it, `-` on the first
+cycle of a run, which has nothing to compare against. `open tasks <before>→<after>` carries the
+counts alongside it. The bound is a property of every run rather than of someone remembering to
+look.
 
 ## 4. The restart: how the session is replaced and the view follows
 

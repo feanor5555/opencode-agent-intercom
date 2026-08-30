@@ -139,7 +139,7 @@ function makeCycle({ directory, overrides = {} } = {}) {
     cycleNumber: 1,
     maxCycles: 10,
     pause: (id, reason) => pauseEndless(id, reason),
-    recordCycle: (n) => recordEndlessCycle(n),
+    recordCycle: (found, left) => recordEndlessCycle(found, left),
     toast: (t) => state.toasts.push(t),
     quiesceTimeoutMs: 600_000,
     pollMs: 500,
@@ -191,10 +191,11 @@ test("nothing left to do pauses and leaves the settings file untouched", async (
 test("the no-progress bound pauses the NEW primary and leaves the settings file untouched", async () => {
   const fixture = settingsFixture()
   const dir = tempProject({ "TODO.md": "- T1: still open\n" })
-  // The streak the bound reads: two earlier cycles that already found the same
-  // one open task, so the cycle below is the second consecutive stall.
-  recordEndlessCycle(1)
-  recordEndlessCycle(1)
+  // The streak the bound reads: an earlier cycle that left `still open` behind
+  // and a second that still found it there, so the cycle below is the second
+  // consecutive one from which no inherited task has disappeared.
+  recordEndlessCycle([], ["still open"])
+  recordEndlessCycle(["still open"], ["still open"])
   const { io, state } = makeCycle({ directory: dir })
 
   const res = await runEndlessCycle(io)
@@ -214,6 +215,61 @@ test("the no-progress bound pauses the NEW primary and leaves the settings file 
     0,
     "the streak that ended this run is not inherited by the next one",
   )
+})
+
+// ---------------------------------------------------------------------------
+// What the no-progress bound measures: the tasks that LEFT the file, not the
+// count standing in it. The two cases the old count-based measure conflated.
+// ---------------------------------------------------------------------------
+
+test("a cycle that adds no new point but completed an inherited task clears the streak", async () => {
+  // The file was left with two tasks; one of them is gone by the time this
+  // cycle reads it. The open-points reply restates the survivor word for word,
+  // so the cycle saves NOTHING — the shape the kickoff makes likely, and the
+  // shape the old measure read as a stall.
+  const dir = tempProject({ "TODO.md": "- T7: Finish the migration script\n" })
+  recordEndlessCycle([], ["write the rollback procedure", "finish the migration script"])
+  recordEndlessCycle(
+    ["write the rollback procedure", "finish the migration script"],
+    ["write the rollback procedure", "finish the migration script"],
+  )
+  assert.equal(endlessProgress.stalledCycles, 1, "one stall already stands on the record")
+
+  const { io, state } = makeCycle({ directory: dir })
+  const res = await runEndlessCycle(io)
+
+  assert.equal(res.outcome, "complete")
+  assert.deepEqual(res.ids, [], "every point deduped against a task already in the file")
+  assert.equal(res.openBefore, 1)
+  assert.equal(res.openAfter, 1)
+  assert.equal(res.stalledCycles, 0, "one inherited task left the file: that is progress")
+  assert.equal(state.handoffCalls.length, 1, "the primary is replaced either way")
+  assert.deepEqual(state.toasts, [], "no stop, so no toast")
+  assert.equal(isEndlessPaused(NEW_SID), false)
+  assert.deepEqual(endlessProgress.lastOpenTitles, ["finish the migration script"])
+})
+
+test("a cycle from which no inherited task left is stalled however many points it saved", async () => {
+  // Nothing was completed — the inherited task is still there — but the cycle
+  // saves a fresh point on top. The count would read 1 -> 2 and look like
+  // movement; the set difference is empty, so it is the second stall and the
+  // bound fires on the NEW primary.
+  const dir = tempProject({ "TODO.md": "- T1: still open\n" })
+  recordEndlessCycle([], ["still open"])
+  recordEndlessCycle(["still open"], ["still open"])
+
+  const { io, state } = makeCycle({ directory: dir })
+  const res = await runEndlessCycle(io)
+
+  assert.equal(res.outcome, "complete")
+  assert.equal(res.ids.length, 1, "the cycle did save a point")
+  assert.equal(res.openBefore, 1)
+  assert.equal(res.openAfter, 2)
+  assert.equal(res.stalledCycles, ENDLESS_MAX_STALLED_CYCLES)
+  assert.equal(state.handoffCalls.length, 1)
+  assert.equal(isEndlessPaused(NEW_SID), true, "the pause goes on the session that inherited the loop")
+  assert.equal(isEndlessPaused(SID), false)
+  assert.match(endlessPauseReason(NEW_SID), /no task completed over 2 cycles at 1 open task\(s\)/)
 })
 
 test("an abandoned cycle neither writes nor pauses — it arms the cooldown", async () => {
@@ -302,15 +358,15 @@ test("the pause dies with the primary a handoff retired", () => {
 })
 
 test("a pause resets the cross-cycle progress record", () => {
-  recordEndlessCycle(4)
-  recordEndlessCycle(4)
+  recordEndlessCycle([], ["still open"])
+  recordEndlessCycle(["still open"], ["still open"])
   assert.equal(endlessProgress.stalledCycles, 1)
 
   pauseEndless(SID, "cycle ceiling reached (10/10) — paused for this session")
 
   assert.equal(endlessProgress.stalledCycles, 0)
   assert.equal(
-    endlessProgress.lastOpenTasks,
+    endlessProgress.lastOpenTitles,
     null,
     "the record measures one run of the mode, and this run has stopped",
   )

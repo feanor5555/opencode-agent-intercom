@@ -259,33 +259,59 @@ test("ENDLESS_COOLDOWN_MS is the five minutes the bound names", () => {
 // ---------------------------------------------------------------------------
 
 test("recordEndlessCycle: the first cycle has nothing to compare against", () => {
-  assert.deepEqual(recordEndlessCycle(5), { stalledCycles: 0, previousOpenTasks: null })
+  assert.deepEqual(recordEndlessCycle(["a"], ["a", "b"]), { stalledCycles: 0, completed: null })
+  assert.deepEqual(endlessProgress.lastOpenTitles, ["a", "b"])
 })
 
-test("recordEndlessCycle: a count that does not fall raises the streak, a falling one resets it", () => {
-  recordEndlessCycle(5)
-  assert.equal(recordEndlessCycle(5).stalledCycles, 1)
-  assert.equal(recordEndlessCycle(6).stalledCycles, 2, "a rising count is no progress either")
-  assert.equal(recordEndlessCycle(4).stalledCycles, 0)
-  assert.equal(endlessProgress.lastOpenTasks, 4)
+test("recordEndlessCycle: a cycle that completed one inherited task clears the streak", () => {
+  // Cycle 1 leaves a, b behind. Cycle 2 finds only b: `a` was finished.
+  recordEndlessCycle([], ["a", "b"])
+  assert.deepEqual(recordEndlessCycle(["b"], ["b"]), { stalledCycles: 0, completed: 1 })
+})
+
+test("recordEndlessCycle: a cycle in which no inherited task left the file is stalled", () => {
+  recordEndlessCycle([], ["a", "b"])
+  assert.deepEqual(recordEndlessCycle(["a", "b"], ["a", "b"]), { stalledCycles: 1, completed: 0 })
+  assert.equal(
+    recordEndlessCycle(["a", "b"], ["a", "b"]).stalledCycles,
+    2,
+    "the streak reaches the bound at the FIRST repetition of an unchanged set",
+  )
+})
+
+test("recordEndlessCycle: a productive cycle that adds nothing is not stalled", () => {
+  // The healthy loop the old count-based measure read as stalled: five open,
+  // two finished, two fresh points saved — the count is flat at five, but two
+  // of the inherited titles are gone.
+  recordEndlessCycle([], ["t1", "t2", "t3", "t4", "t5"])
+  const res = recordEndlessCycle(["t3", "t4", "t5"], ["t3", "t4", "t5", "t6", "t7"])
+  assert.deepEqual(res, { stalledCycles: 0, completed: 2 })
+})
+
+test("recordEndlessCycle: a cycle that finished nothing is stalled however much it added", () => {
+  recordEndlessCycle([], ["t1", "t2"])
+  assert.deepEqual(recordEndlessCycle(["t1", "t2"], ["t1", "t2", "t3", "t4", "t5"]), {
+    stalledCycles: 1,
+    completed: 0,
+  })
 })
 
 test("resetEndlessProgress clears the streak, so re-arming the mode starts from scratch", () => {
-  recordEndlessCycle(5)
-  assert.equal(recordEndlessCycle(5).stalledCycles, 1)
+  recordEndlessCycle([], ["a"])
+  assert.equal(recordEndlessCycle(["a"], ["a"]).stalledCycles, 1)
   resetEndlessProgress()
-  assert.equal(endlessProgress.lastOpenTasks, null)
+  assert.equal(endlessProgress.lastOpenTitles, null)
   assert.equal(endlessProgress.stalledCycles, 0)
   assert.deepEqual(
-    recordEndlessCycle(5),
-    { stalledCycles: 0, previousOpenTasks: null },
+    recordEndlessCycle(["a"], ["a"]),
+    { stalledCycles: 0, completed: null },
     "the cycle after a re-arm has nothing to compare against, as the first one had",
   )
 })
 
 test("recordEndlessCycle: the progress record survives forgetPrimary (each cycle replaces the primary)", () => {
-  recordEndlessCycle(7)
+  recordEndlessCycle([], ["a", "b"])
   forgetPrimary(SID)
-  assert.equal(endlessProgress.lastOpenTasks, 7)
-  assert.equal(recordEndlessCycle(7).stalledCycles, 1)
+  assert.deepEqual(endlessProgress.lastOpenTitles, ["a", "b"])
+  assert.equal(recordEndlessCycle(["a", "b"], ["a", "b"]).stalledCycles, 1)
 })

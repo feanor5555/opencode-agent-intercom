@@ -115,9 +115,9 @@ function makeCycle({ directory, overrides = {} } = {}) {
       state.paused.push({ id, reason })
       return true
     },
-    recordCycle: (n) => {
-      state.recorded.push(n)
-      return { stalledCycles: 0 }
+    recordCycle: (found, left) => {
+      state.recorded.push({ found, left })
+      return { stalledCycles: 0, completed: null }
     },
     toast: (t) => state.toasts.push(t),
     quiesceTimeoutMs: 600_000,
@@ -463,14 +463,14 @@ test("an empty point list with open tasks left still replaces the session", asyn
   assert.equal(state.handoffCalls.length, 1)
 })
 
-test("no progress: two consecutive cycles with a non-falling count pause the NEW primary", async () => {
+test("no progress: two consecutive cycles in which nothing was completed pause the NEW primary", async () => {
   const dir = tempProject()
   const { io, state } = makeCycle({
     directory: dir,
     overrides: {
-      recordCycle: (n) => {
-        state.recorded.push(n)
-        return { stalledCycles: ENDLESS_MAX_STALLED_CYCLES }
+      recordCycle: (found, left) => {
+        state.recorded.push({ found, left })
+        return { stalledCycles: ENDLESS_MAX_STALLED_CYCLES, completed: 0 }
       },
     },
   })
@@ -487,24 +487,34 @@ test("no progress: two consecutive cycles with a non-falling count pause the NEW
   assert.equal(res.pausedSessionID, "ses-new-1")
   assert.deepEqual(
     state.recorded,
-    [0],
-    "the bound reads the count the cycle FOUND (0 here), not the one its own write produced",
+    [{ found: [], left: ["finish the migration script", "write the rollback procedure"] }],
+    "the bound is handed both snapshots, normalised: the file as found and as left",
   )
-  assert.match(state.toasts.at(-1).message, /no progress over 2 cycles at 0 open task\(s\)/)
+  assert.match(state.toasts.at(-1).message, /no task completed over 2 cycles at 0 open task\(s\)/)
   assert.match(state.toasts.at(-1).message, /paused for the new session/)
 })
 
-test("a productive loop is not read as stalled: the recorded count is the one it inherited", async () => {
-  // The steady state the old reading killed at cycle three: the cycle starts
-  // with one task left over, saves two fresh points, and the file ends at
-  // three. What the bound must compare across cycles is the 1, not the 3.
-  const dir = tempProject({ "TODO.md": "- T5: inherited work\n" })
+test("the bound is handed the normalised title sets, not the counts", async () => {
+  // The cycle starts with one task left over, saves two fresh points, and the
+  // file ends at three. Both snapshots go to the record: the inherited set is
+  // what the NEXT cycle is measured against, the left-behind set is what the
+  // cycle after that inherits.
+  const dir = tempProject({ "TODO.md": "- T5: Inherited   Work\n" })
   const { io, state } = makeCycle({ directory: dir })
   const res = await runEndlessCycle(io)
 
   assert.equal(res.openBefore, 1)
   assert.equal(res.openAfter, 3)
-  assert.deepEqual(state.recorded, [1])
+  assert.deepEqual(state.recorded, [
+    {
+      found: ["inherited work"],
+      left: [
+        "inherited work",
+        "finish the migration script",
+        "write the rollback procedure",
+      ],
+    },
+  ])
 })
 
 // ---------------------------------------------------------------------------
@@ -658,7 +668,7 @@ test("a failed handoff abandons the cycle: the tasks stay written, the freeze li
   assert.equal(isEndlessFrozen(SID), false)
   assert.equal(endlessCooldownActive(SID), true)
   assert.deepEqual(state.paused, [], "an abandoned cycle pauses nothing")
-  assert.equal(endlessProgress.lastOpenTasks, null, "an abandoned cycle records no progress")
+  assert.equal(endlessProgress.lastOpenTitles, null, "an abandoned cycle records no progress")
 })
 
 test("a handoff that returns no new session id abandons rather than reporting success", async () => {

@@ -66,9 +66,10 @@ import { log, errMsg } from "./log.js"
 // measured "quiesced after <ms>" figure honest.
 export const ENDLESS_QUIESCE_POLL_MS = 500
 
-// How many consecutive cycles may end without the open-task count falling
-// before the mode pauses itself. The bound against the failure the mode
-// invites: an orchestrator that saves the same points every cycle.
+// How many consecutive cycles may end without a single inherited task leaving
+// the todo file before the mode pauses itself. The bound against the failure
+// the mode invites: an orchestrator that saves the same points every cycle and
+// finishes none of them.
 export const ENDLESS_MAX_STALLED_CYCLES = 2
 
 function defaultSleep(ms) {
@@ -78,7 +79,9 @@ function defaultSleep(ms) {
 // Comparison form of a task title: lower-cased with every run of whitespace
 // collapsed to one space. Deliberately nothing more — no stemming, no fuzzy
 // distance; a dedupe that guesses would drop a point the orchestrator meant.
-function normaliseTitle(title) {
+// Exported because the no-progress bound keys its cross-cycle task sets on the
+// same expression the dedupe uses.
+export function normaliseTitle(title) {
   return typeof title === "string" ? title.trim().toLowerCase().replace(/\s+/g, " ") : ""
 }
 
@@ -175,13 +178,13 @@ export function endlessKickoffBlock({ todoFileName, ids = [], openTasks = [] }) 
 // @property {() => number} [countActive]       active subagents, sampled once for the log line
 // @property {() => Promise<string>} requestOpenPoints  the primary's final open-points turn; throws on timeout
 // @property {(point: { title: string, accept?: string }) => { id: string }} addTask
-// @property {() => Array<{ id: string }>} listOpen  the todo file's open tasks; a greenfield directory reads as []
+// @property {() => Array<{ id: string, text: string }>} listOpen  the todo file's open tasks; a greenfield directory reads as []
 // @property {() => string} [todoFileName]
 // @property {(io: { extraKickoffBlock: string, openPointsText: string }) => Promise<{ newSessionID: string }>} performHandoff
 // @property {number} [cycleNumber]             this primary's generation (handoffGeneration)
 // @property {number} [maxCycles]               ceiling; <= 0 arms no ceiling
 // @property {(sessionID: string, reason: string) => boolean} [pause]  pause the mode for ONE primary session (never writes the settings file)
-// @property {(openTasksBeforeTheWrite: number) => { stalledCycles: number }} [recordCycle]
+// @property {(openTitlesFound: string[], openTitlesLeft: string[]) => { stalledCycles: number, completed: number|null }} [recordCycle]  normalised task titles before and after this cycle's write
 // @property {(t: { message: string, variant: string }) => void} [toast]
 // @property {number} [quiesceTimeoutMs]
 // @property {number} [pollMs]
@@ -208,7 +211,7 @@ export async function runEndlessCycle({
   cycleNumber = 1,
   maxCycles = 0,
   pause = () => false,
-  recordCycle = () => ({ stalledCycles: 0 }),
+  recordCycle = () => ({ stalledCycles: 0, completed: null }),
   toast = () => {},
   quiesceTimeoutMs = 600_000,
   pollMs = ENDLESS_QUIESCE_POLL_MS,
@@ -326,9 +329,10 @@ export async function runEndlessCycle({
   }
 
   // 4b. The todo file as this cycle FOUND it — the tasks the previous cycle
-  // left behind. Its length is the progress figure the no-progress bound
-  // compares across cycles, and its titles are what a point is deduped
-  // against below. A directory with no todo file at all reads as empty; any
+  // left behind. Its titles are both what a point is deduped against below and
+  // one half of what the no-progress bound compares across cycles; its length
+  // is the `open tasks <before>` figure of the log line and of the stop
+  // message. A directory with no todo file at all reads as empty; any
   // other unusable todo file (several of them, or one that is not a regular
   // file) throws and abandons the cycle rather than being written over.
   let existingTasks
@@ -417,17 +421,21 @@ export async function runEndlessCycle({
   }
 
   // 7. The progress record, and the no-progress bound on it. What the bound
-  // compares is `openBefore`: the file as the PREVIOUS cycle left it, minus
-  // what was ticked off since. `openAfter` includes the points this cycle just
-  // saved and is read before the new orchestrator has done anything, so a
-  // healthy loop — each cycle finishing what it inherited and saving a
-  // comparable number of fresh points — would show a flat count and stop
-  // itself at the third cycle.
+  // compares is the PREVIOUS cycle's post-write task set against this cycle's
+  // pre-write task set: a cycle is stalled only when not one title the previous
+  // cycle handed over has left the file. Both snapshots are the reads already
+  // taken here — `existingTasks` from 4b, `openTasks` from 4d — normalised on
+  // the same expression the dedupe uses, so a healthy loop that finishes what
+  // it inherited clears the streak however many fresh points it saves, and a
+  // loop that finishes nothing is caught at the first repetition.
   const openAfter = openTasks.length
-  const { stalledCycles } = recordCycle(openBefore)
+  const { stalledCycles, completed } = recordCycle(
+    existingTasks.map((t) => normaliseTitle(t.text)),
+    openTasks.map((t) => normaliseTitle(t.text)),
+  )
   log(
     `endless: cycle ${cycleNumber}/${maxCycles || "∞"} complete, new session ${result.newSessionID}, ` +
-      `open tasks ${openBefore}→${openAfter}`,
+      `open tasks ${openBefore}→${openAfter} completed=${completed ?? "-"}`,
   )
   if (stalledCycles >= ENDLESS_MAX_STALLED_CYCLES) {
     // The latch of the OLD primary is already gone (the handoff's forgetPrimary
@@ -437,7 +445,7 @@ export async function runEndlessCycle({
     // running in the session that inherited it.
     const stopped = stop(
       "complete",
-      `no progress over ${stalledCycles} cycles at ${openBefore} open task(s) — ` +
+      `no task completed over ${stalledCycles} cycles at ${openBefore} open task(s) — ` +
         `paused for the new session`,
       "warning",
       result.newSessionID,

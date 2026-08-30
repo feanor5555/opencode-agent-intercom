@@ -1560,6 +1560,13 @@ function createEntry(sessionID, agent, prompt, parentID, taskId, directory, pack
     // is notified once (see notifiedParentOfLoop). Resets when a tool call
     // gets through, i.e. when the subagent is no longer over budget.
     stopInjections: 0,
+    // Number of LLM turns on which the contextLimitNotice RESERVE-band block
+    // was injected — the turns the subagent spent between CTX_STOP_RESERVE of
+    // its budget and the budget itself, told to wrap up while its tools still
+    // worked. Kept apart from stopInjections, which counts turns spent under
+    // the tool lockdown and is what the denial-loop notice to the parent
+    // reads. For logs only; nothing escalates on it.
+    contextWarnings: 0,
     // Latch: true after notifyParentOfDenialLoop has fired for this subagent
     // so the parent isn't spammed every subsequent over-budget turn.
     notifiedParentOfLoop: false,

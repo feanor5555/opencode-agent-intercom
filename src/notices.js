@@ -250,15 +250,29 @@ export function timeoutNotice(entry, maxAgeMs, silentMs) {
 // emoji + phrasing vocabulary so the orchestrator's pattern-matching notices
 // stay consistent. We append a `slots` line via slotsNoticeAfterFinish so the
 // freed slot is visible to the orchestrator, matching the completion path.
-export function errorNotice(entry, message, wasAborted = false) {
+//
+// `result` is the last usable assistant text the failed session still held
+// (client.js finalResult, read off a snapshot taken before teardown). A
+// provider blow-up or a user abort lands on a session that has usually been
+// working for a while, and without this block everything the subagent said
+// about that work died with the session and the next run would start from
+// zero. It is appended only when there IS text; the failure wording above it
+// is unchanged either way, so a notice for a session that produced nothing
+// reads exactly as it did before.
+export function errorNotice(entry, message, wasAborted = false, result) {
   const head = `🔔 agent-intercom: subagent "${entry.handle}" (${entry.agent}, session ${entry.sessionID}) `
   const body = wasAborted
     ? `aborted by user. Slot freed. `
     : `failed: ${message}. Slot freed. `
+  const recovered = result
+    ? `\nIts last text before it stopped — this is the only account of the work it managed, ` +
+      `read it before you re-dispatch and do not have the same ground covered twice:\n${result}\n`
+    : ""
   return (
     head +
     body +
     `You may re-dispatch with spawn() if the work is still needed.` +
+    recovered +
     slotsNoticeAfterFinish(entry.parentID)
   )
 }

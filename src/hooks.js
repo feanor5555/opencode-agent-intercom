@@ -170,6 +170,17 @@ const AGENTS_MD_SUBAGENTS = new Set([
 // triggers promptly.
 const CTX_NEAR_BUDGET = 0.7
 
+// The reserve the STOP keeps below the context budget. The tool lockdown in
+// guardToolExecute fires at the budget itself; the demand for a `Done:` /
+// `Blocked:` summary fires at this share of it, so the subagent is told to
+// write its account while its tools STILL WORK and it still has room to write
+// in. Without the gap both fired on the same figure: the very turn the
+// subagent was ordered to summarise was the turn every tool started throwing,
+// and a run that spent its budget mid-tool-call could end with no text at all.
+// A share of the budget, not a setting: it moves with whatever ceiling the
+// agent's own `contextBudget` gives it, and the budget defaults are untouched.
+const CTX_STOP_RESERVE = 0.9
+
 // Handoff re-entrancy state lives in state.js (`pendingHandoffs` +
 // `handoffInProgress`), gated via registry.js (scheduleHandoffIfNeeded /
 // claimPendingHandoff / releaseHandoff / forgetPrimary). The transform hook
@@ -685,16 +696,27 @@ function detectAgentFromSystem(output) {
   return m[1].toLowerCase()
 }
 
-// Reads the subagent's live context size and, if it has reached the budget,
-// returns a "wrap up and report back" notice to inject. Also keeps the entry's
-// ctxTokens/lastActivity fresh as a side effect. Empty string when the budget
-// is disabled, not reached, or the subagent is already aborted.
+// Reads the subagent's live context size and returns the block to inject when
+// it is running out of room. Also keeps the entry's ctxTokens/lastActivity
+// fresh as a side effect. Empty string when the budget is disabled, still far
+// off, or the subagent is already aborted.
+//
+// Two bands, split by CTX_STOP_RESERVE:
+//   reserve band — at or over CTX_STOP_RESERVE of the budget but still under
+//     it. Tools still work. The subagent is told to write its `Done:` /
+//     `Blocked:` summary NOW, while it has both the tools and the room. This
+//     is the band that keeps a result from being lost.
+//   lockdown    — at or over the budget. guardToolExecute is denying every
+//     tool call on the same figure; the block escalates over successive turns
+//     and notifies the parent at BUDGET_NOTIFY_AFTER.
 //
 // Hot path: this runs before EVERY subagent LLM call. The snapshot HTTP fetch
 // dominates cost as the subagent's message history grows, so the result is
 // cached on the entry for CTX_TTL_MS. Once we get within CTX_NEAR_BUDGET of
-// the limit the cache is bypassed so the lockdown triggers as soon as the
-// budget is actually breached.
+// the limit the cache is bypassed — CTX_NEAR_BUDGET sits below
+// CTX_STOP_RESERVE, so the figure is already fresh when the reserve band is
+// entered and the lockdown triggers as soon as the budget is actually
+// breached.
 async function contextLimitNotice(client, entry) {
   const maxContext = contextBudgetFor(entry.agent)
   if (maxContext <= 0 || aborted.has(entry.sessionID)) return ""
@@ -718,7 +740,37 @@ async function contextLimitNotice(client, entry) {
     if (snapshot.lastActivity) entry.lastActivity = snapshot.lastActivity
   }
 
-  if (entry.ctxTokens == null || entry.ctxTokens < maxContext) return ""
+  if (entry.ctxTokens == null || entry.ctxTokens < maxContext * CTX_STOP_RESERVE) return ""
+
+  // Reserve band: room is nearly gone but the budget is not breached, so
+  // guardToolExecute is still letting tool calls through. Ask for the summary
+  // here and the subagent can still write it — and can still use a tool to
+  // finish the one thing it was in the middle of. Deliberately NOT counted in
+  // `stopInjections`: that counter means "turns spent ignoring the lockdown",
+  // it drives the denial-loop notice to the parent, and a subagent that has
+  // been denied nothing is not in a denial loop. `contextWarnings` counts
+  // these turns instead, for the log.
+  if (entry.ctxTokens < maxContext) {
+    entry.contextWarnings = (entry.contextWarnings ?? 0) + 1
+    const left = maxContext - entry.ctxTokens
+    log("subagent entering context reserve", {
+      handle: entry.handle,
+      ctxTokens: entry.ctxTokens,
+      limit: maxContext,
+      remaining: left,
+      contextWarnings: entry.contextWarnings,
+    })
+    return (
+      `\n\n---\n⚠️ WRAP UP NOW. agent-intercom: your context has reached ` +
+      `${fmtTokens(entry.ctxTokens)} tokens of the ${fmtTokens(maxContext)} budget — about ` +
+      `${fmtTokens(left)} left. At the budget your tool calls are DISABLED outright, so this ` +
+      `is your last chance to write while you still have both tools and room.\n\n` +
+      `Finish only what you are already holding, then write a plain-text message beginning with ` +
+      `"Done:" (or "Blocked:") naming what you accomplished and what remains. That message is ` +
+      `the ONLY thing the orchestrator receives from you — start no new line of investigation, ` +
+      `open no further files.\n---\n`
+    )
+  }
 
   // Count THIS injection: each over-budget LLM turn is one "you have seen the
   // stop sign" chance. Counting LLM turns (not raw tool-call denials) is the
@@ -1492,6 +1544,14 @@ async function onSessionError(props, client) {
     error: errText,
     aborted: wasAborted,
   })
+  // Read the session ONE more time before teardown deletes it, purely to
+  // recover the last text the subagent produced. A provider failure — a
+  // context-length error above all — lands on a session that has usually done
+  // real work, and the error notice used to carry none of it, so the
+  // orchestrator had no choice but to re-dispatch the whole task blind.
+  // Best-effort by construction: fetchSnapshot swallows its own failures and
+  // returns {}, and the notice simply omits the block when nothing came back.
+  const { result: lastText } = await fetchSnapshot(client, sessionID)
   // Wake the parent with the error notice, then free the slot — same teardown
   // as onSessionIdle / the watchdog. markAborted keeps the tool-guard hard-
   // denying in-flight tool calls throughout removeEntry + deleteSession
@@ -1503,7 +1563,7 @@ async function onSessionError(props, client) {
       agent: entry.agent,
       detail: errText,
     },
-    notice: errorNotice(entry, errText, wasAborted),
+    notice: errorNotice(entry, errText, wasAborted, lastText),
     toast: {
       title: "agent-intercom",
       message: wasAborted ? `${entry.handle} aborted` : `${entry.handle} failed`,

@@ -323,15 +323,55 @@ export function snapshotOutcome(snapshot) {
   return snapshot.messageCount > 0 ? "ok" : "gone"
 }
 
-// Full text of the subagent's final assistant message — its result, pushed to
-// the primary on completion. Untruncated, unlike latestActivity.
-function finalResult(messages) {
+// A text part whose whole content is a tool INVOCATION written out as prose
+// rather than issued on the native tool channel. Small models fall back to
+// this shape when their tool calling misfires, and it then sits in the
+// session as the newest assistant text — carrying nothing about the work.
+// Three forms, and the match is anchored so only a part that is NOTHING BUT
+// the blob counts; a summary that happens to quote one keeps its text.
+//   <tool_call>…</tool_call> / <function_call>…</function_call> — the
+//     XML-ish wrapper of the Hermes/Qwen family and its relatives.
+//   [TOOL_CALLS]…                                              — the Mistral marker.
+//   {"name": …, "arguments": …}                                — the bare OpenAI call object,
+//     required to carry BOTH a name-ish and an arguments-ish key so a
+//     result that is legitimately JSON is not swallowed.
+const TOOL_SCAFFOLD_RE =
+  /^(?:<(tool_call|function_call|tool▁call)>[\s\S]*|\[TOOL_CALLS\][\s\S]*|\{[\s\S]*"(?:name|function)"[\s\S]*"(?:arguments|parameters)"[\s\S]*\}|\{[\s\S]*"(?:arguments|parameters)"[\s\S]*"(?:name|function)"[\s\S]*\})$/
+
+// Whether a message part carries text the subagent actually SAID, as opposed
+// to text that only exists to run the machinery. Unusable, in order:
+//   - anything that is not a text part (tool, reasoning, step markers);
+//   - `synthetic: true` — opencode's own model-facing wrappers and this
+//     plugin's injected turn notices (see src/pluginmsg.js). Their text is
+//     the plugin talking to the model, never the model reporting back;
+//   - whitespace-only text;
+//   - a part that is nothing but tool-call scaffolding (TOOL_SCAFFOLD_RE).
+function usableText(part) {
+  if (part?.type !== "text" || typeof part.text !== "string") return ""
+  if (part.synthetic) return ""
+  const text = part.text.trim()
+  if (!text) return ""
+  if (TOOL_SCAFFOLD_RE.test(text)) return ""
+  return text
+}
+
+// The subagent's result, pushed to the primary on completion and on failure.
+// Untruncated, unlike latestActivity.
+//
+// The newest assistant message is the result whenever it has usable text.
+// Where it has none — the run died mid-tool-call, the provider blew up on the
+// closing turn, the model emitted only scaffolding — this walks BACK through
+// the earlier assistant messages and returns the most recent usable text
+// instead. That is the last thing the subagent actually said about its work,
+// and handing it up is what keeps a run from being repeated from scratch.
+// Undefined only when the session holds no usable assistant text at all.
+export function finalResult(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
     if (m?.info?.role !== "assistant") continue
     const text = (m.parts ?? [])
-      .filter((p) => p?.type === "text" && p.text)
-      .map((p) => p.text)
+      .map(usableText)
+      .filter(Boolean)
       .join("\n")
       .trim()
     if (text) return text

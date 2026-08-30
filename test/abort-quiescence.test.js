@@ -112,6 +112,14 @@ test("abort/error teardown deletes only after idle or its bounded timeout", asyn
   })
 
   assert.deepEqual(deleted, [idleID])
+  // Same microtask flush as the first phase above. The error path reads the
+  // session once before teardown — to recover the last text the subagent
+  // produced for the error notice — so registering the quiescence guard is no
+  // longer reachable within the event handler's synchronous prefix. What is
+  // pinned is unchanged: the guard is registered, and nothing is deleted while
+  // it holds.
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(deleted, [idleID])
   assert.ok(pendingSessionQuiescence.has(timeoutID))
   await timeoutTeardown
   assert.deepEqual(deleted, [idleID, timeoutID])

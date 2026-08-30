@@ -395,6 +395,91 @@ probe "$DIR/cfg-empty"  "$DIR/other"  OTHER
   rmSync(r.dir, { recursive: true, force: true })
 })
 
+// The TUI half reads a plugin list of its own: a `plugin` entry in
+// opencode.json wires the server alone, so a setup with that entry and no
+// tui.json has the spawn tool and no sidebar. e2e_tui_plugin_wired mirrors the
+// server check one file name over — global tui.json/tui.jsonc, project
+// tui.json/tui.jsonc, project .opencode/tui.json/.jsonc — and every case runs
+// under an XDG_CONFIG_HOME of its own.
+test("e2e_tui_plugin_wired accepts the global and project tui config forms, and refuses none", () => {
+  const r = runShell(
+    `set -uo pipefail
+. "$LIB"
+mkdir -p "$DIR/bare" "$DIR/tjson" "$DIR/tjsonc" "$DIR/tdotopencode/.opencode" "$DIR/server-only" \
+         "$DIR/cfg-empty/opencode" "$DIR/cfg-tjson/opencode" "$DIR/cfg-tjsonc/opencode" \
+         "$DIR/cfg-server-only/opencode"
+printf '{"plugin":["/opt/the-plugin"]}\n' > "$DIR/tjson/tui.json"
+printf '{"plugin":["/opt/the-plugin"]}\n' > "$DIR/tjsonc/tui.jsonc"
+printf '{"plugin":["/opt/the-plugin"]}\n' > "$DIR/tdotopencode/.opencode/tui.json"
+printf '{"plugin":["/opt/the-plugin"]}\n' > "$DIR/server-only/opencode.json"
+printf '{"plugin":["/opt/the-plugin"]}\n' > "$DIR/cfg-tjson/opencode/tui.json"
+printf '{"plugin":["/opt/the-plugin"]}\n' > "$DIR/cfg-tjsonc/opencode/tui.jsonc"
+printf '{"plugin":["/opt/the-plugin"]}\n' > "$DIR/cfg-server-only/opencode/opencode.json"
+printf '{"plugin":["/opt/somewhere-else"]}\n' > "$DIR/cfg-empty/opencode/tui.json"
+
+probe() { # <xdg_config_home> <project_dir> <label>
+  XDG_CONFIG_HOME="$1" e2e_tui_plugin_wired /opt/the-plugin "$2" 2>/dev/null && echo "$3=yes" || echo "$3=no"
+}
+probe "$DIR/cfg-empty"       "$DIR/tjson"        PROJECT_TUI_JSON
+probe "$DIR/cfg-empty"       "$DIR/tjsonc"       PROJECT_TUI_JSONC
+probe "$DIR/cfg-empty"       "$DIR/tdotopencode" PROJECT_DOT_OPENCODE
+probe "$DIR/cfg-tjson"       "$DIR/bare"         GLOBAL_TUI_JSON
+probe "$DIR/cfg-tjsonc"      "$DIR/bare"         GLOBAL_TUI_JSONC
+probe "$DIR/cfg-tjson"       "$DIR/server-only"  GLOBAL_OVER_SERVER_ONLY
+probe "$DIR/cfg-empty"       "$DIR/bare"         BARE
+probe "$DIR/cfg-empty"       "$DIR/server-only"  OTHER_PLUGIN
+probe "$DIR/cfg-server-only" "$DIR/server-only"  SERVER_WIRED_TUI_NOT
+`,
+    { withStub: false },
+  )
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  assert.match(r.stdout, /PROJECT_TUI_JSON=yes/)
+  assert.match(r.stdout, /PROJECT_TUI_JSONC=yes/)
+  assert.match(r.stdout, /PROJECT_DOT_OPENCODE=yes/)
+  assert.match(r.stdout, /GLOBAL_TUI_JSON=yes/)
+  assert.match(r.stdout, /GLOBAL_TUI_JSONC=yes/)
+  assert.match(r.stdout, /GLOBAL_OVER_SERVER_ONLY=yes/)
+  assert.match(r.stdout, /BARE=no/)
+  // A tui.json naming another plugin is no wiring for this one.
+  assert.match(r.stdout, /OTHER_PLUGIN=no/)
+  // The defect this check exists for: the server wired, the TUI not.
+  assert.match(r.stdout, /SERVER_WIRED_TUI_NOT=no/)
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+// The failure is never silent: it names the global tui.json it did not find,
+// keeps a file that exists without the entry apart from one that is absent,
+// and states the remedy.
+test("e2e_tui_plugin_wired names the tui config and what is missing when it refuses", () => {
+  const r = runShell(
+    `set -uo pipefail
+. "$LIB"
+mkdir -p "$DIR/proj" "$DIR/cfg/opencode"
+printf '{"plugin":["/opt/somewhere-else"]}\n' > "$DIR/proj/tui.json"
+XDG_CONFIG_HOME="$DIR/cfg" e2e_tui_plugin_wired /opt/the-plugin "$DIR/proj" && echo UNEXPECTED_PASS
+echo "STATUS=$?"
+`,
+    { withStub: false },
+  )
+  assert.doesNotMatch(r.stdout, /UNEXPECTED_PASS/)
+  assert.match(r.stdout, /STATUS=1/)
+  assert.match(r.stderr, /no tui\.json or tui\.jsonc names \/opt\/the-plugin/)
+  assert.match(r.stderr, new RegExp(`missing: ${r.dir}/cfg/opencode/tui\\.json`))
+  assert.match(r.stderr, new RegExp(`exists but has no "plugin" entry naming /opt/the-plugin: ${r.dir}/proj/tui\\.json`))
+  assert.match(r.stderr, new RegExp(`Add \\{"plugin": \\["/opt/the-plugin"\\]\\} to ${r.dir}/cfg/opencode/tui\\.json`))
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+// Every driver that builds the TUI half must also check that half is wired.
+test("every driver checks the TUI wiring next to the server wiring", () => {
+  const e2e = resolve(import.meta.dirname, "e2e")
+  for (const name of ["run-all.sh", "endless-task.sh", "nested-task.sh"]) {
+    const src = readFileSync(join(e2e, name), "utf8")
+    assert.match(src, /\be2e_tui_plugin_wired\b/, `${name} does not check the TUI wiring`)
+    assert.match(src, /\be2e_plugin_wired\b/, `${name} does not check the server wiring`)
+  }
+})
+
 // A genuinely unwired setup must be told about all three remedies, the global
 // one included — the drivers are the only place that message is printed.
 test("every remediation message for an unwired setup names the global config too", () => {

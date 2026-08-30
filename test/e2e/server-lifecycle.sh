@@ -109,6 +109,53 @@ e2e_plugin_wired() {
   return 1
 }
 
+# Usage: e2e_tui_plugin_wired <plugin_root> <project_dir>
+#
+# True when a TUI started in <project_dir> loads <plugin_root> into its TUI
+# half — the half the sidebar is served from. The TUI reads a plugin list of
+# its own and never the server's: a `plugin` entry in opencode.json reaches the
+# server host alone, so a setup wired there and nowhere else has the `spawn`
+# tool and no sidebar at all, with nothing on either side saying why.
+#
+# The accepted forms are e2e_plugin_wired's config forms one file name over: a
+# `plugin` entry naming the path in the global
+# ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/tui.json or tui.jsonc, in
+# <project_dir>/tui.json or tui.jsonc, or in <project_dir>/.opencode/tui.json
+# or tui.jsonc. There is no drop-in directory for the TUI half — a plugin
+# reaches it through a `plugin` entry only.
+#
+# On failure it prints the files it looked at, keeping a file that does not
+# exist apart from one that exists without the entry, and then the remedy.
+e2e_tui_plugin_wired() {
+  local plugin_root="$1" project_dir="$2" config_home f
+  local -a absent=() unwired=()
+  config_home="${XDG_CONFIG_HOME:-${HOME:-}/.config}/opencode"
+  for f in "$config_home"/tui.json{,c} "$project_dir"/tui.json{,c} \
+           "$project_dir"/.opencode/tui.json{,c}; do
+    if [ ! -f "$f" ]; then
+      absent+=("$f")
+      continue
+    fi
+    if grep -qF "$plugin_root" "$f"; then
+      return 0
+    fi
+    unwired+=("$f")
+  done
+  e2e_fail "TUI wiring: no tui.json or tui.jsonc names $plugin_root — the TUI would start without this plugin and show no sidebar, however the server half is wired."
+  if [ "${#unwired[@]}" -gt 0 ]; then
+    for f in "${unwired[@]}"; do
+      e2e_fail "  exists but has no \"plugin\" entry naming $plugin_root: $f"
+    done
+  fi
+  if [ "${#absent[@]}" -gt 0 ]; then
+    for f in "${absent[@]}"; do
+      e2e_fail "  missing: $f"
+    done
+  fi
+  e2e_fail "  Add {\"plugin\": [\"$plugin_root\"]} to $config_home/tui.json to wire the TUI half in every directory, or to $project_dir/tui.json for this project alone. The server half's opencode.json entry does not cover it."
+  return 1
+}
+
 # ---------- build ----------------------------------------------------------
 
 # Builds the TUI half of the plugin: the sidebar is served from

@@ -62,6 +62,14 @@ if ! e2e_plugin_wired "$PLUGIN_ROOT" "$PROJECT"; then
   exit 2
 fi
 
+# The sidebar comes from the TUI half, which reads a plugin list of its own:
+# the check above says nothing about it, and a run against a TUI-unwired
+# machine would show no sidebar while every server-side step passed. The
+# function prints the files it looked at and the remedy itself.
+if ! e2e_tui_plugin_wired "$PLUGIN_ROOT" "$PROJECT"; then
+  exit 2
+fi
+
 cleanup() {
   local code=$?
   trap - EXIT

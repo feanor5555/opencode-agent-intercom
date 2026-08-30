@@ -278,6 +278,12 @@ PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
 e2e_plugin_wired "$PLUGIN_ROOT" "$PROJECT_DIR" ||
   die "$PLUGIN_ROOT is wired nowhere the server would read it — name it in the plugin array of ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json for every directory, or of $PROJECT_DIR/opencode.json for this project alone, or drop a loader into $PROJECT_DIR/.opencode/plugin/ — as it stands the run would observe a server without this plugin"
 
+# The sidebar is served from the TUI half, which reads its own plugin list —
+# the check above covers the server half alone. e2e_tui_plugin_wired prints the
+# files it looked at and the remedy itself.
+e2e_tui_plugin_wired "$PLUGIN_ROOT" "$PROJECT_DIR" ||
+  die "the TUI half of $PLUGIN_ROOT is wired nowhere the TUI would read it — see the tui.json paths listed above; as it stands the run would observe a TUI without this plugin's sidebar"
+
 if curl -fsS -m 3 "$BASE/global/health" >/dev/null 2>&1; then
   die "something already answers on $BASE — choose another PORT"
 fi

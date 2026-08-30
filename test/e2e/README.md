@@ -24,7 +24,8 @@ that opencode upgrades don't shift the system-prompt composition.
 - `server-lifecycle.sh` — sourced library, not a driver. Holds the four server
   steps `run-all.sh` and `endless-task.sh` share: `e2e_build_tui`,
   `e2e_server_start`, `e2e_server_wait_ready`, `e2e_server_stop`, plus
-  `e2e_plugin_wired` (global and project wiring alike), `e2e_server_alive`,
+  `e2e_plugin_wired` and `e2e_tui_plugin_wired` (global and project wiring
+  alike, server half and TUI half), `e2e_server_alive`,
   `e2e_server_url` and the subshell guard `e2e_require_caller_shell`. Covered by
   `test/e2e-server-lifecycle.test.js`, which drives it against a stub server.
 - `golden/` — reference captures from 2026-05-16 (opencode 1.15.0, omnicoder
@@ -76,11 +77,12 @@ OPENCODE_URL=http://127.0.0.1:4567 \
 it a free one with `RUN_ALL_PORT` or stop the other server. Its own server log,
 pid file and health capture land in `out/00-suite.*`.
 
-**The plugin has to be wired where the server will read it.** A server that
-loads neither half comes up with no `spawn` tool and no diagnostic saying so, so
-`run-all.sh` checks the wiring before it starts anything and exits `2` with the
-remedy if it finds none. `e2e_plugin_wired` accepts four forms, and one is
-enough:
+**Both halves have to be wired where opencode will read them.** A server that
+loads neither half comes up with no `spawn` tool and no diagnostic saying so,
+and a TUI whose own half is unwired shows no sidebar however the server is
+wired. `run-all.sh` checks both before it starts anything and exits `2` with the
+remedy if either is missing. `e2e_plugin_wired` covers the server half and
+accepts four forms, one of which is enough:
 
 | scope | form |
 |---|---|
@@ -89,19 +91,33 @@ enough:
 | project | `plugin` array of `$PROJECT_DIR/opencode.json` naming the plugin root |
 | project | a drop-in under `$PROJECT_DIR/.opencode/plugin/` or `plugins/` |
 
+`e2e_tui_plugin_wired` covers the TUI half. The TUI reads a plugin list of its
+own and never the server's, so the entry above does nothing for it; there is no
+drop-in directory on this side, only a `plugin` entry, and again one of the
+three places is enough:
+
+| scope | form |
+|---|---|
+| global | `plugin` array of `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/tui.json` or `tui.jsonc` |
+| project | `plugin` array of `$PROJECT_DIR/tui.json` or `tui.jsonc` |
+| project | `plugin` array of `$PROJECT_DIR/.opencode/tui.json` or `tui.jsonc` |
+
 ```json
 { "plugin": ["/home/user/opencode-agent-intercom"] }
 ```
 
-On this machine the wiring is global — that entry stands in
-`~/.config/opencode/opencode.json` (and the TUI half's in
-`~/.config/opencode/tui.json`) — so the check passes in any directory, the
-`PROJECT_DIR` default `/home/user/testopencode` included, which carries no
-`opencode.json` of its own. The default is kept for what it still decides: the
+When it refuses, it lists every one of those files, keeping a file that does not
+exist apart from one that exists without the entry, and prints the remedy.
+
+On this machine both wirings are global — that entry stands in
+`~/.config/opencode/opencode.json` for the server half and in
+`~/.config/opencode/tui.json` for the TUI half — so both checks pass in any
+directory, the `PROJECT_DIR` default `/home/user/testopencode` included, which
+carries no config of its own. The default is kept for what it still decides: the
 server's working directory and the `?directory=` every session is created with,
 which is what keeps subagent reads on real paths (see "Known caveats").
 
-`endless-task.sh` and `nested-task.sh` make the same check against
+`endless-task.sh` and `nested-task.sh` make the same two checks against
 `ENDLESS_PROJECT_DIR` and `NESTED_PROJECT_DIR`.
 
 Settings used for the golden references:

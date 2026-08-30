@@ -613,6 +613,30 @@ export function countActiveSubagents(primaryID) {
   return n
 }
 
+// The per-primary form of the same scan, for the one question that is NOT the
+// cap: whether this primary may take its final turn (isQuiesced). Only entries
+// whose parentID is this primary are counted, and pendingSpawns.count is left
+// out — a reservation carries no parent (see isQuiesced, which adds it as its
+// own process-wide term).
+//
+// A nested run is covered transitively rather than by walking the tree: a
+// nested spawn BLOCKS its caller inside the spawn tool call (tools.js), so the
+// caller's own entry — whose parentID is this primary — stays running for as
+// long as its child does.
+//
+// A falsy parentID has no subagents to own and reads as 0; the caller decides
+// what an unattributable session means.
+export function countActiveSubagentsFor(parentID) {
+  if (!parentID) return 0
+  let n = 0
+  for (const e of registry.values()) {
+    if (e.parentID !== parentID) continue
+    if (!isActiveEntry(e)) continue
+    n += 1
+  }
+  return n
+}
+
 // The cap decision for one spawn call, in one synchronous read so the caller
 // can reserve its slot with no await between counting and reserving.
 //
@@ -1484,29 +1508,40 @@ export function clearEndlessPause(sessionID) {
   return endlessPauses.delete(sessionID)
 }
 
-// The quiesce predicate: no subagent is running anywhere in this process, no
-// result is still being delivered, and no handoff drain is open for this
-// primary. Read inside ONE registryMutex section so a concurrent removeEntry /
-// upsertSession cannot splice the count.
+// The quiesce predicate: none of THIS primary's subagents is running, no
+// result is still being delivered, no spawn slot is reserved, and no handoff
+// drain is open for this primary. Read inside ONE registryMutex section so a
+// concurrent removeEntry / upsertSession cannot splice the count.
 //
-// The count is countActiveSubagents, i.e. PROCESS-WIDE and inclusive of
-// pendingSpawns.count — a spawn that has reserved its slot but not yet reached
-// upsertSession counts as running, which is exactly the window a naive
-// registry scan would report as zero. Process-wide is an over-approximation
-// with a second orchestrator in the same process (the endless primary waits
-// for that one's subagents too); it is kept because the alternative is a
-// second counting rule that disagrees with the cap the whole plugin is built
-// on.
+// The registry term is countActiveSubagentsFor(sessionID) — the subagents this
+// primary owns, not the process. The cap the rest of the plugin is built on
+// stays global; quiesce is a different question from the cap, and answering it
+// process-wide makes a primary wait on subagents that can never deliver into
+// it: a chained cycle leaves the retired primary waiting on the successor its
+// own earlier cycle created, with the spawn freeze held for that whole wait.
+// What quiesce protects is the primary's own final turn, so the primary's own
+// subagents are what it has to wait for.
 //
-// pendingDeliveries.count closes the window at the OTHER end of a subagent's
-// life: its entry leaves the registry (or is marked aborted) before the wake
-// notice is posted, so without this term the cycle would see quiesce while the
-// last result is still on its way into the very session it is about to replace
-// — and that result would never reach the saved open points.
+// The two counters stay process-wide, and deliberately so — neither carries a
+// parent to be scoped by, and each one covers a window in which THIS primary's
+// own work is invisible to the registry scan:
+//   - pendingSpawns.count is a spawn between its cap check and upsertSession.
+//     Its reservation is taken before any entry exists, so there is nothing to
+//     attribute it to; a nested spawn's caller is a subagent, so even the
+//     caller's id would not resolve to the primary. The window is one
+//     session.create round trip.
+//   - pendingDeliveries.count is a result between its entry leaving the
+//     registry (or being marked aborted) and its wake notice being posted.
+//     Without it the cycle would see quiesce while the last result is still on
+//     its way into the very session it is about to replace — and that result
+//     would never reach the saved open points. The window is one notice post.
+// Both are seconds; a running subagent is bounded by maxSubagentAgeMs (90 s by
+// default), which is the wait this scoping removes.
 export function isQuiesced(sessionID) {
   return registryMutex.runExclusive(
     () =>
-      countActiveSubagents() === 0 &&
+      countActiveSubagentsFor(sessionID) === 0 &&
+      pendingSpawns.count === 0 &&
       pendingDeliveries.count === 0 &&
       !hasHandoffDrain(sessionID),
   )

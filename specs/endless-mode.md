@@ -285,13 +285,15 @@ section, `countActiveSubagents() === 0` and no handoff drain is open
 `upsertSession` counts as running — the reservation window is exactly the window in which a
 naive registry scan would report zero.
 
-**The count is process-wide, and stays so.** `countActiveSubagents` ignores its `primaryID`
-argument because the concurrency cap is global (`src/registry.js:164-173`). Endless mode
-inherits that: with a second orchestrator session in the same opencode process, the endless
-primary waits for that one's subagents too. This is an over-approximation — it waits longer
-than it strictly must — chosen because the alternative is a second counting rule that
-disagrees with the cap the whole plugin is built on. It is named in §5 as an assumption with
-its own falsification.
+**The active-subagent count is scoped to the endless primary.** `isQuiesced`
+(`src/registry.js:1540`) counts only the registry entries whose `parentID` is the primary
+whose cycle is running, via `countActiveSubagentsFor(sessionID)` (`src/registry.js:629`). A
+second orchestrator's subagents do not hold up this cycle. The spawn cap's own count remains
+global — `countActiveSubagents` is untouched — so the per-cycle wait and the cap disagree on
+purpose. The two remaining terms in `isQuiesced`, `pendingSpawns.count` and
+`pendingDeliveries.count` (`src/registry.js:1543-1544`), stay process-wide because neither
+carries a parent to scope by; each covers a one-round-trip window in which the primary's own
+work is not yet visible to a registry scan.
 
 **A subagent that starts after the trigger fired.** Between the latch and quiesce the
 orchestrator is still answering its turn and can call `spawn`. Left alone, an orchestrator
@@ -597,10 +599,6 @@ auto? }`) compacts a session in place. §2.1 says why that is not this feature.
   premise. Wrong when a cycle's saved points are vague restatements of the kickoff rather than
   work — visible in the todo file itself, and caught mechanically by the no-progress bound of
   §3.6.2.
-- **Process-wide quiesce is not too strict.** In the common single-orchestrator case it is
-  identical to per-primary quiesce. Wrong when `endless: quiesced after …` shows waits that
-  outlast the endless primary's own subagents; the fix is a per-parent count, which the
-  registry supports (`e.parentID`, `src/registry.js:388`) but the cap does not.
 - **The spawn freeze is short.** It holds from the latch to the end of the cycle. Wrong if
   the orchestrator's freeze-time refusals show up as repeated retries in the log rather than
   as an ended turn — that would mean the refusal text is not steering the model.

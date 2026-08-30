@@ -36,7 +36,7 @@ import {
   isEndlessPaused,
   isQuiesced,
   recordEndlessCycle,
-  countActiveSubagents,
+  countActiveSubagentsFor,
 } from "./registry.js"
 import {
   fetchSnapshot,
@@ -325,6 +325,22 @@ async function promptOldPrimaryFor(client, primarySessionID, agentName, { prompt
   })
 }
 
+// Drops an endless latch that has been set but not yet claimed, and says why.
+// The spawn freeze lifts with it, so this is the only thing standing between a
+// primary whose cycle will never start and a `spawn` that refuses for the life
+// of the process.
+//
+// A cycle already claimed is untouched: cancelPendingEndless refuses one, and
+// an executing cycle owns its own abandon discipline (releaseEndless + the
+// cooldown, inside runEndlessCycle). No cooldown is armed here — nothing was
+// attempted, so the next over-threshold turn may arm again at once.
+export function dropEndlessLatch(sessionID, reason) {
+  if (!hasEndlessPending(sessionID)) return false
+  if (!cancelPendingEndless(sessionID)) return false
+  log(`endless: latch dropped — ${reason}`, { sessionID })
+  return true
+}
+
 // Idle-gated endless cycle, execution side. Called from the `session.idle`
 // event for EVERY idle session, beside maybeRunPendingHandoff: a session with
 // no endless latch leaves here after one synchronous set lookup, before any
@@ -335,7 +351,10 @@ async function promptOldPrimaryFor(client, primarySessionID, agentName, { prompt
 // Runs detached from the event handler like the plain handoff, and for a
 // stronger reason: a cycle waits for quiesce (up to endlessQuiesceTimeoutMs),
 // then takes a final turn out of the old primary, then runs the whole handoff.
-// runEndlessCycle never throws, so `void`-calling it cannot hide a rejection.
+// runEndlessCycle itself never throws, but the two session reads THIS function
+// makes before the claim can: a rejection there is outside the cycle's abandon
+// discipline, so it is caught here and drops the latch. The `void` call site
+// (hooks.js) keeps a catch of its own as the backstop.
 //
 // Success releases the in-progress latch through the handoff's forgetPrimary;
 // every abandon path releases it inside runEndlessCycle and arms the cooldown.
@@ -348,8 +367,7 @@ export async function maybeRunPendingEndless(client, sessionID) {
   // reachable stop for a user who sees the toast and turns the row off. Read
   // here, before the claim, so a cycle already executing is untouched.
   if (!endlessMode) {
-    cancelPendingEndless(sessionID)
-    log("endless: latch dropped — the mode was switched off before the cycle started", { sessionID })
+    dropEndlessLatch(sessionID, "the mode was switched off before the cycle started")
     return null
   }
   // The same gate for the mode's own stop. scheduleEndlessIfNeeded already
@@ -358,17 +376,29 @@ export async function maybeRunPendingEndless(client, sessionID) {
   // on the idle that followed. Dropping it here keeps the pause authoritative
   // at both ends, the mark and the execute.
   if (isEndlessPaused(sessionID)) {
-    cancelPendingEndless(sessionID)
-    log("endless: latch dropped — the mode is paused for this session", { sessionID })
+    dropEndlessLatch(sessionID, "the mode is paused for this session")
     return null
   }
-  // The session's OWN directory, not the factory closure's: sessions created
-  // with ?directory=… land in a different project but share the same factory
-  // ctx, and the todo file this cycle writes must be that project's.
-  const directory = await getSessionDirectory(client, sessionID)
-  // Resolve the session's actual agent once and reuse it for both the
-  // open-points prompt and the replacement kickoff.
-  const agentName = await handoffAgentName(client, sessionID, directory)
+  // The two reads that stand BEFORE the claim, and the only awaits in this
+  // function that are not inside runEndlessCycle's own discipline.
+  // getSessionDirectory swallows its failures, but handoffAgentName awaits
+  // knownAgentKinds (config.js), which has no guard of its own — and a
+  // rejection escaping here would leave the latch set with nothing left to
+  // clear it, i.e. `spawn` refused for the life of the process.
+  let directory
+  let agentName
+  try {
+    // The session's OWN directory, not the factory closure's: sessions created
+    // with ?directory=… land in a different project but share the same factory
+    // ctx, and the todo file this cycle writes must be that project's.
+    directory = await getSessionDirectory(client, sessionID)
+    // Resolve the session's actual agent once and reuse it for both the
+    // open-points prompt and the replacement kickoff.
+    agentName = await handoffAgentName(client, sessionID, directory)
+  } catch (err) {
+    dropEndlessLatch(sessionID, `the session could not be resolved: ${errMsg(err)}`)
+    return null
+  }
   return runEndlessCycle({
     primarySessionID: sessionID,
     claim: () => claimPendingEndless(sessionID),
@@ -381,7 +411,9 @@ export async function maybeRunPendingEndless(client, sessionID) {
     // cycle then performs drops them too — by that point there is nothing left
     // to drop, and both entry points stay correct on their own.
     dropRetained: () => dropRetainedSubagents(client, { label: "endless" }),
-    countActive: () => countActiveSubagents(),
+    // The figure the "quiesced after" log line reports: what this primary's
+    // own wait was on when it began, scoped exactly as isQuiesced is.
+    countActive: () => countActiveSubagentsFor(sessionID),
     requestOpenPoints: () =>
       promptOldPrimaryFor(client, sessionID, agentName, {
         prompt: OPEN_POINTS_PROMPT,

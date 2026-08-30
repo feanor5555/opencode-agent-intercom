@@ -112,7 +112,11 @@ import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
 import { completionNotice, errorNotice, denialLoopNotice, isBlockedResult } from "./notices.js"
 import { capReplyForAgent } from "./resultfile.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
-import { maybeRunPendingHandoff, maybeRunPendingEndless } from "./handoffwiring.js"
+import {
+  maybeRunPendingHandoff,
+  maybeRunPendingEndless,
+  dropEndlessLatch,
+} from "./handoffwiring.js"
 
 // Re-exported so existing importers (test/plugin.test.js) keep resolving it
 // from hooks.js after the watchdog code moved to its own module.
@@ -1227,7 +1231,16 @@ export function createEventHandler(client) {
           // endless threshold has the latch, so this is a set lookup and a
           // return for every other idle. Detached because a cycle waits for
           // quiesce and then runs a full handoff.
-          void maybeRunPendingEndless(client, props?.sessionID)
+          //
+          // The catch is not decoration. runEndlessCycle never throws and
+          // maybeRunPendingEndless guards its own two pre-claim reads, but a
+          // detached rejection from anywhere in that path would leave an
+          // unclaimed latch standing — and an endless latch is the spawn
+          // freeze, so `spawn` would refuse for the life of the process. The
+          // drop is a no-op once the cycle has claimed the latch.
+          void maybeRunPendingEndless(client, props?.sessionID).catch((err) => {
+            dropEndlessLatch(props?.sessionID, `the cycle failed to start: ${errMsg(err)}`)
+          })
           // Detector B stays true within the session: the prompt files are
           // re-judged between turns, never during one, so the finding block
           // moves its bytes only where the user actually changed a file.
@@ -1240,6 +1253,19 @@ export function createEventHandler(client) {
           break
         case "session.error":
           await onSessionError(props, client)
+          // The endless latch is set by the transform hook DURING the turn that
+          // crosses the ceiling and is cleared only on that primary's own
+          // `session.idle`. A turn that ends in an error instead of an idle —
+          // and a turn at the endless ceiling is exactly where provider errors
+          // live — would leave it set with nothing left to clear it: the
+          // orchestrator stays alive, `spawn` refuses forever, and no cycle
+          // ever runs. Drop it here; the next over-threshold turn arms again.
+          //
+          // Dropping rather than running the cycle: the session has just
+          // failed, and the cycle's first act is to ask it for a long
+          // open-points turn. onSessionError above owns the subagent case and
+          // returns at once for a primary, which has no registry entry.
+          dropEndlessLatch(props?.sessionID, "the primary's turn ended in a session error")
           break
         case "session.deleted":
           await onSessionDeleted(props)

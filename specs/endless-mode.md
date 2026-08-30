@@ -382,8 +382,10 @@ injected dependencies differ in an endless cycle:
   open-points text, so `validateDocSummaries`' fallback block (`src/handoff.js:469`) is what
   lands in the kickoff's document section — the new orchestrator reads the real files itself,
   which it can, because it has the context to.
-- The kickoff message (`src/handoff.js:229-231`) gains the endless block, placed after the
-  handoff summary:
+- The kickoff message (`src/handoff.js:229-231`) places the endless block before the
+  handoff summary. On this path the predecessor's last-user goal is omitted from the summary:
+  the open points already decompose it, and leaving the imperative in place would give the
+  successor a spent competing instruction:
 
   ```
   ## Endless mode — work off the todo file

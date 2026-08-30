@@ -162,11 +162,11 @@ live criteria §7:
 | (c) save | `endless: saved N point(s) as T…`, every id present as `- T<n>:` in the todo file, exactly one todo file in the directory |
 | (d) replacement | `endless: cycle K/M complete, new session …`; the new session is readable, the old one is readable **and** archived |
 | kickoff | the new session carries `## Endless mode — work off the todo file` naming exactly the ids of (c) |
-| order | the five log lines appear in that order in the debug-log slice |
+| (e) work-off | the successor's messages include a `spawn` tool call whose `input.prompt` carries the first saved task id as the first non-empty line (`T<n>:` / `T<n>.` / `T<n>-` …) and any further spawn prompts likewise carry a saved id |
+| order | the six cycle lines appear in that order in the debug-log slice |
 
-Not asserted, and reported as such rather than silently passed: §7 (e) work-off
-(`test/e2e/todo-driver.mjs` covers the `DONE: T<n>` path on its own), and §7
-(f) view switch and (g) sidebar, which need a screenshot of the rendered TUI.
+Not asserted, and reported as such rather than silently passed: §7 (f) view
+switch and (g) sidebar, which need a screenshot of the rendered TUI.
 
 Parameters are env vars with cheap defaults — `ENDLESS_PROJECT_DIR`,
 `ENDLESS_PORT`, `ENDLESS_CONTEXT` (8000), `ENDLESS_MAX_CYCLES` (1),

@@ -15,6 +15,7 @@
 #              not deleted                               → `endless: cycle K/M complete, new session …`
 #   kickoff    the new session's first message is the endless kickoff and names
 #              exactly the ids of (c)
+#   (e) work-off the successor's spawn prompts carry saved task ids on line one
 #   order      the five evidence lines appear in that order in the debug log
 #
 # This driver owns its server: it builds the TUI, starts one on its own port,
@@ -640,11 +641,95 @@ else
     "out of order — slice lines: scheduled=$LINE_SCHEDULED refused=$LINE_REFUSED quiesced=$LINE_QUIESCED saved=$LINE_SAVED cycle=$LINE_CYCLE"
 fi
 
+# ---------- (e) the work-off -----------------------------------------------
+
+# The kickoff prompt starts the successor's model turn asynchronously. Read the
+# successor's persisted messages until a real spawn tool part appears, then
+# inspect the tool input itself. Looking only at the kickoff text would let a
+# model that ignored the task ids pass this criterion.
+if [ -n "$NEWSID" ] && [ -n "$SAVED_IDS" ]; then
+  WORK_DEADLINE=$(( $(date +%s) + STEP_TIMEOUT_S ))
+  WORK_RESULT="pending|no successor spawn tool call has appeared yet"
+  while :; do
+    curl -s -m 30 "$BASE/session/$NEWSID/message" > "$OUT_DIR/$PREFIX.new-session-messages.json"
+    WORK_RESULT=$(python3 - "$OUT_DIR/$PREFIX.new-session-messages.json" "$SAVED_IDS" <<'PY'
+import json, re, sys
+try:
+    payload = json.load(open(sys.argv[1]))
+except Exception as err:
+    print(f"pending|the successor message list was unreadable: {err}")
+    raise SystemExit
+expected = [i for i in sys.argv[2].split(",") if i]
+expected_set = set(expected)
+
+# OpenCode stores a tool call in an assistant message part. The input is in
+# part.state.input once the call is complete; accept the direct input shape as
+# well so this remains useful across the server's message representations.
+def spawn_prompts(node):
+    if isinstance(node, dict):
+        if node.get("tool") == "spawn":
+            candidates = []
+            state = node.get("state")
+            if isinstance(state, dict):
+                candidates.append(state.get("input"))
+            candidates.append(node.get("input"))
+            for candidate in candidates:
+                if isinstance(candidate, dict) and isinstance(candidate.get("prompt"), str):
+                    yield candidate["prompt"]
+                    break
+        for value in node.values():
+            yield from spawn_prompts(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from spawn_prompts(value)
+
+prompts = list(spawn_prompts(payload))
+if not prompts:
+    print("pending|no successor spawn tool call has appeared yet")
+    raise SystemExit
+
+observed = []
+invalid = []
+for prompt in prompts:
+    first = next((line.strip() for line in prompt.splitlines() if line.strip()), "")
+    match = re.match(r"^(T\d+)\s*[:.\-]\s*", first)
+    task_id = match.group(1) if match else None
+    observed.append((task_id or "?", first[:160]))
+    if task_id is None or task_id not in expected_set:
+        invalid.append((task_id or "no id", first[:160]))
+
+# The first saved point is the next task by contract. A spawn for another
+# saved point is still useful evidence, but a prompt without a saved id is a
+# failed work-off regardless of any valid call beside it.
+first_expected = expected[0] if expected else None
+seen_ids = [task_id for task_id, _ in observed if task_id != "?"]
+if invalid:
+    print(f"fail|spawn prompts {observed}; invalid first lines {invalid}")
+elif first_expected not in seen_ids:
+    print(f"fail|spawn prompts {observed}; first saved task {first_expected} was not spawned")
+else:
+    print(f"pass|spawn prompts carry saved ids on line one: {observed}")
+PY
+)
+    case "$WORK_RESULT" in
+      pass\|*|fail\|*) break ;;
+    esac
+    if [ "$(date +%s)" -ge "$WORK_DEADLINE" ] || ! e2e_server_alive; then break; fi
+    sleep "$POLL_S"
+  done
+  case "$WORK_RESULT" in
+    pass\|*) record "(e) work-off — successor spawn prompts carry saved task ids on their first line" 1 "${WORK_RESULT#*|}" ;;
+    fail\|*) record "(e) work-off — successor spawn prompts carry saved task ids on their first line" 0 "${WORK_RESULT#*|}" ;;
+    *)         record "(e) work-off — successor spawn prompts carry saved task ids on their first line" 0 "${WORK_RESULT#*|} (within ${STEP_TIMEOUT_S}s)" ;;
+  esac
+else
+  record "(e) work-off — successor spawn prompts carry saved task ids on their first line" 0 \
+    "not reachable: no new session id and/or no saved ids from the save step"
+fi
+
 # ---------- what this driver does not assert -------------------------------
 
 say ""
-note_uncovered "(e) work-off (specs/endless-mode.md §7)" \
-  "the new orchestrator spawning for the first task and the DONE: T<n> path removing it is a second cycle's worth of model work; test/e2e/todo-driver.mjs covers the DONE path on its own"
 note_uncovered "(f) view switch and (g) sidebar (specs/endless-mode.md §7)" \
   "both require a screenshot of the rendered TUI; a shell driver cannot produce visual evidence"
 

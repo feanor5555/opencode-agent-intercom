@@ -63,8 +63,10 @@ import { hasOpenPointsHeading } from "./openpoints.js"
 //      and is correctly NOT announced as re-parented.
 //   6. Send the kickoff to the new orchestrator. An endless cycle passes
 //      `deps.extraKickoffBlock` — the "work off the todo file" instruction
-//      naming the task ids it just confirmed — which is placed right after
-//      the handoff summary. Immediately after the kickoff is sent, and only
+//      naming the task ids it just confirmed — which is placed before the
+//      handoff summary. The endless path omits the predecessor's last-user
+//      goal from that summary because the open points already decompose it.
+//      Immediately after the kickoff is sent, and only
 //      then, `deps.selectTuiSession` switches the TUI to the new session:
 //      switching earlier would show the user an empty session, switching
 //      after the archive would leave a window in which the displayed session
@@ -122,7 +124,7 @@ import { hasOpenPointsHeading } from "./openpoints.js"
 // @property {(sessionID: string) => void} forgetPrimary
 // @property {() => Promise<unknown>} [dropRetainedSubagents]  tear down every retained subagent before the sequence starts
 // @property {() => Promise<string>} promptOldPrimaryForDocSummaries
-// @property {string} [extraKickoffBlock]  appended to the kickoff after the handoff summary (endless mode)
+// @property {string} [extraKickoffBlock]  endless work-off block placed before the handoff summary
 // @property {(sessionID: string) => Promise<void>} [selectTuiSession]  best-effort TUI view switch to the new session
 //
 // @param {PrimaryHandoffDeps} deps
@@ -253,9 +255,15 @@ async function performPrimaryHandoffInner(deps) {
     // "" contract.
     const safeGoal =
       goal || "(kein echtes Nutzer-Ziel in der Session-History gefunden — siehe Geplante Schritte / TODO.md)"
-    const stand = inFlight.length > 0
-      ? `Letztes Ziel: ${safeGoal} (${inFlight.length} Subagent(s) wurden re-parented)`
-      : `Letztes Ziel: ${safeGoal}`
+    // In an endless cycle the open points are the successor's source of
+    // truth. Repeating the predecessor's last user message here would turn a
+    // spent imperative into a competing live instruction, so leave the stand
+    // section empty. The plain handoff keeps carrying that goal unchanged.
+    const stand = deps.extraKickoffBlock
+      ? ""
+      : inFlight.length > 0
+        ? `Letztes Ziel: ${safeGoal} (${inFlight.length} Subagent(s) wurden re-parented)`
+        : `Letztes Ziel: ${safeGoal}`
     const notes = [
       "Diese Subagents liefern jetzt an diese Session:",
       ...inFlight.map((s) => `${s.handle} (${s.agent}): ${s.task}`),
@@ -263,13 +271,15 @@ async function performPrimaryHandoffInner(deps) {
     md = deps.formatPrimarySummary({ stand, notes, plannedSteps: steps })
     deps.writePrimarySummary(deps.directory, md)
 
-    // 6. Send the kickoff to the new orchestrator. `extraKickoffBlock` is
-    // the endless cycle's work-off instruction; it sits directly after the
-    // handoff summary so the new session's first read is what it is for.
+    // 6. Send the kickoff to the new orchestrator. On the endless path the
+    // work-off instruction must be the first prose, before the handoff
+    // summary; the summary is background once the open points are explicit.
     // Absent on the plain handoff, which composes exactly as before.
-    const extra = deps.extraKickoffBlock ? "\n\n" + deps.extraKickoffBlock : ""
-    const kickoffMessage =
-      md + extra + (historySummary ? "\n\n" + historySummary : "") + "\n\n" + docSummaries
+    const hasEndlessBlock = Boolean(deps.extraKickoffBlock)
+    const extra = hasEndlessBlock ? "\n\n" + deps.extraKickoffBlock : ""
+    const kickoffMessage = hasEndlessBlock
+      ? deps.extraKickoffBlock + "\n\n" + md + (historySummary ? "\n\n" + historySummary : "") + "\n\n" + docSummaries
+      : md + extra + (historySummary ? "\n\n" + historySummary : "") + "\n\n" + docSummaries
     await deps.promptAsync(newID, kickoffMessage)
   } catch (err) {
     // Pre-kickoff failure: the new session never became the live primary.

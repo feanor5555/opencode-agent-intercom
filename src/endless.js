@@ -120,9 +120,10 @@ function formatOpenTasks(openTasks) {
 }
 
 // The block the new orchestrator's kickoff carries in an endless cycle,
-// inserted right after the handoff summary. States only what the save step
-// confirmed: the ids and the task texts alike come from the read-back of the
-// resolved todo file, never from the parse alone.
+// inserted before the handoff summary so the work-off instruction is the
+// first prose the successor reads. States only what the save step confirmed:
+// the ids and the task texts alike come from the read-back of the resolved
+// todo file, never from the parse alone.
 //
 // The listing is not a convenience. A primary holds spawn / abort / list /
 // reuse and nothing else (PRIMARY_TOOLS, src/hooks.js), so the successor

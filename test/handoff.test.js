@@ -36,6 +36,7 @@ function makeDeps(overrides = {}) {
     primarySessionID: "primary-1",
     directory: "/tmp/work",
     orchestratorAgentName: "orchestrator",
+    extraKickoffBlock: overrides.extraKickoffBlock,
 
     beginDrain: () => {
       call("beginDrain")
@@ -313,6 +314,58 @@ test("promptAsync (kickoff) embeds the summary markdown AND the three per-file d
     !message.includes("Lies jetzt PROJECT.md, TODO.md und ARCHITECTURE.md"),
     "kickoff message must NOT contain the old re-read directive",
   )
+})
+
+test("endless kickoff starts with the work-off block before the handoff summary", async () => {
+  const extraKickoffBlock = [
+    "## Endless mode — work off the todo file",
+    "",
+    "The first open task is T1.",
+  ].join("\n")
+  const deps = makeDeps({ extraKickoffBlock })
+  const result = await performPrimaryHandoff(deps)
+  const message = deps._log.find((e) => e[0] === "promptAsync")[2]
+
+  assert.ok(message.startsWith(extraKickoffBlock + "\n\n"))
+  assert.equal(
+    message.indexOf(result.summaryMarkdown),
+    extraKickoffBlock.length + 2,
+    "the endless work-off block precedes the summary by one blank line",
+  )
+})
+
+test("plain handoff keeps the summary before history and document context", async () => {
+  const docSummaries = [
+    "## PROJECT.md — project index",
+    "",
+    "## TODO.md — task list",
+    "",
+    "## ARCHITECTURE.md — architecture",
+  ].join("\n")
+  const deps = makeDeps({ docSummaries })
+  const result = await performPrimaryHandoff(deps)
+  const message = deps._log.find((e) => e[0] === "promptAsync")[2]
+
+  assert.equal(
+    message,
+    result.summaryMarkdown + "\n\n" + docSummaries,
+    "without an endless block the plain composition is unchanged",
+  )
+})
+
+test("endless handoff suppresses the predecessor's stale goal from the summary", async () => {
+  const staleGoal = "Run the spent imperative exactly once, then stop immediately."
+  const deps = makeDeps({
+    goal: staleGoal,
+    extraKickoffBlock: "## Endless mode — work off the todo file\n\nT1 is open.",
+  })
+  await performPrimaryHandoff(deps)
+
+  const fmt = deps._log.find((e) => e[0] === "formatPrimarySummary")[1]
+  const message = deps._log.find((e) => e[0] === "promptAsync")[2]
+  assert.equal(fmt.stand, "", "endless mode leaves the stale-goal stand section empty")
+  assert.doesNotMatch(message, new RegExp(staleGoal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+  assert.doesNotMatch(message, /Letztes Ziel:/)
 })
 
 test("promptOldPrimaryForDocSummaries is called once, between createSession and promptAsync", async () => {

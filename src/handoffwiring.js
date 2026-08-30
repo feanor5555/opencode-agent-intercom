@@ -32,6 +32,8 @@ import {
   claimPendingEndless,
   releaseEndless,
   setEndlessCooldown,
+  pauseEndless,
+  isEndlessPaused,
   isQuiesced,
   recordEndlessCycle,
   countActiveSubagents,
@@ -50,7 +52,7 @@ import {
 } from "./client.js"
 import { dropRetainedSubagents } from "./teardown.js"
 import { addTask, listOpen, findTodoFile, TodoFileMissingError } from "./todofile.js"
-import { getSettings, writeEndlessMode } from "./settings.js"
+import { getSettings } from "./settings.js"
 import { defaultAgentName, DEFAULT_AGENT } from "./agents.js"
 import { knownAgentKinds } from "./config.js"
 import { readPlannedSteps, formatPrimarySummary, writePrimarySummary } from "./project.js"
@@ -350,6 +352,16 @@ export async function maybeRunPendingEndless(client, sessionID) {
     log("endless: latch dropped — the mode was switched off before the cycle started", { sessionID })
     return null
   }
+  // The same gate for the mode's own stop. scheduleEndlessIfNeeded already
+  // refuses to arm a paused primary, so a latch can only be one that was set
+  // before the pause — the turn that crossed the ceiling, with the stop landing
+  // on the idle that followed. Dropping it here keeps the pause authoritative
+  // at both ends, the mark and the execute.
+  if (isEndlessPaused(sessionID)) {
+    cancelPendingEndless(sessionID)
+    log("endless: latch dropped — the mode is paused for this session", { sessionID })
+    return null
+  }
   // The session's OWN directory, not the factory closure's: sessions created
   // with ?directory=… land in a different project but share the same factory
   // ctx, and the todo file this cycle writes must be that project's.
@@ -410,7 +422,10 @@ export async function maybeRunPendingEndless(client, sessionID) {
       }),
     cycleNumber: handoffGeneration(sessionID),
     maxCycles: endlessMaxCycles,
-    switchOff: () => writeEndlessMode(false),
+    // A stop pauses the mode for one primary session and never writes the
+    // settings file: `endlessMode` is the user's switch, and the sidebar is the
+    // only half that persists a change to it.
+    pause: (pausedSessionID, reason) => pauseEndless(pausedSessionID, reason),
     recordCycle: recordEndlessCycle,
     toast: ({ message, variant }) => showToast(client, { title: "agent-intercom", message, variant }),
     quiesceTimeoutMs: endlessQuiesceTimeoutMs,

@@ -670,19 +670,25 @@ A cycle runs in this order:
 
 ### What bounds the loop
 
-Endless mode is a loop, so it switches itself off rather than waiting for
-someone to watch it:
+Endless mode is a loop, so it stops itself rather than waiting for someone to
+watch it. A self-stop **pauses** the mode for the orchestrator session in hand:
+it never writes `endlessMode: false`, because the mode is on by default and the
+key is the user's own switch. A paused session gets no further cycle and no
+replacement — it is told so in its own limits block — and the pause dies with
+it, so the next orchestrator session starts with the mode available again.
 
 - **Nothing left to do.** When the orchestrator reports no new open points
-  *and* the todo file has no open tasks, the mode writes itself off instead
-  of starting a session that would have nothing to work on.
+  *and* the todo file has no open tasks, the mode pauses instead of starting
+  a session that would have nothing to work on.
 - **No progress.** If the open-task count has not fallen after
-  `ENDLESS_MAX_STALLED_CYCLES` (2) consecutive cycles, the mode writes
-  itself off — the bound against an orchestrator that saves the same points
-  every cycle and never finishes one.
+  `ENDLESS_MAX_STALLED_CYCLES` (2) consecutive cycles, the mode pauses — the
+  bound against an orchestrator that saves the same points every cycle and
+  never finishes one. This one fires after the replacement, so the pause goes
+  on the new orchestrator, which is the session that would otherwise carry the
+  loop on.
 - **Cycle ceiling.** `OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES` (default
-  10) cycles per opencode process. At the ceiling the mode writes itself
-  off with a warning toast.
+  10) cycles per opencode process. At the ceiling the mode pauses with a
+  warning toast.
 - **Failed-cycle cooldown.** A cycle that abandoned (quiesce timeout, save
   failure, handoff failure) arms a cooldown on that orchestrator so an
   already-over-threshold turn cannot retry on its next message; the cooldown
@@ -693,9 +699,9 @@ someone to watch it:
   it has written to the todo file and must not leave the orchestrator
   half-replaced.
 
-Every one of these stops writes `endlessMode: false` back to the settings
-file (or leaves it alone); none of them deletes a session, aborts a subagent
-or removes a task.
+Only the sidebar toggle (or the env var) writes `endlessMode`; none of these
+stops touches the settings file, deletes a session, aborts a subagent or
+removes a task.
 
 ## Under the hood
 

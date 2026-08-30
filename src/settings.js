@@ -31,9 +31,12 @@
 // Endless mode resolves the same way: `endlessMode`, `endlessContext`,
 // `endlessQuiesceTimeoutMs` and `endlessMaxCycles`.
 // While `endlessMode` is on, `endlessContext` is the primary threshold in
-// effect instead of `maxPrimaryContext` — see `primaryContextThreshold`. The
-// plugin writes `endlessMode: false` back itself when one of the mode's own
-// bounds ends the loop (`writeEndlessMode`).
+// effect instead of `maxPrimaryContext` — see `primaryContextThreshold`.
+// `endlessMode` is the USER's switch and this module never writes it: when one
+// of the mode's own bounds ends the loop, the plugin pauses the mode for that
+// one primary session (pauseEndless, src/registry.js) and leaves the file
+// alone. The mode is on by default, so a self-stop that persisted `false` here
+// would disable that default for good.
 //
 // `showAgentcom` resolves the same way and is the second boolean key. While it
 // is OFF, every message the plugin posts into a session carries `synthetic:
@@ -63,9 +66,9 @@
 //       "maxReuseContext": N, "reuseContext": { "<agent>": N },
 //       "showAgentcom": true|false }
 
-import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join, dirname } from "node:path"
+import { join } from "node:path"
 import { log, errMsg } from "./log.js"
 
 // The subagent cap and context budget in effect when neither the file nor the
@@ -174,8 +177,9 @@ const DEFAULT_POST_NOTICE_RETRY_BACKOFF_MS = 500
 // Endless mode: the orchestrator is replaced by a fresh session whenever its
 // context reaches `endlessContext`, after its open points have been written to
 // the project's todo file, and the new session is told to work that file off.
-// On by default — the mode's own bounds switch it off when there is no work
-// left, no progress is made, or the cycle ceiling is reached.
+// On by default — the mode's own bounds PAUSE it for the primary in hand when
+// there is no work left, no progress is made, or the cycle ceiling is reached;
+// they never write this key, which stays the user's own switch.
 // Exported for the same reason as the two limits above: the TUI plugin carries
 // its own copy of both and test/settings-defaults-parity.test.js pins them.
 export const DEFAULT_ENDLESS_MODE = true
@@ -184,8 +188,9 @@ export const DEFAULT_ENDLESS_CONTEXT = 250000
 // The inactivity watchdog (maxSubagentAgeMs) already resolves a HUNG subagent
 // in ~90 s, so this bound is for one that is genuinely working.
 const DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS = 600000
-// How many cycles one opencode process runs before endless mode switches
-// itself off. Counted over the handoff-redirect chain (handoffGeneration).
+// How many cycles one opencode process runs before endless mode pauses itself
+// for that primary. Counted over the handoff-redirect chain
+// (handoffGeneration).
 const DEFAULT_ENDLESS_MAX_CYCLES = 10
 // Whether the plugin's own postings appear in the transcript. While it is off,
 // the text part every posting carries is stamped `synthetic: true` —
@@ -200,33 +205,6 @@ const TTL_MS = 2000
 let settingsPath = join(homedir(), ".config", "opencode", "agent-intercom.json")
 let cache = null
 let cachedAt = 0
-
-// Process-local override of `endlessMode`, set by EVERY writeEndlessMode call
-// whether or not the value reached the disk. All five of endless mode's stops
-// depend on the mode actually going off; a settings file that is present but
-// unparsable, or that cannot be written, would otherwise leave `endlessMode`
-// true on disk and the cycle would re-arm on the primary's very next turn —
-// a loop with no bound left, since endlessMaxCycles counts handoff generations
-// and no handoff runs on a toast-only stop.
-//
-// It is not permanent: `stamp` records what the settings file looked like when
-// the override was set, and the override is dropped as soon as the file
-// changes. That keeps the switch working in the direction the user owns — the
-// sidebar writes the file directly (it is a separate npm package and cannot
-// reach this module), so a hand edit or a toggle re-arming the mode wins over
-// the plugin's own switch-off.
-let endlessOverride = null
-
-// Identity of the settings file as it stands right now: mtime and size, or
-// null when there is no file. Only read while an override is live.
-function settingsFileStamp() {
-  try {
-    const st = statSync(settingsPath)
-    return `${st.mtimeMs}:${st.size}`
-  } catch {
-    return null
-  }
-}
 
 // Reads a non-negative integer env var, falling back to `def` when unset/invalid.
 function envNum(name, def) {
@@ -427,15 +405,6 @@ export function getSettings() {
   } catch {
     // no file / unreadable -> env + defaults; not an error
   }
-  // The plugin's own switch-off wins over the file until the file itself
-  // changes — see endlessOverride.
-  if (endlessOverride) {
-    if (endlessOverride.stamp === settingsFileStamp()) {
-      resolved.endlessMode = endlessOverride.value
-    } else {
-      endlessOverride = null
-    }
-  }
   // The retention window has a floor of 1 ms, wherever its value came from:
   // a 0 here would mean a retained session nothing ever reaps, and this plugin
   // is the only thing that deletes a subagent session. 0 switches retention
@@ -590,74 +559,14 @@ export function primaryContextThreshold() {
   return s.endlessMode ? s.endlessContext : s.maxPrimaryContext
 }
 
-// Writes `endlessMode` into the settings file — the plugin's own half of the
-// switch, used by the bounds that end the loop (nothing left to do, no
-// progress, cycle ceiling). Read-modify-write over what is on disk right now,
-// mirroring the sidebar's writer: every other key, known or not, is carried
-// over untouched. A file that is present but unreadable, unparsable or not a
-// JSON object is NOT written over — one stray character from a hand edit must
-// not cost the user the rest of the file. Returns whether the value reached
-// the disk.
-//
-// The value takes effect either way: it is also held in `endlessOverride`, so
-// a stop is a stop even when the write failed, and getSettings reports the
-// value this call asked for until the file itself changes.
-export function writeEndlessMode(enabled) {
-  let raw
-  try {
-    raw = JSON.parse(readFileSync(settingsPath, "utf8"))
-  } catch (err) {
-    if (err?.code !== "ENOENT") {
-      log("settings: endlessMode write skipped, file unreadable", errMsg(err))
-      holdEndlessMode(enabled)
-      return false
-    }
-    // Absent file: the write creates it. The ONLY path on which `raw` is
-    // synthesised rather than read.
-    raw = {}
-  }
-  // A file that parses but holds `[1,2,3]` or `"text"` is content we cannot
-  // merge into, so it is treated like an unparsable one: refused, not replaced.
-  // The sidebar's half refuses the same case (createJsonObjectFile,
-  // tui/src/json-object-file.ts).
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    log("settings: endlessMode write skipped, file is not a JSON object")
-    holdEndlessMode(enabled)
-    return false
-  }
-  try {
-    mkdirSync(dirname(settingsPath), { recursive: true })
-    writeFileSync(settingsPath, JSON.stringify({ ...raw, endlessMode: enabled }, null, 2) + "\n")
-  } catch (err) {
-    log("settings: endlessMode write failed", errMsg(err))
-    holdEndlessMode(enabled)
-    return false
-  }
-  // Drop the cache so the next getSettings() sees the value we just wrote
-  // instead of serving the old one for the rest of the TTL.
-  holdEndlessMode(enabled)
-  return true
-}
-
-// Pins `enabled` as the resolved endlessMode until the settings file changes,
-// and drops the settings cache so the next getSettings() sees it.
-function holdEndlessMode(enabled) {
-  endlessOverride = { value: enabled, stamp: settingsFileStamp() }
-  // The cache alone. The retention latch belongs to the tool map opencode
-  // resolved at bootstrap, and toggling endless mode does not re-resolve it.
-  dropSettingsCache()
-}
-
 function dropSettingsCache() {
   cache = null
   cachedAt = 0
 }
 
-// Test-only: point at a different file and drop the cache. The endlessMode
-// override belongs to the file it was written against, so it goes with it.
+// Test-only: point at a different file and drop the cache.
 export function setSettingsPath(p) {
   settingsPath = p
-  endlessOverride = null
   resetSettings()
 }
 

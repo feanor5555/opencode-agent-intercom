@@ -180,6 +180,24 @@ export const endlessInProgress = new Set()
 // re-schedule on its very next turn and retry continuously.
 export const endlessCooldowns = new Map()
 
+// sessionID -> { reason, at } for a primary whose endless run stopped ITSELF:
+// the cycle ceiling, the no-progress bound, or a cycle that found nothing left
+// to do. A pause is RUNTIME state and nothing else — the settings file is
+// never touched by it, so `endlessMode` keeps whatever the user put there and
+// the mode stays available to the next primary session.
+//
+// It is what makes a self-stop a stop at all: without it the primary is still
+// over `endlessContext`, so its very next turn would re-arm the latch and the
+// same cycle would run again on the next idle. The pause is keyed by session
+// id, so a primary that a handoff replaced takes its pause with it — the
+// fresh orchestrator starts with the mode available (forgetPrimary drops the
+// old key; the new id was never in the map).
+//
+// The no-progress bound is the one stop that fires AFTER the replacement, so
+// it pauses the NEW primary — pausing the session it just retired would bound
+// nothing.
+export const endlessPauses = new Map()
+
 // Cross-cycle progress bookkeeping for the no-progress bound. NOT keyed by
 // session id: each cycle replaces the primary, so the count has to survive the
 // replacement to be comparable at all. `lastOpenTasks` is the open-task count
@@ -304,6 +322,7 @@ export function resetState() {
   pendingEndless.clear()
   endlessInProgress.clear()
   endlessCooldowns.clear()
+  endlessPauses.clear()
   endlessProgress.lastOpenTasks = null
   endlessProgress.stalledCycles = 0
 }

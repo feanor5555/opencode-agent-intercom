@@ -417,21 +417,32 @@ the user's goal.
 
 Endless mode is a loop, so it needs bounds that do not depend on anyone watching it.
 
+A stop the mode decides for itself never writes the settings file. `endlessMode` is on by
+default and is the user's own switch; persisting `false` on the first self-stop would disable
+that default for good. What a self-stop leaves behind is a runtime pause on ONE primary
+session (`pauseEndless`, `src/registry.js`): `scheduleEndlessIfNeeded` refuses to arm a paused
+primary, so the still-over-threshold session cannot re-arm on its next idle, and the pause
+dies with that session (`forgetPrimary`), so the orchestrator that takes over has the mode
+available again. While it holds, the mode is still on and still owns the threshold, so the
+plain handoff does not step in either: the paused session runs on with the context it has and
+is told so in its per-turn limits block. Only the sidebar's toggle writes `endlessMode`.
+
 1. **Nothing left to do.** When §3.4's confirmed point list is empty *and* `listOpen` reports
-   no open task, the cycle stops before the replacement: latch released, freeze lifted,
-   `endlessMode` written back to `false` through the plugin's own settings write, success
-   toast "endless mode: no open points left — switched off". A restart into an empty todo
+   no open task, the cycle stops before the replacement: latch released, freeze lifted, the
+   primary paused, success toast "endless mode: no open points left — paused for this
+   session". A restart into an empty todo
    file would produce a session with nothing to do, which would idle, be woken by nothing, and
    sit at the start of a fresh context forever.
 2. **No progress.** The plugin records the open-task count at the end of each cycle. If two
-   consecutive cycles end with a count that has not fallen, endless mode switches itself off
-   with a warning toast naming the count. This is the bound against the failure the whole
+   consecutive cycles end with a count that has not fallen, endless mode pauses itself with a
+   warning toast naming the count. This bound fires AFTER the replacement, so the pause goes
+   on the NEW primary — pausing the session just retired would bound nothing. This is the bound against the failure the whole
    mode invites: an orchestrator that saves the same points every 250 000 tokens and never
    finishes one.
 3. **A cycle ceiling.** `endlessMaxCycles`, default 10, counted per opencode process across
    the redirect chain — `handoffGeneration(sessionID)` (`src/registry.js:508`) already derives
    the generation number from `handoffRedirects`, so the ceiling needs no new state. At the
-   ceiling endless mode switches itself off with a toast. Ten cycles at 250 000 tokens is a
+   ceiling endless mode pauses itself with a toast. Ten cycles at 250 000 tokens is a
    very long session; a user who wants more turns it back on.
 4. **A cooldown after a failed cycle.** A cycle that abandoned (quiesce timeout, save
    failure, handoff failure) sets a cooldown of 5 minutes on that primary during which
@@ -442,8 +453,8 @@ Endless mode is a loop, so it needs bounds that do not depend on anyone watching
    settings read (TTL 2 000 ms, `src/settings.js:68`). A cycle already past the save step
    completes — it has written to the todo file and must not leave the primary half-replaced.
 
-Every one of these five stops writes `endlessMode: false` or leaves it alone; none of them
-deletes a session, aborts a subagent or removes a task.
+None of these five stops writes the settings file, deletes a session, aborts a subagent or
+removes a task.
 
 ### 3.7 The sidebar row
 
@@ -650,9 +661,9 @@ Unit, in the existing `node --test` style under `test/`:
 - The kickoff: contains the confirmed ids and the confirmed count and no id `addTask` did not
   return; is sent through `promptSession`, so it carries the plugin-generated marker and
   `lastUserGoal` skips it.
-- The bounds: an empty confirmed list with an empty todo file → no handoff, `endlessMode`
-  written false; two consecutive cycles with a non-falling open-task count → switched off; the
-  cycle counter at `endlessMaxCycles` → switched off; a failed cycle → the cooldown suppresses
+- The bounds: an empty confirmed list with an empty todo file → no handoff, the settings file
+  untouched and the primary paused; two consecutive cycles with a non-falling open-task count → the new primary
+  paused; the cycle counter at `endlessMaxCycles` → paused; a failed cycle → the cooldown suppresses
   the next schedule and lifts after it.
 - Quiesce timeout: with a permanently busy fake registry, the cycle abandons after
   `endlessQuiesceTimeoutMs` of virtual time, the latch is released, the freeze is lifted and

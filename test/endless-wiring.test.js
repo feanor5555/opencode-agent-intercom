@@ -27,6 +27,8 @@ import plugin from "../src/index.js"
 import { resetState, pendingSpawns } from "../src/state.js"
 import {
   markEndlessPending,
+  isEndlessPaused,
+  pauseEndless,
   markHandoffPending,
   claimPendingEndless,
   hasEndlessPending,
@@ -234,9 +236,11 @@ test("endlessQuiesceTimeoutMs reaches the cycle: a busy process abandons at quie
 test("endlessMaxCycles reaches the cycle: a spent ceiling stops it before the quiesce wait", async () => {
   // handoffGeneration counts the redirect chain, so one completed handoff puts
   // this primary at generation 2 — one cycle done. With the ceiling at 1 the
-  // next cycle is refused, and the refusal writes the mode off through the
-  // plugin's own settings write.
+  // next cycle is refused, and the refusal PAUSES this primary without writing
+  // a byte of the settings file: the mode is on by default, and a self-stop
+  // that persisted `endlessMode: false` would disable that default for good.
   settings({ endlessMode: true, endlessMaxCycles: 1 })
+  const before = readFileSync(settingsFile, "utf8")
   const { ctx, created, toasts } = makeCtx()
   beginHandoffDrain("ses-endless-wiring-prev")
   bindHandoffDrainTarget("ses-endless-wiring-prev", SID)
@@ -248,6 +252,81 @@ test("endlessMaxCycles reaches the cycle: a spent ceiling stops it before the qu
   assert.equal(res.outcome, "ceiling")
   assert.deepEqual(created, [], "nothing is written or replaced at the ceiling")
   assert.match(toasts.at(-1).body.message, /cycle ceiling reached \(1\/1\)/)
-  assert.equal(JSON.parse(readFileSync(settingsFile, "utf8")).endlessMode, false)
+  assert.equal(readFileSync(settingsFile, "utf8"), before, "the settings file is untouched")
+  assert.equal(isEndlessPaused(SID), true, "the stop holds as a pause on this primary")
   assert.equal(endlessCooldownActive(SID), false, "a deliberate stop arms no cooldown")
+})
+
+// ---------------------------------------------------------------------------
+// The pause a self-stop leaves behind
+// ---------------------------------------------------------------------------
+
+test("a paused primary arms nothing on its next over-threshold turn", async () => {
+  settings({ endlessMode: true, endlessContext: 1, maxPrimaryContext: 1 })
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  pauseEndless(SID, "cycle ceiling reached (1/1) — paused for this session")
+
+  await primaryTurn(hooks, 5000)
+
+  assert.equal(hasEndlessPending(SID), false, "the pause suppresses the re-arm")
+  assert.equal(
+    hasHandoffPending(SID),
+    false,
+    "and the mode still owns the threshold, so the plain handoff does not step in",
+  )
+})
+
+test("the paused primary is told so in its own limits block", async () => {
+  settings({ endlessMode: true, endlessContext: 1 })
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  pauseEndless(SID, "no open points left — paused for this session")
+
+  recordPrimaryContext(SID, 5000)
+  const out = { system: ["base prompt"] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: SID }, out)
+  const system = out.system.join("\n")
+
+  assert.match(system, /Endless mode is PAUSED for this session — no open points left/)
+  assert.match(system, /nothing was written to the settings/)
+})
+
+test("a fresh primary is not paused, so the mode is available again after a replacement", async () => {
+  settings({ endlessMode: true, endlessContext: 1 })
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  pauseEndless(SID, "cycle ceiling reached (1/1) — paused for this session")
+
+  recordPrimaryContext("ses-endless-wiring-new", 5000)
+  const out = { system: ["base prompt"] }
+  await hooks["experimental.chat.system.transform"](
+    { sessionID: "ses-endless-wiring-new" },
+    out,
+  )
+
+  assert.equal(hasEndlessPending("ses-endless-wiring-new"), true)
+  assert.doesNotMatch(out.system.join("\n"), /Endless mode is PAUSED/)
+})
+
+test("a paused primary that still carries a latch has it dropped on the idle side", async () => {
+  settings({ endlessMode: true })
+  markEndlessPending(SID)
+  pauseEndless(SID, "no open points left — paused for this session")
+
+  assert.equal(await maybeRunPendingEndless(noClient, SID), null)
+  assert.equal(hasEndlessPending(SID), false, "the latch is dropped, so the freeze lifts")
+})
+
+test("the user switching the mode off clears the pause and hands the threshold back", async () => {
+  settings({ endlessMode: true, endlessContext: 1, maxPrimaryContext: 1 })
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  pauseEndless(SID, "cycle ceiling reached (1/1) — paused for this session")
+
+  settings({ endlessMode: false, endlessContext: 1, maxPrimaryContext: 1 })
+  await primaryTurn(hooks, 5000)
+
+  assert.equal(isEndlessPaused(SID), false, "the pause belongs to a mode nobody is running")
+  assert.equal(hasHandoffPending(SID), true, "the plain handoff owns the threshold again")
 })

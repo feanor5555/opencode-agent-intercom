@@ -85,7 +85,7 @@ function makeCycle({ directory, overrides = {} } = {}) {
   const state = {
     handoffCalls: [],
     toasts: [],
-    switchedOff: 0,
+    paused: [],
     slept: 0,
     clock: 0,
     recorded: [],
@@ -105,8 +105,8 @@ function makeCycle({ directory, overrides = {} } = {}) {
     },
     cycleNumber: 1,
     maxCycles: 10,
-    switchOff: () => {
-      state.switchedOff += 1
+    pause: (id, reason) => {
+      state.paused.push({ id, reason })
       return true
     },
     recordCycle: (n) => {
@@ -194,7 +194,7 @@ test("two todo files: the cycle abandons at save, neither file is written, no ha
   assert.deepEqual(readdirSync(dir).sort(), ["todo.md", "todos.md"], "no third file is created")
   assert.equal(isEndlessFrozen(SID), false, "the abandon lifts the spawn freeze")
   assert.equal(endlessCooldownActive(SID), true, "and arms the cooldown")
-  assert.equal(state.switchedOff, 0, "an abandoned cycle does not switch the mode off")
+  assert.deepEqual(state.paused, [], "an abandoned cycle does not pause the mode")
 })
 
 test("a failed read-back confirmation abandons the cycle and never calls the handoff", async () => {
@@ -322,7 +322,7 @@ test("quiesce timeout: the cycle abandons on virtual time, the freeze lifts, no 
 // The bounds
 // ---------------------------------------------------------------------------
 
-test("nothing left to do: an empty point list and an empty todo file switch the mode off", async () => {
+test("nothing left to do: an empty point list and an empty todo file pause the mode", async () => {
   const dir = tempProject()
   const { io, state } = makeCycle({
     directory: dir,
@@ -331,7 +331,9 @@ test("nothing left to do: an empty point list and an empty todo file switch the 
   const res = await runEndlessCycle(io)
 
   assert.equal(res.outcome, "no-open-points")
-  assert.equal(state.switchedOff, 1, "endlessMode is written false")
+  assert.equal(state.paused.length, 1, "the mode is paused, not switched off")
+  assert.equal(state.paused[0].id, SID, "the pause is on the primary that stopped")
+  assert.match(state.paused[0].reason, /no open points left/)
   assert.equal(state.handoffCalls.length, 0, "the session is not replaced")
   assert.equal(isEndlessFrozen(SID), false)
   assert.equal(endlessCooldownActive(SID), false, "a deliberate stop arms no retry cooldown")
@@ -346,11 +348,11 @@ test("an empty point list with open tasks left still replaces the session", asyn
   })
   const res = await runEndlessCycle(io)
   assert.equal(res.outcome, "complete")
-  assert.equal(state.switchedOff, 0)
+  assert.deepEqual(state.paused, [])
   assert.equal(state.handoffCalls.length, 1)
 })
 
-test("no progress: two consecutive cycles with a non-falling count switch the mode off", async () => {
+test("no progress: two consecutive cycles with a non-falling count pause the NEW primary", async () => {
   const dir = tempProject()
   const { io, state } = makeCycle({
     directory: dir,
@@ -365,13 +367,20 @@ test("no progress: two consecutive cycles with a non-falling count switch the mo
 
   assert.equal(res.outcome, "complete")
   assert.equal(state.handoffCalls.length, 1, "the cycle that is already past the save completes")
-  assert.equal(state.switchedOff, 1)
+  assert.equal(state.paused.length, 1)
+  assert.equal(
+    state.paused[0].id,
+    "ses-new-1",
+    "the bound fires after the replacement, so it pauses the session that inherited the loop",
+  )
+  assert.equal(res.pausedSessionID, "ses-new-1")
   assert.deepEqual(
     state.recorded,
     [0],
     "the bound reads the count the cycle FOUND (0 here), not the one its own write produced",
   )
   assert.match(state.toasts.at(-1).message, /no progress over 2 cycles at 0 open task\(s\)/)
+  assert.match(state.toasts.at(-1).message, /paused for the new session/)
 })
 
 test("a productive loop is not read as stalled: the recorded count is the one it inherited", async () => {
@@ -437,7 +446,7 @@ test("a cycle whose points are all already in the file still replaces the sessio
 
   assert.equal(res.outcome, "complete", "there is open work left, so the mode does not stop")
   assert.deepEqual(res.ids, [])
-  assert.equal(state.switchedOff, 0)
+  assert.deepEqual(state.paused, [])
   assert.equal(state.handoffCalls.length, 1)
   assert.match(state.handoffCalls[0].extraKickoffBlock, /no new open points/)
 })
@@ -446,7 +455,7 @@ test("a cycle whose points are all already in the file still replaces the sessio
 // The bounds, continued
 // ---------------------------------------------------------------------------
 
-test("the cycle ceiling switches the mode off before anything is written or replaced", async () => {
+test("the cycle ceiling pauses the mode before anything is written or replaced", async () => {
   // The generation number starts at 1, so `maxCycles: 10` is spent once the
   // chain stands at generation 11 — ten cycles ran.
   const dir = tempProject()
@@ -457,11 +466,12 @@ test("the cycle ceiling switches the mode off before anything is written or repl
   const res = await runEndlessCycle(io)
 
   assert.equal(res.outcome, "ceiling")
-  assert.equal(state.switchedOff, 1)
+  assert.equal(state.paused.length, 1)
+  assert.equal(state.paused[0].id, SID)
   assert.equal(state.handoffCalls.length, 0)
   assert.deepEqual(readdirSync(dir), [])
   assert.equal(isEndlessFrozen(SID), false)
-  assert.match(state.toasts.at(-1).message, /cycle ceiling reached \(10\/10\)/)
+  assert.match(state.toasts.at(-1).message, /cycle ceiling reached \(10\/10\) — paused for this session/)
 })
 
 test("the ceiling grants exactly maxCycles cycles, and maxCycles 0 arms none at all", async () => {
@@ -488,17 +498,18 @@ test("the ceiling grants exactly maxCycles cycles, and maxCycles 0 arms none at 
   assert.equal((await runEndlessCycle(none.io)).outcome, "complete")
 })
 
-test("a stop whose settings write failed still ends the cycle and reports it", async () => {
-  // writeEndlessMode holds the value process-locally even when the disk write
-  // is refused (settings.js), so the stop stands; what the cycle owes here is
-  // an honest report of it rather than a silent success.
+test("a stop that cannot pause still ends the cycle and reports it", async () => {
+  // The pause is process-local state, so it cannot fail the way a disk write
+  // could — but the cycle reports what it got rather than assuming success,
+  // and a stop stands either way: the latch is released and the primary is not
+  // replaced.
   const dir = tempProject()
   const { io, state } = makeCycle({
     directory: dir,
     overrides: {
       requestOpenPoints: async () => "## OPEN POINTS\n",
-      switchOff: () => {
-        state.switchedOff += 1
+      pause: (id, reason) => {
+        state.paused.push({ id, reason })
         return false
       },
     },
@@ -506,8 +517,8 @@ test("a stop whose settings write failed still ends the cycle and reports it", a
   const res = await runEndlessCycle(io)
 
   assert.equal(res.outcome, "no-open-points")
-  assert.equal(res.switchedOff, false, "the caller learns the file was not written")
-  assert.equal(state.switchedOff, 1, "the switch-off was attempted")
+  assert.equal(res.paused, false, "the caller learns the pause did not take")
+  assert.equal(state.paused.length, 1, "the pause was attempted")
   assert.equal(state.handoffCalls.length, 0, "the session is not replaced")
   assert.equal(isEndlessFrozen(SID), false, "and the cycle is over either way")
 })
@@ -530,7 +541,7 @@ test("a failed handoff abandons the cycle: the tasks stay written, the freeze li
   assert.match(readFileSync(join(dir, CANONICAL_TODO_NAME), "utf8"), /- T1: Finish the migration script/)
   assert.equal(isEndlessFrozen(SID), false)
   assert.equal(endlessCooldownActive(SID), true)
-  assert.equal(state.switchedOff, 0)
+  assert.deepEqual(state.paused, [], "an abandoned cycle pauses nothing")
   assert.equal(endlessProgress.lastOpenTasks, null, "an abandoned cycle records no progress")
 })
 

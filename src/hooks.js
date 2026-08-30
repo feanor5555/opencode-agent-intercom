@@ -56,6 +56,8 @@ import {
   cancelPendingEndless,
   cancelPendingHandoff,
   resetEndlessProgress,
+  endlessPauseReason,
+  clearEndlessPause,
   nestedQuotaDecision,
   sessionAgentName,
   rememberPrimaryDirectory,
@@ -317,6 +319,15 @@ export function createTransformSystem(client) {
         // DISPLACES maxPrimaryContext. Arming both would be inert, the lower
         // one always firing first.
         const threshold = primaryContextThreshold()
+        // What the mode's own stops leave behind: a pause on THIS session,
+        // never a written `endlessMode: false`. scheduleEndlessIfNeeded refuses
+        // to arm a paused primary, so the branch below simply schedules
+        // nothing while it holds — no cycle, and no plain handoff either, since
+        // the mode is still on and owns the threshold. The session runs on with
+        // the context it has; the pause dies with it and the next orchestrator
+        // has the mode available again. The orchestrator is told so in its
+        // limits block below.
+        const pausedReason = endlessPauseReason(sessionID)
         if (getSettings().endlessMode) {
           // The switch was turned on between the mark and this turn: drop an
           // unclaimed PLAIN-handoff latch, the mirror of the off-branch below.
@@ -340,6 +351,10 @@ export function createTransformSystem(client) {
           // is not touched — it has written to the todo file and must not
           // leave the primary half-replaced.
           cancelPendingEndless(sessionID)
+          // A pause is state of the endless mode, and the mode is off: the
+          // plain handoff owns the threshold now and must not be held back by
+          // a stop that belongs to a mode nobody is running.
+          clearEndlessPause(sessionID)
           // The cross-cycle progress record belongs to a run of the mode, not
           // to the process: with the mode off it has nothing to measure, and
           // carrying its streak into the next arming would spend the user's
@@ -359,6 +374,7 @@ export function createTransformSystem(client) {
           sessionDir: scopeDir,
           projectMd,
           agentsMd: slices.agentsMd || "",
+          endlessPausedReason: pausedReason,
         })
       } else if (delegates) {
         // A delegating subagent gets its own, much smaller block: it has to
@@ -877,7 +893,20 @@ async function notifyParentOfDenialLoop(client, entry) {
 // tells the orchestrator the user cannot read the notices it receives: the
 // completion notice is then the only copy of a subagent's result and nothing
 // renders it, so the orchestrator is the channel to the user.
-function formatLimitsNotice({ sessionDir, projectMd = "", agentsMd = "" } = {}) {
+//
+// `endlessPausedReason` carries the other conditional sentence: endless mode
+// stopped itself for THIS session (cycle ceiling, no progress, nothing left to
+// do). It is the state the orchestrator cannot infer — the mode reads as on
+// everywhere else, because the settings file was deliberately not written —
+// and it changes what the session can expect: no further context refresh in
+// it. A session the user switched the mode off in gets no such sentence: there
+// the row reads `[off]` and the plain handoff owns the threshold again.
+function formatLimitsNotice({
+  sessionDir,
+  projectMd = "",
+  agentsMd = "",
+  endlessPausedReason = "",
+} = {}) {
   const s = getSettings()
   const sub = s.maxSubagents > 0 ? `${s.maxSubagents}` : "unlimited"
   const snapshot = projectContext(sessionDir)
@@ -904,6 +933,13 @@ function formatLimitsNotice({ sessionDir, projectMd = "", agentsMd = "" } = {}) 
       ? "Subagent results and handoff messages are hidden from the user's " +
         "screen. The user sees only what you write. Relay the substance of a " +
         "subagent's result in your own answer.\n"
+      : "") +
+    (endlessPausedReason
+      ? `Endless mode is PAUSED for this session — ${endlessPausedReason}. The mode itself ` +
+        "is not switched off: nothing was written to the settings, the switch stays the " +
+        "user's, and the next orchestrator session starts with it available again. For THIS " +
+        "session there is no further context refresh and no replacement: bring the work you " +
+        "have to a close and say so to the user.\n"
       : "") +
     "---\n"
   )

@@ -20,6 +20,7 @@ import {
   pendingEndless,
   endlessInProgress,
   endlessCooldowns,
+  endlessPauses,
   endlessProgress,
   sessionAgent,
   primaryDirectory,
@@ -127,6 +128,12 @@ export function forgetPrimary(sessionID) {
   pendingEndless.delete(sessionID)
   endlessInProgress.delete(sessionID)
   endlessCooldowns.delete(sessionID)
+  // The self-stop pause goes with it. It is what holds a stopped run back for
+  // the session it was set on, and this session is being replaced: the primary
+  // that takes over is a different id, has no pause, and starts with endless
+  // mode available again. Keeping the entry would leak one map row per
+  // replaced primary and nothing else.
+  endlessPauses.delete(sessionID)
 }
 
 // Per-agent monotonic friendly handle, e.g. "researcher#1".
@@ -1325,9 +1332,9 @@ export function isHandoffInProgress(sessionID) {
 }
 
 // ----------------------------------------------------------------------------
-// Endless mode: the latch, the spawn freeze, the quiesce predicate and the two
-// bounds that need state (cooldown after an abandoned cycle, open-task
-// progress across cycles).
+// Endless mode: the latch, the spawn freeze, the quiesce predicate and the
+// state the bounds need (cooldown after an abandoned cycle, open-task progress
+// across cycles, and the per-session pause a self-stop leaves behind).
 //
 // The latch is the endless twin of pendingHandoffs and works the same way: the
 // transform hook MARKS while the triggering turn runs, the `session.idle`
@@ -1345,13 +1352,15 @@ export function isHandoffInProgress(sessionID) {
 export const ENDLESS_COOLDOWN_MS = 300_000
 
 // Transform-side gate: schedule an endless cycle for this primary iff the
-// threshold is reached, no cycle is pending or executing, and the primary is
-// not in the cooldown of a cycle that abandoned. Returns true only when the
-// latch was NEWLY set, so the "scheduled" log line and toast fire once per
-// crossing rather than on every over-threshold turn.
+// threshold is reached, no cycle is pending or executing, the primary is not
+// in the cooldown of a cycle that abandoned, and the mode has not stopped
+// itself for this session. Returns true only when the latch was NEWLY set, so
+// the "scheduled" log line and toast fire once per crossing rather than on
+// every over-threshold turn.
 export function scheduleEndlessIfNeeded(sessionID, endlessContext) {
   if (!shouldTriggerPrimaryHandoff(sessionID, endlessContext)) return false
   if (endlessCooldownActive(sessionID)) return false
+  if (isEndlessPaused(sessionID)) return false
   return markEndlessPending(sessionID)
 }
 
@@ -1428,6 +1437,47 @@ export function endlessCooldownActive(sessionID) {
   return true
 }
 
+// The self-stop pause: endless mode stopped ITSELF on this primary — the cycle
+// ceiling, the no-progress bound, or a cycle that found nothing left to do.
+//
+// A self-stop is a pause and never a switch-off: the settings file is not
+// touched, so `endlessMode` keeps the value the user gave it (or the default
+// it resolves to) and the next primary session has the mode available again.
+// Only the user's own switch-off in the sidebar writes the file.
+//
+// `reason` is the same sentence the stop logs and toasts; it is what the
+// orchestrator's per-turn limits block quotes back, so the two states the
+// orchestrator can be in — paused for this session, switched off in the file —
+// read differently on screen and in the prompt.
+//
+// The cross-cycle progress record goes with it: it measures one RUN of the
+// mode (see resetEndlessProgress), and a run that has just stopped itself must
+// not hand its streak to the next primary — a fresh orchestrator would
+// otherwise get exactly one cycle before the no-progress bound fired again.
+export function pauseEndless(sessionID, reason = "") {
+  if (!sessionID) return false
+  endlessPauses.set(sessionID, { reason: String(reason || ""), at: Date.now() })
+  resetEndlessProgress()
+  return true
+}
+
+// True while endless mode is paused for this primary session.
+export function isEndlessPaused(sessionID) {
+  return endlessPauses.has(sessionID)
+}
+
+// Why the mode paused itself for this primary, "" when it did not.
+export function endlessPauseReason(sessionID) {
+  return endlessPauses.get(sessionID)?.reason ?? ""
+}
+
+// Lifts the pause for one primary. The mode was never switched off, so there
+// is nothing to write back — the next over-threshold turn arms a cycle again.
+export function clearEndlessPause(sessionID) {
+  if (!sessionID) return false
+  return endlessPauses.delete(sessionID)
+}
+
 // The quiesce predicate: no subagent is running anywhere in this process, no
 // result is still being delivered, and no handoff drain is open for this
 // primary. Read inside ONE registryMutex section so a concurrent removeEntry /
@@ -1481,7 +1531,8 @@ export function recordEndlessCycle(openTasks) {
 }
 
 // Clears the cross-cycle progress record. Called on every primary turn that
-// observes endless mode switched off: the record measures one RUN of the mode,
+// observes endless mode switched off, and by pauseEndless when the mode stops
+// itself: the record measures one RUN of the mode,
 // and the streak that ended the previous run must not be inherited by the next
 // arming — a user who turns the toggle back on would otherwise get exactly one
 // cycle before the no-progress bound fired again, with nothing on screen

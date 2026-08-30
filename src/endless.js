@@ -9,8 +9,8 @@
 //
 // Sequence (do NOT reorder):
 //   1. Claim the latch. False → another idle event already took this cycle.
-//   2. The cycle ceiling: at `maxCycles` the mode switches itself off before
-//      anything is written or replaced.
+//   2. The cycle ceiling: at `maxCycles` the mode pauses itself for this
+//      primary before anything is written or replaced.
 //   2b. Drop every retained subagent. A retained session is a finished subagent
 //      held alive for a follow-up question, and it must not outlive the primary
 //      it belongs to: from here on the cycle is committed to replacing that
@@ -31,13 +31,19 @@
 //      here abandons WITHOUT replacing the session:
 //      replacing a primary after failing to save its open points is precisely
 //      the data loss endless mode exists to prevent.
-//   5. Nothing left to do: an empty point list AND an empty todo file switch
-//      the mode off instead of starting a session that would have nothing to
+//   5. Nothing left to do: an empty point list AND an empty todo file pause
+//      the mode instead of starting a session that would have nothing to
 //      work on.
 //   6. Replace: the handoff runs with the endless kickoff block and with the
 //      open-points text standing in for the doc-summary turn.
 //   7. Record the open-task count the cycle found (before its own write) and
 //      apply the no-progress bound to it.
+//
+// None of the three deliberate stops writes the settings file. `endlessMode`
+// is the user's own switch (and is on by default), so a self-stop that
+// persisted `false` would disable that default for good on its first firing.
+// A stop pauses ONE primary session instead — see `stop` below and
+// pauseEndless in registry.js.
 //
 // Every abandon path does the same three things: release the latch (which
 // lifts the spawn freeze), arm the cooldown so an already-over-threshold
@@ -54,7 +60,7 @@ import { log, errMsg } from "./log.js"
 export const ENDLESS_QUIESCE_POLL_MS = 500
 
 // How many consecutive cycles may end without the open-task count falling
-// before the mode switches itself off. The bound against the failure the mode
+// before the mode pauses itself. The bound against the failure the mode
 // invites: an orchestrator that saves the same points every cycle.
 export const ENDLESS_MAX_STALLED_CYCLES = 2
 
@@ -114,7 +120,7 @@ export function endlessKickoffBlock({ todoFileName, ids = [] }) {
 // @property {(io: { extraKickoffBlock: string, openPointsText: string }) => Promise<{ newSessionID: string }>} performHandoff
 // @property {number} [cycleNumber]             this primary's generation (handoffGeneration)
 // @property {number} [maxCycles]               ceiling; <= 0 arms no ceiling
-// @property {() => boolean} [switchOff]        write endlessMode:false back to the settings file
+// @property {(sessionID: string, reason: string) => boolean} [pause]  pause the mode for ONE primary session (never writes the settings file)
 // @property {(openTasksBeforeTheWrite: number) => { stalledCycles: number }} [recordCycle]
 // @property {(t: { message: string, variant: string }) => void} [toast]
 // @property {number} [quiesceTimeoutMs]
@@ -141,7 +147,7 @@ export async function runEndlessCycle({
   performHandoff,
   cycleNumber = 1,
   maxCycles = 0,
-  switchOff = () => false,
+  pause = () => false,
   recordCycle = () => ({ stalledCycles: 0 }),
   toast = () => {},
   quiesceTimeoutMs = 600_000,
@@ -164,24 +170,27 @@ export async function runEndlessCycle({
     return { outcome: "abandoned", stage, reason }
   }
 
-  // Switch the mode off through the plugin's own settings write and release.
-  // Used by the three bounds that end the loop deliberately; no cooldown —
-  // there is nothing left to hold back.
-  const stop = (outcome, message, variant) => {
-    const written = switchOff()
+  // Stop the loop by PAUSING it, and release. Used by the three bounds that end
+  // the loop deliberately; no cooldown — there is nothing left to hold back.
+  //
+  // A self-stop never persists `endlessMode: false`. The mode is on by
+  // default, so a write-back would silently disable that default for good on
+  // the first stop; the settings file is the user's own switch and only the
+  // sidebar writes it. What a stop leaves behind is a runtime pause on ONE
+  // primary session: it is what keeps the still-over-threshold primary from
+  // re-arming the latch on its very next turn, and it dies with that session,
+  // so the next orchestrator has the mode available again.
+  //
+  // `pauseTarget` is the primary the pause is set on. It is this cycle's
+  // primary for every stop that fires BEFORE the replacement; the no-progress
+  // bound fires after it and passes the new session, because pausing the
+  // session it has just retired would bound nothing.
+  const stop = (outcome, message, variant, pauseTarget = primarySessionID) => {
     release()
-    if (!written) {
-      // The settings file could not be written. The mode is still off — the
-      // write-back holds the value process-locally either way (writeEndlessMode
-      // in settings.js) — but the file and the sidebar row now disagree with
-      // it, and that is worth seeing in the cycle log.
-      log("endless: endlessMode could not be written to the settings file — held off in this process", {
-        sessionID: primarySessionID,
-      })
-    }
-    log(`endless: ${message}`, { sessionID: primarySessionID, settingsWritten: written })
+    const paused = pause(pauseTarget, message)
+    log(`endless: ${message}`, { sessionID: primarySessionID, pausedSessionID: pauseTarget })
     toast({ message: `endless mode: ${message}`, variant })
-    return { outcome, switchedOff: written }
+    return { outcome, paused, pausedSessionID: pauseTarget }
   }
 
   // 2. The cycle ceiling, checked BEFORE anything is written or replaced.
@@ -196,7 +205,7 @@ export async function runEndlessCycle({
   if (maxCycles > 0 && cyclesCompleted >= maxCycles) {
     return stop(
       "ceiling",
-      `cycle ceiling reached (${cyclesCompleted}/${maxCycles}) — switched off`,
+      `cycle ceiling reached (${cyclesCompleted}/${maxCycles}) — paused for this session`,
       "warning",
     )
   }
@@ -323,7 +332,7 @@ export async function runEndlessCycle({
   // 5. Nothing left to do. A restart into an empty todo file would produce a
   // session with nothing to work on, which would idle and be woken by nothing.
   if (ids.length === 0 && openTasks.length === 0) {
-    return stop("no-open-points", "no open points left — switched off", "success")
+    return stop("no-open-points", "no open points left — paused for this session", "success")
   }
 
   // 6. Replace the primary. The open-points turn has already happened, so the
@@ -357,12 +366,16 @@ export async function runEndlessCycle({
   )
   if (stalledCycles >= ENDLESS_MAX_STALLED_CYCLES) {
     // The latch of the OLD primary is already gone (the handoff's forgetPrimary
-    // released it); `stop`'s release is a harmless no-op here and the write is
-    // what matters.
+    // released it); `stop`'s release is a harmless no-op here and the pause is
+    // what matters. It goes on the NEW primary: the old one is archived and
+    // will never schedule anything again, so pausing it would leave the loop
+    // running in the session that inherited it.
     const stopped = stop(
       "complete",
-      `no progress over ${stalledCycles} cycles at ${openBefore} open task(s) — switched off`,
+      `no progress over ${stalledCycles} cycles at ${openBefore} open task(s) — ` +
+        `paused for the new session`,
       "warning",
+      result.newSessionID,
     )
     return { ...stopped, newSessionID: result.newSessionID, ids, openBefore, openAfter, stalledCycles }
   }

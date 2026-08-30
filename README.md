@@ -17,8 +17,8 @@ comes back with garbage. Melts down at 80 % context. You go back to the cloud.
 It turns a modest local model into a workflow-driven team. A long-living
 **primary** that coordinates and **never blocks** — keep steering,
 course-correct mid-flight, or fan out subagents in parallel while the first one
-runs. One-shot subagents do exactly one job in their own lean context, reply,
-and disappear. The framework guards your model's most precious resource — its
+runs. By default a subagent does exactly one job in its own lean context, replies,
+and disappears; with retention on its session is held so the orchestrator can `reuse` it later. The framework guards your model's most precious resource — its
 context window — at every layer.
 
 The difference between *"interesting demo"* and *"this just shipped feature X."*
@@ -185,14 +185,17 @@ The primary never blocks. You stay in the driver's seat the entire time.
 | `forum_search(query, keywords?, numResults?)` | Discussion-forum search (Exa + searxng with forum-only engine bangs). Use for lived user experience; `web_search` for docs/releases/official facts. | `researcher` only |
 | `outline(path)` | Top-level declarations of a source file via universal-ctags. ~100 languages, ~95 % token savings vs `read`. | Subagents (except `designer`/`gitter`) |
 
-Subagents are one-shot: **spawn → run → reply → destroyed.** The primary is
-woken automatically with the full (capped) result on completion. No
-status-poll tool by design — small LLMs would call it in a loop.
+By default a subagent runs once and is destroyed: **spawn → run → reply →
+deleted.** The primary is woken automatically with the full (capped) result on
+completion. No status-poll tool by design — small LLMs would call it in a
+loop.
 
 A finished subagent's session can also be **held** — kept alive after its
 result has been delivered, so the orchestrator can address it later. Holding
 is gated on `maxRetainedSubagents > 0` and is off by default; with retention
-off the one-shot line above is byte-identical to what it has always been.
+off the default description above is the whole story, and the orchestrator
+loses the `reuse` tool.
+
 With retention on, every clean, top-level subagent whose context fits under
 the reuse ceiling is held for `retainedSubagentTtlMs` after it finishes, the
 oldest entry is evicted when the capacity is reached, and a held session is
@@ -711,7 +714,9 @@ removing every "do it yourself" tool from the primary is the enforcement lever.
 
 - **Abort is best-effort.** `session.abort` is cooperative; the
   `tool.execute.before` hard-deny is the backstop.
-- **No mid-flight subagent steering** — by design. Subagents are one-shot.
+- **No mid-flight subagent steering** — by design. A subagent runs
+  through to its reply and is not steered from the outside; only its
+  held session may be re-prompted through `reuse` after it finishes.
   A subagent that ran into a problem its prompt did not cover hands the
   decision up via a `Blocked:` wake notice; you handle it, not the live
   subagent. Continue by spawning a fresh one with a clearer prompt.

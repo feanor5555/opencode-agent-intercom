@@ -174,10 +174,11 @@ const DEFAULT_POST_NOTICE_RETRY_BACKOFF_MS = 500
 // Endless mode: the orchestrator is replaced by a fresh session whenever its
 // context reaches `endlessContext`, after its open points have been written to
 // the project's todo file, and the new session is told to work that file off.
-// Off by default — the mode is a loop and is only ever armed deliberately.
+// On by default — the mode's own bounds switch it off when there is no work
+// left, no progress is made, or the cycle ceiling is reached.
 // Exported for the same reason as the two limits above: the TUI plugin carries
 // its own copy of both and test/settings-defaults-parity.test.js pins them.
-export const DEFAULT_ENDLESS_MODE = false
+export const DEFAULT_ENDLESS_MODE = true
 export const DEFAULT_ENDLESS_CONTEXT = 250000
 // How long a cycle waits for the last subagent to finish before it abandons.
 // The inactivity watchdog (maxSubagentAgeMs) already resolves a HUNG subagent

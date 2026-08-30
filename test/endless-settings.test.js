@@ -52,10 +52,10 @@ test.beforeEach(() => {
   resetSettings()
 })
 
-test("no file: endlessMode is false and endlessContext is 250000", () => {
+test("no file: endlessMode is true and endlessContext is 250000", () => {
   isolate()
   const s = getSettings()
-  assert.equal(s.endlessMode, false)
+  assert.equal(s.endlessMode, true)
   assert.equal(s.endlessMode, DEFAULT_ENDLESS_MODE)
   assert.equal(s.endlessContext, 250000)
   assert.equal(s.endlessContext, DEFAULT_ENDLESS_CONTEXT)
@@ -71,7 +71,11 @@ test('a file with "endlessMode": true resolves to true', () => {
 test('"true", 1 and null for endlessMode leave the default standing, without throwing', () => {
   for (const bad of ["true", 1, null, "1", [], {}]) {
     isolate({ endlessMode: bad })
-    assert.equal(getSettings().endlessMode, false, `value ${JSON.stringify(bad)} must not arm the mode`)
+    assert.equal(
+      getSettings().endlessMode,
+      DEFAULT_ENDLESS_MODE,
+      `value ${JSON.stringify(bad)} must leave the default standing`,
+    )
   }
 })
 
@@ -96,7 +100,7 @@ test("the env vars resolve when the file is silent and lose to the file when it 
   assert.equal(getSettings().endlessMode, false)
   process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE = "yes"
   isolate()
-  assert.equal(getSettings().endlessMode, false)
+  assert.equal(getSettings().endlessMode, DEFAULT_ENDLESS_MODE)
 
   // File beats env on both keys.
   process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE = "1"
@@ -128,7 +132,7 @@ test("primaryContextThreshold: endless on with endlessContext 0 arms nothing", (
 test("writeEndlessMode: creates the file when absent and drops the cache", () => {
   const file = isolate()
   assert.equal(existsSync(file), false)
-  assert.equal(getSettings().endlessMode, false)
+  assert.equal(getSettings().endlessMode, DEFAULT_ENDLESS_MODE)
   assert.equal(writeEndlessMode(true), true)
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { endlessMode: true })
   assert.equal(getSettings().endlessMode, true, "the cache is dropped by the write")

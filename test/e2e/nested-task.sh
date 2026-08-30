@@ -447,11 +447,22 @@ def num(key, env, default):
     return default
 
 
+def flag(env, default):
+    e = os.environ.get(env)
+    if e is not None:
+        e = e.strip()
+        if e == "1":
+            return True
+        if e == "0":
+            return False
+    return default
+
+
 nested = num("maxNestedSpawns", "OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS", 2)
 age = num("maxSubagentAgeMs", "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS", 90000)
 endless = raw.get("endlessMode")
-endless = endless if isinstance(endless, bool) else False
-ctx = num("endlessContext", "OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT", 0)
+endless = endless if isinstance(endless, bool) else flag("OPENCODE_AGENT_INTERCOM_ENDLESS_MODE", True)
+ctx = num("endlessContext", "OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT", 250000)
 print(nested, age, "true" if endless else "false", ctx)
 PY
 )

@@ -255,15 +255,15 @@ test("setEndlessMode writes only its own key and leaves the rest as it found it"
   })
 })
 
-test("a file without endlessMode reads false and keeps the key absent until toggled", () => {
+test("a file without endlessMode reads true and keeps the key absent until toggled", () => {
   writeFileSync(file, JSON.stringify({ maxContext: 90000 }))
-  assert.equal(readSettings().endlessMode, false)
+  assert.equal(readSettings().endlessMode, true)
   assert.equal("endlessMode" in onDisk(), false)
 
   const merged = toggleEndlessMode()
 
-  assert.equal(merged.endlessMode, true)
-  assert.deepEqual(onDisk(), { maxContext: 90000, endlessMode: true })
+  assert.equal(merged.endlessMode, false)
+  assert.deepEqual(onDisk(), { maxContext: 90000, endlessMode: false })
 })
 
 test("the toggle flips the value the file holds, not the panel's copy", () => {
@@ -300,8 +300,8 @@ test("stepping a limit does not delete the boolean beside it", () => {
 })
 
 test("an endlessMode the plugin rejects is dropped by the next write", () => {
-  // "true" is a string: the plugin leaves the default standing and the panel
-  // would otherwise keep displaying false against a file that looks switched on.
+  // "true" is a string: the plugin leaves the default standing, and the
+  // panel must not preserve a value that is not in effect.
   writeFileSync(file, JSON.stringify({ endlessMode: "true", maxSubagents: 2 }))
 
   const merged = setSetting("maxSubagents", 3)

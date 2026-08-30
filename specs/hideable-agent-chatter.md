@@ -230,12 +230,12 @@ are excluded for a different reason and are not a second switch (§3.7).
 - **File key / server field:** `hideChatter`, in the shared
   `~/.config/opencode/agent-intercom.json` beside `endlessMode`.
 - **Env var:** `OPENCODE_AGENT_INTERCOM_HIDE_CHATTER`, `"1"` / `"0"` through `envBool`.
-- **Default:** `false`. The plugin's own precedent for a mode that changes what the user
-  sees or what the loop does is off-by-default (`DEFAULT_ENDLESS_MODE = false`,
-  `src/settings.js:117-120`), and here the stake is concrete: with the switch on, a finished
-  subagent's result is nowhere on screen and its session is already deleted (§4). That loss
-  is the user's to accept, not the plugin's to impose. Flipping the default later is one
-  constant on each half plus the parity test.
+- **Default:** `false`. Endless mode is on by default
+  (`DEFAULT_ENDLESS_MODE = true`, `src/settings.js:180`), but hiding a finished subagent's
+  result remains opt-in: with the switch on, a finished subagent's result is nowhere on
+  screen and its session is already deleted (§4). That loss is the user's to accept, not
+  the plugin's to impose. Flipping the default later is one constant on each half plus
+  the parity test.
 - **Scope:** the flag is read at send time and stamped on the part. It governs messages
   posted after the flip; a message already posted keeps the flag it was posted with.
 

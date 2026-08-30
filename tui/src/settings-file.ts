@@ -97,7 +97,7 @@ export const DEFAULT_MAX_SUBAGENTS = 1;
 // The budget for an agent type the built-in table DEFAULT_AGENT_CONTEXT
 // (agent-roles.ts) does not name, and the fallback of the legacy flat key.
 export const DEFAULT_MAX_CONTEXT = 100000;
-export const DEFAULT_ENDLESS_MODE = false;
+export const DEFAULT_ENDLESS_MODE = true;
 export const DEFAULT_ENDLESS_CONTEXT = 250000;
 // How many subagents one subagent run may start; 0 switches nesting off. The
 // plugin's own copy is DEFAULT_MAX_NESTED_SPAWNS in src/settings.js and

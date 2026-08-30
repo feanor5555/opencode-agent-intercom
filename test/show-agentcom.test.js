@@ -16,6 +16,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import {
+  DEFAULT_ENDLESS_MODE,
   DEFAULT_SHOW_AGENTCOM,
   getSettings,
   setSettingsPath,
@@ -113,7 +114,7 @@ test("showAgentcom does not disturb the other boolean key", () => {
   writeSettings({ showAgentcom: false })
   const onlyHidden = getSettings()
   assert.equal(onlyHidden.showAgentcom, false)
-  assert.equal(onlyHidden.endlessMode, false)
+  assert.equal(onlyHidden.endlessMode, DEFAULT_ENDLESS_MODE)
 })
 
 // The old key is gone, not aliased: a file still carrying `hideChatter` says

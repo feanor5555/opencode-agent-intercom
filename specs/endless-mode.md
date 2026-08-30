@@ -3,7 +3,8 @@
 Boundary: the plugin at `/home/user/opencode-agent-intercom`, both halves — the
 server-side plugin under `src/` and the sidebar plugin under `tui/`.
 
-Endless mode is a switch in the sidebar. While it is on, the orchestrator's context is
+Endless mode is on by default and is also a switch in the sidebar. While it is on, the
+orchestrator's context is
 watched against a configurable ceiling (250 000 tokens by default). When the ceiling is
 reached and every running subagent has finished, the orchestrator states its open points,
 the plugin writes them into the project's todo file, the session is replaced by a fresh
@@ -255,7 +256,7 @@ the existing file > env > default rule (`src/settings.js:101`):
 
 | key | type | default | env var |
 |---|---|---|---|
-| `endlessMode` | boolean | `false` | `OPENCODE_AGENT_INTERCOM_ENDLESS_MODE` (`"1"`/`"0"`) |
+| `endlessMode` | boolean | `true` | `OPENCODE_AGENT_INTERCOM_ENDLESS_MODE` (`"1"`/`"0"`) |
 | `endlessContext` | integer ≥ 0 | `250000` | `OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT` |
 | `endlessQuiesceTimeoutMs` | integer ≥ 0 | `600000` | `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS` |
 
@@ -487,7 +488,7 @@ signals, so a change made by hand or by the plugin's own switch-off (§3.6) appe
 30 seconds or immediately on opening the section.
 
 `test/settings-defaults-parity.test.js` covers the shared defaults, so
-`DEFAULT_ENDLESS_CONTEXT = 250000` and `DEFAULT_ENDLESS_MODE = false` are exported from both
+`DEFAULT_ENDLESS_CONTEXT = 250000` and `DEFAULT_ENDLESS_MODE = true` are exported from both
 `src/settings.js` and `tui/src/settings-file.ts`.
 
 ### 3.8 Logging
@@ -623,8 +624,8 @@ auto? }`) compacts a session in place. §2.1 says why that is not this feature.
 
 Unit, in the existing `node --test` style under `test/`:
 
-- `getSettings()`: no file → `endlessMode: false`, `endlessContext: 250000`; file with
-  `"endlessMode": true` → true; `"endlessMode": "true"`, `1`, `null` → false, no throw;
+- `getSettings()`: no file → `endlessMode: true`, `endlessContext: 250000`; file with
+  `"endlessMode": true` → true; `"endlessMode": "true"`, `1`, `null` → true, no throw;
   `endlessContext` non-integer / negative → the default; the env vars resolve when the file is
   silent and lose to the file when it is not.
 - `primaryContextThreshold()`: endless off → `maxPrimaryContext`; endless on →
@@ -660,7 +661,7 @@ Unit, in the existing `node --test` style under `test/`:
   `maxContext`, `searxngUrl` and unknown keys byte-identical; a following
   `stepSetting("maxContext", 5000)` does **not** delete `endlessMode` (the per-key validators
   of §3.7); an unreadable file leaves the file untouched and returns the disk state; a file
-  without `endlessMode` still reads `false` and the key stays absent until toggled.
+  without `endlessMode` still reads `true` and the key stays absent until toggled.
 - Defaults parity: `DEFAULT_ENDLESS_CONTEXT` and `DEFAULT_ENDLESS_MODE` agree across
   `src/settings.js` and `tui/src/settings-file.ts`.
 

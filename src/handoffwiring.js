@@ -48,6 +48,7 @@ import {
   promptSession,
   selectTuiSession,
 } from "./client.js"
+import { dropRetainedSubagents } from "./teardown.js"
 import { addTask, listOpen, findTodoFile, TodoFileMissingError } from "./todofile.js"
 import { getSettings, writeEndlessMode } from "./settings.js"
 import { defaultAgentName, DEFAULT_AGENT } from "./agents.js"
@@ -250,6 +251,12 @@ async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, resolvedAg
       }
       return drained.notices.length
     },
+    // Handoff step 0b: the retained subagents of the primary being replaced go
+    // before anything else happens. Their sessions are deleted, not merely
+    // forgotten — nothing outside this plugin ever deletes a subagent session.
+    // A no-op in a process with `maxRetainedSubagents` at its default of 0,
+    // which retains nothing.
+    dropRetainedSubagents: () => dropRetainedSubagents(client, { label: "handoff" }),
     // registry.forgetPrimary also clears the pending/in-progress handoff
     // flags for the old id — the success-path release.
     forgetPrimary,
@@ -356,6 +363,12 @@ export async function maybeRunPendingEndless(client, sessionID) {
     release: () => releaseEndless(sessionID),
     setCooldown: () => setEndlessCooldown(sessionID),
     isQuiesced: () => isQuiesced(sessionID),
+    // Cycle step 2b: a retained subagent must not outlive the primary this
+    // cycle replaces. Runs before the quiesce wait, so nothing is held alive
+    // across a wait that may last `endlessQuiesceTimeoutMs`. The handoff this
+    // cycle then performs drops them too — by that point there is nothing left
+    // to drop, and both entry points stay correct on their own.
+    dropRetained: () => dropRetainedSubagents(client, { label: "endless" }),
     countActive: () => countActiveSubagents(),
     requestOpenPoints: () =>
       promptOldPrimaryFor(client, sessionID, agentName, {

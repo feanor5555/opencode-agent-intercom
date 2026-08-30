@@ -11,6 +11,15 @@
 //   1. Claim the latch. False → another idle event already took this cycle.
 //   2. The cycle ceiling: at `maxCycles` the mode switches itself off before
 //      anything is written or replaced.
+//   2b. Drop every retained subagent. A retained session is a finished subagent
+//      held alive for a follow-up question, and it must not outlive the primary
+//      it belongs to: from here on the cycle is committed to replacing that
+//      primary. The ceiling above is deliberately ahead of this: it replaces
+//      nothing and lifts the freeze again, so it leaves retention alone. Every
+//      later way out — an abandoned quiesce wait, a failed save — has already
+//      paid the drop, which is the safe direction: a dropped retention costs a
+//      fresh spawn, a surviving one would point a handle at a primary the next
+//      cycle replaces.
 //   3. Wait for quiesce — no subagent running anywhere in the process —
 //      bounded by `quiesceTimeoutMs`. A timeout ABANDONS the cycle; aborting a
 //      working subagent to make room for a context refresh would destroy real
@@ -96,6 +105,7 @@ export function endlessKickoffBlock({ todoFileName, ids = [] }) {
 // @property {() => void} release               clear the in-progress latch, lifting the spawn freeze
 // @property {() => void} setCooldown           arm the post-abandon cooldown
 // @property {() => Promise<boolean>} isQuiesced
+// @property {() => Promise<unknown>} [dropRetained]  tear down every retained subagent before the quiesce wait
 // @property {() => number} [countActive]       active subagents, sampled once for the log line
 // @property {() => Promise<string>} requestOpenPoints  the primary's final open-points turn; throws on timeout
 // @property {(point: { title: string, accept?: string }) => { id: string }} addTask
@@ -122,6 +132,7 @@ export async function runEndlessCycle({
   release,
   setCooldown,
   isQuiesced,
+  dropRetained = null,
   countActive = () => 0,
   requestOpenPoints,
   addTask,
@@ -188,6 +199,20 @@ export async function runEndlessCycle({
       `cycle ceiling reached (${cyclesCompleted}/${maxCycles}) — switched off`,
       "warning",
     )
+  }
+
+  // 2b. The retained subagents of the primary this cycle is about to replace.
+  // Optional and best-effort: a process with `maxRetainedSubagents` at its
+  // default of 0 has none, and a drop that throws must not abandon a cycle that
+  // can still save its open points.
+  if (dropRetained) {
+    try {
+      await dropRetained()
+    } catch (err) {
+      log(`endless: dropping retained subagents failed, continuing — ${errMsg(err)}`, {
+        sessionID: primarySessionID,
+      })
+    }
   }
 
   // 3. Quiesce. The count is process-wide, so the wait is an

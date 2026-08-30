@@ -40,8 +40,8 @@ import {
   entryLifecycle,
   LIFECYCLE_RUNNING,
   retentionDecision,
+  retentionContextDecision,
   retainEntryLocked,
-  claimRetentionEvictionsLocked,
   removeEntryLocked,
   reservePendingDelivery,
   releasePendingDelivery,
@@ -65,6 +65,7 @@ import {
   getSettings,
   primaryContextThreshold,
   contextBudgetFor,
+  reuseCeilingFor,
   PACKAGE_WARN_SHARE,
   PACKAGE_REFUSE_SHARE,
 } from "./settings.js"
@@ -81,7 +82,12 @@ import {
   rescanPromptFiles,
 } from "./promptsfile.js"
 import { tokens as fmtTokens, ageSeconds, estimateTokens, percent } from "./format.js"
-import { postParentNotice, teardownSubagent, signalSessionIdle } from "./teardown.js"
+import {
+  postParentNotice,
+  teardownSubagent,
+  dropRetainedSubagents,
+  signalSessionIdle,
+} from "./teardown.js"
 import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
 import { completionNotice, errorNotice, denialLoopNotice, isBlockedResult } from "./notices.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
@@ -1202,10 +1208,30 @@ async function onSessionIdle({ sessionID }, client) {
   let retain = false
   try {
     const snapshot = await fetchSnapshot(client, sessionID)
-    // The retention condition the critical section could not evaluate: a
-    // `Blocked:` report is not a session to hand more work to — the task
-    // continues through a fresh spawn carrying the orchestrator's decision.
-    retain = wake.retained && !isBlockedResult(snapshot.result)
+    // The retention conditions the critical section could not evaluate, both
+    // read off the snapshot it did not have. A `Blocked:` report is not a
+    // session to hand more work to — the task continues through a fresh spawn
+    // carrying the orchestrator's decision. And a session whose context is
+    // missing, over its type's reuse ceiling or over that type's budget would
+    // be refused by every later reuse, so holding it would only occupy a
+    // retained slot and offer the orchestrator a handle it cannot use.
+    // A phase-1 grant either of them fails is revoked here, and the teardown
+    // below disposes of the session on the very path it always used.
+    if (wake.retained) {
+      const context = retentionContextDecision(snapshot.ctxTokens, {
+        ceiling: reuseCeilingFor(agent),
+        budget: contextBudgetFor(agent),
+      })
+      retain = !isBlockedResult(snapshot.result) && context.retain
+      if (!retain) {
+        log("retention revoked", {
+          handle,
+          agent,
+          ctxTokens: snapshot.ctxTokens,
+          reason: isBlockedResult(snapshot.result) ? "blocked" : context.reason,
+        })
+      }
+    }
     // Hand the reply to a session blocked on this one, if there is one. This
     // is the only ending path that has a RESULT rather than just a cause, so
     // it settles here rather than leaving it to teardownSubagent's fallback —
@@ -1276,22 +1302,11 @@ async function onSessionIdle({ sessionID }, client) {
 // orchestrator later is a question about a subagent it has already read, and
 // the one it just heard about is the likeliest to be asked.
 //
-// The claim runs under the mutex and moves the victims to "closing" before it
-// returns, so the watchdog's reap cannot take the same entry; the teardowns
-// themselves run outside the lock. Silent by design — the parent was woken
-// when each of these runs finished, and a second notice would cost it an LLM
-// turn to be told something it may never ask about again is gone.
-async function evictRetainedOverCapacity(client) {
-  const victims = await registryMutex.runExclusive(() =>
-    claimRetentionEvictionsLocked(getSettings().maxRetainedSubagents),
-  )
-  for (const victim of victims) {
-    log("retention: evicting the oldest retained subagent", {
-      handle: victim.handle,
-      sessionID: victim.sessionID,
-    })
-    await teardownSubagent(client, victim, { label: "retention" })
-  }
+// The same drop the handoff and the endless cycle run, with a capacity left
+// standing instead of zero — see dropRetainedSubagents in teardown.js for the
+// claim-then-tear-down discipline and for why an eviction is silent.
+function evictRetainedOverCapacity(client) {
+  return dropRetainedSubagents(client, { keep: getSettings().maxRetainedSubagents })
 }
 
 // A tracked subagent's LLM call failed (provider auth error, API error,

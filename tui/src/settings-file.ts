@@ -1,7 +1,8 @@
 // The runtime settings on disk, shared with the main plugin: it reads this file
 // (file > env > default) for the subagent cap, the context budget, endless mode,
-// the nested-spawn quota and the agentcom visibility switch. Writing it here
-// changes them live, no opencode restart needed.
+// the nested-spawn quota, the subagent-retention window, the per-type reuse
+// ceiling and the agentcom visibility switch. Writing it here changes them
+// live, no opencode restart needed.
 //
 // The context budget is a value PER AGENT TYPE, held in the `agentContext` map.
 // There is no single user-facing ceiling: a type with no entry of its own falls
@@ -13,6 +14,14 @@
 // file, env and default produced `maxContext`, because a flat value the user
 // set governs every type without an own entry while the built-in default does
 // not.
+//
+// The reuse ceiling — the context above which a finished subagent is never held
+// and never re-prompted — is a value PER AGENT TYPE the same way, held in the
+// `reuseContext` map, and its fallback chain is one level shorter: a type with
+// no entry of its own falls back to the flat `maxReuseContext` key, then to the
+// env var, then to DEFAULT_MAX_REUSE_CONTEXT. There is no built-in per-type
+// table behind it and no legacy key, so there is no source flag either. `0` is
+// a real value and means that type is never reused.
 //
 // Every write goes through a read-modify-write: the sidebar seeds its signals
 // once at mount, so its copy is stale as soon as the file is edited elsewhere.
@@ -57,6 +66,10 @@ export interface Settings {
   endlessMode: boolean;
   endlessContext: number;
   maxNestedSpawns: number;
+  maxRetainedSubagents: number;
+  retainedSubagentTtlMs: number;
+  maxReuseContext: number;
+  reuseContext: AgentContext;
   showAgentcom: boolean;
 }
 
@@ -65,7 +78,10 @@ export interface Settings {
 // and each has its own writer. maxContext is not one either: it is legacy-only
 // and is written by nothing here — a ceiling is edited per agent through
 // stepAgentContext. maxNestedSpawns is not one either: it is read and preserved
-// for parity with the plugin, and no row edits it.
+// for parity with the plugin, and no row edits it — and neither are
+// maxRetainedSubagents, retainedSubagentTtlMs and maxReuseContext, for the same
+// reason. The per-type reuse ceiling is not a scalar at all: like the budget it
+// is edited per agent, in reuseContext.
 export type LimitKey = "maxSubagents" | "endlessContext";
 
 // Every key of Settings the file itself carries. maxContextSource is derived
@@ -84,6 +100,29 @@ export const DEFAULT_ENDLESS_CONTEXT = 250000;
 // that parity and because a write must not drop a key the plugin honours — no
 // row steps it.
 export const DEFAULT_MAX_NESTED_SPAWNS = 2;
+// How many finished subagents may be held alive as re-promptable sessions at
+// once; 0 switches retention off, which is the shipped default and the one-shot
+// behaviour. The plugin's own copy is DEFAULT_MAX_RETAINED_SUBAGENTS in
+// src/settings.js and test/settings-defaults-parity.test.js fails on a
+// divergence. Carried here for that parity and because a write must not drop a
+// key the plugin honours — no row steps it.
+export const DEFAULT_MAX_RETAINED_SUBAGENTS = 0;
+// How long one retained subagent is held, in ms, measured from the moment it
+// was retained. The plugin's own copy is DEFAULT_RETAINED_SUBAGENT_TTL_MS in
+// src/settings.js. Read and preserved like the key above; no row steps it.
+export const DEFAULT_RETAINED_SUBAGENT_TTL_MS = 3600000;
+// The reuse ceiling for an agent type the reuseContext map does not name: the
+// context above which a finished subagent of that type is never held and never
+// re-prompted. The plugin's own copy is DEFAULT_MAX_REUSE_CONTEXT in
+// src/settings.js and test/settings-defaults-parity.test.js fails on a
+// divergence. Carried here for that parity and because a write must not drop a
+// key the plugin honours — no row steps it yet.
+export const DEFAULT_MAX_REUSE_CONTEXT = 70000;
+// The floor under the retention window, applied wherever the value came from:
+// the plugin never holds a session on a window of 0, because nothing outside it
+// ever deletes a subagent session. Retention is switched off through
+// maxRetainedSubagents, not through the window.
+const MIN_RETAINED_SUBAGENT_TTL_MS = 1;
 // Whether the plugin's own postings appear in the transcript. The plugin's own
 // copy is DEFAULT_SHOW_AGENTCOM in src/settings.js and
 // test/settings-defaults-parity.test.js fails on a divergence.
@@ -129,6 +168,10 @@ const SETTING_VALIDATORS: { [K in FileKey]: (v: unknown) => boolean } = {
   endlessMode: isFlag,
   endlessContext: isLimit,
   maxNestedSpawns: isLimit,
+  maxRetainedSubagents: isLimit,
+  retainedSubagentTtlMs: isLimit,
+  maxReuseContext: isLimit,
+  reuseContext: (v) => filterAgentContext(v) !== null,
   showAgentcom: isFlag,
 };
 
@@ -171,6 +214,19 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
       "OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS",
       DEFAULT_MAX_NESTED_SPAWNS,
     ),
+    maxRetainedSubagents: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS",
+      DEFAULT_MAX_RETAINED_SUBAGENTS,
+    ),
+    retainedSubagentTtlMs: envNum(
+      "OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS",
+      DEFAULT_RETAINED_SUBAGENT_TTL_MS,
+    ),
+    maxReuseContext: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT",
+      DEFAULT_MAX_REUSE_CONTEXT,
+    ),
+    reuseContext: {},
     showAgentcom: envFlag("OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM", DEFAULT_SHOW_AGENTCOM),
   };
   if (isLimit(raw.maxSubagents)) s.maxSubagents = raw.maxSubagents;
@@ -183,6 +239,15 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
   if (isFlag(raw.endlessMode)) s.endlessMode = raw.endlessMode;
   if (isLimit(raw.endlessContext)) s.endlessContext = raw.endlessContext;
   if (isLimit(raw.maxNestedSpawns)) s.maxNestedSpawns = raw.maxNestedSpawns;
+  if (isLimit(raw.maxRetainedSubagents)) s.maxRetainedSubagents = raw.maxRetainedSubagents;
+  if (isLimit(raw.retainedSubagentTtlMs)) s.retainedSubagentTtlMs = raw.retainedSubagentTtlMs;
+  // The floor the plugin applies last, after file, env and default alike, so a
+  // 0 on this key resolves to 1 ms on both sides rather than to a window
+  // nothing would ever reap.
+  s.retainedSubagentTtlMs = Math.max(MIN_RETAINED_SUBAGENT_TTL_MS, s.retainedSubagentTtlMs);
+  if (isLimit(raw.maxReuseContext)) s.maxReuseContext = raw.maxReuseContext;
+  const perAgentReuse = filterAgentContext(raw.reuseContext);
+  if (perAgentReuse !== null) s.reuseContext = perAgentReuse;
   if (isFlag(raw.showAgentcom)) s.showAgentcom = raw.showAgentcom;
   return s;
 }
@@ -217,6 +282,26 @@ export function effectiveAgentContext(
   return { value: DEFAULT_MAX_CONTEXT, source: "inherited" };
 }
 
+// The reuse ceiling in effect for one agent type, and whether that value is the
+// type's own or the inherited flat one — the same { value, source } pair the
+// budget row's ★ is read from. Same order as the plugin's reuseCeilingFor: own
+// entry > the flat maxReuseContext, itself resolved file > env >
+// DEFAULT_MAX_REUSE_CONTEXT.
+//
+// One level shorter than effectiveAgentContext, and deliberately so: there is
+// no built-in per-type table of reuse ceilings and no legacy key, so there is
+// nothing a source flag would have to disambiguate between. `0` is a real value
+// here too and means the type is never reused.
+export function effectiveReuseContext(
+  settings: Settings,
+  agent: string,
+): { value: number; source: "agent" | "inherited" } {
+  if (Object.hasOwn(settings.reuseContext, agent)) {
+    return { value: settings.reuseContext[agent], source: "agent" };
+  }
+  return { value: settings.maxReuseContext, source: "inherited" };
+}
+
 // Drops every setting the plugin would reject, so the file cannot keep one that
 // silently is not in effect while the panel displays the env-or-default value
 // instead. Each key is checked against its own validator, so a step on a limit
@@ -225,10 +310,11 @@ export function effectiveAgentContext(
 // bad entry and keeps the rest of the map, and a map left with nothing is a key
 // worth nothing.
 function pruneSettings(merged: Record<string, unknown>): Record<string, unknown> {
-  if ("agentContext" in merged) {
-    const kept = filterAgentContext(merged.agentContext);
-    if (kept === null || Object.keys(kept).length === 0) delete merged.agentContext;
-    else merged.agentContext = kept;
+  for (const key of ["agentContext", "reuseContext"] as const) {
+    if (!(key in merged)) continue;
+    const kept = filterAgentContext(merged[key]);
+    if (kept === null || Object.keys(kept).length === 0) delete merged[key];
+    else merged[key] = kept;
   }
   for (const [k, isValid] of Object.entries(SETTING_VALIDATORS)) {
     if (k in merged && !isValid(merged[k])) delete merged[k];

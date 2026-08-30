@@ -14,7 +14,8 @@
 //     exactly as it was;
 //   - retention on holds the session, keeps the handle, and holds no
 //     concurrency slot;
-//   - the exclusions: a `Blocked:` report and a nested child are never retained;
+//   - the exclusions: a `Blocked:` report, a nested child and a session whose
+//     context no later reuse could admit are never retained;
 //   - capacity evicts the OLDEST retained entry, silently;
 //   - the watchdog: a retained entry is exempt from `maxSubagentAgeMs` and is
 //     reaped by `retainedSubagentTtlMs` instead — including with
@@ -38,6 +39,7 @@ import {
   isActiveEntry,
   entryLifecycle,
   retentionDecision,
+  retentionContextDecision,
   isRetainedExpired,
   upsertSession,
   trackPrimary,
@@ -208,6 +210,63 @@ test("retentionDecision: off at capacity 0, on for a top-level entry, never for 
   assert.equal(retentionDecision(undefined, 3).retain, false)
 })
 
+// Condition 5 of the retention decision, the phase-2 half: the context term.
+// It is the reason a session is not held that every reuse attempt would refuse
+// — the entry would take a retained slot and offer the orchestrator a handle
+// the gate turns down at every try.
+test("retentionContextDecision: a figure above 0, at or below the ceiling, under the budget", () => {
+  const under = { ceiling: 70000, budget: 100000 }
+
+  // 1. a figure at all, and above zero. fetchSnapshot returns {} on any
+  // failure, and a ceiling evaluated against a missing number is no ceiling.
+  for (const bad of [undefined, null, NaN, "40000", 0, -1]) {
+    assert.deepEqual(
+      retentionContextDecision(bad, under),
+      { retain: false, reason: "no-context" },
+      `${String(bad)} is not a context figure`,
+    )
+  }
+
+  // 2. the ceiling, inclusive.
+  assert.deepEqual(retentionContextDecision(1, under), { retain: true, reason: "retained" })
+  assert.deepEqual(retentionContextDecision(70000, under), { retain: true, reason: "retained" })
+  assert.deepEqual(retentionContextDecision(70001, under), {
+    retain: false,
+    reason: "over-reuse-ceiling",
+  })
+
+  // A ceiling of 0 needs no branch of its own: no real session's context is at
+  // or below it, so the type is never retained and never reused.
+  assert.deepEqual(retentionContextDecision(1, { ceiling: 0, budget: 100000 }), {
+    retain: false,
+    reason: "over-reuse-ceiling",
+  })
+})
+
+test("retentionContextDecision: the budget term, and what it does where it is disabled", () => {
+  // A budget below the ceiling is the tighter of the two, and it is exclusive:
+  // a session AT its budget is re-prompted straight into the STOP block.
+  const tight = { ceiling: 70000, budget: 50000 }
+  assert.deepEqual(retentionContextDecision(49999, tight), { retain: true, reason: "retained" })
+  assert.deepEqual(retentionContextDecision(50000, tight), { retain: false, reason: "over-budget" })
+  assert.deepEqual(retentionContextDecision(60000, tight), { retain: false, reason: "over-budget" })
+
+  // A ceiling above the budget is inert rather than rejected: the budget term
+  // refuses what the ceiling lets through.
+  const wide = { ceiling: 150000, budget: 100000 }
+  assert.deepEqual(retentionContextDecision(99999, wide), { retain: true, reason: "retained" })
+  assert.deepEqual(retentionContextDecision(120000, wide), { retain: false, reason: "over-budget" })
+
+  // Where the budget is disabled with 0, the ceiling is the only rule — which
+  // is the configuration in which a ceiling above it means something.
+  const noBudget = { ceiling: 150000, budget: 0 }
+  assert.deepEqual(retentionContextDecision(120000, noBudget), { retain: true, reason: "retained" })
+  assert.deepEqual(retentionContextDecision(150001, noBudget), {
+    retain: false,
+    reason: "over-reuse-ceiling",
+  })
+})
+
 test("isRetainedExpired reads only retained entries, and an unstamped one is expired", () => {
   trackPrimary(PRIMARY)
   upsertSession("ses_x", { agent: "planner", prompt: "p", parentID: PRIMARY })
@@ -299,6 +358,97 @@ test("a Blocked: report is delivered and then deleted, never retained", async ()
 
   assert.deepEqual(notices, [PRIMARY], "the report still reaches the orchestrator")
   assert.deepEqual(deleted, [sessionID], "a blocked task continues through a fresh spawn")
+  assert.equal(entryForSession(sessionID), undefined)
+  assert.equal(countRetainedSubagents(), 0)
+})
+
+// The same condition through the whole idle path. A healthy run that ended
+// above the ceiling is under its budget, was never STOP-injected and returned a
+// good result — and is still not held.
+test("a run that ended above the reuse ceiling is delivered and then deleted", async () => {
+  withSettings({ maxRetainedSubagents: 3 })
+  const { ctx, created, deleted, notices } = makeCtx({
+    messages: assistantReply("THE RESULT", 85000),
+  })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
+  const sessionID = created[0]
+
+  await idle(hooks, sessionID)
+
+  assert.deepEqual(notices, [PRIMARY], "the result still reaches the orchestrator")
+  assert.deepEqual(deleted, [sessionID], "no reuse could ever admit it, so it is not held")
+  assert.equal(entryForSession(sessionID), undefined)
+  assert.equal(countRetainedSubagents(), 0)
+})
+
+test("a per-type reuse ceiling of 0 means this type is never retained", async () => {
+  withSettings({ maxRetainedSubagents: 3, maxSubagents: 5, reuseContext: { planner: 0 } })
+  const { ctx, created, deleted } = makeCtx({ messages: assistantReply("THE RESULT", 1000) })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "y" }, toolCtx)
+  const [plannerID, researcherID] = created
+
+  await idle(hooks, plannerID)
+  assert.deepEqual(deleted, [plannerID], "0 is never-reuse, not no-limit")
+  assert.equal(countRetainedSubagents(), 0)
+
+  // The map is per type: the sibling keeps the inherited ceiling and is held.
+  await idle(hooks, researcherID)
+  assert.deepEqual(deleted, [plannerID], "the sibling's session is untouched")
+  assert.equal(countRetainedSubagents(), 1)
+})
+
+// Where a type's budget is set below its reuse ceiling, the budget is the
+// binding term — a session between the two would be re-prompted into an
+// immediate STOP, so it is not held either.
+test("a context budget below the reuse ceiling binds instead of the ceiling", async () => {
+  withSettings({ maxRetainedSubagents: 3, agentContext: { planner: 30000 } })
+  const { ctx, created, deleted } = makeCtx({ messages: assistantReply("THE RESULT", 40000) })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
+  const sessionID = created[0]
+
+  await idle(hooks, sessionID)
+
+  assert.deepEqual(deleted, [sessionID], "under the 70000 ceiling, over its own budget")
+  assert.equal(countRetainedSubagents(), 0)
+})
+
+test("a budget disabled with 0 leaves the reuse ceiling as the only term", async () => {
+  withSettings({
+    maxRetainedSubagents: 3,
+    agentContext: { planner: 0 },
+    reuseContext: { planner: 150000 },
+  })
+  const { ctx, created, deleted } = makeCtx({ messages: assistantReply("THE RESULT", 120000) })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
+  const sessionID = created[0]
+
+  await idle(hooks, sessionID)
+
+  assert.deepEqual(deleted, [], "no budget to bind, and the ceiling the user raised admits it")
+  assert.equal(countRetainedSubagents(), 1)
+  assert.equal(entryLifecycle(entryForSession(sessionID)), LIFECYCLE_RETAINED)
+})
+
+// A snapshot that came back without a figure refuses the retention: the entry
+// is removed and the session deleted on the path it always used.
+test("a snapshot without a context figure is not retained", async () => {
+  withSettings({ maxRetainedSubagents: 3 })
+  const { ctx, created, deleted, notices } = makeCtx({
+    messages: [{ info: { role: "assistant" }, parts: [{ type: "text", text: "THE RESULT" }] }],
+  })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
+  const sessionID = created[0]
+
+  await idle(hooks, sessionID)
+
+  assert.deepEqual(notices, [PRIMARY])
+  assert.deepEqual(deleted, [sessionID], "a ceiling evaluated on a guess is not a ceiling")
   assert.equal(entryForSession(sessionID), undefined)
   assert.equal(countRetainedSubagents(), 0)
 })

@@ -287,11 +287,14 @@ export function isActiveEntry(entry) {
 //      no waiter left. The parent having a registry entry IS the plugin's
 //      definition of "the parent is a subagent" (see trackPrimary).
 //
-// A fourth condition is not decidable here and is the caller's: only a clean
-// idle may retain. The error, timeout and abort paths never run this decision
-// — they go straight to `teardownSubagent` — and a `Blocked:` reply is
-// classified from the result snapshot, which the critical section has not
-// fetched yet (see onSessionIdle).
+// Three further conditions are not decidable here and are the caller's, in the
+// second phase of the decision: only a clean idle may retain — the error,
+// timeout and abort paths never run this decision, they go straight to
+// `teardownSubagent`; a `Blocked:` reply is not retained; and the session's
+// context must fit the reuse ceiling. The last two are read off the result
+// snapshot, which the critical section has not fetched yet (see
+// onSessionIdle), and the context condition is the pure
+// `retentionContextDecision` below.
 //
 // Capacity is not a term either. A retention that overshoots `maxRetained` is
 // resolved by evicting the OLDEST retained entries afterwards
@@ -303,6 +306,39 @@ export function retentionDecision(entry, maxRetained) {
   if (!(maxRetained > 0)) return { retain: false, reason: "retention-off" }
   if (!entry.parentID) return { retain: false, reason: "no-parent" }
   if (entryForSession(entry.parentID)) return { retain: false, reason: "nested" }
+  return { retain: true, reason: "retained" }
+}
+
+// Whether a finished subagent's context leaves it worth holding: the second
+// phase of the retention decision, evaluated on the FRESHLY FETCHED snapshot
+// rather than on the entry's own `ctxTokens`, which is cached for CTX_TTL_MS
+// and can sit well below the truth after one large tool result.
+//
+// Without this term retention holds sessions of any size that every later
+// reuse attempt would refuse: the entry occupies a retained slot, the
+// orchestrator is offered a handle, and the gate turns it down at every try.
+//
+// Pure, and takes its two numbers rather than resolving them — the registry
+// does not read settings. The caller passes `reuseCeilingFor(agent)` and
+// `contextBudgetFor(agent)`.
+//
+// Retained only when all of:
+//   1. the snapshot yielded a figure at all, and it is above 0. `fetchSnapshot`
+//      returns {} on any failure, so `ctxTokens` may be undefined, and a
+//      ceiling evaluated against a missing number is not a ceiling;
+//   2. the context is at or below the type's reuse ceiling. A ceiling of 0
+//      falls out of this same test as "never reuse this type";
+//   3. where a budget is configured for the type, the context is below it. A
+//      session at or over its budget is re-prompted straight into the STOP
+//      block and a tool-denial loop, so it is nothing to hold. `budget === 0`
+//      means the budget is disabled for that type and the ceiling is then the
+//      only rule.
+export function retentionContextDecision(ctxTokens, { ceiling, budget } = {}) {
+  if (typeof ctxTokens !== "number" || !Number.isFinite(ctxTokens) || ctxTokens <= 0) {
+    return { retain: false, reason: "no-context" }
+  }
+  if (!(ctxTokens <= ceiling)) return { retain: false, reason: "over-reuse-ceiling" }
+  if (budget > 0 && !(ctxTokens < budget)) return { retain: false, reason: "over-budget" }
   return { retain: true, reason: "retained" }
 }
 

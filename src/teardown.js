@@ -8,6 +8,8 @@ import {
   removeEntry,
   entryForSession,
   markEntryClosing,
+  claimRetentionEvictionsLocked,
+  registryMutex,
   reservePendingDelivery,
   releasePendingDelivery,
 } from "./registry.js"
@@ -324,4 +326,35 @@ export async function teardownSubagent(
     if (markAborted) aborted.delete(sessionID)
     releasePendingDelivery()
   }
+}
+
+// Tears retained subagents down until at most `keep` of them are left, oldest
+// `retainedAt` first, and returns the descriptors it tore down.
+//
+// The two callers differ only in that number. `keep: maxRetainedSubagents`
+// trims the set back after one more entry joined it — the capacity eviction on
+// the idle path. `keep: 0` — the default — drops the whole set, which is what a
+// primary handoff and an endless cycle do: a retained session's only value is
+// the context of the primary it belongs to, and that primary is on its way out.
+//
+// The claim runs under the registry mutex and moves its victims to "closing"
+// before it returns, so the watchdog's reap and a second drop cannot take the
+// same entry; the teardowns themselves run outside the lock. Silent towards the
+// parent — each of these subagents was woken when its run finished, and a
+// second notice would cost an LLM turn to be told that something it may never
+// ask about again is gone.
+//
+// The session is really torn down, not merely forgotten: the same
+// teardownSubagent every ending path goes through, so the opencode session is
+// deleted rather than left behind as an orphan nothing else will ever delete.
+export async function dropRetainedSubagents(client, { keep = 0, label = "retention" } = {}) {
+  const victims = await registryMutex.runExclusive(() => claimRetentionEvictionsLocked(keep))
+  for (const victim of victims) {
+    log(`${label}: dropping a retained subagent`, {
+      handle: victim.handle,
+      sessionID: victim.sessionID,
+    })
+    await teardownSubagent(client, victim, { notice: null, markAborted: false, label })
+  }
+  return victims
 }

@@ -60,6 +60,7 @@
 //       "endlessQuiesceTimeoutMs": N, "endlessMaxCycles": N,
 //       "maxNestedSpawns": N,
 //       "maxRetainedSubagents": N, "retainedSubagentTtlMs": N,
+//       "maxReuseContext": N, "reuseContext": { "<agent>": N },
 //       "showAgentcom": true|false }
 
 import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs"
@@ -115,14 +116,26 @@ const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
 // re-promptable. 0 switches retention off entirely: every subagent's session
 // is deleted the moment its result is delivered, which is the one-shot
 // behaviour this plugin has always had, and is the default.
-const DEFAULT_MAX_RETAINED_SUBAGENTS = 0
+export const DEFAULT_MAX_RETAINED_SUBAGENTS = 0
 // How long one retained subagent is held, in ms, measured from the moment it
 // was retained (`entry.retainedAt`). The watchdog sweep reaps a retained entry
 // once this window is past. Clamped to a minimum of 1 ms: "hold forever" is
 // deliberately not offered, because nothing outside this plugin ever deletes a
 // subagent session — opencode has neither a session TTL nor a garbage
 // collector, so an unbounded window would be an unbounded leak.
-const DEFAULT_RETAINED_SUBAGENT_TTL_MS = 3600000
+export const DEFAULT_RETAINED_SUBAGENT_TTL_MS = 3600000
+// The context, in whole tokens, above which a finished subagent is never
+// reused: the ceiling for every agent type the `reuseContext` map does not
+// name. A session over it is not held at idle and is not re-promptable — see
+// reuseCeilingFor for the resolution order and for what `0` means.
+//
+// It is not derived from a context budget and does not move when one moves: a
+// run that ended at 85 000 under a 100 000 budget was never over its budget,
+// was never STOP-injected and returned a good result, and is still not
+// reusable. Exported for the parity the two retention scalars above are
+// exported for (tui/src/settings-file.ts,
+// test/settings-defaults-parity.test.js).
+export const DEFAULT_MAX_REUSE_CONTEXT = 70000
 // How many subagents ONE subagent run may start (a nested spawn). Delegation
 // exists for preparatory work whose answer the caller then uses — summarising a
 // long document, a broad lookup — not as a working mode, so the ceiling is
@@ -278,6 +291,10 @@ function envStr(name, def) {
 // subagent's session is deleted as soon as its result is delivered.
 // retainedSubagentTtlMs is how long one retained subagent is held before the
 // watchdog reaps it, floored at 1 ms — the window is never "forever".
+// reuseContext is the per-agent reuse ceiling exactly as the file holds it
+// (empty when the file names none) and maxReuseContext the flat value for
+// every type it does not name — read both through reuseCeilingFor rather than
+// directly.
 // showAgentcom shows the plugin's own postings in the transcript; while it is
 // off they are hidden from it and still left in the model's payload.
 export function getSettings() {
@@ -298,6 +315,8 @@ export function getSettings() {
       "OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS",
       DEFAULT_RETAINED_SUBAGENT_TTL_MS,
     ),
+    maxReuseContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT", DEFAULT_MAX_REUSE_CONTEXT),
+    reuseContext: {},
     searxngUrl: envStr("OPENCODE_AGENT_INTERCOM_SEARXNG_URL", ""),
     exaApiKey: envStr("EXA_API_KEY", ""),
     forumBangs: [...DEFAULT_FORUM_BANGS],
@@ -346,6 +365,21 @@ export function getSettings() {
     }
     if (Number.isInteger(raw?.retainedSubagentTtlMs) && raw.retainedSubagentTtlMs >= 0) {
       resolved.retainedSubagentTtlMs = raw.retainedSubagentTtlMs
+    }
+    if (Number.isInteger(raw?.maxReuseContext) && raw.maxReuseContext >= 0) {
+      resolved.maxReuseContext = raw.maxReuseContext
+    }
+    // Per-agent reuse ceilings, read with exactly the discipline agentContext
+    // is read with above: a key survives only as a whole non-negative integer,
+    // one garbage entry costs the user that entry and not the map, and a value
+    // that is not a plain object leaves the map empty so every type falls
+    // through to the flat value. Nothing is materialised.
+    if (raw?.reuseContext && typeof raw.reuseContext === "object" && !Array.isArray(raw.reuseContext)) {
+      const perAgent = {}
+      for (const [name, value] of Object.entries(raw.reuseContext)) {
+        if (name !== "" && Number.isInteger(value) && value >= 0) perAgent[name] = value
+      }
+      resolved.reuseContext = perAgent
     }
     if (typeof raw?.searxngUrl === "string" && raw.searxngUrl.trim() !== "") {
       resolved.searxngUrl = raw.searxngUrl.trim()
@@ -445,6 +479,42 @@ export function contextBudgetFor(agent) {
   if (s.maxContextSource !== "default") return s.maxContext
   if (Object.hasOwn(DEFAULT_AGENT_CONTEXT, agent)) return DEFAULT_AGENT_CONTEXT[agent]
   return DEFAULT_MAX_CONTEXT
+}
+
+// The reuse ceiling in effect for one agent type, in whole tokens: the context
+// above which a finished subagent of that type is never held and never
+// re-prompted. Order:
+//   1. the type's own `reuseContext` entry from the file,
+//   2. the flat `maxReuseContext` — file, else the env var
+//      OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT,
+//   3. DEFAULT_MAX_REUSE_CONTEXT, which is what the flat value already
+//      resolves to when neither file nor env names one.
+//
+// `0` means this agent type is never reused. Not "no limit": the ceiling is an
+// admission threshold, and "admit sessions up to 0 tokens" is "admit none". It
+// needs no branch anywhere — a real session's context is above 0, so `ctx <=
+// 0` is false for every one of them. "No limit for this type" stays
+// expressible as a large number.
+//
+// One level shorter than contextBudgetFor, deliberately. That resolver needs
+// five levels and its `maxContextSource` flag because it has a built-in
+// per-type table (DEFAULT_AGENT_CONTEXT) as well as a flat key, so it must
+// tell "the user set the flat value" from "the built-in table happens to
+// apply". This one has neither: one number for every type, and no legacy key
+// to migrate, so there is nothing for a source flag to disambiguate.
+//
+// A ceiling above the type's context budget is neither rejected nor clamped.
+// It is inert rather than unsafe — the reuse gate's budget term refuses what
+// this one lets through — except where that type's budget is disabled with 0,
+// which is the configuration in which a user who set a high ceiling meant it.
+//
+// Resolved per call, never cached on a registry entry, for the reason
+// contextBudgetFor states: a freshly spawned subagent is tracked under a
+// provisional type name until the spawn tool upgrades it.
+export function reuseCeilingFor(agent) {
+  const s = getSettings()
+  if (Object.hasOwn(s.reuseContext, agent)) return s.reuseContext[agent]
+  return s.maxReuseContext
 }
 
 // The resolved searxng base URL (file > env > ""), trailing slashes stripped.

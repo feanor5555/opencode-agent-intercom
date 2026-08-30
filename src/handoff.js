@@ -27,6 +27,14 @@ import { hasOpenPointsHeading } from "./openpoints.js"
 //      BUFFERED by the router in hooks.js/registry.js instead of posted —
 //      the old session is on its way out, and a notice delivered to it
 //      would die with the delete (live-verified loss).
+//   0b. Drop every retained subagent (deps.dropRetainedSubagents). A retained
+//      session is a finished subagent held alive for a follow-up question, and
+//      its only value is the context of the primary that is being replaced —
+//      the new orchestrator receives a summary and has never seen that history,
+//      so a fresh spawn is a better offer than a warm session it cannot read.
+//      Dropping FIRST is also what keeps steps 4 and 5 simple: reparent and the
+//      in-flight list never meet a retained entry. Best-effort — a failed drop
+//      is logged and the handoff proceeds.
 //   1. Gather planned steps and the last user goal. (The in-flight subagent
 //      list is deliberately NOT gathered here — it is read AFTER the
 //      reparent in step 4, so the kickoff only announces subagents whose
@@ -112,6 +120,7 @@ import { hasOpenPointsHeading } from "./openpoints.js"
 // @property {(sessionID: string) => Promise<void>} deleteSession  used ONLY for the orphaned NEW session on the failure path (a root session with no children)
 // @property {(sessionID: string) => Promise<void>} archiveSession  retires the OLD primary in step 8 without opencode's recursive child-delete cascade
 // @property {(sessionID: string) => void} forgetPrimary
+// @property {() => Promise<unknown>} [dropRetainedSubagents]  tear down every retained subagent before the sequence starts
 // @property {() => Promise<string>} promptOldPrimaryForDocSummaries
 // @property {string} [extraKickoffBlock]  appended to the kickoff after the handoff summary (endless mode)
 // @property {(sessionID: string) => Promise<void>} [selectTuiSession]  best-effort TUI view switch to the new session
@@ -146,6 +155,21 @@ async function performPrimaryHandoffInner(deps) {
   // of this sequence gets its notice buffered instead of delivered to the
   // dying old session (or to the not-yet-kicked-off new one).
   deps.beginDrain()
+
+  // 0b. Drop the retained subagents of the primary that is being replaced. A
+  // retained entry must not outlive its primary: the new orchestrator never
+  // saw the work such a session holds, and an entry left behind would keep a
+  // handle pointing at the archived old primary. Best-effort and optional —
+  // a caller that retains nothing (every test harness, and every process with
+  // `maxRetainedSubagents` at its default of 0) passes no such dep, and a drop
+  // that throws must not cost the primary its handoff.
+  if (deps.dropRetainedSubagents) {
+    try {
+      await deps.dropRetainedSubagents()
+    } catch (err) {
+      log("primary handoff: dropping retained subagents failed, continuing", errMsg(err))
+    }
+  }
 
   let newID = null
   let reparentDone = false

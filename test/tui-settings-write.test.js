@@ -26,6 +26,9 @@ import {
   DEFAULT_ENDLESS_MODE,
   DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_NESTED_SPAWNS,
+  DEFAULT_MAX_RETAINED_SUBAGENTS,
+  DEFAULT_MAX_REUSE_CONTEXT,
+  DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_MAX_SUBAGENTS,
   DEFAULT_SHOW_AGENTCOM,
   readSettings,
@@ -55,6 +58,9 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS
+  delete process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT
 })
 
 const onDisk = () => JSON.parse(readFileSync(file, "utf8"))
@@ -72,6 +78,10 @@ const state = (over = {}) => ({
   // Read and preserved by the store, stepped by no sidebar row; it is part of
   // every resolved state all the same.
   maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
+  maxRetainedSubagents: DEFAULT_MAX_RETAINED_SUBAGENTS,
+  retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
+  maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
+  reuseContext: {},
   showAgentcom: DEFAULT_SHOW_AGENTCOM,
   ...over,
 })

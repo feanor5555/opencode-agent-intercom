@@ -40,9 +40,13 @@ import {
   DEFAULT_ENDLESS_MODE,
   DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_NESTED_SPAWNS,
+  DEFAULT_MAX_RETAINED_SUBAGENTS,
+  DEFAULT_MAX_REUSE_CONTEXT,
   DEFAULT_MAX_SUBAGENTS,
+  DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_SHOW_AGENTCOM,
   contextBudgetFor,
+  reuseCeilingFor,
   getSettings,
   resetSettings,
   setSettingsPath,
@@ -59,9 +63,13 @@ import {
   DEFAULT_ENDLESS_MODE as TUI_DEFAULT_ENDLESS_MODE,
   DEFAULT_MAX_CONTEXT as TUI_DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_NESTED_SPAWNS as TUI_DEFAULT_MAX_NESTED_SPAWNS,
+  DEFAULT_MAX_RETAINED_SUBAGENTS as TUI_DEFAULT_MAX_RETAINED_SUBAGENTS,
+  DEFAULT_MAX_REUSE_CONTEXT as TUI_DEFAULT_MAX_REUSE_CONTEXT,
   DEFAULT_MAX_SUBAGENTS as TUI_DEFAULT_MAX_SUBAGENTS,
+  DEFAULT_RETAINED_SUBAGENT_TTL_MS as TUI_DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_SHOW_AGENTCOM as TUI_DEFAULT_SHOW_AGENTCOM,
   effectiveAgentContext,
+  effectiveReuseContext,
   readSettings,
   setSettingsPath as setTuiSettingsPath,
 } from "../tui/src/settings-file.ts"
@@ -82,6 +90,9 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS
+  delete process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT
 })
 
 // Every setting both sides carry, as each resolves it right now. The plugin
@@ -99,6 +110,10 @@ function bothSides() {
       endlessMode: plugin.endlessMode,
       endlessContext: plugin.endlessContext,
       maxNestedSpawns: plugin.maxNestedSpawns,
+      maxRetainedSubagents: plugin.maxRetainedSubagents,
+      retainedSubagentTtlMs: plugin.retainedSubagentTtlMs,
+      maxReuseContext: plugin.maxReuseContext,
+      reuseContext: plugin.reuseContext,
       showAgentcom: plugin.showAgentcom,
     },
     tui,
@@ -123,6 +138,24 @@ function assertBudget(agent, value, source) {
   assert.equal(tui.source, source)
 }
 
+// The reuse ceiling both sides resolve for one agent type, plus the TUI's own
+// verdict on whether the type carries a value of its own.
+function ceilingBothSides(agent) {
+  resetSettings()
+  const plugin = reuseCeilingFor(agent)
+  const tui = effectiveReuseContext(readSettings(), agent)
+  return [plugin, tui]
+}
+
+// Asserts the two halves agree on one type's reuse ceiling and on where it came
+// from.
+function assertCeiling(agent, value, source) {
+  const [plugin, tui] = ceilingBothSides(agent)
+  assert.equal(plugin, value)
+  assert.equal(tui.value, value)
+  assert.equal(tui.source, source)
+}
+
 test("the two modules carry the same built-in defaults", () => {
   assert.equal(DEFAULT_MAX_SUBAGENTS, TUI_DEFAULT_MAX_SUBAGENTS)
   assert.equal(DEFAULT_MAX_CONTEXT, TUI_DEFAULT_MAX_CONTEXT)
@@ -130,6 +163,9 @@ test("the two modules carry the same built-in defaults", () => {
   assert.equal(DEFAULT_ENDLESS_CONTEXT, TUI_DEFAULT_ENDLESS_CONTEXT)
   assert.equal(DEFAULT_SHOW_AGENTCOM, TUI_DEFAULT_SHOW_AGENTCOM)
   assert.equal(DEFAULT_MAX_NESTED_SPAWNS, TUI_DEFAULT_MAX_NESTED_SPAWNS)
+  assert.equal(DEFAULT_MAX_RETAINED_SUBAGENTS, TUI_DEFAULT_MAX_RETAINED_SUBAGENTS)
+  assert.equal(DEFAULT_RETAINED_SUBAGENT_TTL_MS, TUI_DEFAULT_RETAINED_SUBAGENT_TTL_MS)
+  assert.equal(DEFAULT_MAX_REUSE_CONTEXT, TUI_DEFAULT_MAX_REUSE_CONTEXT)
   assert.deepEqual(DEFAULT_AGENT_CONTEXT, TUI_DEFAULT_AGENT_CONTEXT)
 })
 
@@ -202,6 +238,10 @@ test("with neither file nor env both resolve the built-in defaults", () => {
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
     maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
+    maxRetainedSubagents: DEFAULT_MAX_RETAINED_SUBAGENTS,
+    retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
+    maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
+    reuseContext: {},
     showAgentcom: DEFAULT_SHOW_AGENTCOM,
   })
   assert.deepEqual(tui, plugin)
@@ -223,6 +263,10 @@ test("with env alone both resolve the env value", () => {
     endlessMode: true,
     endlessContext: 300000,
     maxNestedSpawns: 3,
+    maxRetainedSubagents: DEFAULT_MAX_RETAINED_SUBAGENTS,
+    retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
+    maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
+    reuseContext: {},
     showAgentcom: false,
   })
   assert.deepEqual(tui, plugin)
@@ -255,6 +299,10 @@ test("with file and env both let the file win", () => {
     endlessMode: false,
     endlessContext: 120000,
     maxNestedSpawns: 1,
+    maxRetainedSubagents: DEFAULT_MAX_RETAINED_SUBAGENTS,
+    retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
+    maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
+    reuseContext: {},
     showAgentcom: true,
   })
   assert.deepEqual(tui, plugin)
@@ -275,6 +323,10 @@ test("both reject the same file values and fall back to env or default", () => {
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
     maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
+    maxRetainedSubagents: DEFAULT_MAX_RETAINED_SUBAGENTS,
+    retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
+    maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
+    reuseContext: {},
     showAgentcom: DEFAULT_SHOW_AGENTCOM,
   })
   assert.deepEqual(tui, plugin)
@@ -294,6 +346,10 @@ test("both keep 0 as a value in its own right", () => {
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: 0,
     maxNestedSpawns: 0,
+    maxRetainedSubagents: DEFAULT_MAX_RETAINED_SUBAGENTS,
+    retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
+    maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
+    reuseContext: {},
     showAgentcom: DEFAULT_SHOW_AGENTCOM,
   })
   assert.deepEqual(tui, plugin)
@@ -488,4 +544,137 @@ test("both ignore an agentContext that is not a plain object", () => {
     assert.deepEqual(tui, plugin)
     assertBudget("coder", DEFAULT_AGENT_CONTEXT.coder, "inherited")
   }
+})
+
+// The two retention keys the plugin gates the feature on. The sidebar carries
+// them for the same reason it carries maxNestedSpawns: no row edits them yet,
+// and a write that dropped a key the plugin honours would switch retention off
+// behind the user's back.
+test("both resolve the retention keys file > env > default and reject the same values", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS = "3"
+  process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS = "900000"
+  const [envOnly, tuiEnvOnly] = bothSides()
+  assert.equal(envOnly.maxRetainedSubagents, 3, "env over the built-in default")
+  assert.equal(envOnly.retainedSubagentTtlMs, 900000)
+  assert.deepEqual(tuiEnvOnly, envOnly)
+
+  writeFileSync(file, JSON.stringify({ maxRetainedSubagents: 2, retainedSubagentTtlMs: 120000 }))
+  const [fromFile, tuiFromFile] = bothSides()
+  assert.equal(fromFile.maxRetainedSubagents, 2, "the file wins over the env var")
+  assert.equal(fromFile.retainedSubagentTtlMs, 120000)
+  assert.deepEqual(tuiFromFile, fromFile)
+
+  for (const bad of [1.5, -1, "2", null]) {
+    writeFileSync(file, JSON.stringify({ maxRetainedSubagents: bad, retainedSubagentTtlMs: bad }))
+    const [plugin, tui] = bothSides()
+    assert.equal(plugin.maxRetainedSubagents, 3, `${bad} must be rejected by both`)
+    assert.equal(plugin.retainedSubagentTtlMs, 900000)
+    assert.deepEqual(tui, plugin)
+  }
+})
+
+// 0 means two different things on the two keys, and both sides have to read it
+// the same way: on the capacity it is the off switch, on the window it is a
+// value the floor lifts to 1 ms — nothing outside the plugin ever deletes a
+// subagent session, so a window of 0 would be a session held forever.
+test("both take a retention capacity of 0 as off and floor the window at 1 ms", () => {
+  writeFileSync(file, JSON.stringify({ maxRetainedSubagents: 0, retainedSubagentTtlMs: 0 }))
+  const [plugin, tui] = bothSides()
+  assert.equal(plugin.maxRetainedSubagents, 0)
+  assert.equal(plugin.retainedSubagentTtlMs, 1)
+  assert.deepEqual(tui, plugin)
+})
+
+// The per-type reuse ceiling, pinned over its whole three-level chain the way
+// the budget is pinned over its five: the plugin resolves it in reuseCeilingFor
+// and the sidebar in effectiveReuseContext, and a type the two disagreed on
+// would be admitted for reuse at one number and displayed at another.
+test("both resolve the reuse ceiling keys file > env > default and reject the same values", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT = "50000"
+  const [envOnly, tuiEnvOnly] = bothSides()
+  assert.equal(envOnly.maxReuseContext, 50000, "env over the built-in default")
+  assert.deepEqual(tuiEnvOnly, envOnly)
+
+  writeFileSync(file, JSON.stringify({ maxReuseContext: 40000, reuseContext: { coder: 30000 } }))
+  const [fromFile, tuiFromFile] = bothSides()
+  assert.equal(fromFile.maxReuseContext, 40000, "the file wins over the env var")
+  assert.deepEqual(fromFile.reuseContext, { coder: 30000 })
+  assert.deepEqual(tuiFromFile, fromFile)
+
+  for (const bad of [1.5, -1, "2", null]) {
+    writeFileSync(file, JSON.stringify({ maxReuseContext: bad }))
+    const [plugin, tui] = bothSides()
+    assert.equal(plugin.maxReuseContext, 50000, `${bad} must be rejected by both`)
+    assert.deepEqual(tui, plugin)
+  }
+})
+
+test("both resolve an agent's own reuse ceiling ahead of the flat one", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT = "50000"
+  writeFileSync(file, JSON.stringify({ maxReuseContext: 40000, reuseContext: { coder: 90000 } }))
+  assertCeiling("coder", 90000, "agent")
+  assertCeiling("planner", 40000, "inherited")
+})
+
+test("both let the reuse ceiling env var govern every type without an own entry", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT = "50000"
+  writeFileSync(file, JSON.stringify({ reuseContext: { coder: 90000 } }))
+  assertCeiling("researcher", 50000, "inherited")
+  assertCeiling("coder", 90000, "agent")
+})
+
+// There is no built-in per-type table behind this one: with neither file nor
+// env every type — installed role or not — gets the same flat default.
+test("both give every type the built-in reuse default with neither file nor env", () => {
+  for (const agent of [...SPAWNABLE_ROLES, "subagent", "orchestrator"]) {
+    assertCeiling(agent, DEFAULT_MAX_REUSE_CONTEXT, "inherited")
+  }
+})
+
+test("both take a reuse ceiling of 0 as a real per-type value: never reuse this type", () => {
+  writeFileSync(file, JSON.stringify({ reuseContext: { coder: 0 } }))
+  assertCeiling("coder", 0, "agent")
+  assertCeiling("planner", DEFAULT_MAX_REUSE_CONTEXT, "inherited")
+
+  // A flat 0 says it of every type without an own entry.
+  writeFileSync(file, JSON.stringify({ maxReuseContext: 0, reuseContext: { coder: 60000 } }))
+  assertCeiling("planner", 0, "inherited")
+  assertCeiling("coder", 60000, "agent")
+})
+
+test("both drop a malformed reuse entry and keep the rest of the map", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({
+      reuseContext: { coder: 90000, planner: "lots", debugger: -1, reviewer: 1.5 },
+    }),
+  )
+  assertCeiling("coder", 90000, "agent")
+  for (const agent of ["planner", "debugger", "reviewer"]) {
+    assertCeiling(agent, DEFAULT_MAX_REUSE_CONTEXT, "inherited")
+  }
+})
+
+test("both ignore a reuseContext that is not a plain object", () => {
+  for (const bad of [[60000], "60000", 60000, null]) {
+    writeFileSync(file, JSON.stringify({ reuseContext: bad }))
+    const [plugin, tui] = bothSides()
+    assert.deepEqual(plugin.reuseContext, {})
+    assert.deepEqual(tui, plugin)
+    assertCeiling("coder", DEFAULT_MAX_REUSE_CONTEXT, "inherited")
+  }
+})
+
+// The two maps are separate settings and neither reads the other: a budget for
+// one type says nothing about its reuse ceiling, and a reuse ceiling above the
+// budget is accepted as written on both sides rather than rejected or clamped.
+test("both keep the budget map and the reuse map apart", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ agentContext: { coder: 40000 }, reuseContext: { coder: 150000 } }),
+  )
+  assertBudget("coder", 40000, "agent")
+  assertCeiling("coder", 150000, "agent")
+  assertBudget("planner", DEFAULT_AGENT_CONTEXT.planner, "inherited")
+  assertCeiling("planner", DEFAULT_MAX_REUSE_CONTEXT, "inherited")
 })

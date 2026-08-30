@@ -21,8 +21,9 @@ import {
   listSessions,
   abortSession,
   forgetSessionDirectory,
+  updateSessionTitle,
 } from "./client.js"
-import { getSettings, retentionActive } from "./settings.js"
+import { getSettings, retentionActive, retentionOffered } from "./settings.js"
 import { settleChildWaiter, liveChildSessionIDs } from "./childwait.js"
 import { aborted, pendingSessionQuiescence } from "./state.js"
 import { log, errMsg } from "./log.js"
@@ -293,6 +294,17 @@ export async function teardownSubagent(
       // The session stays. Everything below this point exists to dispose of
       // it, so this is the end of the path for a retained subagent; the
       // watchdog's reap runs the rest when the retention window is up.
+      //
+      // This is the last word on the retention — the two-phase decision is
+      // settled and every caller that keeps a session comes through here — so
+      // it is where the state is published. The window is the entry's own
+      // `retainedAt` plus the configured TTL, i.e. the same moment the reap
+      // works to and the same one `list` and the snapshot count down to.
+      const entry = entryForSession(sessionID)
+      const retainedAt = entry?.retainedAt ?? Date.now()
+      await publishRetentionState(client, sessionID, {
+        retainedUntil: retainedAt + getSettings().retainedSubagentTtlMs,
+      })
       log(`${tag}retained opencode session`, { handle, sessionID })
       return
     }
@@ -371,6 +383,70 @@ export async function dropRetainedSubagents(client, { keep = 0, label = "retenti
 // Not written where retention was off at load — a process that never retains
 // leaks nothing, so at the shipped default no title moves a byte.
 export const SUBAGENT_SESSION_TITLE_MARKER = "[agent-intercom] "
+
+// The retention state, published on that same session title.
+//
+// Whether a finished subagent is really being held is decided here — on its
+// reply, on the context it ended at, on capacity, on whether retention is in
+// effect in this process at all — and none of that is visible from outside the
+// plugin's own memory. A reader that infers it from what a session list does or
+// does not hold gets it wrong for as long as its poll takes to notice, and
+// paints a session as held that is at that moment being deleted.
+//
+// So the state is published rather than inferred, and the title is the channel:
+// the plugin already writes it (spawn puts SUBAGENT_SESSION_TITLE_MARKER in
+// front of it), every reader of a session already gets it, and it needs no
+// transport that does not exist. A held session's title carries the stamp
+// `[retained:<epoch ms the window ends>]` directly after the marker — held, and
+// for how long, in the one field. It goes on when the retention becomes final
+// and comes off again when an accepted reuse ends it; every other way a
+// retention ends deletes the session, which takes the title with it.
+//
+// The marker stays the first thing in the title, so the bootstrap sweep's
+// attribution test (startsWith) is unaffected by the stamp.
+export const RETENTION_STAMP_RE = /^\[retained:(\d{1,15})\]\s/
+
+// The title a held subagent's session carries: marker, stamp, then the text
+// `spawn` was given. `retainedUntil` at or below zero composes the plain form,
+// which is what an accepted reuse writes back.
+export function retentionStampedTitle(baseTitle, retainedUntil) {
+  const base = typeof baseTitle === "string" ? baseTitle : ""
+  const stamp =
+    Number.isFinite(retainedUntil) && retainedUntil > 0
+      ? `[retained:${Math.floor(retainedUntil)}] `
+      : ""
+  return SUBAGENT_SESSION_TITLE_MARKER + stamp + base
+}
+
+// The epoch ms a published retention window ends at, read back off a title.
+// Undefined for every title that does not carry the stamp — a session this
+// plugin never created, one it created and is not holding, and one whose title
+// a future opencode rewrote.
+export function readRetentionStamp(title) {
+  if (typeof title !== "string") return undefined
+  if (!title.startsWith(SUBAGENT_SESSION_TITLE_MARKER)) return undefined
+  const match = RETENTION_STAMP_RE.exec(title.slice(SUBAGENT_SESSION_TITLE_MARKER.length))
+  if (!match) return undefined
+  const until = Number(match[1])
+  return Number.isFinite(until) && until > 0 ? until : undefined
+}
+
+// Writes the retention state of one subagent session to its title. Called with
+// the window's end for a retention that has just become final, and with nothing
+// for a reuse that has just ended one.
+//
+// Best-effort and silent about failure beyond the log: the state is a reading
+// aid, and a title that could not be written costs a reader the row it would
+// have shown, never a wrong one. Skipped entirely where this process cannot
+// retain at all — its titles carry no marker, and at the shipped default
+// (`maxRetainedSubagents = 0`) not one byte of a title moves.
+export async function publishRetentionState(client, sessionID, { retainedUntil = 0 } = {}) {
+  if (!retentionOffered()) return false
+  if (!client || !sessionID) return false
+  const entry = entryForSession(sessionID)
+  const title = retentionStampedTitle(entry?.title ?? "", retainedUntil)
+  return updateSessionTitle(client, sessionID, title)
+}
 
 // A retained session outlives only its own window; a plugin reload inside that
 // window outlives it forever. opencode has no session TTL and no garbage

@@ -609,11 +609,17 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // Sessions the user aborted from this panel — server status alone does not
   // distinguish "aborted" from "idle", so we remember it locally.
   const aborted = new Set<string>();
-  // Subagents that have finished and been removed — kept so a later poll does
-  // not re-add them as fresh entries (their wasBusy flag is gone with them). A
-  // subagent that is being held enters this set only once its retention has
-  // ended: while it is held it is still a row, and the poll still has to see it.
-  const finished = new Set<string>();
+  // Subagents that have finished and been removed, each with the row it was
+  // when it went — kept so a later poll does not re-add them as fresh entries,
+  // and so a row the plugin turns out to be holding can be taken back exactly
+  // as it stood, under its own handle.
+  //
+  // Taking one back is the ordinary course, not an edge case: a run's
+  // `session.idle` reaches the panel before the plugin has decided anything
+  // about it, so the row goes first and the published retention arrives after.
+  // A row whose session is gone stays here for good — nothing publishes a
+  // retention on a session that no longer exists.
+  const finished = new Map<string, SubagentEntry | undefined>();
   const handleCounters = new Map<string, number>();
   let disposed = false;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -624,6 +630,36 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     const n = (handleCounters.get(agent) ?? 0) + 1;
     handleCounters.set(agent, n);
     return `${agent}#${n}`;
+  };
+
+  // A row built from a poll's child record alone, for a session this panel
+  // holds no memory of. Only the re-adoption path uses it: a subagent whose
+  // published retention the poll found while the panel had nothing of its own
+  // about it, e.g. after the panel was rebuilt inside the plugin's window.
+  const rowFromChild = (
+    child: {
+      id: string;
+      parentID?: string;
+      agent?: string;
+      title?: string;
+      time?: { created?: number; updated?: number };
+    },
+    primaryID: string,
+  ): SubagentEntry => {
+    const agent = child.agent ?? "subagent";
+    return {
+      sessionID: child.id,
+      parentID: child.parentID ?? primaryID,
+      agent,
+      handle: nextHandle(agent),
+      title: child.title ?? "",
+      status: "idle",
+      wasBusy: true,
+      createdAt: child.time?.created ?? Date.now(),
+      updatedAt: child.time?.updated ?? Date.now(),
+      ctxTokens: undefined,
+      lastTokenFetch: 0,
+    };
   };
 
   const refresh = async (): Promise<void> => {
@@ -661,9 +697,30 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         }>;
         for (const child of children) {
           seen.add(child.id);
-          // Already finished and removed — keep it gone, do not re-add.
+          const stampedStatus = statuses[child.id]?.type;
+          // Already finished and removed. It stays gone unless the plugin has
+          // published a retention for it since: the row was dropped when its
+          // run ended, because at that moment nothing said it was being held,
+          // and the stamp on its title is that statement arriving. A session
+          // that is running again is not adopted here — the reuse that started
+          // it is a live run and belongs to the branch below.
           if (finished.has(child.id)) {
-            next.delete(child.id);
+            const readopted =
+              stampedStatus === "busy" || stampedStatus === "retry"
+                ? undefined
+                : holdFinishedRow(
+                    finished.get(child.id) ?? rowFromChild(child, primaryID),
+                    { aborted: aborted.has(child.id), title: child.title },
+                    now,
+                  );
+            if (!readopted) {
+              next.delete(child.id);
+              continue;
+            }
+            readopted.title = child.title ?? readopted.title;
+            readopted.updatedAt = child.time?.updated ?? readopted.updatedAt;
+            finished.delete(child.id);
+            next.set(child.id, readopted);
             continue;
           }
           // A primary (orchestrator) session is never a subagent row, even if
@@ -677,16 +734,15 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
           const wasBusy = (existing?.wasBusy ?? false) || running;
 
           // A subagent that has run (or was aborted) and is no longer running
-          // is finished. Where retention is switched on it is held instead of
-          // dropped: it is idle, but its session is alive and re-promptable
-          // until its window runs out, and the poll that lists it here is the
-          // evidence that it is still there. Everywhere else — retention off,
-          // or an abort, which is never held — the row is dropped exactly as it
-          // always was.
+          // is finished. It is held only where the plugin published a retention
+          // on this session's title: it is then idle, alive and re-promptable
+          // until the window that title names. Everywhere else — no stamp, so
+          // no retention, or an abort, which is never held — the row is dropped
+          // exactly as it always was.
           if (!running && (wasBusy || aborted.has(child.id))) {
             const held = holdFinishedRow(
               existing,
-              { aborted: aborted.has(child.id), settings: settings() },
+              { aborted: aborted.has(child.id), title: child.title },
               now,
             );
             if (held) {
@@ -701,7 +757,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             }
             if (existing && !aborted.has(child.id)) completedDelta += 1;
             next.delete(child.id);
-            finished.add(child.id);
+            finished.set(child.id, existing);
             aborted.delete(child.id);
             continue;
           }
@@ -745,13 +801,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       // truth about what the server still lists; a poll that threw never gets
       // here and never reaps. The dropped rows are not counted as done: they
       // were counted when their run ended.
-      for (const sessionID of reapRetained(
-        next.values(),
-        { seen, settings: settings() },
-        now,
-      )) {
+      for (const sessionID of reapRetained(next.values(), { seen }, now)) {
+        finished.set(sessionID, next.get(sessionID));
         next.delete(sessionID);
-        finished.add(sessionID);
         aborted.delete(sessionID);
         if (selectedID() === sessionID) setSelectedID(undefined);
       }
@@ -844,7 +896,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     const next = new Map(subagents());
     next.delete(id);
     setSubagents(next);
-    finished.add(id);
+    finished.set(id, entry);
     if (selectedID() === id) setSelectedID(undefined);
     scheduleRefresh();
   };
@@ -1004,9 +1056,13 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   };
 
   // A subagent going idle means its run is done — act on it right away instead
-  // of waiting for the next poll. Where retention is switched on the row is
-  // held rather than removed; where it is off, it goes exactly as it always
-  // did.
+  // of waiting for the next poll. The row goes, whether or not retention is
+  // switched on: at this moment nothing says this subagent is being held, and
+  // the plugin has not even decided it yet — it decides on the reply and on the
+  // context the run ended at, both of which it is still fetching. A retention
+  // reaches the panel the way every other fact about a session does, on the
+  // next poll, and the row is taken back then under the handle it went with.
+  // Claiming it here would be the panel inventing a state it cannot see.
   const onSessionIdle = (event: unknown): void => {
     const sessionID = (event as { properties?: { sessionID?: string } })
       .properties?.sessionID;
@@ -1027,28 +1083,17 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       ) {
         api.route.navigate("session", { sessionID: entry.parentID });
       }
-      const held = holdFinishedRow(entry, {
-        aborted: aborted.has(sessionID),
-        settings: settings(),
-      });
       const next = new Map(subagents());
-      if (held) {
-        // Held, and counted as done: its run finished here. The claim that it
-        // is being held is settled by the next poll — a subagent the plugin did
-        // not retain has no session left to list, and the row goes with it.
-        next.set(sessionID, held);
-        setSubagents(next);
-        setCompletedCount((count) => count + 1);
-        aborted.delete(sessionID);
-        scheduleRefresh();
-        return;
-      }
       next.delete(sessionID);
       setSubagents(next);
-      finished.add(sessionID);
+      finished.set(sessionID, entry);
       if (!aborted.has(sessionID)) setCompletedCount((count) => count + 1);
       aborted.delete(sessionID);
       if (selectedID() === sessionID) setSelectedID(undefined);
+      // A poll follows, and it is what puts the row back where the plugin
+      // publishes a retention for it. Counted done either way: the run ended
+      // here, and a row taken back later is not counted a second time.
+      scheduleRefresh();
       return;
     }
     scheduleRefresh();
@@ -1452,11 +1497,7 @@ function SubagentPanel(props: {
               tool and the orchestrator's per-turn snapshot carry for it. */}
           <Show when={isRetained(rowProps.entry)}>
             <text fg={props.theme.info}>
-              {` · ${retainedRowNote(
-                rowProps.entry,
-                props.settings().retainedSubagentTtlMs,
-                props.nowMs(),
-              )}`}
+              {` · ${retainedRowNote(rowProps.entry, props.nowMs())}`}
             </text>
           </Show>
         </box>

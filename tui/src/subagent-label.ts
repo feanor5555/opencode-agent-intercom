@@ -74,6 +74,32 @@ const TOPIC_SEP = " · ";
 // and test/tui-subagent-label.test.js pins the two against each other.
 export const SUBAGENT_SESSION_TITLE_MARKER = "[agent-intercom] ";
 
+// The retention state the plugin publishes on that same title, directly after
+// the marker: `[retained:<epoch ms the window ends>]`. It is the panel's only
+// evidence that a finished subagent is really being held, and for how long —
+// the decision is taken inside the plugin, on the subagent's reply and on the
+// context it ended at, and a session list says nothing about it. A stamped
+// session is held; an unstamped one is not, whatever the settings file says
+// about retention being switched on.
+//
+// Mirrors RETENTION_STAMP_RE in src/teardown.js, which is what writes it;
+// test/tui-subagent-label.test.js pins the two against each other.
+export const RETENTION_STAMP_RE = /^\[retained:(\d{1,15})\]\s/;
+
+// The epoch ms a published retention window ends at, or undefined where the
+// title carries no stamp: a session this plugin did not create, one it created
+// and is not holding, one whose retention it has just ended.
+export function readRetentionStamp(title: string | undefined): number | undefined {
+  if (typeof title !== "string") return undefined;
+  if (!title.startsWith(SUBAGENT_SESSION_TITLE_MARKER)) return undefined;
+  const match = RETENTION_STAMP_RE.exec(
+    title.slice(SUBAGENT_SESSION_TITLE_MARKER.length),
+  );
+  if (!match) return undefined;
+  const until = Number(match[1]);
+  return Number.isFinite(until) && until > 0 ? until : undefined;
+}
+
 // The marker a cut leaves behind, and the columns it occupies.
 const ELLIPSIS = "…";
 const ELLIPSIS_W = 1;
@@ -199,9 +225,11 @@ export function modelDisplayName(label: string): string {
 // marker and without the redundant `${agent}: ` prefix of a fallback title, cut
 // to `maxW` columns. Empty where the title holds nothing else.
 //
-// The two prefixes come off in the order they are written, marker first. Both
-// are matched without their trailing space, because sanitizing collapses and
-// trims whitespace: a title that is the marker alone has none left to match.
+// The three prefixes come off in the order they are written: the marker, the
+// retention stamp where the session is being held, then the fallback title's
+// agent name. Each is matched without its trailing space, because sanitizing
+// collapses and trims whitespace: a title that is the marker alone has none
+// left to match.
 export function subagentTopic(
   agent: string,
   title: string,
@@ -210,6 +238,9 @@ export function subagentTopic(
   let topic = sanitizeTitle(title);
   const marker = SUBAGENT_SESSION_TITLE_MARKER.trim();
   if (topic.startsWith(marker)) topic = topic.slice(marker.length).trim();
+  // The stamp is state, not topic: the row says "retained · 47m left" on its
+  // second line, and the title text belongs to the work the subagent did.
+  topic = topic.replace(/^\[retained:\d{1,15}\]/, "").trim();
   const prefix = `${agent}:`;
   if (topic.startsWith(prefix)) topic = topic.slice(prefix.length).trim();
   return truncate(topic, maxW);

@@ -48,6 +48,7 @@ import { registerChildWaiter, settleChildWaiter } from "./childwait.js"
 import {
   endLiveChildrenOf,
   waitForSessionQuiescence,
+  publishRetentionState,
   SUBAGENT_SESSION_TITLE_MARKER,
 } from "./teardown.js"
 import { projectContext } from "./project.js"
@@ -607,6 +608,10 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
         parentID: toolCtx.sessionID,
         taskId,
         directory,
+        // The title WITHOUT the marker: the entry keeps the text so the
+        // retention state can be stamped in front of it and taken off it again
+        // without reading the session back.
+        title,
         // The gate's own figure, kept for the completion notice: it reports
         // what this package cost beside what the whole run cost.
         packageTokens: size.estimate,
@@ -960,15 +965,25 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
             `retention window ran out or it was evicted. Spawn a fresh subagent instead.`,
         }
       }
+      // The retention is over, so the state published on the session title goes
+      // with it: from here the row is a running subagent again, and a stamp
+      // left standing would have the next reader show this run as held the
+      // moment it falls quiet, on a window that already ended.
+      await publishRetentionState(client, sessionID)
       try {
         await promptSession(client, { sessionID, agent, prompt })
       } catch (err) {
         // The follow-up never reached the session, so no run started. Put the
         // entry back to retained on its ORIGINAL window rather than leaving a
-        // running entry the inactivity watchdog would report as a hang.
+        // running entry the inactivity watchdog would report as a hang — and
+        // publish that same original window again, so the state on the title
+        // says what the registry says.
         await registryMutex.runExclusive(() =>
           restoreRetainedEntryLocked(sessionID, revived.previous),
         )
+        await publishRetentionState(client, sessionID, {
+          retainedUntil: (revived.previous.retainedAt ?? 0) + settings.retainedSubagentTtlMs,
+        })
         throw err
       }
       const run = revived.entry.runs

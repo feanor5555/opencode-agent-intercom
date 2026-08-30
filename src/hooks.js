@@ -62,7 +62,12 @@ import {
   primaryDirectoryOf,
   CTX_TTL_MS,
 } from "./registry.js"
-import { fetchSnapshot, showToast, getSessionDirectory } from "./client.js"
+import {
+  fetchSnapshot,
+  showToast,
+  getSessionDirectory,
+  forgetSessionDirectory,
+} from "./client.js"
 import {
   getSettings,
   primaryContextThreshold,
@@ -1126,6 +1131,9 @@ export function createEventHandler(client) {
         case "session.error":
           await onSessionError(props, client)
           break
+        case "session.deleted":
+          await onSessionDeleted(props)
+          break
         default:
           if (event?.type && !unknownEventsSeen.has(event.type)) {
             unknownEventsSeen.add(event.type)
@@ -1377,6 +1385,49 @@ async function onSessionIdle({ sessionID }, client) {
   } finally {
     releasePendingDelivery()
   }
+}
+
+// A session this plugin tracks was deleted by somebody else. opencode publishes
+// `session.deleted` for every session it removes, its own children included, so
+// this is the one signal that reaches the plugin when a session goes away
+// without a plugin path having taken it there.
+//
+// It matters for exactly one state: a RETAINED entry. A held subagent's session
+// is the only one the plugin leaves standing with the entry still in the
+// registry, and it is the one a user can end from outside — the sidebar's `x`
+// on a held row deletes the session, because a held subagent is idle and there
+// is no run to abort. Without this, the entry outlives its session until the
+// window runs out or a `reuse` walks into the gap, and `list` names a handle
+// that addresses nothing.
+//
+// Every other lifecycle is left alone, and deliberately:
+//   - "closing" is this plugin's own delete, and the entry is already on its
+//     way out through the path that started it;
+//   - "running" is untouched here. Its session ending under it is a different
+//     matter with a different answer — the parent is waiting for a result and
+//     the inactivity watchdog is what tells it — and folding it into this
+//     handler would silence that notice.
+//
+// The check and the removal run in one critical section: a reuse that revives
+// the entry between them would otherwise have its fresh run deleted out of the
+// registry.
+async function onSessionDeleted(props) {
+  const sessionID = props?.sessionID ?? props?.info?.id
+  if (!sessionID) return
+  const entry = entryForSession(sessionID)
+  if (!entry || entryLifecycle(entry) !== LIFECYCLE_RETAINED) return
+  const dropped = await registryMutex.runExclusive(() => {
+    const e = entryForSession(sessionID)
+    if (!e || entryLifecycle(e) !== LIFECYCLE_RETAINED) return null
+    const handle = e.handle
+    return removeEntryLocked(sessionID) ? handle : null
+  })
+  if (!dropped) return
+  forgetSessionDirectory(sessionID)
+  log("retained subagent dropped: its opencode session was deleted", {
+    handle: dropped,
+    sessionID,
+  })
 }
 
 // Trims the retained set back to `maxRetainedSubagents` after one more entry

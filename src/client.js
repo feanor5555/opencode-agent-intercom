@@ -162,6 +162,22 @@ export async function deleteSession(client, sessionID) {
   }
 }
 
+// Best-effort rename of a session (PATCH /session/{id} with `title`). The
+// title is the one field of a subagent session this plugin owns from the
+// outside, and it is what carries the retention state to any reader of the
+// opencode session list — the sidebar included (publishRetentionState in
+// teardown.js). Returns whether the write went through; a failure is logged and
+// costs the reader nothing but the state it would have shown.
+export async function updateSessionTitle(client, sessionID, title) {
+  try {
+    await client.session.update({ path: { id: sessionID }, body: { title } })
+    return true
+  } catch (err) {
+    log("session.update (title) failed", { sessionID, err: errMsg(err) })
+    return false
+  }
+}
+
 // Every session opencode holds, optionally narrowed to one project directory.
 // Read-only and best-effort: an empty array on any failure, so a caller that
 // sweeps on this list does nothing rather than something wrong when the call

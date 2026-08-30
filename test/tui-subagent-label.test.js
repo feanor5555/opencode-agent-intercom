@@ -11,10 +11,17 @@
 
 import test from "node:test"
 import assert from "node:assert/strict"
-import { SUBAGENT_SESSION_TITLE_MARKER as PLUGIN_MARKER } from "../src/teardown.js"
+import {
+  SUBAGENT_SESSION_TITLE_MARKER as PLUGIN_MARKER,
+  RETENTION_STAMP_RE as PLUGIN_STAMP_RE,
+  readRetentionStamp as pluginReadRetentionStamp,
+  retentionStampedTitle,
+} from "../src/teardown.js"
 import {
   FALLBACK_PANEL_W,
   SUBAGENT_SESSION_TITLE_MARKER,
+  RETENTION_STAMP_RE,
+  readRetentionStamp,
   MIN_TOPIC_W,
   MODEL_MAX_W,
   ROW_CHROME_W,
@@ -102,6 +109,27 @@ test("subagentTopic strips the marker and the agent prefix behind it", () => {
 test("a title that is nothing but the marker leaves no topic", () => {
   assert.equal(subagentTopic("coder", SUBAGENT_SESSION_TITLE_MARKER), "")
   assert.equal(subagentTopic("coder", `${SUBAGENT_SESSION_TITLE_MARKER}coder:`), "")
+})
+
+test("the TUI reads the retention stamp exactly as the plugin writes it", () => {
+  // The plugin publishes a held subagent's window on the session title; this
+  // package cannot import it, so the format is mirrored and pinned here.
+  assert.equal(RETENTION_STAMP_RE.source, PLUGIN_STAMP_RE.source)
+  const held = retentionStampedTitle("Searching for X", 1_700_000_060_000)
+  assert.equal(readRetentionStamp(held), 1_700_000_060_000)
+  assert.equal(readRetentionStamp(held), pluginReadRetentionStamp(held))
+  assert.equal(readRetentionStamp(retentionStampedTitle("Searching for X", 0)), undefined)
+})
+
+test("subagentTopic strips the retention stamp: it is state, not topic", () => {
+  assert.equal(
+    subagentTopic("researcher", retentionStampedTitle("Searching for X", 1_700_000_060_000)),
+    "Searching for X",
+  )
+  assert.equal(
+    subagentTopic("coder", retentionStampedTitle("coder: rewrite the parser", 1_700_000_060_000)),
+    "rewrite the parser",
+  )
 })
 
 test("the marker is stripped only where it stands at the front", () => {

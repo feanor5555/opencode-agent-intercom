@@ -754,7 +754,7 @@ export function isTaskIdPending(taskId) {
 // whoever is first creates the entry, the second upgrades it in place.
 export function upsertSession(
   sessionID,
-  { agent, prompt, parentID, taskId, directory, packageTokens } = {},
+  { agent, prompt, parentID, taskId, directory, packageTokens, title } = {},
 ) {
   if (!sessionID) return undefined
   const existing = entryForSession(sessionID)
@@ -765,9 +765,19 @@ export function upsertSession(
     if (taskId && !existing.taskId) existing.taskId = taskId
     if (directory && !existing.directory) existing.directory = directory
     if (packageTokens && !existing.packageTokens) existing.packageTokens = packageTokens
+    if (title && !existing.title) existing.title = title
     return existing
   }
-  return createEntry(sessionID, agent || "subagent", prompt || "", parentID, taskId, directory, packageTokens)
+  return createEntry(
+    sessionID,
+    agent || "subagent",
+    prompt || "",
+    parentID,
+    taskId,
+    directory,
+    packageTokens,
+    title,
+  )
 }
 
 // Returns the set of taskIds currently held by active subagents of a primary,
@@ -1482,7 +1492,7 @@ export function resetEndlessProgress() {
   endlessProgress.stalledCycles = 0
 }
 
-function createEntry(sessionID, agent, prompt, parentID, taskId, directory, packageTokens) {
+function createEntry(sessionID, agent, prompt, parentID, taskId, directory, packageTokens, title) {
   const now = Date.now()
   const entry = {
     handle: nextHandle(agent),
@@ -1490,6 +1500,14 @@ function createEntry(sessionID, agent, prompt, parentID, taskId, directory, pack
     agent,
     prompt,
     parentID,
+    // The session title WITHOUT the plugin's own title marker, as `spawn` set
+    // it. Kept because the title is the channel the plugin publishes a
+    // retention on (publishRetentionState in teardown.js): the stamp is written
+    // in front of this text and taken off it again, so no read-back of the
+    // session is needed to compose either form. Undefined for an entry the
+    // event hook registered before `spawn` reached it, which then publishes the
+    // stamp alone.
+    title: title || undefined,
     // Stable TODO.md task id (e.g. "T5" / "R2") extracted by `spawn` from the
     // first line of the spawn-prompt. Used by the wake-hook to validate the
     // subagent's `DONE:`/`BLOCKED:` marker matches the task that was assigned —

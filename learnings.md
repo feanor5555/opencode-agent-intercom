@@ -320,3 +320,22 @@ Latent caveats:
 - If opencode's marker strings change, `parseOpencodeSystem` returns `{ role: joined, env: "", agentsMd: "" }` (`src/hooks.js:442`): the rewrite degrades to one element with `<env>` embedded at its front. Per-day invalidation, not a corrupted prompt.
 
 Anthropic-style `ttl: 1h` cache marker: not worth pursuing at the providers in use. DeepSeek (`deepseek-v4-flash`), MiniMax M3 native, and xAI Grok 4.6 cache prefixes automatically with no caller breakpoints or TTL. OpenAI GPT-5.6 Luna only supports `ttl: "30m"`. opencode merges plugin-supplied `providerOptions` rather than overwriting them (`provider/transform.ts:401`), so the setting would reach the provider — it simply has no documented effect at these four. The current two-element split with system breakpoints and a trailing-message synthetic part is what gives the cache its hit surface.
+
+## A text-shaped answer in the primary's transcript is not a tool result
+
+When a verification has to read back what a tool did, an answer that merely
+*looks* like a prior tool output is not evidence that the tool ran. In this
+project's message history a real call always carries a tool part; a model
+echoing an earlier output has parts `step-start`, `text`, `step-finish` and no
+tool part at all. Two independent checks catch it:
+
+1. **Inspect the message parts.** A genuine tool result is one of the parts
+   on the assistant message; the plain text parts around it are commentary,
+   not the call. An answer with only `step-start`, `text`, `step-finish` and
+   no tool part is the model reproducing its context verbatim.
+2. **Sanity-check any figure that depends on `Date.now()`.** A row whose
+   window read `9m left` at one timestamp and `9m left` again two minutes
+   later cannot have been rendered twice; identical bytes across a gap no
+   real render produces are the fingerprint of a replayed string.
+
+Apply both before treating any text the primary quotes as a tool result.

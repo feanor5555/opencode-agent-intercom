@@ -150,13 +150,21 @@ either way.
   boundary is ever revisited, only §3.4 (the reap), §6 (the bootstrap sweep)
   and §4 (the tool) are plugin-specific; §3.2 is a policy that could live
   anywhere.
-- **Which half owns the truth about a retained row.** The server half owns the
-  registry; the TUI half derives its panel independently from
-  `session.children` polling and `session.idle` events
-  (`tui/src/tui.tsx:650-686`, `:933-959`) and shares no state with it. The last
-  step below gives the TUI its own `retained` row derived from the same events;
-  an alternative — a plugin-served endpoint the TUI reads — is out of scope and
-  would be a new interface between the two halves.
+- **Which half owns the truth about a retained row.** The two halves do not
+  need a new interface between them. The plugin publishes a held subagent's
+  state in the opencode session title — `[agent-intercom]
+  [retained:<epoch ms when the retention window ends>] <work title>`, written
+  by `publishRetentionState` (`src/teardown.js`) through `updateSessionTitle`
+  (`src/client.js`) — and the TUI reads it on every poll via
+  `readRetentionStamp` (`tui/src/subagent-label.ts`). Both halves already own
+  and read the title field; the stamp rides on what is already there, no new
+  transport between server and TUI. The TUI holds a row only when the stamp is
+  present in the title it polls — over the reuse ceiling, a `Blocked:` reply,
+  a nested child, an error ending, or a retention the plugin simply refused,
+  the title carries no stamp and the row is never shown as held, even briefly.
+  The cost is one `session.update` per retention that becomes final and one per
+  accepted reuse; the title change is best-effort and a failed write costs the
+  reader the row it would have shown, never a wrong one.
 - **Whether the feature ships on.** The default proposed below is off
   (`maxRetainedSubagents = 0`), which keeps a project that never opts in
   byte-identical to today and keeps `test/system-prompt-stability.test.js`

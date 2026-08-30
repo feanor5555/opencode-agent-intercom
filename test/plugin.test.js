@@ -463,6 +463,22 @@ test("tool.execute.before denies back-to-back list calls from a primary", async 
   )
 })
 
+test("a denied list call clears the streak for the next attempt", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const sessionID = "ses_primary"
+  const guard = (callID) =>
+    hooks["tool.execute.before"]({ tool: "list", sessionID, callID })
+
+  await guard("l1")
+  await assert.rejects(() => guard("l2"), /twice in a row/i)
+  assert.equal(lastPrimaryTool.has(sessionID), false, "a refused list must not remain the last tool")
+
+  // The refusal consumed one attempt, not the rest of the session.
+  await guard("l3")
+  await assert.rejects(() => guard("l4"), /twice in a row/i)
+})
+
 test("tool.execute.before lets a tracked subagent run work tools (but not delegation)", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)

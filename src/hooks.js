@@ -1734,6 +1734,9 @@ export function createGuardToolExecute(client, permissionGuard) {
     // denied. Any other tool call (spawn/abort) resets the streak.
     if (input.tool === "list" && lastPrimaryTool.get(sessionID) === "list") {
       log("denied back-to-back list from primary", { sessionID })
+      // The denied call never executes. Clear the marker so one refusal does
+      // not latch this primary out of list for the rest of its session.
+      lastPrimaryTool.delete(sessionID)
       throw new Error(
         "agent-intercom: don't call `list` twice in a row. End your turn — you will be woken.",
       )

@@ -62,7 +62,7 @@ After restarting opencode, two things still have to happen before the
    type's ceiling in k tokens (with `★` marking a type that has its own
    value and `off` for a ceiling of `0`; stepping a type's own value below
    zero drops the entry so it falls back to the inherited ceiling again),
-   and the orchestrator's system prompt also carries a `Limits` block with headroom per agent type — each entry lists the budget, the fixed overhead (subagent guides, PROJECT.md, the project snapshot prepended to every spawn, AGENTS.md where that type keeps it) and the headroom left for the orchestrator's prompt and the subagent's work, in the form `coder 60.0k (−12.4k fixed → 47.6k)`. The fixed overhead occupies part of every budget before the orchestrator's words do; the limits block names it so the orchestrator can see why its own prompt has less room than the bare budget suggests. The work-package size gate below measures the package against the same budget the headroom was computed from. The same block names `off` for any type whose budget is disabled. The sidebar itself also exposes collapsed `TUI settings` / `LLM params` / `Prompts` sections.
+   and the orchestrator's system prompt also carries a `Limits` block with headroom per agent type — each entry lists the budget, the fixed overhead (subagent guides, PROJECT.md, the project snapshot prepended to every spawn, AGENTS.md where that type keeps it) and the headroom left for the orchestrator's prompt and the subagent's work, in the form `coder 100.0k (−12.4k fixed → 87.6k)`. The fixed overhead occupies part of every budget before the orchestrator's words do; the limits block names it so the orchestrator can see why its own prompt has less room than the bare budget suggests. The work-package size gate below measures the package against the same budget the headroom was computed from. The same block names `off` for any type whose budget is disabled. The sidebar itself also exposes collapsed `TUI settings` / `LLM params` / `Prompts` sections.
    SDK's `layout` field is `"auto" | "stretch"` and marked deprecated with
    "Always uses stretch layout", and `tui.json` has no `sidebar` block,
    no width, no position. The column takes its width from the content
@@ -419,21 +419,24 @@ exposes every runtime knob:
   A type with no entry of its own falls back to the flat legacy
   `maxContext` key in the same file, then to the env var
   `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT`, then to a built-in per-type
-  default, then to 40 000. `0` is a real value at every level and means
+  default, then to 100 000. `0` is a real value at every level and means
   the budget is disabled for that type.
-- **`thinking [on/off]`** / **`tool details [on/off]`** — opencode's
-  built-in visibility toggles.
-- **`hide chatter [on/off]`** — hides the plugin's own notices
-  (subagent completion messages, handoff kickoffs, doc-summary prompts) from
-  the transcript. The text part the plugin posts is stamped `synthetic: true`,
-  which opencode's TUI does not render; the model still receives the text
-  unchanged, so the orchestrator keeps being woken and keeps receiving its
-  subagent results. The task prompt sent to a subagent stays visible by
-  design — it is the subagent's entire instruction, not chatter — and tool
-  results stay under opencode's own `tool_details_visibility`. Writes
-  `~/.config/opencode/agent-intercom.json` as `"hideChatter": true|false`,
-  picked up within ~2 s; env var `OPENCODE_AGENT_INTERCOM_HIDE_CHATTER`
-  resolves with `1`/`0`. Default `false`. With the switch on, the transcript
+- **`endless mode [on/off]`** / **`endless (k)`** — arms the self-restarting
+  orchestrator loop and sets its context threshold.
+- Under **`TUI settings`**: **`thinking [on/off]`** and **`tool details
+  [on/off]`**, opencode's built-in visibility toggles, plus **`show agentcom
+  [on/off]`**, which decides whether the plugin's own notices (subagent
+  completion messages, handoff kickoffs, doc-summary prompts) appear in the
+  transcript. With it off, the text part the plugin posts is stamped
+  `synthetic: true`, which opencode's TUI does not render; the model still
+  receives the text unchanged, so the orchestrator keeps being woken and keeps
+  receiving its subagent results. The task prompt sent to a subagent stays
+  visible whatever the switch says — it is the subagent's entire instruction,
+  not chatter — and tool results stay under opencode's own
+  `tool_details_visibility`. Writes
+  `~/.config/opencode/agent-intercom.json` as `"showAgentcom": true|false`,
+  picked up within ~2 s; env var `OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM`
+  resolves with `1`/`0`. Default `true`. With the switch off, the transcript
   no longer shows why the orchestrator continues — the orchestrator is told
   to relay the substance itself.
 - **Per-agent LLM sampling** — temperature, top-p/top-k, max-tokens, plus
@@ -533,7 +536,7 @@ also takes `"searxngUrl"` and `"exaApiKey"`, each overriding its environment var
 | `OPENCODE_AGENT_INTERCOM_LOG_REQUESTS` | off | `"1"` writes per-LLM-call JSONL to `~/.cache/opencode-agent-intercom/requests.jsonl` (path override: `_LOG_REQUESTS_FILE`) |
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS` | `1` | Concurrent subagents per primary. `"0"` disables. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS` | `2` | Nested `spawn` calls a single subagent run may start (always targeting `researcher`). `"0"` disables — the subagent must do the work itself. TUI file overrides via `"maxNestedSpawns"`. |
-| `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` | `40000` | Subagent context budget (tokens). `"0"` disables. TUI file overrides. |
+| `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` | `100000` | Subagent context budget (tokens). `"0"` disables. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_RESULT_CHARS` | `8000` | Cap on a subagent's final reply forwarded to the primary. `"0"` disables. |
 | `OPENCODE_AGENT_INTERCOM_PROJECT_CONTEXT` | on | `"0"` skips the project snapshot prepended to spawn prompts |
 | `OPENCODE_AGENT_INTERCOM_RESPECT_TASK_PERMS` | on | `"0"` ignores `permission.task` allowlist in `spawn` |
@@ -545,7 +548,7 @@ also takes `"searxngUrl"` and `"exaApiKey"`, each overriding its environment var
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT` | `250000` | Orchestrator context threshold (tokens) while endless mode is on. Displaces the plain handoff threshold. `"0"` disables. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS` | `600000` | How long (ms) one endless cycle waits for the last subagent to finish before abandoning. |
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES` | `10` | Cycle ceiling per opencode process. At the ceiling endless mode writes itself off. `"0"` arms no ceiling. |
-| `OPENCODE_AGENT_INTERCOM_HIDE_CHATTER` | off | `"1"` hides the plugin's own postings — subagent notices, handoff kickoff, doc-summary prompts — from the transcript. Their text still reaches the model unchanged. `"0"` shows them. TUI file overrides. |
+| `OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM` | on | `"0"` hides the plugin's own postings — subagent notices, handoff kickoff, doc-summary prompts — from the transcript. Their text still reaches the model unchanged. `"1"` shows them. TUI file overrides. |
 
 ## Endless mode
 
@@ -670,7 +673,7 @@ removing every "do it yourself" tool from the primary is the enforcement lever.
   text outside those four elements, and a maintainer who re-pins a real
   contract change without bumping.
 - **Solo-maintainer surface area.** `pw` daemon, `gen` CLI, Exa SSE parser,
-  ctags subprocess, four opencode hooks. 1031 unit tests, no CI against real
+  ctags subprocess, four opencode hooks. 1046 unit tests, no CI against real
   opencode. Bugs are addressed at hobby-project pace.
 
 ## Development

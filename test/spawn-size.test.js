@@ -104,8 +104,8 @@ function makeCtx({ agentConfig = {}, serverAgents } = {}) {
 
 const toolCtx = { sessionID: "ses_primary", agent: "orchestrator", messageID: "m1" }
 
-// coder: 60000 built-in budget → warn above 12.0k, refuse above 24.0k.
-const CODER_BUDGET = 60000
+// coder: 100000 built-in budget → warn above 20.0k, refuse above 40.0k.
+const CODER_BUDGET = 100000
 const CODER_WARN = CODER_BUDGET * PACKAGE_WARN_SHARE
 const CODER_REFUSE = CODER_BUDGET * PACKAGE_REFUSE_SHARE
 
@@ -146,9 +146,9 @@ test("a package above the warn share spawns and reports size, budget and headroo
     toolCtx,
   )
   assert.match(res.output, /Spawned subagent "coder#1"/, "the spawn still goes through")
-  assert.match(res.output, /Package size: ~13\.0k of the 60\.0k coder budget/)
-  assert.match(res.output, /over the 20% target of 12\.0k/)
-  assert.match(res.output, /47\.0k left for the subagent's own work/)
+  assert.match(res.output, /Package size: ~21\.0k of the 100\.0k coder budget/)
+  assert.match(res.output, /over the 20% target of 20\.0k/)
+  assert.match(res.output, /79\.0k left for the subagent's own work/)
   assert.deepEqual(created, ["ses_sub1"], "the session was created")
 })
 
@@ -161,7 +161,7 @@ test("a package exactly at the refuse share is still allowed", async () => {
     toolCtx,
   )
   assert.match(res.output, /Spawned subagent "coder#1"/)
-  assert.match(res.output, /Package size: ~24\.0k of the 60\.0k coder budget/)
+  assert.match(res.output, /Package size: ~40\.0k of the 100\.0k coder budget/)
   assert.deepEqual(created, ["ses_sub1"])
 })
 
@@ -174,22 +174,26 @@ test("a package above the refuse share is refused, naming size, budget, bar and 
     { agent: "coder", prompt: packageOf(CODER_REFUSE + 1000) },
     toolCtx,
   )
-  assert.match(res.output, /^Spawn refused: the work package is ~25\.0k tokens \(estimated/)
-  assert.match(res.output, /over the 40% bar of 24\.0k for a coder/)
-  assert.match(res.output, /whose context budget is 60\.0k/)
+  assert.match(res.output, /^Spawn refused: the work package is ~41\.0k tokens \(estimated/)
+  assert.match(res.output, /over the 40% bar of 40\.0k for a coder/)
+  assert.match(res.output, /whose context budget is 100\.0k/)
   assert.match(res.output, /SPLIT this work into smaller packages/)
   assert.match(res.output, /file path/, "the alternative to inline content is named")
-  assert.match(res.output, /at or under 20% of the budget \(12\.0k for a coder\)/)
+  assert.match(res.output, /at or under 20% of the budget \(20\.0k for a coder\)/)
   assert.deepEqual(created, [], "no session was created")
   assert.equal(countActiveSubagents(), before, "no slot was taken")
 })
 
 test("the bars follow the spawned type's own budget, not one shared number", async () => {
+  // The built-in table gives every type the same budget, so the two types are
+  // driven apart here by a configured ceiling — the case is that the gate reads
+  // the SPAWNED type's budget, not one number shared across types.
+  withSettings({ agentContext: { designer: 30000 } })
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
 
-  // 20.0k: under coder's 24.0k bar (budget 60000), over designer's 12.0k bar
-  // (budget 30000) — the same package, two verdicts.
+  // 20.0k: under coder's 40.0k bar (budget 100000), over designer's 12.0k bar
+  // (configured 30000) — the same package, two verdicts.
   const pkg = packageOf(20000)
 
   const designer = await hooks.tool.spawn.execute({ agent: "designer", prompt: pkg }, toolCtx)
@@ -219,7 +223,7 @@ test("a configured budget moves the bars with it", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
 
-  // 4.5k is far under the built-in coder bar of 24.0k but over the 4.0k bar of
+  // 4.5k is far under the built-in coder bar of 40.0k but over the 4.0k bar of
   // the configured 10000-token budget.
   const res = await hooks.tool.spawn.execute({ agent: "coder", prompt: packageOf(4500) }, toolCtx)
   assert.match(res.output, /Spawn refused: the work package is ~4\.5k/)
@@ -253,7 +257,7 @@ test("the text sent to the subagent is the text that was measured", async () => 
 
   const pkg = packageOf(CODER_WARN + 1000)
   const res = await hooks.tool.spawn.execute({ agent: "coder", prompt: pkg }, toolCtx)
-  assert.match(res.output, /Package size: ~13\.0k/)
+  assert.match(res.output, /Package size: ~21\.0k/)
   assert.equal(
     estimateTokens(prompted[0].body.parts[0].text),
     CODER_WARN + 1000,
@@ -278,20 +282,22 @@ function sizeLine(agent, ctxTokens, packageTokens) {
 }
 
 test("a finished run is reported against the budget of its own agent type", () => {
-  assert.match(sizeLine("coder", 20000), /run-size: 20\.0k of the 60\.0k coder budget — ok\./)
+  assert.match(sizeLine("coder", 20000), /run-size: 20\.0k of the 100\.0k coder budget — ok\./)
 })
 
 test("the same figure is ok for one type and over for another", () => {
-  // 20.0k: a third of coder's 60000, two thirds of designer's 30000.
+  // 20.0k: a fifth of coder's built-in 100000, two thirds of the 30000 the
+  // designer is configured with.
+  withSettings({ agentContext: { designer: 30000 } })
   assert.match(sizeLine("coder", 20000), /— ok\./)
   assert.match(sizeLine("designer", 20000), /20\.0k of the 30\.0k designer budget — over 60% of it/)
   assert.match(sizeLine("designer", 20000), /Scope the next spawn in this area tighter/)
 })
 
 test("a run at or over 90% of the budget reads as too big", () => {
-  assert.match(sizeLine("coder", 54000), /54\.0k of the 60\.0k coder budget — at 90% of it or beyond/)
-  assert.match(sizeLine("coder", 54000), /SPLIT the next spawn/)
-  assert.match(sizeLine("coder", 53999), /— over 60% of it/, "just under the hard bar is the soft verdict")
+  assert.match(sizeLine("coder", 90000), /90\.0k of the 100\.0k coder budget — at 90% of it or beyond/)
+  assert.match(sizeLine("coder", 90000), /SPLIT the next spawn/)
+  assert.match(sizeLine("coder", 89000), /— over 60% of it/, "just under the hard bar is the soft verdict")
 })
 
 test("a budget of 0 prints the figure with no verdict", () => {
@@ -307,8 +313,8 @@ test("an unknown run size produces no size line at all", () => {
 })
 
 test("a type the built-in table does not name is measured against the default budget", () => {
-  // DEFAULT_MAX_CONTEXT = 40000 → soft bar 24.0k.
-  assert.match(sizeLine("scribe", 30000), /30\.0k of the 40\.0k scribe budget — over 60% of it/)
+  // DEFAULT_MAX_CONTEXT = 100000 → soft bar 60.0k.
+  assert.match(sizeLine("scribe", 70000), /70\.0k of the 100\.0k scribe budget — over 60% of it/)
 })
 
 test("the registry entry a spawn leaves behind still carries the orchestrator's prompt", async () => {
@@ -338,16 +344,16 @@ test("the package figure the gate measured is kept on the entry for the wake not
 
 test("the finished run is named beside the package that started it", () => {
   const line = sizeLine("coder", 20000, 3100)
-  assert.match(line, /run-size: 20\.0k of the 60\.0k coder budget/)
+  assert.match(line, /run-size: 20\.0k of the 100\.0k coder budget/)
   assert.match(line, /your package was 3\.1k of it/)
   assert.match(line, /— ok\./)
 })
 
-test("a run at 55k for a coder reads as too big and points at both correctives", () => {
-  // 55.0k is 92% of the 60000 coder budget — past the 90% bar.
-  const line = sizeLine("coder", 55000, 24000)
-  assert.match(line, /run-size: 55\.0k of the 60\.0k coder budget/)
-  assert.match(line, /your package was 24\.0k of it/)
+test("a run at 92k for a coder reads as too big and points at both correctives", () => {
+  // 92.0k is 92% of the 100000 coder budget — past the 90% bar.
+  const line = sizeLine("coder", 92000, 40000)
+  assert.match(line, /run-size: 92\.0k of the 100\.0k coder budget/)
+  assert.match(line, /your package was 40\.0k of it/)
   assert.match(line, /at 90% of it or beyond/)
   assert.match(line, /SPLIT the next spawn/)
   assert.match(line, /package figure is itself a large share of the budget/)
@@ -355,7 +361,7 @@ test("a run at 55k for a coder reads as too big and points at both correctives",
 
 test("a run whose package was never sized reports the run alone", () => {
   const line = sizeLine("coder", 20000)
-  assert.match(line, /run-size: 20\.0k of the 60\.0k coder budget — ok\./)
+  assert.match(line, /run-size: 20\.0k of the 100\.0k coder budget — ok\./)
   assert.doesNotMatch(line, /your package/)
 })
 

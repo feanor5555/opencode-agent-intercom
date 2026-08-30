@@ -17,7 +17,7 @@
 // var OPENCODE_AGENT_INTERCOM_MAX_CONTEXT means the same thing one level down
 // — the value for every unconfigured type — and is the only lever a headless
 // run has. `maxContextSource` records which of the three produced the resolved
-// `maxContext`, because "the user set 40000" and "nobody set anything" pick
+// `maxContext`, because "the user set 100000" and "nobody set anything" pick
 // different budgets for a type that has a built-in default.
 //
 // The searxng base URL for `web_search` resolves the same way (file key
@@ -35,8 +35,8 @@
 // plugin writes `endlessMode: false` back itself when one of the mode's own
 // bounds ends the loop (`writeEndlessMode`).
 //
-// `hideChatter` resolves the same way and is the second boolean key. While it
-// is on, every message the plugin posts into a session carries `synthetic:
+// `showAgentcom` resolves the same way and is the second boolean key. While it
+// is OFF, every message the plugin posts into a session carries `synthetic:
 // true` on its text part: opencode's renderer skips such a part, the model
 // still receives its text verbatim. Nothing is suppressed — see
 // src/pluginmsg.js.
@@ -59,7 +59,7 @@
 //       "endlessMode": true|false, "endlessContext": N,
 //       "endlessQuiesceTimeoutMs": N, "endlessMaxCycles": N,
 //       "maxNestedSpawns": N,
-//       "hideChatter": true|false }
+//       "showAgentcom": true|false }
 
 import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs"
 import { homedir } from "node:os"
@@ -75,7 +75,7 @@ export const DEFAULT_MAX_SUBAGENTS = 1
 // The context budget for an agent type the built-in table below does not name —
 // a project's own agent, or a subagent whose type is still provisional. Also
 // the value the legacy flat `maxContext` key falls back to.
-export const DEFAULT_MAX_CONTEXT = 40000
+export const DEFAULT_MAX_CONTEXT = 100000
 // The built-in context budget per agent type, in whole tokens. One entry per
 // role the plugin installs (src/agents.js) except `orchestrator`: the budget
 // governs subagents only, the primary is governed by primaryContextThreshold.
@@ -83,14 +83,14 @@ export const DEFAULT_MAX_CONTEXT = 40000
 // reason as the scalars above — the TUI carries its own copy and
 // test/settings-defaults-parity.test.js fails on a divergence.
 export const DEFAULT_AGENT_CONTEXT = {
-  planner: 40000,
-  coder: 60000,
-  debugger: 60000,
-  reviewer: 40000,
-  documenter: 40000,
-  researcher: 60000,
-  designer: 30000,
-  gitter: 30000,
+  planner: 100000,
+  coder: 100000,
+  debugger: 100000,
+  reviewer: 100000,
+  documenter: 100000,
+  researcher: 100000,
+  designer: 100000,
+  gitter: 100000,
 }
 // Threshold (in tokens) at which the orchestrator primary session triggers a
 // context-refresh handoff. Independent of maxContext (which gates subagents).
@@ -158,14 +158,14 @@ const DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS = 600000
 // How many cycles one opencode process runs before endless mode switches
 // itself off. Counted over the handoff-redirect chain (handoffGeneration).
 const DEFAULT_ENDLESS_MAX_CYCLES = 10
-// Whether the plugin's own postings are hidden from the transcript. While it
-// is on, the text part every posting carries is stamped `synthetic: true` —
-// opencode's renderer skips it, the model still gets the text. Off by
-// default: with it on, a finished subagent's result is nowhere on screen and
+// Whether the plugin's own postings appear in the transcript. While it is off,
+// the text part every posting carries is stamped `synthetic: true` —
+// opencode's renderer skips it, the model still gets the text. On by
+// default: with it off, a finished subagent's result is nowhere on screen and
 // its session is already deleted, a loss the user chooses rather than
 // inherits. Exported for the same reason as the limits above — the TUI plugin
 // carries its own copy and test/settings-defaults-parity.test.js pins them.
-export const DEFAULT_HIDE_CHATTER = false
+export const DEFAULT_SHOW_AGENTCOM = true
 const TTL_MS = 2000
 
 let settingsPath = join(homedir(), ".config", "opencode", "agent-intercom.json")
@@ -237,7 +237,7 @@ function envStr(name, def) {
 // maxPrimaryContext,
 // maxSubagentAgeMs, searxngUrl, exaApiKey, forumBangs, postNoticeRetries,
 // postNoticeRetryBackoffMs, endlessMode, endlessContext,
-// endlessQuiesceTimeoutMs, endlessMaxCycles, maxNestedSpawns, hideChatter }.
+// endlessQuiesceTimeoutMs, endlessMaxCycles, maxNestedSpawns, showAgentcom }.
 // Cached for TTL_MS so the hot paths (spawn, every subagent transform) don't
 // stat the file constantly. searxngUrl is "" when unset (searxng disabled).
 // exaApiKey is "" when unset (web_search falls back to Exa's anonymous tier).
@@ -258,8 +258,8 @@ function envStr(name, def) {
 // number of cycles one process runs; 0 disables the cycle ceiling.
 // maxNestedSpawns is how many subagents one subagent run may start; 0 disables
 // nesting.
-// hideChatter hides the plugin's own postings from the transcript while
-// leaving them in the model's payload.
+// showAgentcom shows the plugin's own postings in the transcript; while it is
+// off they are hidden from it and still left in the model's payload.
 export function getSettings() {
   const now = Date.now()
   if (cache && now - cachedAt < TTL_MS) return cache
@@ -283,7 +283,7 @@ export function getSettings() {
     ),
     endlessMaxCycles: envNum("OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES", DEFAULT_ENDLESS_MAX_CYCLES),
     maxNestedSpawns: envNum("OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS", DEFAULT_MAX_NESTED_SPAWNS),
-    hideChatter: envBool("OPENCODE_AGENT_INTERCOM_HIDE_CHATTER", DEFAULT_HIDE_CHATTER),
+    showAgentcom: envBool("OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM", DEFAULT_SHOW_AGENTCOM),
   }
   try {
     const raw = JSON.parse(readFileSync(settingsPath, "utf8"))
@@ -336,7 +336,7 @@ export function getSettings() {
     }
     // A boolean key. Anything but a real boolean ("true", 1, null) leaves the
     // env-or-default resolution standing, exactly as a bad numeric value does
-    // above. `hideChatter` below reads the same way.
+    // above. `showAgentcom` below reads the same way.
     if (typeof raw?.endlessMode === "boolean") {
       resolved.endlessMode = raw.endlessMode
     }
@@ -352,8 +352,8 @@ export function getSettings() {
     if (Number.isInteger(raw?.maxNestedSpawns) && raw.maxNestedSpawns >= 0) {
       resolved.maxNestedSpawns = raw.maxNestedSpawns
     }
-    if (typeof raw?.hideChatter === "boolean") {
-      resolved.hideChatter = raw.hideChatter
+    if (typeof raw?.showAgentcom === "boolean") {
+      resolved.showAgentcom = raw.showAgentcom
     }
   } catch {
     // no file / unreadable -> env + defaults; not an error

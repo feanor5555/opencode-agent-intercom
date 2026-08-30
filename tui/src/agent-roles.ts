@@ -78,12 +78,12 @@ export type AgentContext = Record<string, number>;
 // its keys to SPAWNABLE_ROLES. No orchestrator entry: the budget governs
 // subagents only.
 export const DEFAULT_AGENT_CONTEXT: AgentContext = {
-  planner: 40000,
-  coder: 60000,
-  debugger: 60000,
-  reviewer: 40000,
-  documenter: 40000,
-  researcher: 60000,
-  designer: 30000,
-  gitter: 30000,
+  planner: 100000,
+  coder: 100000,
+  debugger: 100000,
+  reviewer: 100000,
+  documenter: 100000,
+  researcher: 100000,
+  designer: 100000,
+  gitter: 100000,
 };

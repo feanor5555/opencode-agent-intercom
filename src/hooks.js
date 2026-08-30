@@ -775,7 +775,7 @@ async function notifyParentOfDenialLoop(client, entry) {
 // against the bare budget is not over the ceiling by an amount the
 // orchestrator cannot see.
 //
-// While `hideChatter` is on, the block also carries the one sentence that
+// While `showAgentcom` is off, the block also carries the one sentence that
 // tells the orchestrator the user cannot read the notices it receives: the
 // completion notice is then the only copy of a subagent's result and nothing
 // renders it, so the orchestrator is the channel to the user.
@@ -802,7 +802,7 @@ function formatLimitsNotice({ sessionDir, projectMd = "", agentsMd = "" } = {}) 
     "subagent's own work.\n" +
     "Use the budget — the first number of the agent you are spawning — in the " +
     "right-sized-chunks rule of the orchestration protocol above.\n" +
-    (s.hideChatter
+    (!s.showAgentcom
       ? "Subagent results and handoff messages are hidden from the user's " +
         "screen. The user sees only what you write. Relay the substance of a " +
         "subagent's result in your own answer.\n"
@@ -833,7 +833,7 @@ function delegatesNested(agent) {
 // which the size gate warns and refuses are all invisible to it otherwise.
 //
 // Three things and nothing more (the primary's block also carries maxSubagents,
-// every spawnable type's budget and the hideChatter sentence — none of which a
+// every spawnable type's budget and the showAgentcom sentence — none of which a
 // subagent can act on):
 //   - its own context budget, the ceiling its run is enforced against;
 //   - the researcher's budget with the fixed overhead every researcher spawn
@@ -909,7 +909,7 @@ function fixedOverheadFor(agent, { projectMd, agentsMd, snapshot }) {
   // The same assembly the transform injects, so the estimate cannot count a
   // block the subagent is not given: the delegation block a role actually gets
   // depends on the nesting setting too, and the two blocks differ by ~250
-  // tokens, which is real against a 40k budget.
+  // tokens, which is a real share of a 100k budget.
   let text =
     guideBlocks({
       agent,

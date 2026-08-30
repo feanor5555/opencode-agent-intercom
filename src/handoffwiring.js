@@ -175,7 +175,7 @@ async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, resolvedAg
     // routes the first turn to the orchestrator role for the new
     // (otherwise empty) session.
     // `hideable`: the kickoff is traffic between the plugin and the fresh
-    // orchestrator, so it follows the `hideChatter` setting.
+    // orchestrator, so it follows the `showAgentcom` setting.
     promptAsync: (sid, message) =>
       promptSession(client, {
         sessionID: sid,

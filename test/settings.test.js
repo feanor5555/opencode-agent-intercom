@@ -51,7 +51,7 @@ test("maxPrimaryContext defaults to 80000 when neither env nor JSON file is set"
   const s = getSettings()
   assert.equal(s.maxPrimaryContext, 80000, "default must be 80000 tokens")
   // Sanity: independent from maxContext — maxContext keeps its own default.
-  assert.equal(s.maxContext, 40000)
+  assert.equal(s.maxContext, DEFAULT_MAX_CONTEXT)
 })
 
 test("maxPrimaryContext picks up the env var override", () => {
@@ -88,12 +88,22 @@ function withSettings(content) {
   return file
 }
 
+// The two numbers a user who configures nothing runs on. Pinned as literals
+// on purpose: everything else in this file reads them through the constants,
+// so without this one test a change to either would go unnoticed.
+test("the built-in budget is 100000 tokens for every type and for an unknown name", () => {
+  assert.equal(DEFAULT_MAX_CONTEXT, 100000)
+  for (const [agent, budget] of Object.entries(DEFAULT_AGENT_CONTEXT)) {
+    assert.equal(budget, 100000, `${agent} must carry the default budget`)
+  }
+})
+
 test("contextBudgetFor falls back to the built-in table per agent type", () => {
   clearEnv()
   isolate()
-  assert.equal(contextBudgetFor("coder"), 60000)
-  assert.equal(contextBudgetFor("designer"), 30000)
-  assert.equal(contextBudgetFor("planner"), 40000)
+  assert.equal(contextBudgetFor("coder"), DEFAULT_AGENT_CONTEXT.coder)
+  assert.equal(contextBudgetFor("designer"), DEFAULT_AGENT_CONTEXT.designer)
+  assert.equal(contextBudgetFor("planner"), DEFAULT_AGENT_CONTEXT.planner)
 })
 
 test("contextBudgetFor gives an unknown agent name DEFAULT_MAX_CONTEXT", () => {
@@ -112,7 +122,7 @@ test("an agentContext entry wins for its own type and leaves the others alone", 
   clearEnv()
   withSettings({ agentContext: { coder: 12345 } })
   assert.equal(contextBudgetFor("coder"), 12345)
-  assert.equal(contextBudgetFor("planner"), 40000)
+  assert.equal(contextBudgetFor("planner"), DEFAULT_AGENT_CONTEXT.planner)
   assert.equal(contextBudgetFor("unknown"), DEFAULT_MAX_CONTEXT)
 })
 
@@ -162,7 +172,7 @@ test("0 is a real budget at every level and disables that type", () => {
   // Per type: 0 beats the non-zero built-in default of that type.
   withSettings({ agentContext: { coder: 0 } })
   assert.equal(contextBudgetFor("coder"), 0)
-  assert.equal(contextBudgetFor("planner"), 40000)
+  assert.equal(contextBudgetFor("planner"), DEFAULT_AGENT_CONTEXT.planner)
 
   // As the flat seed: 0 disables every type that has no entry of its own.
   withSettings({ maxContext: 0, agentContext: { coder: 60000 } })
@@ -183,9 +193,9 @@ test("a malformed agentContext map is dropped entry by entry", () => {
   withSettings({
     agentContext: { coder: "lots", planner: -1, reviewer: 2.5, designer: 1000, "": 5 },
   })
-  assert.equal(contextBudgetFor("coder"), 60000, "non-integer entry must be dropped")
-  assert.equal(contextBudgetFor("planner"), 40000, "negative entry must be dropped")
-  assert.equal(contextBudgetFor("reviewer"), 40000, "fractional entry must be dropped")
+  assert.equal(contextBudgetFor("coder"), DEFAULT_AGENT_CONTEXT.coder, "non-integer entry must be dropped")
+  assert.equal(contextBudgetFor("planner"), DEFAULT_AGENT_CONTEXT.planner, "negative entry must be dropped")
+  assert.equal(contextBudgetFor("reviewer"), DEFAULT_AGENT_CONTEXT.reviewer, "fractional entry must be dropped")
   assert.equal(contextBudgetFor("designer"), 1000, "the one valid entry must survive")
 })
 
@@ -194,7 +204,7 @@ test("an agentContext that is not a plain object leaves the key unset", () => {
   for (const bad of [[1, 2], "60000", null, 42]) {
     withSettings({ agentContext: bad })
     assert.deepEqual(getSettings().agentContext, {}, `bad map ${JSON.stringify(bad)}`)
-    assert.equal(contextBudgetFor("coder"), 60000)
+    assert.equal(contextBudgetFor("coder"), DEFAULT_AGENT_CONTEXT.coder)
   }
 })
 

@@ -249,7 +249,7 @@ test("a delegating role's limits block carries its three figures and nothing mor
     new RegExp(`Your own context budget: ${fmtTokens(contextBudgetFor("planner"))} `),
   )
   // 2. the researcher's budget with fixed overhead and headroom, in the same
-  //    `60.0k (−12.4k fixed → 47.6k)` shape the primary's block uses.
+  //    `100.0k (−12.4k fixed → 87.6k)` shape the primary's block uses.
   const m = /researcher ([0-9.]+k?) \(−([0-9.]+k?) fixed → ([0-9.]+k?)\)/.exec(prompt)
   assert.ok(m, "the researcher entry renders budget, fixed overhead and headroom")
   assert.equal(m[1], fmtTokens(contextBudgetFor("researcher")))
@@ -261,7 +261,7 @@ test("a delegating role's limits block carries its three figures and nothing mor
   assert.doesNotMatch(prompt, /nested spawns left this run/i)
   // Nothing from the orchestrator's own block: a subagent can act on none of it.
   assert.doesNotMatch(prompt, /coder \d/, "no full per-type budget table")
-  assert.doesNotMatch(prompt, /hideChatter/)
+  assert.doesNotMatch(prompt, /hidden from the user's screen/)
 })
 
 // ---- the quota line: on the message, not in the system prompt --------------
@@ -450,7 +450,7 @@ test("the nested cost sits outside the run-size verdict, below it", () => {
   assert.ok(sizeAt >= 0 && nestedAt > sizeAt, "the nested line follows the run-size line")
   // The parent's own run is measured against the parent's own budget; folding
   // the child's spend in would make a well-scoped parent read as oversized.
-  assert.match(lines[sizeAt], /run-size: 20\.0k of the 40\.0k planner budget/)
+  assert.match(lines[sizeAt], /run-size: 20\.0k of the 100\.0k planner budget/)
   assert.doesNotMatch(lines[sizeAt], /51\.4k/)
 })
 

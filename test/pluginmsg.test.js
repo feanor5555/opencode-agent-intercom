@@ -11,7 +11,7 @@
 // see the scratch notes intercom-wake-notice-fix.
 //
 // The second flag on the part is `synthetic`, which client.js stamps from the
-// `hideChatter` setting: it keeps the part off the transcript and leaves its
+// `showAgentcom` setting: while it is off it keeps the part off the transcript and leaves its
 // text in the model's payload. The tests below pin which send is hidden —
 // postNotice always follows the setting, promptSession only where the call
 // site opts in with `hideable` — and that the marker metadata, the text and
@@ -44,19 +44,19 @@ test.beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "agent-intercom-pluginmsg-"))
   settingsFile = join(tmpDir, "agent-intercom.json")
   setSettingsPath(settingsFile)
-  delete process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER
+  delete process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM
   resetSettings()
 })
 test.afterEach(() => {
-  delete process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER
+  delete process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM
   resetSettings()
   if (tmpDir) rmSync(tmpDir, { recursive: true, force: true })
 })
 
-// Turns the hide switch on for the next send; the TTL cache is dropped so the
-// value is read from the file.
-function hideChatter(on) {
-  writeFileSync(settingsFile, JSON.stringify({ hideChatter: on }))
+// Sets the agentcom visibility switch for the next send; the TTL cache is
+// dropped so the value is read from the file.
+function showAgentcom(on) {
+  writeFileSync(settingsFile, JSON.stringify({ showAgentcom: on }))
   resetSettings()
 }
 
@@ -197,15 +197,15 @@ test("promptSession: kickoff/doc-summary/spawn prompts carry the marker metadata
   assert.equal(part.metadata[INTERCOM_MESSAGE_METADATA_KEY], true)
 })
 
-test("postNotice: with hideChatter off the posted part has no synthetic key", async () => {
+test("postNotice: with showAgentcom on the posted part has no synthetic key", async () => {
   const client = makeFakeClient()
   await postNotice(client, "ses_parent", "🔔 agent-intercom: notice text")
   const part = client.calls[0].body.parts[0]
   assert.equal("synthetic" in part, false)
 })
 
-test("postNotice: with hideChatter on the posted part carries synthetic: true", async () => {
-  hideChatter(true)
+test("postNotice: with showAgentcom off the posted part carries synthetic: true", async () => {
+  showAgentcom(false)
   const client = makeFakeClient()
   await postNotice(client, "ses_parent", "🔔 agent-intercom: notice text")
   const part = client.calls[0].body.parts[0]
@@ -216,8 +216,8 @@ test("postNotice: with hideChatter on the posted part carries synthetic: true", 
   assert.equal(part.metadata[INTERCOM_MESSAGE_METADATA_KEY], true)
 })
 
-test("promptSession: with hideChatter on a call site that does not opt in stays visible", async () => {
-  hideChatter(true)
+test("promptSession: with showAgentcom off a call site that does not opt in stays visible", async () => {
+  showAgentcom(false)
   const client = makeFakeClient()
   // The spawn task prompt: it lands in the SUBAGENT's session and is that
   // session's entire instruction.
@@ -231,8 +231,8 @@ test("promptSession: with hideChatter on a call site that does not opt in stays 
   assert.equal(part.text, "task text")
 })
 
-test("promptSession: with hideChatter on and hideable: true the part is hidden", async () => {
-  hideChatter(true)
+test("promptSession: with showAgentcom off and hideable: true the part is hidden", async () => {
+  showAgentcom(false)
   const client = makeFakeClient()
   await promptSession(client, {
     sessionID: "ses_new",
@@ -246,7 +246,7 @@ test("promptSession: with hideChatter on and hideable: true the part is hidden",
   assert.equal(part.metadata[INTERCOM_MESSAGE_METADATA_KEY], true)
 })
 
-test("promptSession: with hideChatter off even hideable: true stays visible", async () => {
+test("promptSession: with showAgentcom on even hideable: true stays visible", async () => {
   const client = makeFakeClient()
   await promptSession(client, {
     sessionID: "ses_new",
@@ -259,7 +259,7 @@ test("promptSession: with hideChatter off even hideable: true stays visible", as
 })
 
 test("a hidden part is still recognised as plugin-generated and skipped by the goal scan", async () => {
-  hideChatter(true)
+  showAgentcom(false)
   const client = makeFakeClient()
   await postNotice(client, "ses_parent", '🔔 agent-intercom: your subagent "x" has finished')
   const part = client.calls[0].body.parts[0]

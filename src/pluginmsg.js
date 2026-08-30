@@ -53,7 +53,7 @@ export const INTERCOM_MESSAGE_METADATA_KEY = "agentIntercom"
 // when the part is visible, so a visible part is byte-identical to what this
 // helper built before the option existed. The marker metadata is
 // unconditional, so isPluginGeneratedMessage reads hidden and visible parts
-// alike. Who decides `hidden` is client.js, which resolves the `hideChatter`
+// alike. Who decides `hidden` is client.js, which resolves the `showAgentcom`
 // setting at send time; this module stays a leaf.
 export function intercomTextPart(text, { hidden = false } = {}) {
   return {

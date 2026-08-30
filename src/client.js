@@ -32,9 +32,9 @@ function sleep(ms) {
 // of the base) to avoid synchronised thundering-herd retries if opencode
 // comes back up under load.
 // Every caller of postNotice targets a primary, so the notice is hidden
-// whenever `hideChatter` is on — the setting is read here, per send.
+// whenever `showAgentcom` is off — the setting is read here, per send.
 export async function postNotice(client, sessionID, text) {
-  const { postNoticeRetries, postNoticeRetryBackoffMs, hideChatter } = getSettings()
+  const { postNoticeRetries, postNoticeRetryBackoffMs, showAgentcom } = getSettings()
   const maxAttempts = Math.max(1, postNoticeRetries + 1)
   let lastErr
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -46,7 +46,7 @@ export async function postNotice(client, sessionID, text) {
         // handoff's lastUserGoal can skip it, and stamps `synthetic: true`
         // when the notice is hidden — see src/pluginmsg.js. The text reaches
         // the model either way; the post is the wake and is never dropped.
-        body: { parts: [intercomTextPart(text, { hidden: hideChatter })] },
+        body: { parts: [intercomTextPart(text, { hidden: !showAgentcom })] },
       })
       return
     } catch (err) {
@@ -88,13 +88,13 @@ export async function createChildSession(client, { parentID, title, directory })
 // picked up as `Letztes Ziel:` by a later handoff's goal scan.
 //
 // `hideable` says whether this call site's prompt is chatter between the
-// orchestrator and the plugin, and so may be hidden while `hideChatter` is
-// on. It defaults to false, so a send path added later stays visible until
+// orchestrator and the plugin, and so may be hidden while `showAgentcom` is
+// off. It defaults to false, so a send path added later stays visible until
 // someone decides otherwise. The spawn task prompt is one such site on
 // purpose: it lands in the SUBAGENT's session and is that session's entire
 // instruction.
 export async function promptSession(client, { sessionID, agent, prompt, hideable = false }) {
-  const hidden = hideable && getSettings().hideChatter
+  const hidden = hideable && !getSettings().showAgentcom
   await client.session.promptAsync({
     path: { id: sessionID },
     body: { agent, parts: [intercomTextPart(prompt, { hidden })] },

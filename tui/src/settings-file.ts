@@ -1,7 +1,7 @@
 // The runtime settings on disk, shared with the main plugin: it reads this file
 // (file > env > default) for the subagent cap, the context budget, endless mode,
-// the nested-spawn quota and the chatter switch. Writing it here changes them
-// live, no opencode restart needed.
+// the nested-spawn quota and the agentcom visibility switch. Writing it here
+// changes them live, no opencode restart needed.
 //
 // The context budget is a value PER AGENT TYPE, held in the `agentContext` map.
 // There is no single user-facing ceiling: a type with no entry of its own falls
@@ -57,11 +57,11 @@ export interface Settings {
   endlessMode: boolean;
   endlessContext: number;
   maxNestedSpawns: number;
-  hideChatter: boolean;
+  showAgentcom: boolean;
 }
 
 // The scalar keys that hold a limit, i.e. the ones a [-]/[+] row steps.
-// endlessMode and hideChatter are not among them: they are the file's booleans
+// endlessMode and showAgentcom are not among them: they are the file's booleans
 // and each has its own writer. maxContext is not one either: it is legacy-only
 // and is written by nothing here — a ceiling is edited per agent through
 // stepAgentContext. maxNestedSpawns is not one either: it is read and preserved
@@ -75,7 +75,7 @@ type FileKey = Exclude<keyof Settings, "maxContextSource">;
 export const DEFAULT_MAX_SUBAGENTS = 1;
 // The budget for an agent type the built-in table DEFAULT_AGENT_CONTEXT
 // (agent-roles.ts) does not name, and the fallback of the legacy flat key.
-export const DEFAULT_MAX_CONTEXT = 40000;
+export const DEFAULT_MAX_CONTEXT = 100000;
 export const DEFAULT_ENDLESS_MODE = false;
 export const DEFAULT_ENDLESS_CONTEXT = 250000;
 // How many subagents one subagent run may start; 0 switches nesting off. The
@@ -84,10 +84,10 @@ export const DEFAULT_ENDLESS_CONTEXT = 250000;
 // that parity and because a write must not drop a key the plugin honours — no
 // row steps it.
 export const DEFAULT_MAX_NESTED_SPAWNS = 2;
-// Whether the plugin's own postings are hidden from the transcript. The
-// plugin's own copy is DEFAULT_HIDE_CHATTER in src/settings.js and
+// Whether the plugin's own postings appear in the transcript. The plugin's own
+// copy is DEFAULT_SHOW_AGENTCOM in src/settings.js and
 // test/settings-defaults-parity.test.js fails on a divergence.
-export const DEFAULT_HIDE_CHATTER = false;
+export const DEFAULT_SHOW_AGENTCOM = true;
 
 const MAX_CONTEXT_ENV = "OPENCODE_AGENT_INTERCOM_MAX_CONTEXT";
 
@@ -129,7 +129,7 @@ const SETTING_VALIDATORS: { [K in FileKey]: (v: unknown) => boolean } = {
   endlessMode: isFlag,
   endlessContext: isLimit,
   maxNestedSpawns: isLimit,
-  hideChatter: isFlag,
+  showAgentcom: isFlag,
 };
 
 function envNum(name: string, def: number): number {
@@ -171,7 +171,7 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
       "OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS",
       DEFAULT_MAX_NESTED_SPAWNS,
     ),
-    hideChatter: envFlag("OPENCODE_AGENT_INTERCOM_HIDE_CHATTER", DEFAULT_HIDE_CHATTER),
+    showAgentcom: envFlag("OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM", DEFAULT_SHOW_AGENTCOM),
   };
   if (isLimit(raw.maxSubagents)) s.maxSubagents = raw.maxSubagents;
   if (isLimit(raw.maxContext)) {
@@ -183,7 +183,7 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
   if (isFlag(raw.endlessMode)) s.endlessMode = raw.endlessMode;
   if (isLimit(raw.endlessContext)) s.endlessContext = raw.endlessContext;
   if (isLimit(raw.maxNestedSpawns)) s.maxNestedSpawns = raw.maxNestedSpawns;
-  if (isFlag(raw.hideChatter)) s.hideChatter = raw.hideChatter;
+  if (isFlag(raw.showAgentcom)) s.showAgentcom = raw.showAgentcom;
   return s;
 }
 
@@ -336,15 +336,16 @@ export function toggleEndlessMode(): Settings {
   return applySetting("endlessMode", (current) => !current.endlessMode);
 }
 
-// Sets the chatter switch. While it is on, the plugin stamps every posting it
-// makes into a session as hidden: the transcript does not render it, the model
-// still receives its text.
-export function setHideChatter(value: boolean): Settings {
-  return applySetting("hideChatter", () => value);
+// Sets the agentcom visibility switch. While it is off, the plugin stamps every
+// posting it makes into a session as hidden: the transcript does not render it,
+// the model still receives its text.
+export function setShowAgentcom(value: boolean): Settings {
+  return applySetting("showAgentcom", () => value);
 }
 
-// Flips the chatter switch, from the value the file holds at this moment rather
-// than from the panel's copy, which a hand edit may have made stale.
-export function toggleHideChatter(): Settings {
-  return applySetting("hideChatter", (current) => !current.hideChatter);
+// Flips the agentcom visibility switch, from the value the file holds at this
+// moment rather than from the panel's copy, which a hand edit may have made
+// stale.
+export function toggleShowAgentcom(): Settings {
+  return applySetting("showAgentcom", (current) => !current.showAgentcom);
 }

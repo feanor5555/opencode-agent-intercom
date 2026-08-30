@@ -982,11 +982,11 @@ test("searxngUrl resolves file > env > empty default", () => {
 })
 
 test("a subagent over the context budget gets a wrap-up instruction injected", async () => {
-  // newest assistant message reports ~70k tokens -> over coder's 60k built-in
+  // newest assistant message reports ~110k tokens -> over coder's 100k built-in
   // per-type budget
   const messages = [
     {
-      info: { role: "assistant", tokens: { input: 70000, output: 0, cache: { read: 0, write: 0 } } },
+      info: { role: "assistant", tokens: { input: 110000, output: 0, cache: { read: 0, write: 0 } } },
       parts: [{ type: "text", text: "still working" }],
     },
   ]
@@ -1006,11 +1006,11 @@ test("a subagent over the context budget gets a wrap-up instruction injected", a
 })
 
 test("ignored STOP injections escalate in tone and notify the primary once — no auto-abort", async () => {
-  // newest assistant message reports ~70k tokens -> over coder's 60k built-in
+  // newest assistant message reports ~110k tokens -> over coder's 100k built-in
   // per-type budget
   const messages = [
     {
-      info: { role: "assistant", tokens: { input: 70000, output: 0, cache: { read: 0, write: 0 } } },
+      info: { role: "assistant", tokens: { input: 110000, output: 0, cache: { read: 0, write: 0 } } },
       parts: [{ type: "text", text: "still working" }],
     },
   ]
@@ -1149,19 +1149,19 @@ test("the orchestrator limits block lists the context budget of every spawnable 
   assert.match(joined, /Context budget per agent: /)
   // built-in per-type default, the configured 0 as "off", and no orchestrator
   // entry — the budget governs subagents only.
-  assert.match(joined, /coder 60\.0k/)
-  assert.match(joined, /researcher 60\.0k/)
-  assert.match(joined, /designer 30\.0k/)
+  assert.match(joined, /coder 100\.0k/)
+  assert.match(joined, /researcher 100\.0k/)
+  assert.match(joined, /designer 100\.0k/)
   assert.match(joined, /gitter off/)
   assert.doesNotMatch(joined, /orchestrator \d/)
   assert.doesNotMatch(joined, /maxContext = /)
 })
 
-test("the limits block tells the orchestrator its notices are hidden, only while hideChatter is on", async () => {
-  // With the switch on, a subagent's completion notice is the only copy of
+test("the limits block tells the orchestrator its notices are hidden, only while showAgentcom is off", async () => {
+  // With the switch off, a subagent's completion notice is the only copy of
   // its result and nothing renders it, so the orchestrator is told it is the
   // channel to the user.
-  writeFileSync(settingsFile, JSON.stringify({ hideChatter: true }))
+  writeFileSync(settingsFile, JSON.stringify({ showAgentcom: false }))
   resetSettings()
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
@@ -1170,8 +1170,8 @@ test("the limits block tells the orchestrator its notices are hidden, only while
   assert.match(out.system.join(""), /hidden from the user's screen/)
   assert.match(out.system.join(""), /Relay the substance of a subagent's result/)
 
-  // Off — the default — the block is exactly what it was.
-  writeFileSync(settingsFile, JSON.stringify({ hideChatter: false }))
+  // On — the default — the block is exactly what it was.
+  writeFileSync(settingsFile, JSON.stringify({ showAgentcom: true }))
   resetSettings()
   const offOut = { system: ["base prompt"] }
   await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, offOut)

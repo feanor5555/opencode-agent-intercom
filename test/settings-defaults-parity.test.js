@@ -5,7 +5,7 @@
 // carries its own copy of the shared defaults, the env var names and the
 // file > env > default order. Nothing at runtime notices when the two drift
 // apart; these tests do, by pinning both sides at the same file and env. The
-// two boolean keys are in it too: endlessMode and hideChatter are pinned here
+// two boolean keys are in it too: endlessMode and showAgentcom are pinned here
 // as booleans, the kind whose validator differs from the integer rule the
 // others share.
 //
@@ -38,10 +38,10 @@ import {
   DEFAULT_AGENT_CONTEXT,
   DEFAULT_ENDLESS_CONTEXT,
   DEFAULT_ENDLESS_MODE,
-  DEFAULT_HIDE_CHATTER,
   DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_NESTED_SPAWNS,
   DEFAULT_MAX_SUBAGENTS,
+  DEFAULT_SHOW_AGENTCOM,
   contextBudgetFor,
   getSettings,
   resetSettings,
@@ -57,10 +57,10 @@ import {
 import {
   DEFAULT_ENDLESS_CONTEXT as TUI_DEFAULT_ENDLESS_CONTEXT,
   DEFAULT_ENDLESS_MODE as TUI_DEFAULT_ENDLESS_MODE,
-  DEFAULT_HIDE_CHATTER as TUI_DEFAULT_HIDE_CHATTER,
   DEFAULT_MAX_CONTEXT as TUI_DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_NESTED_SPAWNS as TUI_DEFAULT_MAX_NESTED_SPAWNS,
   DEFAULT_MAX_SUBAGENTS as TUI_DEFAULT_MAX_SUBAGENTS,
+  DEFAULT_SHOW_AGENTCOM as TUI_DEFAULT_SHOW_AGENTCOM,
   effectiveAgentContext,
   readSettings,
   setSettingsPath as setTuiSettingsPath,
@@ -80,7 +80,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT
-  delete process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER
+  delete process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS
 })
 
@@ -99,7 +99,7 @@ function bothSides() {
       endlessMode: plugin.endlessMode,
       endlessContext: plugin.endlessContext,
       maxNestedSpawns: plugin.maxNestedSpawns,
-      hideChatter: plugin.hideChatter,
+      showAgentcom: plugin.showAgentcom,
     },
     tui,
   ]
@@ -128,7 +128,7 @@ test("the two modules carry the same built-in defaults", () => {
   assert.equal(DEFAULT_MAX_CONTEXT, TUI_DEFAULT_MAX_CONTEXT)
   assert.equal(DEFAULT_ENDLESS_MODE, TUI_DEFAULT_ENDLESS_MODE)
   assert.equal(DEFAULT_ENDLESS_CONTEXT, TUI_DEFAULT_ENDLESS_CONTEXT)
-  assert.equal(DEFAULT_HIDE_CHATTER, TUI_DEFAULT_HIDE_CHATTER)
+  assert.equal(DEFAULT_SHOW_AGENTCOM, TUI_DEFAULT_SHOW_AGENTCOM)
   assert.equal(DEFAULT_MAX_NESTED_SPAWNS, TUI_DEFAULT_MAX_NESTED_SPAWNS)
   assert.deepEqual(DEFAULT_AGENT_CONTEXT, TUI_DEFAULT_AGENT_CONTEXT)
 })
@@ -202,7 +202,7 @@ test("with neither file nor env both resolve the built-in defaults", () => {
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
     maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
-    hideChatter: DEFAULT_HIDE_CHATTER,
+    showAgentcom: DEFAULT_SHOW_AGENTCOM,
   })
   assert.deepEqual(tui, plugin)
 })
@@ -212,7 +212,7 @@ test("with env alone both resolve the env value", () => {
   process.env.OPENCODE_AGENT_INTERCOM_MAX_CONTEXT = "70000"
   process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE = "1"
   process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT = "300000"
-  process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER = "1"
+  process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM = "0"
   process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS = "3"
   const [plugin, tui] = bothSides()
   assert.deepEqual(plugin, {
@@ -223,7 +223,7 @@ test("with env alone both resolve the env value", () => {
     endlessMode: true,
     endlessContext: 300000,
     maxNestedSpawns: 3,
-    hideChatter: true,
+    showAgentcom: false,
   })
   assert.deepEqual(tui, plugin)
 })
@@ -233,7 +233,7 @@ test("with file and env both let the file win", () => {
   process.env.OPENCODE_AGENT_INTERCOM_MAX_CONTEXT = "70000"
   process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_MODE = "1"
   process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT = "300000"
-  process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER = "1"
+  process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM = "0"
   process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS = "3"
   writeFileSync(
     file,
@@ -243,7 +243,7 @@ test("with file and env both let the file win", () => {
       endlessMode: false,
       endlessContext: 120000,
       maxNestedSpawns: 1,
-      hideChatter: false,
+      showAgentcom: true,
     }),
   )
   const [plugin, tui] = bothSides()
@@ -255,7 +255,7 @@ test("with file and env both let the file win", () => {
     endlessMode: false,
     endlessContext: 120000,
     maxNestedSpawns: 1,
-    hideChatter: false,
+    showAgentcom: true,
   })
   assert.deepEqual(tui, plugin)
 })
@@ -264,7 +264,7 @@ test("both reject the same file values and fall back to env or default", () => {
   process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS = "4"
   writeFileSync(
     file,
-    JSON.stringify({ maxSubagents: -1, maxContext: "lots", hideChatter: "yes" }),
+    JSON.stringify({ maxSubagents: -1, maxContext: "lots", showAgentcom: "yes" }),
   )
   const [plugin, tui] = bothSides()
   assert.deepEqual(plugin, {
@@ -275,7 +275,7 @@ test("both reject the same file values and fall back to env or default", () => {
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
     maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
-    hideChatter: DEFAULT_HIDE_CHATTER,
+    showAgentcom: DEFAULT_SHOW_AGENTCOM,
   })
   assert.deepEqual(tui, plugin)
 })
@@ -294,7 +294,7 @@ test("both keep 0 as a value in its own right", () => {
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: 0,
     maxNestedSpawns: 0,
-    hideChatter: DEFAULT_HIDE_CHATTER,
+    showAgentcom: DEFAULT_SHOW_AGENTCOM,
   })
   assert.deepEqual(tui, plugin)
 })
@@ -357,54 +357,63 @@ test("both read the endlessMode env var as 1/0 and ignore anything else", () => 
   assert.deepEqual(tui, plugin)
 })
 
-test("both take hideChatter from the file only as a real boolean", () => {
-  writeFileSync(file, JSON.stringify({ hideChatter: true }))
-  const [on, tuiOn] = bothSides()
-  assert.equal(on.hideChatter, true)
-  assert.deepEqual(tuiOn, on)
+test("both take showAgentcom from the file only as a real boolean", () => {
+  writeFileSync(file, JSON.stringify({ showAgentcom: false }))
+  const [off, tuiOff] = bothSides()
+  assert.equal(off.showAgentcom, false)
+  assert.deepEqual(tuiOff, off)
 
-  for (const bad of ["true", 1, null]) {
-    writeFileSync(file, JSON.stringify({ hideChatter: bad }))
+  for (const bad of ["false", 0, null]) {
+    writeFileSync(file, JSON.stringify({ showAgentcom: bad }))
     const [plugin, tui] = bothSides()
-    assert.equal(plugin.hideChatter, DEFAULT_HIDE_CHATTER)
+    assert.equal(plugin.showAgentcom, DEFAULT_SHOW_AGENTCOM)
     assert.deepEqual(tui, plugin)
   }
 })
 
-test("both let the file's hideChatter win over the env var", () => {
-  process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER = "0"
-  writeFileSync(file, JSON.stringify({ hideChatter: true }))
+test("both let the file's showAgentcom win over the env var", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM = "1"
+  writeFileSync(file, JSON.stringify({ showAgentcom: false }))
   const [plugin, tui] = bothSides()
-  assert.equal(plugin.hideChatter, true)
+  assert.equal(plugin.showAgentcom, false)
   assert.deepEqual(tui, plugin)
 })
 
-test("both read the hideChatter env var as 1/0 and ignore anything else", () => {
-  process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER = "1"
-  const [on, tuiOn] = bothSides()
-  assert.equal(on.hideChatter, true)
-  assert.deepEqual(tuiOn, on)
+test("both read the showAgentcom env var as 1/0 and ignore anything else", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM = "0"
+  const [off, tuiOff] = bothSides()
+  assert.equal(off.showAgentcom, false)
+  assert.deepEqual(tuiOff, off)
 
-  process.env.OPENCODE_AGENT_INTERCOM_HIDE_CHATTER = "yes"
+  process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM = "no"
   const [plugin, tui] = bothSides()
-  assert.equal(plugin.hideChatter, DEFAULT_HIDE_CHATTER)
+  assert.equal(plugin.showAgentcom, DEFAULT_SHOW_AGENTCOM)
+  assert.deepEqual(tui, plugin)
+})
+
+// A file still carrying the superseded key expresses nothing about this
+// setting on either side: it is a rename, not an alias.
+test("both ignore the superseded hideChatter key", () => {
+  writeFileSync(file, JSON.stringify({ hideChatter: true }))
+  const [plugin, tui] = bothSides()
+  assert.equal(plugin.showAgentcom, DEFAULT_SHOW_AGENTCOM)
   assert.deepEqual(tui, plugin)
 })
 
 test("both keep the two booleans apart", () => {
   // One switch on and the other off must not read as one state: the file's
   // validators are per key on both sides.
-  writeFileSync(file, JSON.stringify({ endlessMode: true, hideChatter: false }))
+  writeFileSync(file, JSON.stringify({ endlessMode: true, showAgentcom: false }))
   const [plugin, tui] = bothSides()
   assert.equal(plugin.endlessMode, true)
-  assert.equal(plugin.hideChatter, false)
+  assert.equal(plugin.showAgentcom, false)
   assert.deepEqual(tui, plugin)
 
   // A rejected value for one leaves the other standing.
-  writeFileSync(file, JSON.stringify({ endlessMode: "true", hideChatter: true }))
+  writeFileSync(file, JSON.stringify({ endlessMode: "true", showAgentcom: false }))
   const [mixed, tuiMixed] = bothSides()
   assert.equal(mixed.endlessMode, DEFAULT_ENDLESS_MODE)
-  assert.equal(mixed.hideChatter, true)
+  assert.equal(mixed.showAgentcom, false)
   assert.deepEqual(tuiMixed, mixed)
 })
 

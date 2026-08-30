@@ -738,10 +738,11 @@ another run is editing that surface and its layout is not settled here:
   `reuseContext`, drop the flat `maxReuseContext` key, so a type's ceiling has
   one home from then on.
 - `maxRetainedSubagents` and `retainedSubagentTtlMs` are scalars and join
-  `LimitKey`, stepped through the existing `stepSetting`. The TTL row steps in
-  whole minutes and writes milliseconds; its floor is 1 ms, not 0, per §3.3,
-  while `maxRetainedSubagents` keeps 0 reachable because 0 is how the feature
-  is switched off.
+  `LimitKey`, stepped through the existing `stepSetting`. The TTL row steps
+  in whole minutes and writes milliseconds; its floor is one whole minute,
+  the unit the row is shown in. The 1 ms floor `resolveSettings` clamps
+  the file value to is what a hand-written `0` in the file resolves to —
+  it is not somewhere the `[-]` key can take the user.
 
 Nothing about this needs an opencode restart: the TUI's writes go to the file
 the plugin reads, and `getSettings` re-reads it when its cache expires

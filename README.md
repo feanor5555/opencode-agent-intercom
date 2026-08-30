@@ -56,12 +56,15 @@ After restarting opencode, two things still have to happen before the
 2. **Enter or create a session.** The panel only renders on a session
    route — the home screen has no sidebar slot. Open or start a session
    and the right sidebar (its own column beside the content, not an
-   overlay) shows `Subagents (N)` with `● N running · ✓ M done` counters,
-   agent rows with an `x` abort control and an age, plus `max subagents`
+   overlay) shows `Subagents (N)` with `● N running · ✓ M done · ◆ K retained`
+   counters (`◆ K retained` only when something is held), agent rows with an
+   `x` abort control and an age, plus `max subagents`
    and a per-agent-type context ceiling: an agent cycler and the selected
    type's ceiling in k tokens (with `★` marking a type that has its own
    value and `off` for a ceiling of `0`; stepping a type's own value below
    zero drops the entry so it falls back to the inherited ceiling again),
+   plus the selected type's reuse ceiling as `reuse Token(k)` (the same
+   own-versus-inherited marker; `0` means never reused),
    and the orchestrator's system prompt also carries a `Limits` block with headroom per agent type — each entry lists the budget, the fixed overhead (subagent guides, PROJECT.md, the project snapshot prepended to every spawn, AGENTS.md where that type keeps it) and the headroom left for the orchestrator's prompt and the subagent's work, in the form `coder 100.0k (−12.4k fixed → 87.6k)`. The fixed overhead occupies part of every budget before the orchestrator's words do; the limits block names it so the orchestrator can see why its own prompt has less room than the bare budget suggests. The work-package size gate below measures the package against the same budget the headroom was computed from. The same block names `off` for any type whose budget is disabled. The sidebar itself also exposes collapsed `TUI settings` / `LLM params` / `Prompts` sections.
    SDK's `layout` field is `"auto" | "stretch"` and marked deprecated with
    "Always uses stretch layout", and `tui.json` has no `sidebar` block,
@@ -185,6 +188,37 @@ The primary never blocks. You stay in the driver's seat the entire time.
 Subagents are one-shot: **spawn → run → reply → destroyed.** The primary is
 woken automatically with the full (capped) result on completion. No
 status-poll tool by design — small LLMs would call it in a loop.
+
+A finished subagent's session can also be **held** — kept alive after its
+result has been delivered, so the orchestrator can address it later. Holding
+is gated on `maxRetainedSubagents > 0` and is off by default; with retention
+off the one-shot line above is byte-identical to what it has always been.
+With retention on, every clean, top-level subagent whose context fits under
+the reuse ceiling is held for `retainedSubagentTtlMs` after it finishes, the
+oldest entry is evicted when the capacity is reached, and a held session is
+reaped once its window runs out — none of which changes what the orchestrator
+receives at wake time. `list()` renders the held ones in a `RETAINED` section,
+the per-turn snapshot does the same, and the next tool addresses them.
+
+The reuse tool:
+
+| Tool | Purpose | Who |
+|---|---|---|
+| `reuse(subagent, prompt, mode?)` | Put a follow-up to a retained subagent — a question (the default, `mode: "question"`) or a further related piece of work (`mode: "task"`). Refuses when the session's context is over the per-type reuse ceiling, when the prompt would push it over its budget, when the window has run out, when the handle is unknown or foreign, when the caller is itself a subagent, or when the snapshot fetch fails — each refusal names the rule that fired and the figure it fired on, and `spawn` is always the way forward. | Orchestrator |
+
+Reach for `reuse` when something about a finished reply strikes you later
+("which of the two did you mean?", "did you also look at X?") — the held
+session already has the context, so a follow-up costs no re-briefing and no
+re-reading. Reach for `spawn` instead for work that is new, for work the held
+session's own history would push the wrong way, and after a `Blocked:`
+report (a blocked task continues through a FRESH subagent carrying the
+decision, never through the one that stopped).
+
+At every opencode restart the plugin also runs a one-shot **bootstrap sweep**
+of its own opencode sessions — anything left over from an earlier process
+whose title is this plugin's marker and that has been idle for longer than
+twice the retention window is deleted, so a retention that survived a
+process crash or a manual restart does not leak into the new instance.
 
 When a subagent hits a problem its spawn prompt did not cover — a blocker, a
 missing precondition, an ambiguity, a tool that keeps failing, a decision
@@ -421,6 +455,21 @@ exposes every runtime knob:
   `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT`, then to a built-in per-type
   default, then to 100 000. `0` is a real value at every level and means
   the budget is disabled for that type.
+- **`reuse Token(k)`** — the selected type's reuse ceiling, the maximum
+  context under which a held subagent of that type may be re-prompted. The
+  same agent cycler edits it; the same `★` marks an own value, `0` means
+  that type is never reused. Writes
+  `"reuseContext": { "<agent>": tokens }` and inherits the flat
+  `maxReuseContext` (env `OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT`,
+  default `70000`) wherever the map has no entry.
+- **`retained subs [-N+]`** — how many finished subagents the process holds
+  at once; `0` switches retention off and the sidebar then has no held
+  rows. Writes `"maxRetainedSubagents"`.
+- **`retain (min)`** — the retention window in whole minutes, the unit the
+  row is shown and stepped in. Writes `"retainedSubagentTtlMs"` in ms; the
+  row's floor is one whole minute. A `0` typed by hand into the file
+  resolves to `1` ms at the plugin, since nothing else ever deletes a
+  subagent session.
 - **`endless mode [on/off]`** / **`endless (k)`** — arms the self-restarting
   orchestrator loop and sets its context threshold.
 - Under **`TUI settings`**: **`thinking [on/off]`** and **`tool details
@@ -526,7 +575,11 @@ embed legibility-critical text in images (the model garbles letters).
 
 All optional. The subagent and context caps usually live in
 `~/.config/opencode/agent-intercom.json` (written by the TUI panel); that file
-also takes `"searxngUrl"` and `"exaApiKey"`, each overriding its environment variable, and `"forumBangs"` (no env var — the array REPLACES the built-in set rather than extending it). Everything else is environment-variable-driven:
+also takes `"maxRetainedSubagents"`, `"retainedSubagentTtlMs"`,
+`"maxReuseContext"` and the per-agent-type `"reuseContext"` map for the
+`reuse`/retention feature, `"searxngUrl"` and `"exaApiKey"` (each overriding its
+environment variable), and `"forumBangs"` (no env var — the array REPLACES the
+built-in set rather than extending it). Everything else is environment-variable-driven:
 
 `forumBangs` defaults to `["!st", "!ubuntu", "!su", "!hn", "!lo"]` — Stack Overflow, Ask Ubuntu, Super User, Hacker News, lobste.rs. A non-empty `"forumBangs"` array in the file replaces this set entirely; an empty, missing, or non-array value leaves the defaults in effect. The key exists so a project whose topic lives on a product Discourse instance — `!dpy`, `!caddy`, `!pi` and the like — can list those engines once for the plugin to use.
 
@@ -537,6 +590,9 @@ also takes `"searxngUrl"` and `"exaApiKey"`, each overriding its environment var
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS` | `1` | Concurrent subagents per primary. `"0"` disables. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS` | `2` | Nested `spawn` calls a single subagent run may start (always targeting `researcher`). `"0"` disables — the subagent must do the work itself. TUI file overrides via `"maxNestedSpawns"`. |
 | `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` | `100000` | Subagent context budget (tokens). `"0"` disables. TUI file overrides. |
+| `OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS` | `0` | How many finished subagents may be held as retained sessions in this process. `"0"` switches retention off — every subagent's session is deleted the moment its result is delivered, the one-shot behaviour. Recommended non-zero value: `3`. TUI file overrides. **Enabling retention needs an opencode restart** — the tool surface is resolved at plugin load, so the `reuse` tool only appears once the next instance boots with this set. Disabling takes effect at once. |
+| `OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS` | `3600000` | Retention window per held subagent, in ms. Clamped to a floor of `1`. The TUI's row steps in whole minutes with a one-minute floor. |
+| `OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT` | `70000` | Reuse ceiling for every agent type the `reuseContext` map does not name. `"0"` means that type is never reused at all. The TUI panel shows and edits the per-type map; the flat key is only what an untouched type inherits. |
 | `OPENCODE_AGENT_INTERCOM_RESULT_CHARS` | `8000` | Cap on a subagent's final reply forwarded to the primary. `"0"` disables. |
 | `OPENCODE_AGENT_INTERCOM_PROJECT_CONTEXT` | on | `"0"` skips the project snapshot prepended to spawn prompts |
 | `OPENCODE_AGENT_INTERCOM_RESPECT_TASK_PERMS` | on | `"0"` ignores `permission.task` allowlist in `spawn` |

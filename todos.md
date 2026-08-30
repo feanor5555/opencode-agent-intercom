@@ -9,3 +9,6 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
+- A held TUI sidebar row can linger for up to one poll where the plugin refuses the retention (over the reuse ceiling, a `Blocked:` result, a nested child, a `session.error` ending, or retention switched on after plugin load while the tool-map latch has it off) before the next poll withdraws it.
+- A TUI-side drop on a held row leaves the plugin's registry entry standing until the TTL reap or a `reuse` sees the session is gone; the panel's action and the plugin's state are briefly apart.
+

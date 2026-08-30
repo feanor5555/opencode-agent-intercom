@@ -213,22 +213,40 @@ the session change:
   notice runs: no `endLiveChildrenOf`, no quiescence wait, no `deleteSession`,
   no `forgetSessionDirectory` (the directory cache is what a reuse needs).
 
-The retention decision itself is a pure function in `registry.js`, computed
-inside the same mutex section from values the section already holds plus the
-snapshot the idle path already fetched. It says **retain** only when all of:
+The retention decision is taken in **two phases**, because the conditions do
+not all become knowable at the same moment: the mutex section holds the entry
+but not the reply, and the result snapshot is fetched only after the lock is
+released (`hooks.js:1175`). Splitting it is what lets the delivery half of the
+idle path stay exactly as it is.
+
+**Phase 1, inside the critical section.** A pure function in `registry.js`,
+`retentionDecision(entry, maxRetained)`, computed on the values the section
+already holds and doing no I/O. It grants a retention only when all of:
 
 1. `maxRetainedSubagents > 0`;
 2. the ending is a clean idle — never `session.error`
    (`hooks.js:1254-1304`), never a watchdog timeout (`watchdog.js:126-163`),
    never the abort tool (`tools.js:682-764`). A run that failed or hung is not
    a session to hand more work to, and those three paths keep deleting exactly
-   as today;
-3. the reply is not a `Blocked:` report — `isBlockedResult`
+   as today. This is not a term of the function but of its caller: those three
+   paths go straight to `teardownSubagent` and never take the decision at all;
+3. the entry is a top-level subagent, i.e. its parent is a primary and it has
+   no waiter — nested children are excluded outright (§7.4).
+
+On a grant the section calls `retainEntryLocked` instead of
+`removeEntryLocked`; on a refusal it removes the entry exactly as it always
+did. Either way the wake is delivered from the same snapshot a moment later.
+
+**Phase 2, after the snapshot, before the teardown.** The conditions that need
+the delivered result are evaluated where that result is, and a phase-1 grant
+they fail is **revoked**: the retention flag the teardown is called with goes
+back to false, and `teardownSubagent` then disposes of the session on the very
+same path it always used. Two conditions live here:
+
+4. the reply is not a `Blocked:` report — `isBlockedResult`
    (`notices.js:29-33`) already classifies it, and the established decision is
    that a blocked task continues through a fresh spawn carrying the
    orchestrator's decision (`notices.js:89-92`);
-4. the entry is a top-level subagent, i.e. its parent is a primary and it has
-   no waiter — nested children are excluded outright (§7.4);
 5. **the question-mode admission gate of §4 passes on the freshly fetched
    `snapshot.ctxTokens`** — i.e. `0 < ctx ≤ 70 000` and, where a budget is
    configured, `ctx < budget`. A session that could never be admitted for even
@@ -237,11 +255,19 @@ snapshot the idle path already fetched. It says **retain** only when all of:
    case: a large but perfectly healthy run that ended at 85 000 was never over
    its budget, was never STOP-injected, produced a good result — and is still
    not retainable, because the user's ceiling is 70 000. That outcome is
-   intended and is the visible face of requirement 2;
-6. there is retention capacity after expired entries are reaped.
+   intended and is the visible face of requirement 2.
+
+A failed snapshot fetch or a failed wake revokes the retention too: a subagent
+whose result never reached the orchestrator is nothing to hold a session for.
+
+Capacity is not a term of either phase. A retention that overshoots
+`maxRetainedSubagents` is resolved afterwards, by evicting the OLDEST retained
+entries (§3.4) rather than by refusing the newest — the entry the orchestrator
+was just told about is the one most likely to be asked a follow-up question.
 
 Anything else deletes, and the whole feature reduces to today's behaviour when
-`maxRetainedSubagents` is 0 — which is its default.
+`maxRetainedSubagents` is 0 — which is its default: phase 1's first condition
+is then the only one ever reached.
 
 ### 3.3 Settings and defaults
 
@@ -389,10 +415,28 @@ that does not exist today. No running subagent's treatment changes.
   first also means `reparentSubagents` (`registry.js:534-549`) and
   `inFlightSubagentsFor` (`registry.js:569-584`) never meet a retained entry
   and stay untouched.
-- **Endless cycle.** Same drop, at the moment the freeze latch is observed
-  (the latch is read in the spawn gate at `tools.js:324`). It is not optional:
-  the cycle waits for `isQuiesced` (`endless.js:204-210`) and abandons after
-  `endlessQuiesceTimeoutMs`, default 600 s (`settings.js:157`).
+- **Endless cycle.** Same drop, inside the cycle itself: step 2b of
+  `runEndlessCycle` (`endless.js:204-216`), after the cycle-ceiling check and
+  before the quiesce wait.
+
+  The reason is the exclusion, not the quiesce wait. A retained session must not
+  outlive the primary it belongs to, and from step 2b on the cycle is committed
+  to replacing that primary; a retention that survived would leave a handle
+  addressing a warm session whose orchestrator is gone. The quiesce wait forces
+  nothing here: a retained entry is not `isActiveEntry` (`registry.js:264-268`),
+  so `isQuiesced` (`registry.js:1270-1277`) already passes over it and no
+  retention can hold a cycle to its `endlessQuiesceTimeoutMs` (default 600 s,
+  `settings.js:185`).
+
+  The two neighbouring positions are what fix the placement. The cycle ceiling
+  stays **ahead** of the drop: at `maxCycles` the mode switches itself off,
+  replaces nothing and lifts the spawn freeze again, so that path must leave
+  retention standing. Everything **after** the drop is a way out that has
+  already paid it — an abandoned quiesce wait, a failed save — and that is the
+  safe direction: a dropped retention costs a fresh spawn, a surviving one
+  points a handle at a primary the next cycle replaces. The drop is
+  best-effort: it is skipped where no dependency is injected, and a failure is
+  logged rather than abandoning a cycle that can still save its open points.
 - **A consequence of the longer window worth naming.** With a 60-minute ceiling
   and an endless-mode restart threshold of 250 000 tokens, the handoff will
   often end a retention window before the TTL does. The effective retention is
@@ -537,9 +581,10 @@ Two consequences follow and should be expected rather than diagnosed:
   `hooks.js:657`), so one large tool result can carry a subagent well past its
   ceiling before anything looks again. Under a 100 000 budget such a session is
   far above 70 000 and G2 refuses it long before G3 would. What it still means
-  for the *retention* decision is that the decision must run on the snapshot the
-  idle path has just fetched (`hooks.js:1175`), never on the entry's older
-  value.
+  for the *retention* decision is that its context term is a **phase-2**
+  condition (§3.2): it is evaluated on the snapshot the idle path fetches after
+  the lock is released (`hooks.js:1175`), never on the entry's older value, and
+  a phase-1 grant it fails is revoked before the teardown runs.
 
 ### 4.5 Is a separate "very little context" threshold still needed?
 

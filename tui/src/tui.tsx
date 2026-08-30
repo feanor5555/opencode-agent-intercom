@@ -54,9 +54,12 @@ import {
 import {
   type LimitKey,
   type Settings,
+  RETAINED_SUBAGENT_TTL_STEP_MS,
   effectiveAgentContext,
+  effectiveReuseContext,
   readSettings,
   stepAgentContext,
+  stepReuseContext,
   stepSetting,
   toggleEndlessMode,
   toggleShowAgentcom,
@@ -328,15 +331,18 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   };
 
   // Step a setting by delta and save. Deltas are in the setting's own unit:
-  // subagents ±1, endless context ±10000 tokens (= 10k on the display). Both
-  // are clamped at 0. maxSubagents=0 means "no cap" (unlimited concurrent
-  // subagents); endlessContext=0 arms no endless cycle.
+  // subagents ±1, endless context ±10000 tokens (= 10k on the display),
+  // retained subagents ±1, the retention window ±1 minute in milliseconds. The
+  // floor is the store's, one per key: maxSubagents=0 means "no cap" (unlimited
+  // concurrent subagents), endlessContext=0 arms no endless cycle,
+  // maxRetainedSubagents=0 switches retention off, and the window stops at one
+  // whole minute because it has no off state of its own.
   const adjustSetting = (key: LimitKey, delta: number): void => {
     // Read-modify-write inside the store: the file may have been edited outside
     // the panel since the last read, so the base value comes from the file and
     // only the stepped limit goes into what disk currently holds. The merged
     // result is what the signals show from here on.
-    showSettings(stepSetting(key, delta, 0));
+    showSettings(stepSetting(key, delta));
   };
 
   // Flip endless mode and save. Same read-modify-write: the value flipped is
@@ -519,6 +525,13 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // with it: those are the types whose effective ceiling is frozen.
   const adjustAgentContext = (delta: number): void => {
     showSettings(stepAgentContext(currentContextAgent(), delta, contextAgents()));
+  };
+
+  // Step the selected agent's reuse ceiling and save. The same cycler picks the
+  // type for both rows, and the same freeze applies on the first step — see
+  // stepReuseContext.
+  const adjustReuseContext = (delta: number): void => {
+    showSettings(stepReuseContext(currentContextAgent(), delta, contextAgents()));
   };
 
   // Walk the pick list by one. Position and write are one read-modify-write in
@@ -1015,6 +1028,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             contextAgent={currentContextAgent}
             onCycleContextAgent={cycleContextAgent}
             onAdjustContext={adjustAgentContext}
+            onAdjustReuse={adjustReuseContext}
             endlessMode={endlessMode}
             endlessContext={endlessContext}
             onAdjust={adjustSetting}
@@ -1115,6 +1129,7 @@ function SubagentPanel(props: {
   contextAgent: () => string;
   onCycleContextAgent: (delta: number) => void;
   onAdjustContext: (delta: number) => void;
+  onAdjustReuse: (delta: number) => void;
   endlessMode: () => boolean;
   endlessContext: () => number;
   onAdjust: (key: LimitKey, delta: number) => void;
@@ -1421,6 +1436,60 @@ function SubagentPanel(props: {
               {"[+]"}
             </text>
           </box>
+          {/* Retention: how many finished subagents are held as re-promptable
+              sessions at once, and for how long one of them is held. "off" is a
+              count of 0 — the shipped default, at which a finished subagent is
+              destroyed the moment its result is delivered. The window is shown
+              and stepped in whole minutes and has no off state of its own: it
+              is switched off through the count above it. */}
+          <box flexDirection="row">
+            <text fg={props.theme.textMuted}>{rowLabel("retained subs")}</text>
+            <text
+              fg={props.theme.accent}
+              {...holdRepeat(() => props.onAdjust("maxRetainedSubagents", -1))}
+            >
+              {"[-]"}
+            </text>
+            <text fg={props.theme.text}>
+              {numCell(
+                props.settings().maxRetainedSubagents === 0
+                  ? "off"
+                  : props.settings().maxRetainedSubagents,
+              )}
+            </text>
+            <text
+              fg={props.theme.accent}
+              {...holdRepeat(() => props.onAdjust("maxRetainedSubagents", 1))}
+            >
+              {"[+]"}
+            </text>
+          </box>
+          <box flexDirection="row">
+            <text fg={props.theme.textMuted}>{rowLabel("retain (min)")}</text>
+            <text
+              fg={props.theme.accent}
+              {...holdRepeat(() =>
+                props.onAdjust("retainedSubagentTtlMs", -RETAINED_SUBAGENT_TTL_STEP_MS),
+              )}
+            >
+              {"[-]"}
+            </text>
+            <text fg={props.theme.text}>
+              {numCell(
+                Math.round(
+                  props.settings().retainedSubagentTtlMs / RETAINED_SUBAGENT_TTL_STEP_MS,
+                ),
+              )}
+            </text>
+            <text
+              fg={props.theme.accent}
+              {...holdRepeat(() =>
+                props.onAdjust("retainedSubagentTtlMs", RETAINED_SUBAGENT_TTL_STEP_MS),
+              )}
+            >
+              {"[+]"}
+            </text>
+          </box>
           {/* Context ceiling of one agent type: the [<]/[>] cycler picks the
               type, the row under it steps that type's own ceiling. ★ marks a
               type carrying a value of its own; without one the row shows the
@@ -1461,6 +1530,42 @@ function SubagentPanel(props: {
                 </text>
                 <Show when={ceiling().source === "agent"}>
                   <text fg={props.theme.success}>{" ★"}</text>
+                </Show>
+              </box>
+            );
+          })()}
+          {/* Reuse ceiling of the same agent type, picked by the same cycler:
+              the context above which a finished subagent of that type is never
+              held and never re-prompted. ★ marks a type carrying a value of its
+              own exactly as on the budget row, and [-] below zero drops that
+              value so the inherited ceiling shows again. A 0 is spelled out,
+              because here it is the strictest value on the row — this type is
+              never reused — and not the "off" the budget row's 0 means. */}
+          {(() => {
+            const ceiling = createMemo(() =>
+              effectiveReuseContext(props.settings(), props.contextAgent()),
+            );
+            return (
+              <box flexDirection="row">
+                <text fg={props.theme.textMuted}>{rowLabel("reuse Token(k)")}</text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat(() => props.onAdjustReuse(-CONTEXT_STEP))}
+                >
+                  {"[-]"}
+                </text>
+                <text fg={props.theme.text}>{numCell(ceiling().value / 1000)}</text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat(() => props.onAdjustReuse(CONTEXT_STEP))}
+                >
+                  {"[+]"}
+                </text>
+                <Show when={ceiling().source === "agent"}>
+                  <text fg={props.theme.success}>{" ★"}</text>
+                </Show>
+                <Show when={ceiling().value === 0}>
+                  <text fg={props.theme.textMuted}>{" never"}</text>
                 </Show>
               </box>
             );

@@ -64,6 +64,16 @@ export const MODEL_MAX_W = 12;
 // The separator between handle and topic.
 const TOPIC_SEP = " · ";
 
+// The fixed prefix the plugin puts in front of every subagent session title in a
+// process that can retain a finished subagent: it is what attributes an opencode
+// session to this plugin from the outside, and the bootstrap sweep reads it. It
+// carries nothing for the user and is stripped out of the topic.
+//
+// Mirrors SUBAGENT_SESSION_TITLE_MARKER in src/teardown.js, which is the value
+// actually written; this package is a separate npm package and cannot import it,
+// and test/tui-subagent-label.test.js pins the two against each other.
+export const SUBAGENT_SESSION_TITLE_MARKER = "[agent-intercom] ";
+
 // The marker a cut leaves behind, and the columns it occupies.
 const ELLIPSIS = "…";
 const ELLIPSIS_W = 1;
@@ -185,15 +195,21 @@ export function modelDisplayName(label: string): string {
   return label.replace(/[()]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-// The topic part: the sanitized session title without the redundant
-// `${agent}: ` prefix of a fallback title, cut to `maxW` columns. Empty where
-// the title holds nothing else.
+// The topic part: the sanitized session title without the plugin's own title
+// marker and without the redundant `${agent}: ` prefix of a fallback title, cut
+// to `maxW` columns. Empty where the title holds nothing else.
+//
+// The two prefixes come off in the order they are written, marker first. Both
+// are matched without their trailing space, because sanitizing collapses and
+// trims whitespace: a title that is the marker alone has none left to match.
 export function subagentTopic(
   agent: string,
   title: string,
   maxW: number = TOPIC_MAX_W,
 ): string {
   let topic = sanitizeTitle(title);
+  const marker = SUBAGENT_SESSION_TITLE_MARKER.trim();
+  if (topic.startsWith(marker)) topic = topic.slice(marker.length).trim();
   const prefix = `${agent}:`;
   if (topic.startsWith(prefix)) topic = topic.slice(prefix.length).trim();
   return truncate(topic, maxW);

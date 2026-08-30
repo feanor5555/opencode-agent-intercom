@@ -36,10 +36,11 @@
 // A key the file carries in a form the plugin rejects is dropped by the next
 // write, so the file cannot keep a setting that silently is not in effect.
 //
-// The one write that materialises keys is `stepAgentContext`: the first ceiling
-// edit freezes the budget every listed agent has in effect into `agentContext`
-// and drops the flat `maxContext` key, so one type's ceiling lives in one place
-// from then on.
+// The two writes that materialise keys are `stepAgentContext` and
+// `stepReuseContext`: the first edit of either freezes the value every listed
+// agent has in effect into `agentContext` resp. `reuseContext` and drops the
+// flat key behind it — `maxContext` resp. `maxReuseContext` — so one type's
+// ceiling lives in one place from then on.
 //
 // A file that cannot be read, and a write that does not reach the disk, both
 // leave the file as it is and hand back the state that is on disk, so the panel
@@ -78,11 +79,15 @@ export interface Settings {
 // and each has its own writer. maxContext is not one either: it is legacy-only
 // and is written by nothing here — a ceiling is edited per agent through
 // stepAgentContext. maxNestedSpawns is not one either: it is read and preserved
-// for parity with the plugin, and no row edits it — and neither are
-// maxRetainedSubagents, retainedSubagentTtlMs and maxReuseContext, for the same
-// reason. The per-type reuse ceiling is not a scalar at all: like the budget it
-// is edited per agent, in reuseContext.
-export type LimitKey = "maxSubagents" | "endlessContext";
+// for parity with the plugin, and no row edits it. maxReuseContext is not one
+// for a different reason: the reuse ceiling is edited per agent type, in
+// reuseContext through stepReuseContext, and the flat key is only what a type
+// without an own entry inherits.
+export type LimitKey =
+  | "maxSubagents"
+  | "endlessContext"
+  | "maxRetainedSubagents"
+  | "retainedSubagentTtlMs";
 
 // Every key of Settings the file itself carries. maxContextSource is derived
 // from the file rather than stored in it.
@@ -104,25 +109,32 @@ export const DEFAULT_MAX_NESTED_SPAWNS = 2;
 // once; 0 switches retention off, which is the shipped default and the one-shot
 // behaviour. The plugin's own copy is DEFAULT_MAX_RETAINED_SUBAGENTS in
 // src/settings.js and test/settings-defaults-parity.test.js fails on a
-// divergence. Carried here for that parity and because a write must not drop a
-// key the plugin honours — no row steps it.
+// divergence. Stepped by the panel's "retained subs" row, which shows the 0 as
+// "off".
 export const DEFAULT_MAX_RETAINED_SUBAGENTS = 0;
 // How long one retained subagent is held, in ms, measured from the moment it
 // was retained. The plugin's own copy is DEFAULT_RETAINED_SUBAGENT_TTL_MS in
-// src/settings.js. Read and preserved like the key above; no row steps it.
+// src/settings.js. Stepped by the panel's "retain (min)" row, which shows and
+// steps it in whole minutes.
 export const DEFAULT_RETAINED_SUBAGENT_TTL_MS = 3600000;
 // The reuse ceiling for an agent type the reuseContext map does not name: the
 // context above which a finished subagent of that type is never held and never
 // re-prompted. The plugin's own copy is DEFAULT_MAX_REUSE_CONTEXT in
 // src/settings.js and test/settings-defaults-parity.test.js fails on a
-// divergence. Carried here for that parity and because a write must not drop a
-// key the plugin honours — no row steps it yet.
+// divergence. No row steps this flat key: the panel edits the ceiling per agent
+// type through stepReuseContext, and this is what an untouched type inherits.
 export const DEFAULT_MAX_REUSE_CONTEXT = 70000;
 // The floor under the retention window, applied wherever the value came from:
 // the plugin never holds a session on a window of 0, because nothing outside it
 // ever deletes a subagent session. Retention is switched off through
 // maxRetainedSubagents, not through the window.
 const MIN_RETAINED_SUBAGENT_TTL_MS = 1;
+// The unit the retention window is shown and stepped in: whole minutes, which
+// is the unit an hour-long window is reasoned in. It is also the floor the
+// stepping row clamps at, because a row that steps in minutes cannot show a
+// value smaller than one of them — the 1 ms floor above is what a hand-written
+// 0 in the file resolves to, not somewhere a [-] can take the user.
+export const RETAINED_SUBAGENT_TTL_STEP_MS = 60000;
 // Whether the plugin's own postings appear in the transcript. The plugin's own
 // copy is DEFAULT_SHOW_AGENTCOM in src/settings.js and
 // test/settings-defaults-parity.test.js fails on a divergence.
@@ -356,32 +368,49 @@ export function setSetting(key: LimitKey, value: number): Settings {
   return applySetting(key, () => value);
 }
 
+// The value each limit steps down to at its lowest. Zero for the three that are
+// switched off by being zero — no cap, no armed endless cycle, no retention —
+// and one whole minute for the retention window, which has no off state of its
+// own and is stepped in minutes.
+const LIMIT_FLOOR: Record<LimitKey, number> = {
+  maxSubagents: 0,
+  endlessContext: 0,
+  maxRetainedSubagents: 0,
+  retainedSubagentTtlMs: RETAINED_SUBAGENT_TTL_STEP_MS,
+};
+
 // Steps one limit by `delta`, from the value the file holds at this moment
-// rather than from the panel's copy, and clamps the result at `min`.
+// rather than from the panel's copy, and clamps the result at `min` — the
+// key's own floor where the caller names none.
 export function stepSetting(
   key: LimitKey,
   delta: number,
-  min = 0,
+  min = LIMIT_FLOOR[key],
 ): Settings {
   return applySetting(key, (current) => Math.max(min, current[key] + delta));
 }
 
-// Steps one agent type's context ceiling by `delta`, from the value the file
-// holds at this moment. `agents` is the list the panel's cycler offers.
+// Steps one agent type's entry in a per-type ceiling map by `delta`, from the
+// value the file holds at this moment. `agents` is the list the panel's cycler
+// offers, `mapKey` the map that holds the per-type values, `flatKey` the single
+// key every type without an own entry falls back on, and `effective` the
+// resolver that says what a type has in effect right now.
 //
-// The first such edit migrates the file: every listed agent gets the ceiling it
-// has in effect right now written into `agentContext`, and the flat `maxContext`
-// key goes. Freezing the effective values means the migration changes no
-// budget, and dropping the flat key means a type's ceiling has one home rather
-// than two. Types the cycler does not list keep their own entries untouched and
-// otherwise fall back to the built-in table.
+// The first such edit migrates the file: every listed agent gets the value it
+// has in effect right now written into the map, and the flat key goes. Freezing
+// the effective values means the migration changes no ceiling, and dropping the
+// flat key means a type's ceiling has one home rather than two. Types the cycler
+// does not list keep their own entries untouched and otherwise fall back to
+// whatever stands behind the map.
 //
 // A step that would take the value below zero removes the agent's entry instead,
-// so the inherited ceiling shows again — `0` itself stays reachable and means
-// the budget is disabled for that type. Returns the merged state for the
-// signals; an unreadable file or a failed write leaves the file as it is and
-// hands back the state on disk.
-export function stepAgentContext(
+// so the inherited ceiling shows again — `0` itself stays reachable. Returns the
+// merged state for the signals; an unreadable file or a failed write leaves the
+// file as it is and hands back the state on disk.
+function stepPerAgentCeiling(
+  mapKey: "agentContext" | "reuseContext",
+  flatKey: "maxContext" | "maxReuseContext",
+  effective: (settings: Settings, agent: string) => { value: number },
   agent: string,
   delta: number,
   agents: string[],
@@ -393,19 +422,59 @@ export function stepAgentContext(
     return readSettings();
   }
   const current = resolveSettings(raw);
-  const next: AgentContext = { ...current.agentContext };
+  const next: AgentContext = { ...current[mapKey] };
   for (const name of [...agents, agent]) {
-    if (!Object.hasOwn(next, name)) next[name] = effectiveAgentContext(current, name).value;
+    if (!Object.hasOwn(next, name)) next[name] = effective(current, name).value;
   }
   const stepped = next[agent] + delta;
   if (stepped < 0) delete next[agent];
   else next[agent] = stepped;
-  const merged = pruneSettings({ ...raw, agentContext: next });
+  const merged = pruneSettings({ ...raw, [mapKey]: next });
   // The flat key is what the frozen map was built from; leaving it would put
   // one type's ceiling in two places.
-  delete merged.maxContext;
+  delete merged[flatKey];
   if (!file.write(merged)) return readSettings();
   return resolveSettings(merged);
+}
+
+// Steps one agent type's context ceiling by `delta`. The first such edit freezes
+// the budget every listed agent has in effect into `agentContext` and drops the
+// flat legacy `maxContext` key. `0` is reachable and means the budget is
+// disabled for that type; a step below it drops the entry so the inherited
+// ceiling shows again.
+export function stepAgentContext(
+  agent: string,
+  delta: number,
+  agents: string[],
+): Settings {
+  return stepPerAgentCeiling(
+    "agentContext",
+    "maxContext",
+    effectiveAgentContext,
+    agent,
+    delta,
+    agents,
+  );
+}
+
+// Steps one agent type's reuse ceiling by `delta`. Same migration as the budget
+// above, on `reuseContext` and the flat `maxReuseContext` key. `0` is reachable
+// and means that type is never reused — the opposite reading of the same figure
+// the budget map gives it, and the strictest value on the row rather than the
+// loosest; a step below it drops the entry so the inherited ceiling shows again.
+export function stepReuseContext(
+  agent: string,
+  delta: number,
+  agents: string[],
+): Settings {
+  return stepPerAgentCeiling(
+    "reuseContext",
+    "maxReuseContext",
+    effectiveReuseContext,
+    agent,
+    delta,
+    agents,
+  );
 }
 
 // Sets endless mode. A boolean, so it has its own writer rather than a spot in

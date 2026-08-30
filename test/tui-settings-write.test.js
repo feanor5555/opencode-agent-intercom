@@ -8,10 +8,16 @@
 // much as for a stepped limit: the value each flips is the one on disk at that
 // moment.
 //
-// The context ceiling is the one write that materialises keys: it is a value per
-// agent type, so the first edit freezes the budget every listed type has in
-// effect into `agentContext` and drops the flat legacy `maxContext` key. What
-// that write must not do is change any type's budget while doing so.
+// The context ceiling is one of the two writes that materialise keys: it is a
+// value per agent type, so the first edit freezes the budget every listed type
+// has in effect into `agentContext` and drops the flat legacy `maxContext` key.
+// What that write must not do is change any type's budget while doing so. The
+// reuse ceiling is the other one, on `reuseContext` and `maxReuseContext`, and
+// the two maps are stepped independently of each other.
+//
+// The retention rows are scalars and go through the ordinary stepping pair. The
+// count reaches 0, which is how retention is switched off; the window does not,
+// because it has no off state of its own and the row steps it in whole minutes.
 //
 // Run: node --test test/tui-settings-write.test.js
 
@@ -31,12 +37,15 @@ import {
   DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_MAX_SUBAGENTS,
   DEFAULT_SHOW_AGENTCOM,
+  RETAINED_SUBAGENT_TTL_STEP_MS,
+  effectiveReuseContext,
   readSettings,
   setEndlessMode,
   setSetting,
   setSettingsPath,
   setShowAgentcom,
   stepAgentContext,
+  stepReuseContext,
   stepSetting,
   toggleEndlessMode,
   toggleShowAgentcom,
@@ -531,5 +540,200 @@ test("a ceiling write that cannot reach the disk leaves the panel on the file's 
 
   assert.deepEqual(onDisk(), { maxContext: 90000 })
   assert.deepEqual(merged, state({ maxContext: 90000 }))
+  chmodSync(file, 0o644)
+})
+
+test("the retained count steps like the other limits and is written alone", () => {
+  writeFileSync(file, JSON.stringify({ maxSubagents: 2 }))
+
+  const merged = stepSetting("maxRetainedSubagents", 1)
+
+  assert.deepEqual(onDisk(), { maxSubagents: 2, maxRetainedSubagents: 1 })
+  assert.deepEqual(merged, state({ maxSubagents: 2, maxRetainedSubagents: 1 }))
+})
+
+test("the retained count steps down to 0, the value that switches retention off", () => {
+  writeFileSync(file, JSON.stringify({ maxRetainedSubagents: 1 }))
+
+  const merged = stepSetting("maxRetainedSubagents", -1)
+
+  assert.deepEqual(onDisk(), { maxRetainedSubagents: 0 })
+  assert.equal(merged.maxRetainedSubagents, 0)
+
+  // And no further: 0 is the floor, not a step on the way to a negative.
+  assert.equal(stepSetting("maxRetainedSubagents", -1).maxRetainedSubagents, 0)
+})
+
+test("the retention window steps by whole minutes and is written in milliseconds", () => {
+  const merged = stepSetting("retainedSubagentTtlMs", -RETAINED_SUBAGENT_TTL_STEP_MS)
+
+  assert.equal(RETAINED_SUBAGENT_TTL_STEP_MS, 60000)
+  assert.deepEqual(onDisk(), {
+    retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS - 60000,
+  })
+  assert.equal(merged.retainedSubagentTtlMs, DEFAULT_RETAINED_SUBAGENT_TTL_MS - 60000)
+})
+
+test("the retention window stops at one whole minute rather than at zero", () => {
+  writeFileSync(file, JSON.stringify({ retainedSubagentTtlMs: 60000 }))
+
+  const merged = stepSetting("retainedSubagentTtlMs", -RETAINED_SUBAGENT_TTL_STEP_MS)
+
+  assert.deepEqual(onDisk(), { retainedSubagentTtlMs: 60000 })
+  assert.equal(merged.retainedSubagentTtlMs, 60000)
+})
+
+test("a window of 0 in the file still resolves to the plugin's 1 ms floor", () => {
+  writeFileSync(file, JSON.stringify({ retainedSubagentTtlMs: 0 }))
+
+  assert.equal(readSettings().retainedSubagentTtlMs, 1)
+})
+
+test("the first reuse ceiling edit freezes every listed agent and drops the flat key", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ maxReuseContext: 60000, searxngUrl: "http://host:8080" }),
+  )
+
+  const merged = stepReuseContext("coder", 5000, AGENTS)
+
+  const frozen = { planner: 60000, coder: 65000, researcher: 60000 }
+  assert.deepEqual(onDisk(), {
+    searxngUrl: "http://host:8080",
+    reuseContext: frozen,
+  })
+  assert.equal("maxReuseContext" in onDisk(), false)
+  assert.deepEqual(merged, state({ reuseContext: frozen }))
+})
+
+test("with no flat key the reuse freeze takes the built-in default for every type", () => {
+  const merged = stepReuseContext("coder", 5000, AGENTS)
+
+  const frozen = {
+    planner: DEFAULT_MAX_REUSE_CONTEXT,
+    coder: DEFAULT_MAX_REUSE_CONTEXT + 5000,
+    researcher: DEFAULT_MAX_REUSE_CONTEXT,
+  }
+  assert.deepEqual(onDisk(), { reuseContext: frozen })
+  assert.deepEqual(merged, state({ reuseContext: frozen }))
+})
+
+test("the reuse freeze takes the env value where that is what governs", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT = "50000"
+
+  stepReuseContext("coder", 5000, AGENTS)
+
+  assert.deepEqual(onDisk(), {
+    reuseContext: { planner: 50000, coder: 55000, researcher: 50000 },
+  })
+})
+
+test("a reuse step starts from the value the file holds for that agent", () => {
+  writeFileSync(file, JSON.stringify({ reuseContext: { coder: 40000 } }))
+  assert.equal(readSettings().reuseContext.coder, 40000)
+
+  // Raised outside the panel while the sidebar still shows 40000.
+  writeFileSync(file, JSON.stringify({ reuseContext: { coder: 90000 } }))
+
+  const merged = stepReuseContext("coder", 5000, ["coder"])
+
+  assert.equal(merged.reuseContext.coder, 95000)
+  assert.deepEqual(onDisk(), { reuseContext: { coder: 95000 } })
+})
+
+test("0 is reachable on a reuse ceiling and stays as the never-reuse value", () => {
+  writeFileSync(file, JSON.stringify({ reuseContext: { coder: 5000 } }))
+
+  const merged = stepReuseContext("coder", -5000, ["coder"])
+
+  assert.deepEqual(onDisk(), { reuseContext: { coder: 0 } })
+  assert.equal(merged.reuseContext.coder, 0)
+  // The row reads that 0 as the type's own value, not as an inherited ceiling.
+  assert.deepEqual(effectiveReuseContext(merged, "coder"), {
+    value: 0,
+    source: "agent",
+  })
+})
+
+test("a reuse step below zero drops the entry and the inherited ceiling shows again", () => {
+  writeFileSync(file, JSON.stringify({ reuseContext: { planner: 40000, coder: 0 } }))
+
+  const merged = stepReuseContext("coder", -5000, ["planner", "coder"])
+
+  assert.deepEqual(onDisk(), { reuseContext: { planner: 40000 } })
+  assert.deepEqual(merged, state({ reuseContext: { planner: 40000 } }))
+  assert.deepEqual(effectiveReuseContext(merged, "coder"), {
+    value: DEFAULT_MAX_REUSE_CONTEXT,
+    source: "inherited",
+  })
+})
+
+test("dropping the last reuse entry drops the whole map", () => {
+  writeFileSync(file, JSON.stringify({ maxSubagents: 2, reuseContext: { coder: 0 } }))
+
+  stepReuseContext("coder", -5000, ["coder"])
+
+  assert.deepEqual(onDisk(), { maxSubagents: 2 })
+})
+
+test("a malformed entry in the reuse map is dropped by a reuse write", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ reuseContext: { coder: 60000, planner: "lots" } }),
+  )
+
+  stepReuseContext("coder", 5000, ["coder"])
+
+  assert.deepEqual(onDisk(), { reuseContext: { coder: 65000 } })
+})
+
+test("a reuse step leaves the budget map and its flat key untouched", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ maxContext: 90000, agentContext: { coder: 40000 } }),
+  )
+
+  stepReuseContext("coder", 5000, ["coder"])
+
+  assert.deepEqual(onDisk(), {
+    maxContext: 90000,
+    agentContext: { coder: 40000 },
+    reuseContext: { coder: 75000 },
+  })
+})
+
+test("a budget step leaves the reuse map and its flat key untouched", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ maxReuseContext: 60000, reuseContext: { coder: 30000 } }),
+  )
+
+  stepAgentContext("coder", 5000, ["coder"])
+
+  assert.deepEqual(onDisk(), {
+    maxReuseContext: 60000,
+    reuseContext: { coder: 30000 },
+    agentContext: { coder: DEFAULT_AGENT_CONTEXT.coder + 5000 },
+  })
+})
+
+test("an unparsable file is left alone by a reuse step", () => {
+  writeFileSync(file, '{ "maxReuseContext": 50000, "exaApiKey": "secret",')
+  const before = readFileSync(file, "utf8")
+
+  const merged = stepReuseContext("coder", 5000, AGENTS)
+
+  assert.equal(readFileSync(file, "utf8"), before)
+  assert.deepEqual(merged, state())
+})
+
+test("a reuse write that cannot reach the disk leaves the panel on the file's state", { skip: rootSkip }, () => {
+  writeFileSync(file, JSON.stringify({ maxReuseContext: 60000 }))
+  chmodSync(file, 0o444)
+
+  const merged = stepReuseContext("coder", 5000, AGENTS)
+
+  assert.deepEqual(onDisk(), { maxReuseContext: 60000 })
+  assert.deepEqual(merged, state({ maxReuseContext: 60000 }))
   chmodSync(file, 0o644)
 })

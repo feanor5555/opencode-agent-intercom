@@ -1,12 +1,20 @@
 // Unit tests for the label of a sidebar subagent row
 // (tui/src/subagent-label.ts): agent handle, topic, model in parentheses.
 //
+// The topic is the opencode session title, and in a process that can retain a
+// finished subagent that title carries the plugin's own marker prefix. The
+// marker exists for the bootstrap sweep, says nothing to the user, and is
+// stripped here — pinned below together with its parity against the value
+// src/teardown.js actually writes.
+//
 // Run: node --test test/tui-subagent-label.test.js
 
 import test from "node:test"
 import assert from "node:assert/strict"
+import { SUBAGENT_SESSION_TITLE_MARKER as PLUGIN_MARKER } from "../src/teardown.js"
 import {
   FALLBACK_PANEL_W,
+  SUBAGENT_SESSION_TITLE_MARKER,
   MIN_TOPIC_W,
   MODEL_MAX_W,
   ROW_CHROME_W,
@@ -71,6 +79,42 @@ test("subagentTopic is empty for a title that carries nothing else", () => {
   assert.equal(subagentTopic("coder", ""), "")
   assert.equal(subagentTopic("coder", "   "), "")
   assert.equal(subagentTopic("coder", "coder:"), "")
+})
+
+test("the TUI's title marker is the one the plugin writes", () => {
+  assert.equal(SUBAGENT_SESSION_TITLE_MARKER, PLUGIN_MARKER)
+})
+
+test("subagentTopic strips the plugin's session-title marker", () => {
+  assert.equal(
+    subagentTopic("researcher", `${SUBAGENT_SESSION_TITLE_MARKER}Searching for X`),
+    "Searching for X",
+  )
+})
+
+test("subagentTopic strips the marker and the agent prefix behind it", () => {
+  assert.equal(
+    subagentTopic("coder", `${SUBAGENT_SESSION_TITLE_MARKER}coder: rewrite the parser`),
+    "rewrite the parser",
+  )
+})
+
+test("a title that is nothing but the marker leaves no topic", () => {
+  assert.equal(subagentTopic("coder", SUBAGENT_SESSION_TITLE_MARKER), "")
+  assert.equal(subagentTopic("coder", `${SUBAGENT_SESSION_TITLE_MARKER}coder:`), "")
+})
+
+test("the marker is stripped only where it stands at the front", () => {
+  assert.equal(
+    subagentTopic("coder", `about ${SUBAGENT_SESSION_TITLE_MARKER}titles`),
+    `about ${SUBAGENT_SESSION_TITLE_MARKER}titles`,
+  )
+})
+
+test("a marked title is cut to the budget on what is left after the marker", () => {
+  const long = "x".repeat(TOPIC_MAX_W)
+  const topic = subagentTopic("coder", SUBAGENT_SESSION_TITLE_MARKER + long)
+  assert.equal(topic, long)
 })
 
 test("subagentTopic cuts a long topic to the budget", () => {

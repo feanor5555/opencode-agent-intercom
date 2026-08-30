@@ -21,6 +21,11 @@ export const ABORT_CONFIRM_MS = 4000;
 // ways to confirm, the cross of that row and the key that armed it.
 export const ABORT_CONFIRM_TEXT = "abort? \u2715 or x again";
 
+// The same question on a row that is being held for a follow-up. Nothing is
+// running there to abort: what the cross does on such a row is end the
+// retention now, by deleting the session the plugin is holding.
+export const DROP_CONFIRM_TEXT = "drop? \u2715 or x again";
+
 // The one entry whose abort is armed, and when it was armed.
 export interface ArmedAbort {
   readonly sessionID: string;

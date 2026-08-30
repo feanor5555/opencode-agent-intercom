@@ -40,11 +40,22 @@ import {
 import {
   ABORT_CONFIRM_MS,
   ABORT_CONFIRM_TEXT,
+  DROP_CONFIRM_TEXT,
   type ArmedAbort,
   armingAfterSelection,
   decideAbort,
   isAbortArmed,
 } from "./abort-arming.ts";
+import {
+  type SubagentEntry,
+  type SubagentStatus,
+  holdFinishedRow,
+  isRetained,
+  reapRetained,
+  retainedRowNote,
+  statusMarker,
+  statusRank,
+} from "./subagent-store.ts";
 import {
   AGENT_NAMES,
   PROMPT_AGENT_FILES,
@@ -203,24 +214,6 @@ function formatLlmValue(value: number | null, decimals: number): string {
   return value.toFixed(decimals);
 }
 
-type SubagentStatus = "busy" | "idle" | "retry" | "aborted" | "error";
-
-interface SubagentEntry {
-  sessionID: string;
-  parentID: string;
-  agent: string;
-  handle: string;
-  title: string;
-  status: SubagentStatus;
-  // True once the subagent has been observed running. A subagent that has run
-  // and is no longer running is finished and gets dropped from the panel.
-  wasBusy: boolean;
-  createdAt: number;
-  updatedAt: number;
-  ctxTokens?: number;
-  lastTokenFetch: number;
-}
-
 function formatAge(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(total / 3600);
@@ -237,26 +230,15 @@ function formatTokens(tokens: number | undefined): string {
   return String(tokens);
 }
 
-function statusMarker(status: SubagentStatus): string {
-  switch (status) {
-    case "busy":
-      return "●";
-    case "retry":
-      return "◐";
-    case "aborted":
-      return "✕";
-    case "error":
-      return "✕";
-    default:
-      return "✓";
-  }
-}
-
+// The colour of a row's dot. A held row is finished but not gone, so it takes
+// neither the green of a completed run nor the colour of a running one.
 function statusColor(status: SubagentStatus, theme: TuiThemeCurrent) {
   switch (status) {
     case "busy":
       return theme.warning;
     case "retry":
+      return theme.info;
+    case "retained":
       return theme.info;
     case "aborted":
     case "error":
@@ -628,7 +610,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // distinguish "aborted" from "idle", so we remember it locally.
   const aborted = new Set<string>();
   // Subagents that have finished and been removed — kept so a later poll does
-  // not re-add them as fresh entries (their wasBusy flag is gone with them).
+  // not re-add them as fresh entries (their wasBusy flag is gone with them). A
+  // subagent that is being held enters this set only once its retention has
+  // ended: while it is held it is still a row, and the poll still has to see it.
   const finished = new Set<string>();
   const handleCounters = new Map<string, number>();
   let disposed = false;
@@ -659,6 +643,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       const next = new Map(subagents());
       const seen = new Set<string>();
       let completedDelta = 0;
+      // One clock for the whole pass: a row held in this pass and the window
+      // left on a row held in an earlier one are measured against the same
+      // moment.
+      const now = Date.now();
 
       for (const primaryID of primaryIDs) {
         const childRes = await api.client.session.children({
@@ -689,8 +677,28 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
           const wasBusy = (existing?.wasBusy ?? false) || running;
 
           // A subagent that has run (or was aborted) and is no longer running
-          // is finished — drop it so the panel only shows live work.
+          // is finished. Where retention is switched on it is held instead of
+          // dropped: it is idle, but its session is alive and re-promptable
+          // until its window runs out, and the poll that lists it here is the
+          // evidence that it is still there. Everywhere else — retention off,
+          // or an abort, which is never held — the row is dropped exactly as it
+          // always was.
           if (!running && (wasBusy || aborted.has(child.id))) {
+            const held = holdFinishedRow(
+              existing,
+              { aborted: aborted.has(child.id), settings: settings() },
+              now,
+            );
+            if (held) {
+              // The run is over either way, so it counts as done once — on the
+              // transition into the held state, not on every poll that finds
+              // the row still held.
+              if (!isRetained(existing)) completedDelta += 1;
+              held.title = child.title ?? held.title;
+              held.updatedAt = child.time?.updated ?? held.updatedAt;
+              next.set(child.id, held);
+              continue;
+            }
             if (existing && !aborted.has(child.id)) completedDelta += 1;
             next.delete(child.id);
             finished.add(child.id);
@@ -730,12 +738,29 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
           next.set(child.id, entry);
         }
       }
+      // Every way a retention ends has the plugin delete the opencode session,
+      // so a held row whose session is no longer among its primary's children
+      // is a retention that is over — and a row that outlives the session it
+      // names is worse than no row. This pass completed, so `seen` is the whole
+      // truth about what the server still lists; a poll that threw never gets
+      // here and never reaps. The dropped rows are not counted as done: they
+      // were counted when their run ended.
+      for (const sessionID of reapRetained(
+        next.values(),
+        { seen, settings: settings() },
+        now,
+      )) {
+        next.delete(sessionID);
+        finished.add(sessionID);
+        aborted.delete(sessionID);
+        if (selectedID() === sessionID) setSelectedID(undefined);
+      }
+
       if (completedDelta > 0) {
         setCompletedCount((count) => count + completedDelta);
       }
 
       // Refresh context-token counts (throttled per entry).
-      const now = Date.now();
       for (const entry of next.values()) {
         if (!seen.has(entry.sessionID)) continue;
         if (now - entry.lastTokenFetch < TOKEN_REFRESH_MS) continue;
@@ -793,8 +818,43 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     api.route.navigate("session", { sessionID: id });
   };
 
+  // Ending a retention from the panel. A held subagent is idle, so there is no
+  // run to abort: what ends the hold is the session going away, which is also
+  // what every plugin-side end of a retention does. The plugin notices on its
+  // own — a reuse against a session with no messages left refuses and drops the
+  // handle — and the row goes as soon as the poll stops listing the session.
+  // The row is dropped here as well so the panel answers the keypress at once;
+  // a failed delete leaves it standing, because the session is then still there.
+  const dropRetained = async (id: string): Promise<void> => {
+    const entry = subagents().get(id);
+    try {
+      await api.client.session.delete({ sessionID: id });
+    } catch {
+      api.ui.toast({
+        variant: "error",
+        message: `Drop failed for ${entry?.handle ?? id}`,
+      });
+      scheduleRefresh();
+      return;
+    }
+    api.ui.toast({
+      variant: "warning",
+      message: `Dropped ${entry?.handle ?? id} — its session is gone`,
+    });
+    const next = new Map(subagents());
+    next.delete(id);
+    setSubagents(next);
+    finished.add(id);
+    if (selectedID() === id) setSelectedID(undefined);
+    scheduleRefresh();
+  };
+
   const abortSubagent = async (id: string): Promise<void> => {
     const entry = subagents().get(id);
+    if (isRetained(entry)) {
+      await dropRetained(id);
+      return;
+    }
     aborted.add(id);
     try {
       await api.client.session.abort({ sessionID: id });
@@ -943,8 +1003,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     scheduleRefresh();
   };
 
-  // A subagent going idle means it is done — remove it from the panel right
-  // away instead of waiting for the next poll.
+  // A subagent going idle means its run is done — act on it right away instead
+  // of waiting for the next poll. Where retention is switched on the row is
+  // held rather than removed; where it is off, it goes exactly as it always
+  // did.
   const onSessionIdle = (event: unknown): void => {
     const sessionID = (event as { properties?: { sessionID?: string } })
       .properties?.sessionID;
@@ -953,7 +1015,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       // If the user is currently viewing this subagent, jump back to the
       // parent before the main plugin deletes the session server-side —
       // otherwise the route points at a now-missing session and the TUI
-      // falls back to the start page, losing the orchestrator chat.
+      // falls back to the start page, losing the orchestrator chat. This runs
+      // for a held row too: whether the plugin retains this subagent or deletes
+      // it is decided on its reply and on the context it ended at, neither of
+      // which the panel can see, so the route is put somewhere safe either way.
       if (
         entry.parentID &&
         api.route.current.name === "session" &&
@@ -962,7 +1027,22 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       ) {
         api.route.navigate("session", { sessionID: entry.parentID });
       }
+      const held = holdFinishedRow(entry, {
+        aborted: aborted.has(sessionID),
+        settings: settings(),
+      });
       const next = new Map(subagents());
+      if (held) {
+        // Held, and counted as done: its run finished here. The claim that it
+        // is being held is settled by the next poll — a subagent the plugin did
+        // not retain has no session left to list, and the row goes with it.
+        next.set(sessionID, held);
+        setSubagents(next);
+        setCompletedCount((count) => count + 1);
+        aborted.delete(sessionID);
+        scheduleRefresh();
+        return;
+      }
       next.delete(sessionID);
       setSubagents(next);
       finished.add(sessionID);
@@ -1170,8 +1250,7 @@ function SubagentPanel(props: {
         !props.isPrimary(entry.sessionID),
     );
     return own.sort((a, b) => {
-      const rank = (s: SubagentStatus) => (s === "busy" || s === "retry" ? 0 : 1);
-      const byRank = rank(a.status) - rank(b.status);
+      const byRank = statusRank(a.status) - statusRank(b.status);
       if (byRank !== 0) return byRank;
       return a.createdAt - b.createdAt;
     });
@@ -1183,14 +1262,18 @@ function SubagentPanel(props: {
   // to the orchestrator that spawned it.
   const currentSub = createMemo(() => props.subagents().get(props.sessionID));
 
-  // Finished subagents are removed from `rows`, so "running" counts the live
-  // list and "done" is the cumulative count of subagents that have completed.
+  // A finished subagent is removed from `rows` unless it is being held, so
+  // "running" counts the live list, "retained" the held rows still in it, and
+  // "done" is the cumulative count of subagents whose run has completed — the
+  // held ones included, their run being over.
   const counts = createMemo(() => {
     let running = 0;
+    let retained = 0;
     for (const entry of rows()) {
       if (entry.status === "busy" || entry.status === "retry") running += 1;
+      else if (entry.status === "retained") retained += 1;
     }
-    return { running, done: props.completedCount() };
+    return { running, retained, done: props.completedCount() };
   });
 
   // Keep the selection valid as the list changes.
@@ -1304,7 +1387,10 @@ function SubagentPanel(props: {
     );
     const rowText = createMemo(() =>
       armed()
-        ? truncate(ABORT_CONFIRM_TEXT, subagentLabelWidth(panelWidth()))
+        ? truncate(
+            isRetained(rowProps.entry) ? DROP_CONFIRM_TEXT : ABORT_CONFIRM_TEXT,
+            subagentLabelWidth(panelWidth()),
+          )
         : label(),
     );
     // A busy/retry subagent's dot alternates filled/hollow on the pulse timer
@@ -1361,6 +1447,18 @@ function SubagentPanel(props: {
           <Show when={rowProps.entry.status === "aborted"}>
             <text fg={props.theme.error}> · aborting</text>
           </Show>
+          {/* A held row says so and says how long it still has. The countdown
+              is in whole minutes, the same figure and the same word the `list`
+              tool and the orchestrator's per-turn snapshot carry for it. */}
+          <Show when={isRetained(rowProps.entry)}>
+            <text fg={props.theme.info}>
+              {` · ${retainedRowNote(
+                rowProps.entry,
+                props.settings().retainedSubagentTtlMs,
+                props.nowMs(),
+              )}`}
+            </text>
+          </Show>
         </box>
       </box>
     );
@@ -1415,6 +1513,12 @@ function SubagentPanel(props: {
                 <text fg={props.theme.warning}>{`● ${counts().running} running`}</text>
                 <text fg={props.theme.textMuted}> · </text>
                 <text fg={props.theme.success}>{`✓ ${counts().done} done`}</text>
+                {/* Only where something is actually being held: with retention
+                    at its default of 0 this line stays what it always was. */}
+                <Show when={counts().retained > 0}>
+                  <text fg={props.theme.textMuted}> · </text>
+                  <text fg={props.theme.info}>{`◆ ${counts().retained} retained`}</text>
+                </Show>
               </box>
               <box flexDirection="column">
                 <For each={rows()}>{(entry) => <Row entry={entry} />}</For>

@@ -1,7 +1,7 @@
 // The three tools the primary agent gets: spawn, abort, list.
 
 import { tool } from "@opencode-ai/plugin"
-import { registry, aborted } from "./state.js"
+import { registry, aborted, registryMutex } from "./state.js"
 import {
   createChildSession,
   promptSession,
@@ -10,6 +10,8 @@ import {
   getSessionDirectory,
   deleteSession,
   forgetSessionDirectory,
+  fetchSnapshot,
+  snapshotOutcome,
 } from "./client.js"
 import {
   resolve,
@@ -32,6 +34,15 @@ import {
   nestedQuotaDecision,
   chargeNestedSpawn,
   chargeNestedRun,
+  entryLifecycle,
+  reuseAdmission,
+  reviveRetainedEntryLocked,
+  restoreRetainedEntryLocked,
+  LIFECYCLE_RETAINED,
+  LIFECYCLE_RUNNING,
+  REUSE_QUESTION,
+  REUSE_TASK,
+  RETAIN_TASK_SHARE,
 } from "./registry.js"
 import { registerChildWaiter, settleChildWaiter } from "./childwait.js"
 import { endLiveChildrenOf, waitForSessionQuiescence } from "./teardown.js"
@@ -41,6 +52,7 @@ import { knownAgentKinds } from "./config.js"
 import {
   getSettings,
   contextBudgetFor,
+  reuseCeilingFor,
   PACKAGE_WARN_SHARE,
   PACKAGE_REFUSE_SHARE,
 } from "./settings.js"
@@ -267,6 +279,28 @@ function formatListRow(entry) {
   return (
     `${entry.handle}  [${effectiveState(entry)}]  ${ageSeconds(entry.spawnedAt)}s  ` +
     `ctx:${fmtTokens(entry.ctxTokens)}  session:${entry.sessionID}`
+  )
+}
+
+// Whole minutes left on a retained entry's window, floored at 0. Coarse on
+// purpose: the figure is read by a model deciding whether a follow-up is still
+// worth asking, and a second-precision countdown would be a number that moves
+// on every render for no decision it changes.
+function retainedMinutesLeft(entry, ttlMs, now = Date.now()) {
+  const left = (entry.retainedAt ?? 0) + ttlMs - now
+  return Math.max(0, Math.floor(left / 60000))
+}
+
+// One row of the retained section of `list`. A retained subagent is finished
+// and holds no concurrency slot, so it carries what the orchestrator needs to
+// decide whether to put a follow-up to it rather than what it needs to watch a
+// run: the handle it would address, the agent type it is, the context already
+// in the session (which is what the reuse gate is decided on) and how much of
+// the retention window is left.
+function formatRetainedRow(entry, ttlMs) {
+  return (
+    `${entry.handle}  [retained]  ${entry.agent}  ctx:${fmtTokens(entry.ctxTokens)}  ` +
+    `${retainedMinutesLeft(entry, ttlMs)}m left  session:${entry.sessionID}`
   )
 }
 
@@ -680,6 +714,272 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     return ` Subagent slots: ${active}/${maxSubagents} (global, across all sessions) — ${free} free.`
   }
 
+  // Builds the refusal for a reuse the gate turned down. Each term names the
+  // figure it was decided on and the number it was decided against, so the
+  // orchestrator learns the rule rather than retrying blind, and every one of
+  // them names `spawn` as the way forward so it can never be stuck.
+  function reuseGateRefusal(entry, admission, ctxTokens, pkgTokens, mode) {
+    const who = `"${entry.handle}" (${entry.agent})`
+    const spawnInstead =
+      `spawn a fresh subagent instead and carry what it needs to know in the prompt.`
+    switch (admission.term) {
+      case "G1":
+        return (
+          `Reuse refused (G1: no context figure): the session of ${who} answered, but reports no ` +
+          `context size, and the reuse ceiling is never evaluated on a guessed number. ` +
+          `${who} stays held — try again, or ${spawnInstead}`
+        )
+      case "G2":
+        return (
+          `Reuse refused (G2: reuse ceiling): ${who} holds ${fmtTokens(ctxTokens)} tokens of ` +
+          `context, over the ${fmtTokens(admission.limit)} reuse ceiling for a ${entry.agent}. ` +
+          `A session this large is not handed more work however small the follow-up — ` +
+          `${spawnInstead}`
+        )
+      case "G3":
+        return (
+          `Reuse refused (G3: context budget): ${who} holds ${fmtTokens(ctxTokens)} tokens and ` +
+          `your follow-up adds ~${fmtTokens(pkgTokens)}, which does not fit under the ` +
+          `${fmtTokens(admission.limit)} ${entry.agent} budget. Re-prompted there it would be ` +
+          `STOP-injected on its first turn and every tool call it made would be denied. ` +
+          `Cut the follow-up down, or ${spawnInstead}`
+        )
+      case "G4":
+        return (
+          `Reuse refused (G4: room for a further task): ${who} holds ${fmtTokens(ctxTokens)} ` +
+          `tokens, over the ${fmtTokens(admission.limit)} — ${percent(RETAIN_TASK_SHARE)} of the ` +
+          `${entry.agent} budget — a further task must still be under, because a task needs room ` +
+          `for what it produces. Ask a QUESTION about the work it already did ` +
+          `(mode "${REUSE_QUESTION}"), or ${spawnInstead}`
+        )
+      default:
+        return `Reuse refused. ${spawnInstead}`
+    }
+  }
+
+  // Put a follow-up to a retained subagent. The orchestrator decides this and
+  // the plugin never does it on its own: a spawn prompt is written for a fresh
+  // context ("read X, then do Y") and prepending it to a session that has
+  // already read X yields a run whose briefing contradicts its own history.
+  //
+  // The shape is a spawn's, deliberately: the session goes back to running, it
+  // takes a concurrency slot through the same cap decision and reservation, it
+  // is woken to the same parent by the same idle path, and it faces the same
+  // retention decision when it finishes. What differs is that no session is
+  // created, the handle is the one the orchestrator already knows, and the
+  // gate below decides whether the session may be prompted at all.
+  async function reuseHandler(args, toolCtx) {
+    const settings = getSettings()
+    if (!(settings.maxRetainedSubagents > 0)) {
+      return {
+        output:
+          `Reuse refused: holding a finished subagent alive is switched off for this ` +
+          `installation (maxRetainedSubagents = 0), so no subagent is ever kept for a follow-up ` +
+          `and no handle can be reused. Spawn a fresh subagent instead and carry the question in ` +
+          `its prompt.`,
+      }
+    }
+    // A subagent has no retained subagents of its own — retention is refused
+    // for nested spawns outright — and the follow-up question this tool exists
+    // for is the orchestrator's.
+    if (entryForSession(toolCtx.sessionID)) {
+      return {
+        output:
+          `Reuse refused: reuse is the orchestrator's tool and you are a subagent. Do what you ` +
+          `can yourself and name in your final reply what you still need; the orchestrator ` +
+          `decides. Open that reply with "Blocked:" where the missing material stops the task.`,
+      }
+    }
+    // The endless-mode freeze, on the same grounds as the spawn freeze and in
+    // the same shape (a throw, so the refusal is a failed tool call): the cycle
+    // drops every retained subagent as it replaces this primary, so a run
+    // started now would be torn down mid-flight.
+    if (isEndlessFrozen(rootPrimaryFor(toolCtx.sessionID))) {
+      log("reuse refused: endless cycle in progress", { sessionID: toolCtx.sessionID })
+      throw new Error(
+        "Endless mode is saving this session's open points and replacing it with a fresh " +
+          "orchestrator. Every retained subagent is being dropped with it, so no follow-up will " +
+          "run. End your turn now — what you would ask belongs in your open points.",
+      )
+    }
+    trackPrimary(toolCtx.sessionID)
+    const entry = resolve(args.subagent)
+    // Same ownership rule and same uniform wording as abort: a handle
+    // belonging to another primary is reported exactly as a nonexistent one,
+    // so foreign ownership does not leak.
+    if (!entry || entry.parentID !== toolCtx.sessionID) return unknown(args.subagent)
+    const lifecycle = entryLifecycle(entry)
+    if (lifecycle !== LIFECYCLE_RETAINED) {
+      // A closing entry is on its way out and its handle addresses nothing a
+      // moment later, so it reads as unknown. A running one is a live subagent
+      // and the orchestrator is about to be woken by it anyway.
+      if (lifecycle !== LIFECYCLE_RUNNING) return unknown(args.subagent)
+      return {
+        output:
+          `Reuse refused: "${entry.handle}" (${entry.agent}) is still running — a reuse is a ` +
+          `follow-up to a FINISHED subagent. You are woken automatically with its result; put ` +
+          `your question to it then.`,
+      }
+    }
+    const prompt = String(args.prompt ?? "")
+    if (!prompt.trim()) {
+      return { output: `reuse failed: prompt is required — say what you want to ask or hand over.` }
+    }
+    const mode = args.mode === REUSE_TASK ? REUSE_TASK : REUSE_QUESTION
+
+    // The follow-up is measured on its own, with no project snapshot prepended:
+    // the session already carries one from its spawn, and sending it a second
+    // time would spend the very context the gate below is protecting. The size
+    // verdict supplies the wording and the notice; G3 is what actually decides,
+    // because at a high context it is the far stricter of the two.
+    const size = packageSizeVerdict(entry.agent, prompt)
+    if (size.refusal) {
+      log("reuse refused: follow-up too large", {
+        handle: entry.handle,
+        estimate: size.estimate,
+        budget: size.budget,
+      })
+      return {
+        output:
+          `Reuse refused: the follow-up is ~${fmtTokens(size.estimate)} tokens (estimated) — over ` +
+          `the ${percent(PACKAGE_REFUSE_SHARE)} bar of ` +
+          `${fmtTokens(size.budget * PACKAGE_REFUSE_SHARE)} for a ${entry.agent}, whose context ` +
+          `budget is ${fmtTokens(size.budget)}. Nothing was sent to "${entry.handle}". Cut the ` +
+          `follow-up down and pass bulk material as a file path for it to read, or spawn a fresh ` +
+          `subagent for work this size.`,
+      }
+    }
+
+    // The gate runs on a FRESHLY fetched figure, never on the entry's stored
+    // one: a retained session is a real opencode session the user can open in
+    // the TUI and type into, and the stored value is only what was true when
+    // the run ended. Three outcomes, each meaning something different.
+    const snapshot = await fetchSnapshot(client, entry.sessionID)
+    const outcome = snapshotOutcome(snapshot)
+    if (outcome === "gone") {
+      // The fetch succeeded and the session has no messages: it was deleted
+      // underneath the plugin. Drop the entry so the handle stops being offered
+      // in `list` and in the snapshot block.
+      log("reuse refused: session gone", { handle: entry.handle, sessionID: entry.sessionID })
+      await removeEntry(entry.sessionID)
+      forgetSessionDirectory(entry.sessionID)
+      return {
+        output:
+          `Reuse refused: the session behind "${entry.handle}" no longer exists — it was deleted ` +
+          `outside this plugin. The handle is gone with it and will not appear in list() again. ` +
+          `Spawn a fresh subagent and carry what it needs to know in the prompt.`,
+      }
+    }
+    if (outcome === "unavailable") {
+      // The fetch itself failed. Nothing was established about the session, so
+      // it stays retained and the stale figure is NOT substituted: a ceiling
+      // evaluated on a guess is not a ceiling.
+      log("reuse refused: snapshot unavailable", {
+        handle: entry.handle,
+        sessionID: entry.sessionID,
+      })
+      return {
+        output:
+          `Reuse refused: could not read the current context size of "${entry.handle}" ` +
+          `(the session did not answer). The reuse ceiling is never evaluated on a stale figure, ` +
+          `so nothing was sent. "${entry.handle}" is still held — call reuse again, or spawn a ` +
+          `fresh subagent.`,
+      }
+    }
+
+    const admission = reuseAdmission(snapshot.ctxTokens, {
+      pkgTokens: size.estimate,
+      mode,
+      ceiling: reuseCeilingFor(entry.agent),
+      budget: contextBudgetFor(entry.agent),
+    })
+    if (!admission.admit) {
+      log("reuse refused: gate", {
+        handle: entry.handle,
+        term: admission.term,
+        reason: admission.reason,
+        ctxTokens: snapshot.ctxTokens,
+        pkgTokens: size.estimate,
+        limit: admission.limit,
+        mode,
+      })
+      return {
+        output: reuseGateRefusal(entry, admission, snapshot.ctxTokens, size.estimate, mode),
+      }
+    }
+
+    const sessionID = entry.sessionID
+    const handle = entry.handle
+    const agent = entry.agent
+    let reservedSpawn = false
+    try {
+      // The slot is taken exactly as a spawn's is, through the same decision
+      // and the same reservation — a reused run is an LLM run in flight, and
+      // the cap means how many of those there are. Counted and reserved in one
+      // synchronous block, with no await between, so two calls in the same turn
+      // cannot both pass on the same figure.
+      const maxSubagents = settings.maxSubagents
+      const cap = spawnCapDecision(toolCtx.sessionID, maxSubagents)
+      if (cap.refused) {
+        log("reuse refused: subagent limit", { active: cap.active, limit: maxSubagents })
+        return {
+          output:
+            `Reuse refused: subagent limit reached (${cap.active}/${maxSubagents} running ` +
+            `globally across all orchestrator sessions) — a reused run takes a slot exactly as a ` +
+            `spawn does. Wait for one to finish (you are woken automatically) and call reuse ` +
+            `again; "${handle}" stays held until its window runs out.`,
+        }
+      }
+      reservePendingSpawn(toolCtx.sessionID)
+      reservedSpawn = true
+
+      // Back to running under the registry mutex, so a watchdog reap or a
+      // capacity eviction cannot take this entry between the gate and the
+      // prompt. A revive that finds the entry gone is exactly that race.
+      const revived = await registryMutex.runExclusive(() =>
+        reviveRetainedEntryLocked(sessionID, {
+          ctxTokens: snapshot.ctxTokens,
+          packageTokens: size.estimate,
+        }),
+      )
+      if (!revived) {
+        log("reuse refused: entry no longer retained", { handle, sessionID })
+        return {
+          output:
+            `Reuse refused: "${handle}" was dropped while this call was being decided — its ` +
+            `retention window ran out or it was evicted. Spawn a fresh subagent instead.`,
+        }
+      }
+      try {
+        await promptSession(client, { sessionID, agent, prompt })
+      } catch (err) {
+        // The follow-up never reached the session, so no run started. Put the
+        // entry back to retained on its ORIGINAL window rather than leaving a
+        // running entry the inactivity watchdog would report as a hang.
+        await registryMutex.runExclusive(() =>
+          restoreRetainedEntryLocked(sessionID, revived.previous),
+        )
+        throw err
+      }
+      const run = revived.entry.runs
+      log("reused", { handle, sessionID, agent, run, mode, ctxTokens: snapshot.ctxTokens })
+      showToast(client, { title: "agent-intercom", message: `reused ${handle} (run ${run})` })
+      return {
+        output:
+          `Follow-up sent to "${handle}" (${agent}, session ${sessionID}) — run ${run} of that ` +
+          `session, which already holds ${fmtTokens(snapshot.ctxTokens)} tokens of the work you ` +
+          `are asking about. It runs in the background; you are woken automatically with its ` +
+          `reply when it finishes, exactly as a spawn is. ` +
+          `abort("${handle}") stops it (only if the user asks).` +
+          slotsNoticeAfterSpawn(toolCtx.sessionID) +
+          size.notice,
+        metadata: { handle, sessionID, agent, reuse: true, run },
+      }
+    } finally {
+      if (reservedSpawn) releasePendingSpawn(toolCtx.sessionID)
+    }
+  }
+
   async function abortHandler(args, toolCtx) {
     trackPrimary(toolCtx.sessionID)
     const entry = resolve(args.subagent)
@@ -771,12 +1071,31 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // system-prompt snapshot does this correctly; without the same filter here,
     // a second primary started in the same opencode serve process would "see"
     // (and try to abort) the previous primary's children.
-    const active = [...registry.values()].filter((e) => {
-      if (e.parentID !== toolCtx.sessionID) return false
-      return isActiveEntry(e)
-    })
-    if (active.length === 0) return { output: "No active subagents." }
-    return { output: active.map(formatListRow).join("\n") }
+    const mine = [...registry.values()].filter((e) => e.parentID === toolCtx.sessionID)
+    const active = mine.filter((e) => isActiveEntry(e))
+    const head = active.length === 0 ? "No active subagents." : active.map(formatListRow).join("\n")
+    // The retained section. Since the count split a retained entry is not
+    // active anywhere — no slot, no quiesce, no task id, no snapshot row — and
+    // `list` would therefore not show it either, which would leave the
+    // orchestrator unable to ask a follow-up of something it cannot see. It is
+    // shown as its own clearly separated block rather than as another row, so
+    // "running" and "finished but still there" cannot be read as the same
+    // state. Empty — and byte-identical to what `list` has always returned —
+    // wherever retention is switched off, because nothing is ever retained.
+    const settings = getSettings()
+    if (!(settings.maxRetainedSubagents > 0)) return { output: head }
+    const retained = mine.filter((e) => entryLifecycle(e) === LIFECYCLE_RETAINED)
+    if (retained.length === 0) return { output: head }
+    const rows = retained
+      .map((e) => formatRetainedRow(e, settings.retainedSubagentTtlMs))
+      .join("\n")
+    return {
+      output:
+        `${head}\n\nRETAINED — finished, NOT running, holding no slot. Their sessions are still ` +
+        `alive and still hold the work they did, so you can put a follow-up question to one with ` +
+        `reuse("<handle>", "<question>") until its window runs out. After that it is gone and ` +
+        `only spawn is left.\n${rows}`,
+    }
   }
 
   async function listOpenHandler(_args, toolCtx) {
@@ -859,6 +1178,12 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     return { output: `${id} updated.` }
   }
 
+  // Retention off is the default, and with it nothing is ever held: no entry
+  // reaches "retained", `list` has no retained section to show, and `reuse`
+  // has nothing it could ever address. Read once here so the tool surface is
+  // decided in one place.
+  const retentionOn = getSettings().maxRetainedSubagents > 0
+
   return {
     spawn: tool({
       description:
@@ -892,10 +1217,49 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     list: tool({
       description:
         "List your currently running subagents (handle, agent, status, age). Finished ones are gone " +
-        "(one-shot); their result already arrived in the wake notice.",
+        "(one-shot); their result already arrived in the wake notice." +
+        (retentionOn
+          ? " Subagents that are being held for a follow-up are listed separately as RETAINED, " +
+            "with the context they hold and the time left on them — those can be asked a " +
+            "follow-up with reuse()."
+          : ""),
       args: {},
       execute: guard("list", listHandler),
     }),
+
+    // Only where retention is switched on. At `maxRetainedSubagents = 0` —
+    // the default — nothing is ever retained, so the tool would have nothing
+    // to address in any call it could ever receive; it is left out entirely
+    // rather than offered as a tool that always refuses, the same way the
+    // optional search tools are. Read once, at plugin load.
+    ...(retentionOn
+      ? {
+          reuse: tool({
+            description:
+              'Put a follow-up to a subagent that has already finished and is being held (it is ' +
+              'listed as RETAINED by list()). Its session still holds the work it did, so a ' +
+              'question like "which of the two did you mean?" can be answered without re-briefing ' +
+              'anything — that is what this tool is for. The run behaves exactly like a spawn: it ' +
+              'runs in the background and you are woken with its reply. Refused when the ' +
+              "session's context is already too large to be handed more; the refusal says which " +
+              'rule refused and spawn is always the way forward.',
+            args: {
+              subagent: z.string().describe('Handle of a RETAINED subagent ("researcher#1")'),
+              prompt: z
+                .string()
+                .describe("Your follow-up — a question about the work it already did"),
+              mode: z
+                .enum([REUSE_QUESTION, REUSE_TASK])
+                .optional()
+                .describe(
+                  `"${REUSE_QUESTION}" (default) for a follow-up question; "${REUSE_TASK}" for a ` +
+                    `further related piece of work, which is admitted only at a much lower context`,
+                ),
+            },
+            execute: guard("reuse", reuseHandler),
+          }),
+        }
+      : {}),
 
     todos_open: tool({
       description:

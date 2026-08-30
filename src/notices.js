@@ -75,6 +75,7 @@ export function completionNotice(
   ctxTokens,
   packageTokens,
   nested,
+  runs = 1,
 ) {
   // A result opening with `Blocked:` is the subagent handing a decision up:
   // it stopped at a problem its prompt did not cover, did what did not depend
@@ -83,9 +84,15 @@ export function completionNotice(
   // report reads like any other completion and gets passed to the user or
   // re-spawned unchanged.
   const blocked = isBlockedResult(result)
+  // Which run of this session ended. A reuse re-prompts the SAME session under
+  // the same handle, so without this the orchestrator cannot tell the answer to
+  // its follow-up from a fresh subagent's first report — the handle, the type
+  // and the shape of the notice are identical. Absent for run 1, which is every
+  // run wherever retention is switched off.
+  const followUp = runs > 1 ? ` — follow-up run ${runs} of that session` : ""
   const head = blocked
-    ? `🔔 agent-intercom: your subagent "${handle}" (${agent}) came back BLOCKED and was destroyed.\n`
-    : `🔔 agent-intercom: your subagent "${handle}" (${agent}) has finished and been destroyed.\n`
+    ? `🔔 agent-intercom: your subagent "${handle}" (${agent})${followUp} came back BLOCKED and was destroyed.\n`
+    : `🔔 agent-intercom: your subagent "${handle}" (${agent})${followUp} has finished and been destroyed.\n`
   const tail = blocked
     ? `⚠️ This is a DECISION for you, not a failed run to retry: decide what happens about the ` +
       `problem and whether the original task continues — where it does, spawn a FRESH subagent ` +
@@ -97,7 +104,7 @@ export function completionNotice(
     (result ? `Its result:\n${result}\n` : "It produced no text result.\n") +
     tail +
     taskOutcomeLine(taskOutcome, blocked) +
-    runSizeNotice(agent, ctxTokens, packageTokens) +
+    runSizeNotice(agent, ctxTokens, packageTokens, runs) +
     nestedRunsNotice(nested) +
     slotsNoticeAfterFinish(parentID)
   )
@@ -139,19 +146,23 @@ function nestedRunsNotice(nested) {
 // is too big and the next spawn in the area should be split tighter. A budget
 // of 0 means the ceiling is disabled for that type — the figure is then
 // reported with no verdict.
-function runSizeNotice(agent, ctxTokens, packageTokens) {
+function runSizeNotice(agent, ctxTokens, packageTokens, runs = 1) {
   if (!ctxTokens || ctxTokens <= 0) return ""
   const used = fmtTokens(ctxTokens)
+  // On run 2 and beyond the figure is the whole SESSION's context, not this
+  // run's: a reuse adds to a session that was already carrying its first run.
+  // The number was always the honest one; only its caption would be wrong.
+  const label = runs > 1 ? `run-size (run ${runs}, cumulative over the session)` : "run-size"
   const budget = contextBudgetFor(agent)
   if (budget <= 0) {
     const pkg = packageTokens > 0 ? `, your package was ${fmtTokens(packageTokens)} of it` : ""
-    return `\n📏 run-size: ${used} tokens${pkg} (no context budget set for ${agent}).`
+    return `\n📏 ${label}: ${used} tokens${pkg} (no context budget set for ${agent}).`
   }
   const pkg = packageTokens > 0 ? ` — your package was ${fmtTokens(packageTokens)} of it` : ""
   const against = `${used} of the ${fmtTokens(budget)} ${agent} budget${pkg}`
   if (ctxTokens >= budget * RUN_SIZE_HARD_SHARE) {
     return (
-      `\n📏 run-size: ${against} — at ${percent(RUN_SIZE_HARD_SHARE)} of it or beyond. The task ` +
+      `\n📏 ${label}: ${against} — at ${percent(RUN_SIZE_HARD_SHARE)} of it or beyond. The task ` +
       `was too big. SPLIT the next spawn in this area into smaller, single-concern pieces ` +
       `(1 file / 1 slice each) before continuing. Where the package figure is itself a large ` +
       `share of the budget, cut the prompt first and pass bulk material as a file path.`
@@ -159,11 +170,11 @@ function runSizeNotice(agent, ctxTokens, packageTokens) {
   }
   if (ctxTokens >= budget * RUN_SIZE_SOFT_SHARE) {
     return (
-      `\n📏 run-size: ${against} — over ${percent(RUN_SIZE_SOFT_SHARE)} of it. Scope the next ` +
+      `\n📏 ${label}: ${against} — over ${percent(RUN_SIZE_SOFT_SHARE)} of it. Scope the next ` +
       `spawn in this area tighter (fewer files, narrower goal).`
     )
   }
-  return `\n📏 run-size: ${against} — ok.`
+  return `\n📏 ${label}: ${against} — ok.`
 }
 
 // Tail line for completion notices: tells the orchestrator how many subagent

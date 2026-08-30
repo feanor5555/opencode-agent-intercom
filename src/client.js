@@ -254,6 +254,11 @@ export async function fetchSnapshot(client, sessionID) {
     )
     const messages = Array.isArray(resp) ? resp : []
     return {
+      // How many messages the session answered with. It is what tells a
+      // successful fetch of an EMPTY session apart from a failed fetch: both
+      // leave every other field undefined, and only the failure returns {}.
+      // See snapshotOutcome.
+      messageCount: messages.length,
       lastActivity: latestActivity(messages),
       ctxTokens: latestContextTokens(messages),
       result: capResult(finalResult(messages), sessionID),
@@ -262,6 +267,28 @@ export async function fetchSnapshot(client, sessionID) {
     log("session.messages failed", errMsg(err))
     return {}
   }
+}
+
+// Classifies what a fetchSnapshot call actually established about the session,
+// for the callers that have to act differently per case rather than degrade to
+// "no figure". Three outcomes and no fourth:
+//
+//   "ok"          — the session answered with messages. Its fields are the
+//                   truth about it right now; an individual field may still be
+//                   undefined (a step whose tokens are all zero yields no
+//                   ctxTokens), which is the reading caller's business.
+//   "unavailable" — the fetch failed: a timeout, a transport error, anything
+//                   that produced {}. Nothing was established about the
+//                   session; it is very probably still there.
+//   "gone"        — the fetch SUCCEEDED and the session has no messages at
+//                   all. A session this plugin created was prompted before it
+//                   was ever registered, so it always has messages; an empty
+//                   list means the session was deleted underneath the plugin
+//                   (an `opencode session delete`, a database reset) and its
+//                   id now addresses nothing.
+export function snapshotOutcome(snapshot) {
+  if (!snapshot || typeof snapshot.messageCount !== "number") return "unavailable"
+  return snapshot.messageCount > 0 ? "ok" : "gone"
 }
 
 // Full text of the subagent's final assistant message — its result, pushed to

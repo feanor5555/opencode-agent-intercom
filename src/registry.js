@@ -342,6 +342,77 @@ export function retentionContextDecision(ctxTokens, { ceiling, budget } = {}) {
   return { retain: true, reason: "retained" }
 }
 
+// The share of an agent type's context budget a retained session must still be
+// under before a further TASK may be handed to it (term G4 below). It is a
+// share and not a second per-type number so that it follows a budget a user
+// lowers for one type, where a hard figure would silently exceed that type's
+// whole budget.
+export const RETAIN_TASK_SHARE = 0.5
+
+// The two things a follow-up can be. `question` — the default and the case the
+// whole feature exists for — is one prompt and one answer, and is admitted up
+// to the type's reuse ceiling. `task` is a further piece of work handed to a
+// session that already has history, and needs room to run in, so it carries
+// the stricter G4 term on top.
+export const REUSE_QUESTION = "question"
+export const REUSE_TASK = "task"
+
+// The reuse admission gate: whether a retained session may be handed this
+// follow-up. Pure, synchronous, and the single place the rule lives — the tool
+// composes its refusal out of the answer and decides nothing itself.
+//
+// `ctxTokens` is the figure from a FRESHLY fetched snapshot, never the entry's
+// own `ctxTokens`: that one is cached for CTX_TTL_MS, and a retained session is
+// a real opencode session a user can open in the TUI and type into, so the
+// stored figure is a value that WAS true rather than one that is.
+//
+// The four terms, in the order they are evaluated, each named in the answer so
+// a refusal can say which one bound:
+//
+//   G1  a figure at all, above 0. `fetchSnapshot` leaves `ctxTokens` undefined
+//       on a failure and on a session whose newest step is still all-zero, and
+//       a ceiling evaluated against a missing number is not a ceiling. This is
+//       also what makes a reuse ceiling of 0 mean "never reuse this type" with
+//       no branch of its own: no real session is at or below it.
+//   G2  the type's reuse ceiling, inclusive. The term that exists to be
+//       configured; the other three protect contracts the plugin already holds.
+//   G3  the context budget of the type, carrying the follow-up itself: a
+//       session re-prompted to at or over its budget is STOP-injected on its
+//       first transform and every tool call it makes is denied, so it would be
+//       handed back to the orchestrator as a denial loop. `budget === 0` is the
+//       budget switched off for that type, and the term falls away with it.
+//   G4  half the budget, for a further task only. G3 asks only whether the
+//       PROMPT fits; a task also needs room for what it produces. A question
+//       does not, which is why G4 does not govern it — requiring a researcher
+//       to be under half its budget before it can be asked which of two things
+//       it meant would refuse the reuse in exactly the case the feature is for.
+//
+// `limit` is the number the failing term was decided against, so the refusal
+// can name it; on G1 there is none.
+export function reuseAdmission(
+  ctxTokens,
+  { pkgTokens = 0, mode = REUSE_QUESTION, ceiling = 0, budget = 0 } = {},
+) {
+  if (typeof ctxTokens !== "number" || !Number.isFinite(ctxTokens) || ctxTokens <= 0) {
+    return { admit: false, term: "G1", reason: "no-context", limit: undefined }
+  }
+  if (!(ctxTokens <= ceiling)) {
+    return { admit: false, term: "G2", reason: "over-reuse-ceiling", limit: ceiling }
+  }
+  if (budget > 0 && !(ctxTokens + pkgTokens < budget)) {
+    return { admit: false, term: "G3", reason: "over-budget", limit: budget }
+  }
+  if (mode === REUSE_TASK && budget > 0 && !(ctxTokens <= budget * RETAIN_TASK_SHARE)) {
+    return {
+      admit: false,
+      term: "G4",
+      reason: "over-task-share",
+      limit: budget * RETAIN_TASK_SHARE,
+    }
+  }
+  return { admit: true, term: null, reason: "admitted", limit: ceiling }
+}
+
 // Turns the entry of `sessionID` into a retained one, in place. The exact
 // opposite of removeEntryLocked: the entry stays in `registry` and
 // `bySession`, its handle is NOT released back to the counter and the agent
@@ -362,6 +433,105 @@ export function retainEntryLocked(sessionID, now = Date.now()) {
   entry.lifecycle = LIFECYCLE_RETAINED
   entry.retainedAt = now
   entry.dispatched = false
+  return true
+}
+
+// The inverse of retainEntryLocked: an accepted reuse puts a retained entry
+// back to running, in place and under the same handle, because the point of the
+// whole feature is that the orchestrator addresses `researcher#1` twice.
+//
+// What moves, and why each one:
+//   - `lifecycle` back to running, so the entry occupies a concurrency slot
+//     again (isActiveEntry) and the inactivity watchdog owns run 2 exactly as
+//     it owned run 1;
+//   - `status` to busy and `dispatched` to false, so the idle path of run 2
+//     wakes the parent the way run 1's did;
+//   - `lastActivityAt` to now, so the run is measured from the reuse and the
+//     first watchdog tick after admission cannot reap it on run 1's silence;
+//   - `retainedAt` cleared: the window is over, and a window is per retention
+//     rather than per session — the next idle stamps a fresh one;
+//   - `runs` up by one, and `packageTokens` replaced by this follow-up's
+//     estimate, which is what the completion notice reports against the budget;
+//   - `ctxTokens` / `lastTokensFetchAt` taken from the snapshot the gate ran
+//     on, so run 2's first context check sees the figure the gate decided on.
+//
+// What deliberately does NOT move: `spawnedAt`, so the age column keeps telling
+// the truth about how long the session has existed; `nestedSpawns`, which is a
+// quota and would be unbounded if a re-prompt could refill it; `nestedRuns` /
+// `nestedTokens`, which are cumulative reporting figures.
+//
+// Returns the entry together with the previous values of everything it moved,
+// so a reuse whose prompt never reaches the session can put the entry back
+// (restoreRetainedEntryLocked). Undefined where the entry is gone or is no
+// longer retained — a reap or a drop got there first, and the caller must not
+// prompt a session that is on its way out.
+//
+// Must be called with the registry mutex held.
+export function reviveRetainedEntryLocked(
+  sessionID,
+  { ctxTokens, packageTokens, now = Date.now() } = {},
+) {
+  const entry = entryForSession(sessionID)
+  if (!entry) return undefined
+  if (entryLifecycle(entry) !== LIFECYCLE_RETAINED) return undefined
+  const previous = {
+    retainedAt: entry.retainedAt,
+    runs: entry.runs ?? 1,
+    packageTokens: entry.packageTokens,
+    ctxTokens: entry.ctxTokens,
+    lastTokensFetchAt: entry.lastTokensFetchAt,
+    lastActivityAt: entry.lastActivityAt,
+    status: entry.status,
+  }
+  entry.lifecycle = LIFECYCLE_RUNNING
+  entry.status = "busy"
+  entry.dispatched = false
+  entry.lastActivityAt = now
+  entry.retainedAt = undefined
+  entry.runs = (entry.runs ?? 1) + 1
+  entry.packageTokens = packageTokens || undefined
+  if (Number.isFinite(ctxTokens) && ctxTokens > 0) {
+    entry.ctxTokens = ctxTokens
+    entry.lastTokensFetchAt = now
+  }
+  return { entry, previous }
+}
+
+// Puts a revived entry back to retained after a reuse that never reached the
+// session — the prompt call itself failed, so no run started and nothing about
+// the session changed. The ORIGINAL `retainedAt` is restored rather than a
+// fresh one stamped: a failed reuse neither ends the retention window nor
+// extends it.
+//
+// Must be called with the registry mutex held.
+export function restoreRetainedEntryLocked(sessionID, previous) {
+  const entry = entryForSession(sessionID)
+  if (!entry || !previous) return false
+  entry.lifecycle = LIFECYCLE_RETAINED
+  entry.dispatched = false
+  entry.retainedAt = previous.retainedAt
+  entry.runs = previous.runs
+  entry.packageTokens = previous.packageTokens
+  entry.ctxTokens = previous.ctxTokens
+  entry.lastTokensFetchAt = previous.lastTokensFetchAt
+  entry.lastActivityAt = previous.lastActivityAt
+  entry.status = previous.status
+  return true
+}
+
+// Writes the context figure a retention was decided on onto the entry. The
+// idle path fetches it AFTER the critical section that retained the entry, and
+// without this the retained row would report the figure the entry happened to
+// be carrying from its last in-run check — frequently none at all, since a
+// short run never triggers one. It is the number the orchestrator decides a
+// follow-up on and the number the reuse gate will be measured against, so it is
+// the one the entry keeps. A missing or non-positive figure changes nothing.
+export function recordRetainedContext(sessionID, ctxTokens, now = Date.now()) {
+  const entry = entryForSession(sessionID)
+  if (!entry) return false
+  if (!Number.isFinite(ctxTokens) || ctxTokens <= 0) return false
+  entry.ctxTokens = ctxTokens
+  entry.lastTokensFetchAt = now
   return true
 }
 
@@ -1339,6 +1509,11 @@ function createEntry(sessionID, agent, prompt, parentID, taskId, directory, pack
     // that sprawled once it was running.
     packageTokens: packageTokens || undefined,
     status: "busy",
+    // How many runs this session has had. 1 from the spawn; incremented by
+    // every accepted reuse (reviveRetainedEntryLocked), so the completion
+    // notice can say which run finished and label the cumulative figures as
+    // cumulative. Never reset — the whole point of a reuse is one session.
+    runs: 1,
     // Whether this entry occupies a concurrency slot; see isActiveEntry. Set
     // here and nowhere else, so every registry entry is "running".
     lifecycle: LIFECYCLE_RUNNING,

@@ -40,6 +40,7 @@ import {
   entryLifecycle,
   LIFECYCLE_RUNNING,
   retentionDecision,
+  recordRetainedContext,
   retentionContextDecision,
   retainEntryLocked,
   removeEntryLocked,
@@ -105,7 +106,21 @@ const PRIMARY_TOOLS = new Set([
   "spawn",
   "abort",
   "list",
+  // Only reachable where retention is switched on: the tool itself is not
+  // registered at `maxRetainedSubagents = 0` (see createTools), so at the
+  // default this entry gates a tool that does not exist.
+  "reuse",
 ])
+
+// The orchestration tools a primary may actually call right now, for the
+// refusal that names them. `reuse` is left out wherever retention is off,
+// because the tool is not registered there and naming it would send the model
+// after something it cannot call.
+function availablePrimaryTools() {
+  return [...PRIMARY_TOOLS]
+    .filter((name) => name !== "reuse" || getSettings().maxRetainedSubagents > 0)
+    .join(", ")
+}
 
 // TODO.md is the domain of the six agents that produce concrete deliverables:
 // planner (plans), coder (code), debugger (diagnoses), reviewer (reviews),
@@ -1197,11 +1212,16 @@ async function onSessionIdle({ sessionID }, client) {
       // the notice needs: the entry is removed a few lines above and is gone
       // by the time the notice is composed.
       nested: { runs: e.nestedRuns ?? 0, tokens: e.nestedTokens ?? 0 },
+      // Which run of this session just ended: 1 for a spawned one, higher for
+      // every run a `reuse` started. The notice reports it so a follow-up run
+      // is not read as a fresh subagent's, and labels the cumulative figures
+      // that come with it.
+      runs: e.runs ?? 1,
       retained: retention.retain,
     }
   })
   if (!wake) return
-  const { handle, parentID, agent, taskId, directory, packageTokens, nested } = wake
+  const { handle, parentID, agent, taskId, directory, packageTokens, nested, runs } = wake
   // Whether the session survives this path. Starts false and is only raised
   // once the result is in hand: a snapshot fetch or a notice that throws falls
   // through to the delete below, exactly as it did before retention existed.
@@ -1223,6 +1243,7 @@ async function onSessionIdle({ sessionID }, client) {
         budget: contextBudgetFor(agent),
       })
       retain = !isBlockedResult(snapshot.result) && context.retain
+      if (retain) recordRetainedContext(sessionID, snapshot.ctxTokens)
       if (!retain) {
         log("retention revoked", {
           handle,
@@ -1265,6 +1286,7 @@ async function onSessionIdle({ sessionID }, client) {
         snapshot.ctxTokens,
         packageTokens,
         nested,
+        runs,
       ),
     )
     showToast(client, {
@@ -1590,7 +1612,7 @@ export function createGuardToolExecute(client, permissionGuard) {
             "subagent reaches the goal is its own concern, not yours."
       throw new Error(
         `agent-intercom: this is an orchestrator session — it delegates work, it does not run ` +
-          `\`${input.tool}\` itself. ${hint} Available orchestration tools: spawn, abort, list.`,
+          `\`${input.tool}\` itself. ${hint} Available orchestration tools: ${availablePrimaryTools()}.`,
       )
     }
 

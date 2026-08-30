@@ -3,7 +3,7 @@
 // orchestrator sees. No client, no I/O, no session-lifecycle side effects.
 
 import { getSettings, contextBudgetFor } from "./settings.js"
-import { countActiveSubagents } from "./registry.js"
+import { countActiveSubagents, RETAIN_TASK_SHARE } from "./registry.js"
 import { tokens as fmtTokens, percent } from "./format.js"
 
 // Size thresholds applied AFTER a subagent finishes, as shares of that type's
@@ -66,6 +66,36 @@ function taskOutcomeLine(outcome, blocked = false) {
   }
 }
 
+// The tail of a completion notice whose session was kept. It carries the three
+// things the orchestrator needs in order to act on the retention: that the
+// subagent is still reachable, the handle it is reachable under, and how long
+// the window is. The mode hint is the one term that separates a question from a
+// further task (G4, `reuseAdmission`) evaluated on the context this run ended
+// at — the other terms depend on the follow-up prompt, which does not exist
+// yet, so the tool names them at the call and this line does not guess them.
+//
+// The window is the whole retention ceiling rather than a countdown: the entry
+// was stamped `retainedAt` moments ago, in the same critical section that
+// decided this notice.
+function retainedTail(handle, agent, ctxTokens) {
+  const ttlMs = getSettings().retainedSubagentTtlMs
+  const minutes = Math.floor(ttlMs / 60000)
+  const window = minutes >= 1 ? `${minutes} minutes` : "under a minute"
+  const budget = contextBudgetFor(agent)
+  const taskToo = budget <= 0 || (ctxTokens ?? 0) <= budget * RETAIN_TASK_SHARE
+  const mode = taskToo
+    ? `A further related piece of work is admitted too, with mode: "task".`
+    : `Only a question: at this size a further piece of work (mode: "task") is refused, it needs ` +
+      `more room than the session has left.`
+  return (
+    `Use this to report back to the user. The session is NOT gone: it still holds everything it ` +
+    `read and did, and for the next ${window} you can put a follow-up question to it with ` +
+    `reuse("${handle}", "<question>") — no re-briefing, it already has the context. ${mode} ` +
+    `After that window it is gone and only spawn is left. Work that is new, or work this ` +
+    `session's own history would push the wrong way, is a fresh spawn either way.`
+  )
+}
+
 export function completionNotice(
   handle,
   agent,
@@ -76,6 +106,7 @@ export function completionNotice(
   packageTokens,
   nested,
   runs = 1,
+  retained = false,
 ) {
   // A result opening with `Blocked:` is the subagent handing a decision up:
   // it stopped at a problem its prompt did not cover, did what did not depend
@@ -90,15 +121,26 @@ export function completionNotice(
   // and the shape of the notice are identical. Absent for run 1, which is every
   // run wherever retention is switched off.
   const followUp = runs > 1 ? ` — follow-up run ${runs} of that session` : ""
+  // A retention granted by the idle path: the session was NOT deleted and is
+  // still addressable under the same handle. Saying "destroyed" here would be
+  // false and would hide the one thing the orchestrator has to know to use it.
+  // A blocked report is never retained (the idle path revokes on it), so the
+  // two branches cannot both apply; the guard keeps that true of this function
+  // on its own rather than only of its caller.
+  const held = retained && !blocked
   const head = blocked
     ? `🔔 agent-intercom: your subagent "${handle}" (${agent})${followUp} came back BLOCKED and was destroyed.\n`
-    : `🔔 agent-intercom: your subagent "${handle}" (${agent})${followUp} has finished and been destroyed.\n`
+    : held
+      ? `🔔 agent-intercom: your subagent "${handle}" (${agent})${followUp} has finished. Its session is being HELD, not destroyed.\n`
+      : `🔔 agent-intercom: your subagent "${handle}" (${agent})${followUp} has finished and been destroyed.\n`
   const tail = blocked
     ? `⚠️ This is a DECISION for you, not a failed run to retry: decide what happens about the ` +
       `problem and whether the original task continues — where it does, spawn a FRESH subagent ` +
       `carrying that decision. Do not re-send the same prompt; the one above is gone.`
-    : `Use this to report back to the user. If you need more work in this area, spawn a fresh ` +
-      `subagent — the one above is gone.`
+    : held
+      ? retainedTail(handle, agent, ctxTokens)
+      : `Use this to report back to the user. If you need more work in this area, spawn a fresh ` +
+        `subagent — the one above is gone.`
   return (
     head +
     (result ? `Its result:\n${result}\n` : "It produced no text result.\n") +

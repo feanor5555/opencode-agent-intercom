@@ -421,7 +421,7 @@ test("the completion notice of a reused run names the run and labels its figure"
   const { ctx, created, notices, state } = makeCtx({ messages: assistantReply("FIRST", 20000) })
   const hooks = await plugin(ctx)
   const { sessionID, handle } = await retainOne(hooks, created)
-  assert.match(notices[0], /has finished and been destroyed/)
+  assert.match(notices[0], /has finished\. Its session is being HELD, not destroyed\./)
   assert.match(notices[0], /📏 run-size: /, "run 1's caption is what it has always been")
 
   await hooks.tool.reuse.execute({ subagent: handle, prompt: "which one?" }, toolCtx)

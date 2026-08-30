@@ -27,3 +27,13 @@ export function percent(share) {
 export function ageSeconds(spawnedAt) {
   return Math.round((Date.now() - spawnedAt) / 1000)
 }
+
+// Whole minutes left on a retained subagent's window, floored at 0. Coarse on
+// purpose: the figure is read by a model deciding whether a follow-up is still
+// worth asking, and a second-precision countdown would be a number that moves
+// on every render for no decision it changes. One source for both renderings —
+// the `list` tool's retained section and the per-turn snapshot block.
+export function retainedMinutesLeft(entry, ttlMs, now = Date.now()) {
+  const left = (entry.retainedAt ?? 0) + ttlMs - now
+  return Math.max(0, Math.floor(left / 60000))
+}

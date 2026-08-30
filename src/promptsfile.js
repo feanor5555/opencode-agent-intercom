@@ -46,6 +46,7 @@ import { join } from "node:path"
 import { log, errMsg } from "./log.js"
 import { AGENTS, mayDelegate } from "./agents.js"
 import { PROMPT_CONTRACT, OUTLINE_DISABLED_AGENTS } from "./prompts.js"
+import { retentionOffered } from "./settings.js"
 import {
   classifyPromptFile,
   claimPromptFileScan,
@@ -414,12 +415,21 @@ export function renderOpencodeDefaultFile(agent) {
     )
   }
   // The blocks prompts.js `guideBlocks` assembles for this role, all of them:
-  // the orchestrator gets ORCHESTRATION_GUIDE alone, every subagent gets the
-  // core plus exactly one of the two spawn blocks plus, unless its outline tool
-  // is gated off, the reading discipline.
+  // the orchestrator gets ORCHESTRATION_GUIDE, plus ORCHESTRATION_REUSE_GUIDE
+  // where this process offers retention; every subagent gets the core plus
+  // exactly one of the two spawn blocks plus, unless its outline tool is gated
+  // off, the reading discipline.
+  //
+  // The retention answer is the LATCHED one, exactly as the injection path
+  // takes it (hooks.js, `retention: retentionOffered()`): whether the reuse
+  // block is appended was settled when opencode resolved the tool map, so a
+  // reference file written mid-process names the block the role really gets
+  // rather than what the settings file happens to say this second.
   const guideNames =
     agent === "orchestrator"
-      ? "ORCHESTRATION_GUIDE"
+      ? ["ORCHESTRATION_GUIDE", ...(retentionOffered() ? ["ORCHESTRATION_REUSE_GUIDE"] : [])].join(
+          " + ",
+        )
       : [
           "SUBAGENT_GUIDE_CORE",
           mayDelegate(agent) ? "SUBAGENT_DELEGATION_GUIDE" : "SUBAGENT_NO_SPAWN_GUIDE",

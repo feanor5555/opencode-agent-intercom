@@ -45,7 +45,11 @@ import {
   RETAIN_TASK_SHARE,
 } from "./registry.js"
 import { registerChildWaiter, settleChildWaiter } from "./childwait.js"
-import { endLiveChildrenOf, waitForSessionQuiescence } from "./teardown.js"
+import {
+  endLiveChildrenOf,
+  waitForSessionQuiescence,
+  SUBAGENT_SESSION_TITLE_MARKER,
+} from "./teardown.js"
 import { projectContext } from "./project.js"
 import { AGENTS, NESTED_SPAWN_TARGET, SPAWNABLE_ROLES } from "./agents.js"
 import { knownAgentKinds } from "./config.js"
@@ -53,6 +57,8 @@ import {
   getSettings,
   contextBudgetFor,
   reuseCeilingFor,
+  retentionOffered,
+  retentionActive,
   PACKAGE_WARN_SHARE,
   PACKAGE_REFUSE_SHARE,
 } from "./settings.js"
@@ -68,7 +74,13 @@ import {
   TodoFileMissingError,
 } from "./todofile.js"
 import { log, errMsg } from "./log.js"
-import { tokens as fmtTokens, ageSeconds, estimateTokens, percent } from "./format.js"
+import {
+  tokens as fmtTokens,
+  ageSeconds,
+  estimateTokens,
+  percent,
+  retainedMinutesLeft,
+} from "./format.js"
 
 // Matches an optional task-id prefix on the first line of a spawn prompt
 // (T5). When present, the wake-hook will auto-tick TODO.md on the matching
@@ -280,15 +292,6 @@ function formatListRow(entry) {
     `${entry.handle}  [${effectiveState(entry)}]  ${ageSeconds(entry.spawnedAt)}s  ` +
     `ctx:${fmtTokens(entry.ctxTokens)}  session:${entry.sessionID}`
   )
-}
-
-// Whole minutes left on a retained entry's window, floored at 0. Coarse on
-// purpose: the figure is read by a model deciding whether a follow-up is still
-// worth asking, and a second-precision countdown would be a number that moves
-// on every render for no decision it changes.
-function retainedMinutesLeft(entry, ttlMs, now = Date.now()) {
-  const left = (entry.retainedAt ?? 0) + ttlMs - now
-  return Math.max(0, Math.floor(left / 60000))
 }
 
 // One row of the retained section of `list`. A retained subagent is finished
@@ -536,9 +539,16 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       reservePendingSpawn(toolCtx.sessionID)
       reservedSpawn = true
 
+      // The title carries the plugin's marker wherever this process can ever
+      // retain a subagent, and only there. It is what the bootstrap sweep
+      // (teardown.js) attributes a leftover session by after a plugin reload
+      // dropped the registry that held the same knowledge; a process that never
+      // retains leaks nothing and its titles stay byte-identical. The tool-call
+      // metadata title below is a UI label, not an identity, and stays clean.
+      const title = args.description || `${args.agent}: ${args.prompt.slice(0, 60)}`
       const sessionID = await createChildSession(client, {
         parentID: toolCtx.sessionID,
-        title: args.description || `${args.agent}: ${args.prompt.slice(0, 60)}`,
+        title: retentionOffered() ? SUBAGENT_SESSION_TITLE_MARKER + title : title,
         directory,
       })
       if (!sessionID) return { output: "Failed to create subagent session." }
@@ -770,7 +780,7 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
   // gate below decides whether the session may be prompted at all.
   async function reuseHandler(args, toolCtx) {
     const settings = getSettings()
-    if (!(settings.maxRetainedSubagents > 0)) {
+    if (!retentionActive()) {
       return {
         output:
           `Reuse refused: holding a finished subagent alive is switched off for this ` +
@@ -1081,9 +1091,11 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // shown as its own clearly separated block rather than as another row, so
     // "running" and "finished but still there" cannot be read as the same
     // state. Empty — and byte-identical to what `list` has always returned —
-    // wherever retention is switched off, because nothing is ever retained.
+    // wherever retention is not in effect (retentionActive: offered at load and
+    // switched on now), so this section never names a `reuse` the tool map does
+    // not carry and never survives the setting being switched off.
     const settings = getSettings()
-    if (!(settings.maxRetainedSubagents > 0)) return { output: head }
+    if (!retentionActive()) return { output: head }
     const retained = mine.filter((e) => entryLifecycle(e) === LIFECYCLE_RETAINED)
     if (retained.length === 0) return { output: head }
     const rows = retained
@@ -1182,7 +1194,7 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
   // reaches "retained", `list` has no retained section to show, and `reuse`
   // has nothing it could ever address. Read once here so the tool surface is
   // decided in one place.
-  const retentionOn = getSettings().maxRetainedSubagents > 0
+  const retentionOn = retentionOffered()
 
   return {
     spawn: tool({

@@ -64,6 +64,7 @@ import { chatParamsHook } from "./llmparams.js"
 import { chatMessageHook, applyModelChoices, messageAgent } from "./llmmodel.js"
 import { captureSystem, captureMessages, captureParams } from "./reqlog.js"
 import { setServerUrl } from "./client.js"
+import { sweepOrphanedSubagentSessions } from "./teardown.js"
 import { log } from "./log.js"
 
 // NOTE: this module must have exactly ONE export — the default factory.
@@ -80,6 +81,18 @@ export default async (ctx) => {
   // resolved SDK client carries no method for it; `serverUrl` is where it
   // posts to and reaches the plugin only here, in the factory context.
   setServerUrl(serverUrl)
+
+  // The reload leak: a subagent session that was being HELD for a follow-up
+  // when this plugin was last unloaded is still there, and nothing in opencode
+  // will ever delete it — no session TTL, no garbage collection, and no
+  // shutdown hook the plugin could have used. One pass at load deletes what can
+  // only be such a leftover; it makes no call at all where retention is off,
+  // which is the shipped default.
+  try {
+    await sweepOrphanedSubagentSessions(client, { directory })
+  } catch (err) {
+    log("bootstrap sweep failed", err?.message ?? String(err))
+  }
 
   const permissionGuard = createPermissionGuard(client)
   const transformSystem = createTransformSystem(client)

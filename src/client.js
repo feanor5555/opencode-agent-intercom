@@ -162,6 +162,22 @@ export async function deleteSession(client, sessionID) {
   }
 }
 
+// Every session opencode holds, optionally narrowed to one project directory.
+// Read-only and best-effort: an empty array on any failure, so a caller that
+// sweeps on this list does nothing rather than something wrong when the call
+// does not come back.
+export async function listSessions(client, { directory } = {}) {
+  try {
+    const data = unwrap(
+      await client.session.list(directory ? { query: { directory } } : undefined),
+    )
+    return Array.isArray(data) ? data : []
+  } catch (err) {
+    log("session.list failed", errMsg(err))
+    return []
+  }
+}
+
 // Best-effort ARCHIVE of a session (PATCH /session/{id} with `time.archived`).
 // Used in place of deleteSession for the OLD primary in the orchestrator
 // handoff: archiving retires the session WITHOUT triggering opencode's

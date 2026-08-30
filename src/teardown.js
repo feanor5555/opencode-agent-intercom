@@ -7,6 +7,7 @@ import {
   routeParentNotice,
   removeEntry,
   entryForSession,
+  isPrimary,
   markEntryClosing,
   claimRetentionEvictionsLocked,
   registryMutex,
@@ -17,9 +18,11 @@ import {
   postNotice,
   showToast,
   deleteSession,
+  listSessions,
   abortSession,
   forgetSessionDirectory,
 } from "./client.js"
+import { getSettings, retentionActive } from "./settings.js"
 import { settleChildWaiter, liveChildSessionIDs } from "./childwait.js"
 import { aborted, pendingSessionQuiescence } from "./state.js"
 import { log, errMsg } from "./log.js"
@@ -357,4 +360,81 @@ export async function dropRetainedSubagents(client, { keep = 0, label = "retenti
     await teardownSubagent(client, victim, { notice: null, markAborted: false, label })
   }
   return victims
+}
+
+// The fixed prefix every subagent session title carries in a process that can
+// retain one (tools.js spawn, gated on retentionOffered). It is the ONLY thing
+// that attributes an opencode session to this plugin from the outside: the
+// registry lives in the plugin's own process and is empty in a fresh one, and
+// nothing in the session record itself says who created it.
+//
+// Not written where retention was off at load — a process that never retains
+// leaks nothing, so at the shipped default no title moves a byte.
+export const SUBAGENT_SESSION_TITLE_MARKER = "[agent-intercom] "
+
+// A retained session outlives only its own window; a plugin reload inside that
+// window outlives it forever. opencode has no session TTL and no garbage
+// collection, and the plugin gets no shutdown hook, so a reload while a
+// subagent is retained leaves that opencode session behind with nothing left in
+// the world that would ever delete it.
+//
+// This is the counter-move, run once at plugin load: list the project's
+// sessions and delete the ones that can only be this plugin's own leftovers.
+export const ORPHAN_SWEEP_TTL_FACTOR = 2
+
+// A session is deleted only when EVERY one of these holds. Each is a positive
+// statement about the session, not the absence of a reason to keep it — a
+// session that cannot be attributed with certainty is left standing, whatever
+// it costs in leaked rows.
+//
+//  1. its title carries SUBAGENT_SESSION_TITLE_MARKER — this plugin created it
+//     as a subagent session, and nothing else writes that prefix;
+//  2. it has a parentID — it is a child. A primary is never a candidate, and
+//     the one primary this plugin does create as a child (the handoff's
+//     successor orchestrator, handoffwiring.js) carries no marker either, so it
+//     is excluded twice over;
+//  3. no listed session names it as a parent — it has no children of its own,
+//     so the recursive DELETE cascade cannot reach a session this sweep never
+//     judged;
+//  4. this process knows nothing about it: not a tracked primary, not a
+//     registry entry. At bootstrap the registry is empty and every candidate
+//     passes, but the sweep must stay safe wherever it is called from;
+//  5. it has been idle for longer than ORPHAN_SWEEP_TTL_FACTOR × the retention
+//     window. A running subagent is reaped by the inactivity watchdog at 90 s
+//     and a retained one at its TTL, so nothing alive is ever this old; a
+//     second opencode instance's subagent on the same database is either far
+//     younger than this or already an orphan itself.
+//
+// Gated on retentionActive: a process that does not retain has nothing of its
+// own to clean up, and at the shipped default the list call is never made.
+export async function sweepOrphanedSubagentSessions(client, { directory, now = Date.now() } = {}) {
+  if (!retentionActive()) return []
+  const minAgeMs = ORPHAN_SWEEP_TTL_FACTOR * getSettings().retainedSubagentTtlMs
+  const sessions = await listSessions(client, { directory })
+  const parents = new Set()
+  for (const s of sessions) if (typeof s?.parentID === "string" && s.parentID) parents.add(s.parentID)
+
+  const deleted = []
+  for (const s of sessions) {
+    const sessionID = s?.id
+    if (typeof sessionID !== "string" || sessionID === "") continue
+    if (typeof s.title !== "string" || !s.title.startsWith(SUBAGENT_SESSION_TITLE_MARKER)) continue
+    if (typeof s.parentID !== "string" || s.parentID === "") continue
+    if (parents.has(sessionID)) continue
+    if (isPrimary(sessionID) || entryForSession(sessionID)) continue
+    const idleSince = s.time?.updated
+    if (typeof idleSince !== "number" || !Number.isFinite(idleSince)) continue
+    if (now - idleSince <= minAgeMs) continue
+    log("bootstrap sweep: deleting a leaked subagent session", {
+      sessionID,
+      title: s.title,
+      idleMs: now - idleSince,
+    })
+    if (await deleteSession(client, sessionID)) {
+      forgetSessionDirectory(sessionID)
+      deleted.push(sessionID)
+    }
+  }
+  if (deleted.length > 0) log("bootstrap sweep: deleted leaked subagent sessions", deleted.length)
+  return deleted
 }

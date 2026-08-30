@@ -40,6 +40,26 @@ export const ORCHESTRATION_GUIDE =
   "\n" +
   "A live snapshot of your active subagents is injected below — reference subagents by the handle from that snapshot in abort.\n---\n"
 
+// Appended to ORCHESTRATION_GUIDE, and only where this process offers the
+// `reuse` tool at all (settings.js `retentionOffered`). It is a second block
+// rather than an edit to the one above so that a process at the shipped default
+// — `maxRetainedSubagents = 0`, nothing ever retained, no `reuse` tool in the
+// map — keeps the orchestration guide byte for byte.
+//
+// It states the exception to the one-shot line above, because that line is what
+// otherwise tells the model a finished subagent cannot be addressed. The whole
+// premise of the feature is that the orchestrator reaches for `reuse` when a
+// question about finished work strikes it later, so the block names that case
+// first and by example, and names the two cases that stay a fresh spawn.
+export const ORCHESTRATION_REUSE_GUIDE =
+  "\n\n---\n♻️ agent-intercom: a finished subagent can be asked again.\n" +
+  "- reuse(subagent, prompt, mode?) — put a follow-up to a subagent that has already finished. `list()` shows which ones are still held, as RETAINED, with the context each holds and the minutes it has left.\n" +
+  "Not every subagent is destroyed when it finishes: a held one keeps the whole session it worked in. So a question about work it already did needs no re-briefing and no re-reading — and it can be asked LATER, in a turn long after the one you were woken in, not only straight away.\n" +
+  "Reuse it when something about a finished reply strikes you afterwards: which of two things it meant, whether it also looked at X, what it found and left out. That is what this tool is for.\n" +
+  "Spawn a fresh subagent instead for work that is new, for work the held session's own history would push the wrong way, and after a `Blocked:` report — a blocked task continues through a FRESH subagent carrying your decision, never through the one that stopped.\n" +
+  'mode: "question" (the default) for a follow-up question; "task" for a further related piece of work, admitted only at a much lower context because a task needs room to run.\n' +
+  "reuse can refuse — the session may be too large to be handed more, its window may have run out, or it may be gone. Each refusal names the rule and the figure it refused on, and spawn is always the way forward: a refused reuse costs you a fresh spawn, never the work.\n---\n"
+
 // Injected into every subagent session so subagents share basic working
 // discipline — without per-project prompt engineering. Targets the failure
 // modes seen with small local models: editing blind and retrying no-op edits.
@@ -242,8 +262,17 @@ export const OUTLINE_DISABLED_AGENTS = new Set(["designer", "gitter"])
 // `delegates` is the runtime answer, not the role's map alone: with nested
 // spawning switched off installation-wide a role that may delegate still
 // cannot, and is told so.
-export function guideBlocks({ primary = false, agent = "", delegates = false } = {}) {
-  if (primary) return ORCHESTRATION_GUIDE
+//
+// `retention` is the same kind of answer for the primary: it says whether this
+// process offers the `reuse` tool, and it defaults to false so that every
+// caller that does not resolve it gets the guide as it ships.
+export function guideBlocks({
+  primary = false,
+  agent = "",
+  delegates = false,
+  retention = false,
+} = {}) {
+  if (primary) return ORCHESTRATION_GUIDE + (retention ? ORCHESTRATION_REUSE_GUIDE : "")
   return (
     SUBAGENT_GUIDE_CORE +
     // Exactly one of the two, always: the spawn rule is not in CORE because it

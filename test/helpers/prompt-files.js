@@ -61,6 +61,15 @@ export function resetPromptFileState() {
   resetSettings()
 }
 
+// The settings file these suites resolve against: written whole, cache dropped,
+// so the next read sees it. The retention latch goes with the cache — a suite
+// that wants retention offered writes the file BEFORE the first read that
+// latches it.
+export function writeSettings(values) {
+  writeFileSync(settingsFile, JSON.stringify(values))
+  resetSettings()
+}
+
 export function writePromptFile(dir, agent, text) {
   const filePath = getPromptFilePath(dir, agent)
   writeFileSync(filePath, text)

@@ -39,6 +39,7 @@ import {
   isActiveEntry,
   entryLifecycle,
   LIFECYCLE_RUNNING,
+  LIFECYCLE_RETAINED,
   retentionDecision,
   recordRetainedContext,
   retentionContextDecision,
@@ -67,6 +68,9 @@ import {
   primaryContextThreshold,
   contextBudgetFor,
   reuseCeilingFor,
+  retentionOffered,
+  retentionActive,
+  retentionCapacity,
   PACKAGE_WARN_SHARE,
   PACKAGE_REFUSE_SHARE,
 } from "./settings.js"
@@ -82,7 +86,13 @@ import {
   scanPromptFiles,
   rescanPromptFiles,
 } from "./promptsfile.js"
-import { tokens as fmtTokens, ageSeconds, estimateTokens, percent } from "./format.js"
+import {
+  tokens as fmtTokens,
+  ageSeconds,
+  estimateTokens,
+  percent,
+  retainedMinutesLeft,
+} from "./format.js"
 import {
   postParentNotice,
   teardownSubagent,
@@ -113,13 +123,12 @@ const PRIMARY_TOOLS = new Set([
 ])
 
 // The orchestration tools a primary may actually call right now, for the
-// refusal that names them. `reuse` is left out wherever retention is off,
-// because the tool is not registered there and naming it would send the model
-// after something it cannot call.
+// refusal that names them. `reuse` is left out wherever retention is not in
+// effect: it is not registered at all where retention was off at load, and
+// where it was switched off since it refuses every call — either way naming it
+// would send the model after something it cannot use.
 function availablePrimaryTools() {
-  return [...PRIMARY_TOOLS]
-    .filter((name) => name !== "reuse" || getSettings().maxRetainedSubagents > 0)
-    .join(", ")
+  return [...PRIMARY_TOOLS].filter((name) => name !== "reuse" || retentionActive()).join(", ")
 }
 
 // TODO.md is the domain of the six agents that produce concrete deliverables:
@@ -356,6 +365,11 @@ export function createTransformSystem(client) {
         primary: !isSubagent,
         agent: agentName,
         delegates,
+        // Latched, not the live setting: it decides whether the guide names
+        // `reuse`, and whether that tool exists was settled when opencode
+        // resolved the tool map. Ignored on the subagent path — a subagent is
+        // never told about retention (its own run is one-shot either way).
+        retention: retentionOffered(),
       })
 
       // Detector B (overrides.js): the prompt files this project has on disk,
@@ -955,26 +969,67 @@ function fixedOverheadFor(agent, { projectMd, agentsMd, snapshot }) {
 // what is running. Fed from the module-level registry, kept fresh by the
 // `event` hook (status/idle). Rows are the entries isActiveEntry admits — the
 // same predicate the concurrency cap counts on — so an entry that holds no
-// slot is not listed here either; finished subagents are not in the registry
-// at all (event hook removes them on idle). Returns the empty string when
-// nothing is active.
+// slot is not listed here either; a subagent that finished and was destroyed
+// is not in the registry at all (event hook removes them on idle). Returns the
+// empty string when there is nothing to show.
+//
+// Where retention is switched on, a second kind of row exists: a finished
+// subagent that is being HELD. It is not active — it holds no slot and
+// isActiveEntry refuses it — so it gets its own clearly separated section
+// rather than another row, in the same words the `list` tool uses for it
+// (tools.js listHandler), and the prose above the rows stops asserting a
+// one-shot rule that no longer holds without exception. Both are gated on
+// retentionActive — offered at load and switched on now — so at
+// `maxRetainedSubagents = 0`, the default, where nothing is ever retained, this
+// block is byte for byte what it has always been.
+//
+// The minutes-left figure moves, and is rendered here rather than per step
+// because the whole block is memoised per user turn (snapshotForTurn). Whole
+// minutes, so it moves as rarely as a figure that moves can.
 function formatSubagentSnapshot(primaryID) {
-  const active = [...registry.values()].filter((e) => isActiveEntry(e))
-  if (active.length === 0) return ""
+  const settings = getSettings()
+  const retentionOn = retentionActive()
+  const entries = [...registry.values()]
+  const active = entries.filter((e) => isActiveEntry(e))
+  const retained = retentionOn
+    ? entries.filter((e) => entryLifecycle(e) === LIFECYCLE_RETAINED)
+    : []
+  if (active.length === 0 && retained.length === 0) return ""
+  const owned = (e) => (e.parentID === primaryID ? "" : " · [other session]")
+  const ctxOf = (e) => (e.ctxTokens == null ? "? ctx" : `${fmtTokens(e.ctxTokens)} ctx`)
   const rows = active.map((e) => {
     const state = effectiveState(e)
-    const ctx = e.ctxTokens == null ? "? ctx" : `${fmtTokens(e.ctxTokens)} ctx`
     const age = ageSeconds(e.spawnedAt)
     const last = e.lastActivity ? ` · last: ${e.lastActivity.slice(0, 80)}` : ""
-    const owner = e.parentID === primaryID ? "" : " · [other session]"
-    return `• ${e.handle} (${e.agent}) — ${state} · ${ctx} · ${age}s${last}${owner}`
+    return `• ${e.handle} (${e.agent}) — ${state} · ${ctxOf(e)} · ${age}s${last}${owned(e)}`
+  })
+  if (!retentionOn) {
+    return (
+      "\n\n---\n📋 agent-intercom: active subagents across all orchestrator sessions in this process " +
+      "(the subagent cap is global). They are one-shot — a finished subagent disappears from this " +
+      "list. To stop one, use `abort` (only on user request); for more work, spawn a fresh " +
+      "subagent:\n" +
+      rows.join("\n") +
+      "\n---\n"
+    )
+  }
+  const retainedRows = retained.map((e) => {
+    const left = retainedMinutesLeft(e, settings.retainedSubagentTtlMs)
+    return `• ${e.handle} (${e.agent}) — retained · ${ctxOf(e)} · ${left}m left${owned(e)}`
   })
   return (
     "\n\n---\n📋 agent-intercom: active subagents across all orchestrator sessions in this process " +
-    "(the subagent cap is global). They are one-shot — a finished subagent disappears from this " +
-    "list. To stop one, use `abort` (only on user request); for more work, spawn a fresh " +
-    "subagent:\n" +
-    rows.join("\n") +
+    "(the subagent cap is global). A finished subagent disappears from this list unless it is " +
+    "being held for a follow-up — those are listed under RETAINED below. To stop a running one, " +
+    "use `abort` (only on user request); for more work, spawn a fresh subagent:\n" +
+    (rows.length > 0 ? rows.join("\n") : "• none running") +
+    (retainedRows.length > 0
+      ? "\n\nRETAINED — finished, NOT running, holding no slot. Their sessions are still alive " +
+        "and still hold the work they did, so you can put a follow-up question to one with " +
+        'reuse("<handle>", "<question>") until its window runs out. After that it is gone and ' +
+        "only spawn is left.\n" +
+        retainedRows.join("\n")
+      : "") +
     "\n---\n"
   )
 }
@@ -1186,7 +1241,7 @@ async function onSessionIdle({ sessionID }, client) {
     // orchestrator gets its result at the same moment. The decision is taken on
     // what this section already holds; the one condition it cannot see, a
     // `Blocked:` reply, is applied below once the result snapshot is in.
-    const retention = retentionDecision(e, getSettings().maxRetainedSubagents)
+    const retention = retentionDecision(e, retentionCapacity())
     if (retention.retain) {
       retainEntryLocked(sessionID)
     } else {
@@ -1287,6 +1342,11 @@ async function onSessionIdle({ sessionID }, client) {
         packageTokens,
         nested,
         runs,
+        // The decision as it stands after phase 2 revoked what the snapshot
+        // refused, which is the last word on it: the teardown below acts on
+        // this same value, so the notice cannot claim a session the delete is
+        // about to take.
+        retain,
       ),
     )
     showToast(client, {
@@ -1328,7 +1388,7 @@ async function onSessionIdle({ sessionID }, client) {
 // standing instead of zero — see dropRetainedSubagents in teardown.js for the
 // claim-then-tear-down discipline and for why an eviction is silent.
 function evictRetainedOverCapacity(client) {
-  return dropRetainedSubagents(client, { keep: getSettings().maxRetainedSubagents })
+  return dropRetainedSubagents(client, { keep: retentionCapacity() })
 }
 
 // A tracked subagent's LLM call failed (provider auth error, API error,

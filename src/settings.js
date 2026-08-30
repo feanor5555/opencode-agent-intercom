@@ -517,6 +517,46 @@ export function reuseCeilingFor(agent) {
   return s.maxReuseContext
 }
 
+// Whether this process offers retention at all, decided at the first read and
+// never again.
+//
+// opencode resolves the plugin's tool map at instance bootstrap and keeps it
+// for the life of the instance, so whether the `reuse` tool exists is settled
+// there, by `createTools`. Every text that NAMES that tool — the orchestrator
+// guide, the `list` description — is decided on this same latched answer, so a
+// settings edit mid-process can never leave the orchestrator told about a tool
+// its map does not carry.
+//
+// What the setting still governs live is behaviour on entries, not the tool
+// surface: whether a finished subagent is retained, whether `list` renders its
+// retained section, whether `reuse` admits the call it was handed.
+let retentionLatch = null
+export function retentionOffered() {
+  if (retentionLatch === null) retentionLatch = getSettings().maxRetainedSubagents > 0
+  return retentionLatch
+}
+
+// How many finished subagents this process may hold RIGHT NOW: the live
+// setting where retention was offered at load, and 0 where it was not.
+//
+// The conjunction is what keeps the two halves of the feature from drifting
+// apart. The tool surface is settled at load and cannot move (retentionOffered);
+// everything else — whether an entry is retained, whether `list` renders a
+// retained section, whether `reuse` admits a call — reads the live file. Read
+// live alone, a user who switches retention ON mid-process gets retained
+// sessions and a `list` that points at a `reuse` tool the orchestrator's map
+// does not carry. So: enabling retention needs an opencode restart, disabling
+// it takes effect at the next settings read, and no state exists that only one
+// of the two halves believes in.
+export function retentionCapacity() {
+  return retentionOffered() ? getSettings().maxRetainedSubagents : 0
+}
+
+// Whether retention is in effect right now — offered at load AND switched on.
+export function retentionActive() {
+  return retentionCapacity() > 0
+}
+
 // The resolved searxng base URL (file > env > ""), trailing slashes stripped.
 // Empty string means searxng is disabled and web_search stays Exa-only.
 export function getSearxngUrl() {
@@ -602,7 +642,14 @@ export function writeEndlessMode(enabled) {
 // and drops the settings cache so the next getSettings() sees it.
 function holdEndlessMode(enabled) {
   endlessOverride = { value: enabled, stamp: settingsFileStamp() }
-  resetSettings()
+  // The cache alone. The retention latch belongs to the tool map opencode
+  // resolved at bootstrap, and toggling endless mode does not re-resolve it.
+  dropSettingsCache()
+}
+
+function dropSettingsCache() {
+  cache = null
+  cachedAt = 0
 }
 
 // Test-only: point at a different file and drop the cache. The endlessMode
@@ -614,7 +661,18 @@ export function setSettingsPath(p) {
 }
 
 // Test-only: invalidate the cache so the next getSettings() re-reads the file.
+// The retention latch goes with it: it is taken at plugin load, and a test that
+// swaps the settings under a fresh plugin has to get a fresh answer.
 export function resetSettings() {
-  cache = null
-  cachedAt = 0
+  dropSettingsCache()
+  retentionLatch = null
+}
+
+// Test-only: invalidate the cache and LEAVE the retention latch standing, so a
+// test can move `maxRetainedSubagents` under a process that has already decided
+// at load whether it offers the `reuse` tool at all. That combination — offered
+// at load, switched off now, and its mirror image — is the whole point of
+// retentionCapacity, and resetSettings cannot express it.
+export function dropSettingsCacheKeepingLatch() {
+  dropSettingsCache()
 }

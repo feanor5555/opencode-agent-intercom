@@ -23,6 +23,7 @@ import {
   PROMPT_CONTRACT,
   guideBlocks,
   ORCHESTRATION_GUIDE,
+  ORCHESTRATION_REUSE_GUIDE,
   SUBAGENT_GUIDE_CORE,
   SUBAGENT_DELEGATION_GUIDE,
   SUBAGENT_NO_SPAWN_GUIDE,
@@ -41,7 +42,9 @@ import {
   cleanupProjects,
   resetPromptFileState,
   makeCtx,
+  writeSettings,
 } from "./helpers/prompt-files.js"
+import { retentionOffered } from "../src/settings.js"
 
 after(cleanupProjects)
 beforeEach(resetPromptFileState)
@@ -206,6 +209,7 @@ test("an unknown token is still left in place — only `guide` was added", () =>
 // changes both sides here, and a note that stops naming a block fails.
 const GUIDE_CONSTANTS = [
   ["ORCHESTRATION_GUIDE", ORCHESTRATION_GUIDE],
+  ["ORCHESTRATION_REUSE_GUIDE", ORCHESTRATION_REUSE_GUIDE],
   ["SUBAGENT_GUIDE_CORE", SUBAGENT_GUIDE_CORE],
   ["SUBAGENT_DELEGATION_GUIDE", SUBAGENT_DELEGATION_GUIDE],
   ["SUBAGENT_NO_SPAWN_GUIDE", SUBAGENT_NO_SPAWN_GUIDE],
@@ -214,10 +218,20 @@ const GUIDE_CONSTANTS = [
 
 const GUIDE_NOTE = /^ {2}- the agent-intercom guide block \(([^)]+)\) appended by the plugin$/m
 
-test("the opencode-defaults reference names every guide block the role really gets", () => {
+// The note against what `guideBlocks` really assembles for the role, in this
+// process's retention state. The state is read through `retentionOffered` on
+// both sides, so the comparison cannot pass by both sides being wrong in the
+// same direction: the file is rendered from the latch, and the guide it is
+// measured against is assembled from the same latch.
+function assertGuideNoteNamesWhatTheRoleGets() {
   for (const agent of AGENT_NAMES) {
     const primary = agent === "orchestrator"
-    const guide = guideBlocks({ primary, agent, delegates: mayDelegate(agent) })
+    const guide = guideBlocks({
+      primary,
+      agent,
+      delegates: mayDelegate(agent),
+      retention: retentionOffered(),
+    })
     const expected = GUIDE_CONSTANTS.filter(([, text]) => guide.includes(text)).map(([name]) => name)
 
     const note = GUIDE_NOTE.exec(renderOpencodeDefaultFile(agent))
@@ -228,6 +242,36 @@ test("the opencode-defaults reference names every guide block the role really ge
       `${agent}: the reference file must name the blocks guideBlocks assembles, in order`,
     )
   }
+}
+
+test("the opencode-defaults reference names every guide block the role really gets", () => {
+  assertGuideNoteNamesWhatTheRoleGets()
+})
+
+// With retention offered the orchestrator's prompt carries a SECOND block, and
+// a reference file that still names ORCHESTRATION_GUIDE alone under-reports what
+// the plugin appends — the one thing that file exists to state.
+test("with retention offered the reference names the reuse block too", () => {
+  writeSettings({ maxRetainedSubagents: 3 })
+  assert.equal(retentionOffered(), true)
+  assertGuideNoteNamesWhatTheRoleGets()
+
+  const note = GUIDE_NOTE.exec(renderOpencodeDefaultFile("orchestrator"))
+  assert.equal(note[1], "ORCHESTRATION_GUIDE + ORCHESTRATION_REUSE_GUIDE")
+
+  // Only the orchestrator. A subagent is never told about retention, so no
+  // subagent's file may grow a block on account of it.
+  for (const agent of AGENT_NAMES) {
+    if (agent === "orchestrator") continue
+    assert.doesNotMatch(renderOpencodeDefaultFile(agent), /ORCHESTRATION_REUSE_GUIDE/)
+  }
+})
+
+test("with retention off the reference names ORCHESTRATION_GUIDE alone", () => {
+  assert.equal(retentionOffered(), false, "the shipped default")
+  const note = GUIDE_NOTE.exec(renderOpencodeDefaultFile("orchestrator"))
+  assert.equal(note[1], "ORCHESTRATION_GUIDE")
+  assert.doesNotMatch(renderOpencodeDefaultFile("orchestrator"), /reuse/i)
 })
 
 test("the reference file names the no-spawn stand-in for exactly the delegating roles", () => {

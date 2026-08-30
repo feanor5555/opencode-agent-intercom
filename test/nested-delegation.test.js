@@ -19,7 +19,7 @@
 
 import test, { beforeEach, after } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -380,6 +380,62 @@ test("the counters are per run: a second entry of the same role starts clean", (
   subagentCaller("ses_b", "planner")
   assert.equal(entryForSession("ses_b").nestedRuns, 0)
   assert.equal(entryForSession("ses_b").nestedTokens, 0)
+})
+
+// The child hand-back is a crossing point like the wake notice: the reply
+// leaves the child's session and enters the WAITING parent's context, so it is
+// cut against the CHILD's type, not the parent's.
+test("a nested child's reply is cut against the child's own ceiling", async () => {
+  const huge = "F".repeat(9000) + "NESTED_TAIL"
+  const home = mkdtempSync(join(tmpdir(), "intercom-deleg-home-"))
+  const realHome = process.env.HOME
+  process.env.HOME = home
+  try {
+    const { ctx, created } = makeCtx({ messages: assistantReply(huge, 8000) })
+    const hooks = await plugin(ctx)
+    const callerCtx = subagentCaller("ses_planner", "planner")
+
+    const pending = hooks.tool.spawn.execute({ agent: "researcher", prompt: "q" }, callerCtx)
+    const childID = await until(() => created[0], "the child session")
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: childID } } })
+    const handback = (await pending).output
+
+    assert.match(handback, /\[cut at 2000 tokens — \d+ more tokens of this reply are not shown/)
+    assert.doesNotMatch(handback, /NESTED_TAIL/)
+    const path = /^(\/\S+\.md)$/m.exec(handback)?.[1]
+    assert.ok(path, `no overflow file path in the hand-back: ${handback}`)
+    assert.match(readFileSync(path, "utf8"), /^# subagent result — researcher#1 \(researcher\)$/m)
+  } finally {
+    process.env.HOME = realHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The per-type entry, at the wiring level: the same reply that is cut for a
+// type on the default ceiling passes whole for one carrying its own.
+test("a resultTokens entry for the child's type lets the same reply through whole", async () => {
+  withSettings({ resultTokens: { researcher: 20000 } })
+  const huge = "F".repeat(9000) + "NESTED_TAIL"
+  const home = mkdtempSync(join(tmpdir(), "intercom-deleg-home-"))
+  const realHome = process.env.HOME
+  process.env.HOME = home
+  try {
+    const { ctx, created } = makeCtx({ messages: assistantReply(huge, 8000) })
+    const hooks = await plugin(ctx)
+    const callerCtx = subagentCaller("ses_planner", "planner")
+
+    const pending = hooks.tool.spawn.execute({ agent: "researcher", prompt: "q" }, callerCtx)
+    const childID = await until(() => created[0], "the child session")
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: childID } } })
+    const handback = (await pending).output
+
+    assert.match(handback, /NESTED_TAIL/)
+    assert.doesNotMatch(handback, /\[cut at /)
+    assert.equal(existsSync(join(home, ".cache", "opencode-agent-intercom", "results")), false)
+  } finally {
+    process.env.HOME = realHome
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
 test("an ended nested spawn is booked on the caller's entry as the waiter resolves", async () => {

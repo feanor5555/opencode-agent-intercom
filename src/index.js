@@ -65,7 +65,14 @@ import { chatMessageHook, applyModelChoices, messageAgent } from "./llmmodel.js"
 import { captureSystem, captureMessages, captureParams } from "./reqlog.js"
 import { setServerUrl } from "./client.js"
 import { sweepOrphanedSubagentSessions } from "./teardown.js"
+import { pruneResultFiles } from "./resultfile.js"
 import { log } from "./log.js"
+
+// The overflow-file prune is a cache sweep, not per-session work: opencode
+// calls this factory once per session in one process, and one pass over a
+// directory of at most a few dozen files is enough for the life of that
+// process.
+let resultFilesPruned = false
 
 // NOTE: this module must have exactly ONE export — the default factory.
 // opencode 1.14.48 treats every named export of a plugin module as its own
@@ -94,6 +101,19 @@ export default async (ctx) => {
       log("bootstrap sweep failed", err?.message ?? String(err))
     })
   })
+
+  // The other leftover a load has to clear: the overflow files behind the reply
+  // token ceiling. Nothing removes them on the wake path — once the subagent's
+  // session is deleted such a file is the only copy of the cut text — so a
+  // single pass here drops what is older than RESULT_FILE_TTL_MS. Same
+  // next-event-loop-turn discipline as the sweep above, so the fs walk cannot
+  // hold up this factory; pruneResultFiles never throws.
+  if (!resultFilesPruned) {
+    resultFilesPruned = true
+    setImmediate(() => {
+      pruneResultFiles()
+    })
+  }
 
   const permissionGuard = createPermissionGuard(client)
   const transformSystem = createTransformSystem(client)

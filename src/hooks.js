@@ -110,6 +110,7 @@ import {
 } from "./teardown.js"
 import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
 import { completionNotice, errorNotice, denialLoopNotice, isBlockedResult } from "./notices.js"
+import { capReplyForAgent } from "./resultfile.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
 import { maybeRunPendingHandoff, maybeRunPendingEndless } from "./handoffwiring.js"
 
@@ -1425,17 +1426,38 @@ async function onSessionIdle({ sessionID }, client) {
         })
       }
     }
+    // The reply token ceiling, applied HERE because this is where the text
+    // crosses into another agent's context: the parent's wake notice and, when
+    // a session is blocked on this one, that session's tool result. Both get
+    // the same capped text, resolved against the FINISHED subagent's own type.
+    //
+    // Before the teardown below, on purpose: what the cut leaves out is written
+    // to the overflow file while the session that holds the original still
+    // exists, and the marker names that file. The two readings that are not a
+    // context crossing — the `Blocked:` test above and the `DONE: T<n>` marker
+    // below — keep the full text: a marker sits on the reply's LAST line and a
+    // cut one would silently stop ticking off tasks.
+    const reply = capReplyForAgent(snapshot.result, {
+      handle,
+      agent,
+      sessionID,
+      taskId,
+      runs,
+      // The decision as it stands after phase 2, so the marker cannot offer a
+      // `reuse` on a session the teardown below is about to delete.
+      retained: retain,
+    })
     // Hand the reply to a session blocked on this one, if there is one. This
     // is the only ending path that has a RESULT rather than just a cause, so
     // it settles here rather than leaving it to teardownSubagent's fallback —
     // which still runs below and is then a no-op. `ctxTokens` rides along
     // because what a nested run burned is invisible in the parent's own
-    // figure. No-op for every subagent today: nothing registers a waiter yet.
+    // figure.
     settleChildWaiter(sessionID, {
       status: "completed",
       handle,
       agent,
-      result: snapshot.result,
+      result: reply.text,
       ctxTokens: snapshot.ctxTokens,
     })
     // Auto-tick TODO.md based on the subagent's `DONE: T<n>` marker, if it's
@@ -1452,7 +1474,7 @@ async function onSessionIdle({ sessionID }, client) {
       completionNotice(
         handle,
         agent,
-        snapshot.result,
+        reply.text,
         parentID,
         taskOutcome,
         snapshot.ctxTokens,
@@ -1609,6 +1631,19 @@ async function onSessionError(props, client) {
   // Best-effort by construction: fetchSnapshot swallows its own failures and
   // returns {}, and the notice simply omits the block when nothing came back.
   const { result: lastText } = await fetchSnapshot(client, sessionID)
+  // The same reply ceiling the idle path applies, for the same reason: this
+  // text is about to be pushed into the orchestrator's context, and a session
+  // that died of a context-length error is exactly the one whose last text is
+  // longest. The overflow file is written before the teardown below deletes
+  // the session. `retained: false` — an errored subagent is never held.
+  const recovered = capReplyForAgent(lastText, {
+    handle: entry.handle,
+    agent: entry.agent,
+    sessionID,
+    taskId: entry.taskId,
+    runs: entry.runs ?? 1,
+    retained: false,
+  })
   // Wake the parent with the error notice, then free the slot — same teardown
   // as onSessionIdle / the watchdog. markAborted keeps the tool-guard hard-
   // denying in-flight tool calls throughout removeEntry + deleteSession
@@ -1620,7 +1655,7 @@ async function onSessionError(props, client) {
       agent: entry.agent,
       detail: errText,
     },
-    notice: errorNotice(entry, errText, wasAborted, lastText),
+    notice: errorNotice(entry, errText, wasAborted, recovered.text),
     toast: {
       title: "agent-intercom",
       message: wasAborted ? `${entry.handle} aborted` : `${entry.handle} failed`,

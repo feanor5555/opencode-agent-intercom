@@ -8,12 +8,13 @@
 // much as for a stepped limit: the value each flips is the one on disk at that
 // moment.
 //
-// The context ceiling is one of the two writes that materialise keys: it is a
+// The context ceiling is one of the three writes that materialise keys: it is a
 // value per agent type, so the first edit freezes the budget every listed type
 // has in effect into `agentContext` and drops the flat legacy `maxContext` key.
 // What that write must not do is change any type's budget while doing so. The
-// reuse ceiling is the other one, on `reuseContext` and `maxReuseContext`, and
-// the two maps are stepped independently of each other.
+// reuse ceiling is the second, on `reuseContext` and `maxReuseContext`, and the
+// result ceiling the third, on `resultTokens` and `maxResultTokens`; the three
+// maps are stepped independently of each other.
 //
 // The retention rows are scalars and go through the ordinary stepping pair. The
 // count reaches 0, which is how retention is switched off; the window does not,
@@ -33,11 +34,13 @@ import {
   DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_NESTED_SPAWNS,
   DEFAULT_MAX_RETAINED_SUBAGENTS,
+  DEFAULT_MAX_RESULT_TOKENS,
   DEFAULT_MAX_REUSE_CONTEXT,
   DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_MAX_SUBAGENTS,
   DEFAULT_SHOW_AGENTCOM,
   RETAINED_SUBAGENT_TTL_STEP_MS,
+  effectiveResultTokens,
   effectiveReuseContext,
   readSettings,
   setEndlessMode,
@@ -45,6 +48,7 @@ import {
   setSettingsPath,
   setShowAgentcom,
   stepAgentContext,
+  stepResultTokens,
   stepReuseContext,
   stepSetting,
   toggleEndlessMode,
@@ -70,6 +74,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS
   delete process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS
 })
 
 const onDisk = () => JSON.parse(readFileSync(file, "utf8"))
@@ -91,6 +96,8 @@ const state = (over = {}) => ({
   retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
   reuseContext: {},
+  maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
+  resultTokens: {},
   showAgentcom: DEFAULT_SHOW_AGENTCOM,
   ...over,
 })
@@ -735,5 +742,166 @@ test("a reuse write that cannot reach the disk leaves the panel on the file's st
 
   assert.deepEqual(onDisk(), { maxReuseContext: 60000 })
   assert.deepEqual(merged, state({ maxReuseContext: 60000 }))
+  chmodSync(file, 0o644)
+})
+
+// The result ceiling: the third per-agent map on the cycler, stepped in whole
+// tokens rather than thousands, and materialised by the same freeze the other
+// two run.
+
+test("the first result ceiling edit freezes every listed agent and drops the flat key", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ maxResultTokens: 2000, searxngUrl: "http://host:8080" }),
+  )
+
+  const merged = stepResultTokens("coder", 500, AGENTS)
+
+  const frozen = { planner: 2000, coder: 2500, researcher: 2000 }
+  assert.deepEqual(onDisk(), {
+    searxngUrl: "http://host:8080",
+    resultTokens: frozen,
+  })
+  assert.equal("maxResultTokens" in onDisk(), false)
+  assert.deepEqual(merged, state({ resultTokens: frozen }))
+})
+
+test("with no flat key the result freeze takes the built-in default for every type", () => {
+  const merged = stepResultTokens("coder", 500, AGENTS)
+
+  const frozen = {
+    planner: DEFAULT_MAX_RESULT_TOKENS,
+    coder: DEFAULT_MAX_RESULT_TOKENS + 500,
+    researcher: DEFAULT_MAX_RESULT_TOKENS,
+  }
+  assert.deepEqual(onDisk(), { resultTokens: frozen })
+  assert.deepEqual(merged, state({ resultTokens: frozen }))
+})
+
+test("the result freeze takes the env value where that is what governs", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS = "3000"
+
+  stepResultTokens("coder", 500, AGENTS)
+
+  assert.deepEqual(onDisk(), {
+    resultTokens: { planner: 3000, coder: 3500, researcher: 3000 },
+  })
+})
+
+test("a result step starts from the value the file holds for that agent", () => {
+  writeFileSync(file, JSON.stringify({ resultTokens: { coder: 4000 } }))
+  assert.equal(readSettings().resultTokens.coder, 4000)
+
+  // Raised outside the panel while the sidebar still shows 4000.
+  writeFileSync(file, JSON.stringify({ resultTokens: { coder: 20000 } }))
+
+  const merged = stepResultTokens("coder", 500, ["coder"])
+
+  assert.equal(merged.resultTokens.coder, 20500)
+  assert.deepEqual(onDisk(), { resultTokens: { coder: 20500 } })
+})
+
+test("0 is reachable on a result ceiling and stays as the never-cut value", () => {
+  writeFileSync(file, JSON.stringify({ resultTokens: { coder: 500 } }))
+
+  const merged = stepResultTokens("coder", -500, ["coder"])
+
+  assert.deepEqual(onDisk(), { resultTokens: { coder: 0 } })
+  assert.equal(merged.resultTokens.coder, 0)
+  // The row reads that 0 as the type's own value — its "off" — not as an
+  // inherited ceiling.
+  assert.deepEqual(effectiveResultTokens(merged, "coder"), {
+    value: 0,
+    source: "agent",
+  })
+})
+
+test("a result step below zero drops the entry and the inherited ceiling shows again", () => {
+  writeFileSync(file, JSON.stringify({ resultTokens: { planner: 4000, coder: 0 } }))
+
+  const merged = stepResultTokens("coder", -500, ["planner", "coder"])
+
+  assert.deepEqual(onDisk(), { resultTokens: { planner: 4000 } })
+  assert.deepEqual(merged, state({ resultTokens: { planner: 4000 } }))
+  assert.deepEqual(effectiveResultTokens(merged, "coder"), {
+    value: DEFAULT_MAX_RESULT_TOKENS,
+    source: "inherited",
+  })
+})
+
+test("dropping the last result entry drops the whole map", () => {
+  writeFileSync(file, JSON.stringify({ maxSubagents: 2, resultTokens: { coder: 0 } }))
+
+  stepResultTokens("coder", -500, ["coder"])
+
+  assert.deepEqual(onDisk(), { maxSubagents: 2 })
+})
+
+test("a malformed entry in the result map is dropped by a result write", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ resultTokens: { coder: 2000, planner: "lots" } }),
+  )
+
+  stepResultTokens("coder", 500, ["coder"])
+
+  assert.deepEqual(onDisk(), { resultTokens: { coder: 2500 } })
+})
+
+test("a result step leaves the budget and reuse maps and their flat keys untouched", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({
+      maxContext: 90000,
+      agentContext: { coder: 40000 },
+      maxReuseContext: 60000,
+      reuseContext: { coder: 30000 },
+    }),
+  )
+
+  stepResultTokens("coder", 500, ["coder"])
+
+  assert.deepEqual(onDisk(), {
+    maxContext: 90000,
+    agentContext: { coder: 40000 },
+    maxReuseContext: 60000,
+    reuseContext: { coder: 30000 },
+    resultTokens: { coder: DEFAULT_MAX_RESULT_TOKENS + 500 },
+  })
+})
+
+test("a reuse step leaves the result map and its flat key untouched", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ maxResultTokens: 3000, resultTokens: { coder: 1500 } }),
+  )
+
+  stepReuseContext("coder", 5000, ["coder"])
+
+  assert.deepEqual(onDisk(), {
+    maxResultTokens: 3000,
+    resultTokens: { coder: 1500 },
+    reuseContext: { coder: DEFAULT_MAX_REUSE_CONTEXT + 5000 },
+  })
+})
+
+test("an unparsable file is left alone by a result step", () => {
+  writeFileSync(file, '{ "maxResultTokens": 3000, "exaApiKey": "secret",')
+  const before = readFileSync(file, "utf8")
+
+  const merged = stepResultTokens("coder", 500, AGENTS)
+
+  assert.equal(readFileSync(file, "utf8"), before)
+  assert.deepEqual(merged, state())
+})
+
+test("a result write that cannot reach the disk leaves the panel on the file's state", { skip: rootSkip }, () => {
+  writeFileSync(file, JSON.stringify({ maxResultTokens: 3000 }))
+  chmodSync(file, 0o444)
+
+  const merged = stepResultTokens("coder", 500, AGENTS)
+
+  assert.deepEqual(onDisk(), { maxResultTokens: 3000 })
+  assert.deepEqual(merged, state({ maxResultTokens: 3000 }))
   chmodSync(file, 0o644)
 })

@@ -16,7 +16,7 @@
 
 import test, { beforeEach } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -228,6 +228,52 @@ test("session.error posts the recovered text to the parent", async () => {
   const notice = posted.map((p) => p.text).join("\n")
   assert.match(notice, /failed: APIError: context length exceeded/)
   assert.match(notice, /Done: mapped the call sites; the migration is not written\./)
+})
+
+// The error path is the one where the recovered text is longest — a session
+// that died of a context-length error has usually been working for a while —
+// so it carries the same reply ceiling as the idle path: cut in the notice,
+// whole in the overflow file, written before the teardown deletes the session.
+test("session.error carries a capped last text and files the rest", async () => {
+  const posted = []
+  const huge = "Done: " + "R".repeat(9000) + "TAIL_MARKER"
+  const home = mkdtempSync(join(tmpdir(), "intercom-recovery-home-"))
+  const realHome = process.env.HOME
+  process.env.HOME = home
+  try {
+    const { ctx, created } = makeCtx({
+      ctxTokens: 5000,
+      resultParts: [textPart(huge)],
+      onPrompt: (id, text) => posted.push({ id, text }),
+    })
+    const hooks = await plugin(ctx)
+    await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
+    const sessionID = created[created.length - 1]
+    posted.length = 0
+
+    await hooks.event({
+      event: {
+        type: "session.error",
+        properties: {
+          sessionID,
+          error: { name: "APIError", data: { message: "context length exceeded" } },
+        },
+      },
+    })
+
+    const notice = posted.map((p) => p.text).join("\n")
+    assert.match(notice, /failed: APIError: context length exceeded/)
+    assert.match(notice, /\[cut at 2000 tokens — \d+ more tokens of this reply are not shown here/)
+    assert.doesNotMatch(notice, /TAIL_MARKER/)
+    const path = /^(\/\S+\.md)$/m.exec(notice)?.[1]
+    assert.ok(path, `no overflow file path in the error notice: ${notice}`)
+    assert.ok(readFileSync(path, "utf8").endsWith(huge), "the file must hold the reply whole")
+    // An errored subagent is never held, so the marker must not offer `reuse`.
+    assert.doesNotMatch(notice, /reuse\(/)
+  } finally {
+    process.env.HOME = realHome
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
 test("session.error on a session with no assistant text reports the failure alone", async () => {

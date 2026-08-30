@@ -69,9 +69,11 @@ import {
   type Settings,
   RETAINED_SUBAGENT_TTL_STEP_MS,
   effectiveAgentContext,
+  effectiveResultTokens,
   effectiveReuseContext,
   readSettings,
   stepAgentContext,
+  stepResultTokens,
   stepReuseContext,
   stepSetting,
   toggleEndlessMode,
@@ -104,6 +106,10 @@ const ABORT_COMMAND = "agent-intercom.abort-selected";
 const PROMPTS_DIR_PATH = join(process.cwd(), ".opencode", "agent-intercom");
 // Step of the [-]/[+] buttons on the context-ceiling row, in tokens.
 const CONTEXT_STEP = 5000;
+// Step of the [-]/[+] buttons on the result-ceiling row, in tokens. Its own
+// step, an order of magnitude smaller: that row holds a reply ceiling in the
+// low thousands, which the 5000 of a context budget cannot edit at all.
+const RESULT_TOKEN_STEP = 500;
 // The stepping rule of one parameter row plus the label it carries; the rule
 // itself is the store's, which applies it inside its read-modify-write.
 interface LlmParamDef extends LlmParamStep {
@@ -122,6 +128,9 @@ const LLM_PARAM_DEFS: LlmParamDef[] = [
 // displayed value changes from 1 to 999 digits, or from "not set" to "0.30".
 const ROW_LABEL_W = 15;     // label field, after the 2-space indent
 const NUM_W = 3;            // fits up to 999 (max subagents, max Token(k))
+// The three per-agent ceiling rows share a wider value cell because the result
+// ceiling shows whole tokens rather than thousands, up to 99999 and "off".
+const CEILING_NUM_W = 5;
 const LLM_VAL_W = 7;        // fits "not set" and every numeric format
 const AGENT_NAME_W = 12;    // fits "orchestrator", the longest agent name
 // Model names are unbounded; same width as the agent cell so the two cycler
@@ -281,6 +290,14 @@ function resolveLlmEffort(
 // draws on the subagent cap.
 function formatContextCeiling(tokens: number): string {
   return tokens === 0 ? "off" : String(tokens / 1000);
+}
+
+// Label for the result ceiling: whole tokens, not thousands, because the value
+// lives in the low thousands and rounding it to a k would hide every step the
+// row takes. "off" is the 0 that lets a whole reply through uncut — the same
+// reading the budget row's 0 has, and the opposite of the reuse row's 0.
+function formatResultCeiling(tokens: number): string {
+  return tokens === 0 ? "off" : String(tokens);
 }
 
 function formatLlmValue(value: number | null, decimals: number): string {
@@ -613,6 +630,12 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // stepReuseContext.
   const adjustReuseContext = (delta: number): void => {
     showSettings(stepReuseContext(currentContextAgent(), delta, contextAgents()));
+  };
+
+  // Step the selected agent's result ceiling and save. Third row on the same
+  // cycler, same freeze on the first step — see stepResultTokens.
+  const adjustResultTokens = (delta: number): void => {
+    showSettings(stepResultTokens(currentContextAgent(), delta, contextAgents()));
   };
 
   // Walk the pick list by one. Position and write are one read-modify-write in
@@ -1266,6 +1289,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             onCycleContextAgent={cycleContextAgent}
             onAdjustContext={adjustAgentContext}
             onAdjustReuse={adjustReuseContext}
+            onAdjustResultTokens={adjustResultTokens}
             endlessMode={endlessMode}
             endlessContext={endlessContext}
             onAdjust={adjustSetting}
@@ -1369,6 +1393,7 @@ function SubagentPanel(props: {
   onCycleContextAgent: (delta: number) => void;
   onAdjustContext: (delta: number) => void;
   onAdjustReuse: (delta: number) => void;
+  onAdjustResultTokens: (delta: number) => void;
   endlessMode: () => boolean;
   endlessContext: () => number;
   onAdjust: (key: LimitKey, delta: number) => void;
@@ -1781,7 +1806,7 @@ function SubagentPanel(props: {
                   {"[-]"}
                 </text>
                 <text fg={props.theme.text}>
-                  {numCell(formatContextCeiling(ceiling().value))}
+                  {numCell(formatContextCeiling(ceiling().value), CEILING_NUM_W)}
                 </text>
                 <text
                   fg={props.theme.accent}
@@ -1815,7 +1840,9 @@ function SubagentPanel(props: {
                 >
                   {"[-]"}
                 </text>
-                <text fg={props.theme.text}>{numCell(ceiling().value / 1000)}</text>
+                <text fg={props.theme.text}>
+                  {numCell(ceiling().value / 1000, CEILING_NUM_W)}
+                </text>
                 <text
                   fg={props.theme.accent}
                   {...holdRepeat(() => props.onAdjustReuse(CONTEXT_STEP))}
@@ -1827,6 +1854,43 @@ function SubagentPanel(props: {
                 </Show>
                 <Show when={ceiling().value === 0}>
                   <text fg={props.theme.textMuted}>{" never"}</text>
+                </Show>
+              </box>
+            );
+          })()}
+          {/* Result ceiling of the same agent type, picked by the same cycler:
+              how many tokens of that type's final reply reach the orchestrator.
+              Everything past it is cut out of the wake notice and written to a
+              file the notice names. Whole tokens rather than thousands, and its
+              own smaller step, because the value lives in the low thousands. ★
+              marks a type carrying a value of its own as on the two rows above,
+              and [-] below zero drops that value so the inherited ceiling shows
+              again. "off" is a ceiling of 0, i.e. that type's reply is never
+              cut. */}
+          {(() => {
+            const ceiling = createMemo(() =>
+              effectiveResultTokens(props.settings(), props.contextAgent()),
+            );
+            return (
+              <box flexDirection="row">
+                <text fg={props.theme.textMuted}>{rowLabel("result Token")}</text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat(() => props.onAdjustResultTokens(-RESULT_TOKEN_STEP))}
+                >
+                  {"[-]"}
+                </text>
+                <text fg={props.theme.text}>
+                  {numCell(formatResultCeiling(ceiling().value), CEILING_NUM_W)}
+                </text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat(() => props.onAdjustResultTokens(RESULT_TOKEN_STEP))}
+                >
+                  {"[+]"}
+                </text>
+                <Show when={ceiling().source === "agent"}>
+                  <text fg={props.theme.success}>{" ★"}</text>
                 </Show>
               </box>
             );

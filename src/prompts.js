@@ -3,7 +3,7 @@
 // (subagent snapshot, context-budget notice) stay in
 // hooks.js because they depend on runtime state.
 
-import { PACKAGE_WARN_SHARE, PACKAGE_REFUSE_SHARE } from "./settings.js"
+import { PACKAGE_WARN_SHARE, PACKAGE_REFUSE_SHARE, resultCeilingFor } from "./settings.js"
 import { percent } from "./format.js"
 
 export const ABORT_NOTICE =
@@ -74,7 +74,7 @@ export const SUBAGENT_GUIDE_CORE =
   "\n\n---\n🔧 agent-intercom: subagent discipline.\n" +
   "You are a one-shot subagent — do one focused task, then reply once and return.\n" +
   "Read a file before editing it. Make each tool call once; on error change your approach, don't repeat.\n" +
-  "Final reply: brief plain text (hard-capped at 8000 chars). Reference files by path:line; do not paste file contents back.\n" +
+  "Final reply: brief plain text. Reference files by path:line; do not paste file contents back.\n" +
   "If your spawn prompt started with `T<n>:` and you completed the task, put `DONE: T<n>` on the FIRST or LAST non-empty line of your final reply — the wake-hook removes that task from TODO.md for you. If you could not finish, leave that marker off and report as blocked, below.\n" +
   "Blocked: on a problem your prompt does not cover — a blocker, a missing precondition, an ambiguity, a tool that keeps failing, a decision that is not yours to make — stop that step, still finish every part of the task that does not depend on it, and start the FIRST line of your final reply with `Blocked:` naming the problem, what you did complete, and what you need to go on. Do not invent a workaround, do not widen the task, do not drop the step in silence. The orchestrator decides what happens and spawns a fresh subagent if the task continues.\n" +
   "Reply to the orchestrator in English. Address the user directly only in the user's language.\n---\n"
@@ -252,6 +252,36 @@ export function contractElementText(id) {
 // them so the system prompt doesn't push a tool they can't use.
 export const OUTLINE_DISABLED_AGENTS = new Set(["designer", "gitter"])
 
+// What the subagent is told about the reply ceiling. Not a constant: the
+// figure is the ceiling THIS type carries (settings.js `resultCeilingFor`), so
+// a type with its own `resultTokens` entry is told its own number. The
+// character figure beside it is the estimator's own exchange rate (3.5 ASCII
+// characters per token, format.js `estimateReplyTokens`), because a model
+// judging the length of its own draft counts characters, not tokens.
+//
+// Empty at a ceiling of 0: that type's reply is never cut, so there is nothing
+// to tell it.
+//
+// Best effort, and only half of the rule. The other half is the plugin's
+// guarantee (resultfile.js): whatever the subagent does, the part that does not
+// fit is written out in full and the notice carries the path. This block exists
+// so the good outcome — the subagent files its own material, under the project,
+// while it still has its tools — has a chance of happening first.
+export function replyCapBlock(agent) {
+  const ceiling = resultCeilingFor(agent)
+  if (!(ceiling > 0)) return ""
+  const chars = Math.round(ceiling * 3.5)
+  return (
+    "\n\n---\n📄 agent-intercom: your final reply is capped.\n" +
+    `The orchestrator sees at most ~${ceiling} tokens (~${chars} characters) of your final reply. ` +
+    "Everything past that is cut out of what it receives and written to a file, and it gets that " +
+    "file's path instead of your words — it cannot see them.\n" +
+    "So file the long material yourself, while you still have your tools: write it under the " +
+    "project, and let your reply carry the findings and the path. A reply that leaves the cut to " +
+    "decide what survives keeps its opening and loses its conclusion.\n---\n"
+  )
+}
+
 // The guide blocks one agent is given, in the order they are injected. One
 // assembly for three call sites — the auto-assembled system prompt, the
 // `{{guide}}` placeholder of a user's prompt file, and the spawn-size overhead
@@ -279,6 +309,11 @@ export function guideBlocks({
     // differs per role, so leaving both out would leave a subagent with nothing
     // said about spawning at all.
     (delegates ? SUBAGENT_DELEGATION_GUIDE : SUBAGENT_NO_SPAWN_GUIDE) +
-    (OUTLINE_DISABLED_AGENTS.has(agent) ? "" : SUBAGENT_OUTLINE_GUIDE)
+    (OUTLINE_DISABLED_AGENTS.has(agent) ? "" : SUBAGENT_OUTLINE_GUIDE) +
+    // Last, because it is about the last thing the subagent does. Per type and
+    // read from the settings at call time, like the limits block: it moves when
+    // the settings file moves and not from one turn to the next, which is what
+    // keeps it inside the stable system-prompt element.
+    replyCapBlock(agent)
   )
 }

@@ -10,6 +10,11 @@
 // `0` is a valid value meaning "disabled" — it must be preserved through
 // every layer, not treated as falsy.
 //
+// `resultCeilingFor`, the per-type ceiling on how much of a subagent's final
+// reply reaches the orchestrator, is at the bottom of this file: three levels,
+// resultTokens[agent] > flat maxResultTokens (file, else env) >
+// DEFAULT_MAX_RESULT_TOKENS, where `0` means no ceiling at all.
+//
 // Run: node --test --test-timeout=2000 test/settings.test.js
 
 import test from "node:test"
@@ -21,7 +26,9 @@ import { join } from "node:path"
 import {
   DEFAULT_AGENT_CONTEXT,
   DEFAULT_MAX_CONTEXT,
+  DEFAULT_MAX_RESULT_TOKENS,
   contextBudgetFor,
+  resultCeilingFor,
   getSettings,
   setSettingsPath,
   resetSettings,
@@ -36,6 +43,7 @@ function clearEnv() {
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_SEARXNG_URL
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS
 }
 
 // Point settings.js at an empty temp dir so the JSON loader has no opinion.
@@ -220,5 +228,95 @@ test("getSettings names where the flat maxContext came from", () => {
   // A file value the validator rejects leaves the env resolution standing.
   withSettings({ maxContext: "lots" })
   assert.equal(getSettings().maxContextSource, "env")
+  clearEnv()
+})
+
+// --- the reply token ceiling -------------------------------------------------
+//
+// `resultCeilingFor` has the three levels `reuseCeilingFor` has, no built-in
+// per-type table and no legacy key: resultTokens[agent] > flat maxResultTokens
+// (file, else env) > DEFAULT_MAX_RESULT_TOKENS. `0` here means NO ceiling for
+// that type — the reply is forwarded whole — so it must survive every layer
+// rather than be read as "unset".
+
+const RESULT_ENV = "OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS"
+
+test("the reply ceiling defaults to 2000 for every type", () => {
+  clearEnv()
+  isolate()
+  assert.equal(DEFAULT_MAX_RESULT_TOKENS, 2000)
+  assert.equal(getSettings().maxResultTokens, DEFAULT_MAX_RESULT_TOKENS)
+  assert.deepEqual(getSettings().resultTokens, {})
+  assert.equal(resultCeilingFor("researcher"), 2000)
+  assert.equal(resultCeilingFor("a-type-nobody-configured"), 2000)
+})
+
+test("the reply ceiling resolves file > env > default", () => {
+  clearEnv()
+  isolate()
+  process.env[RESULT_ENV] = "3000"
+  resetSettings()
+  assert.equal(resultCeilingFor("coder"), 3000, "env beats the built-in default")
+
+  withSettings({ maxResultTokens: 5000 })
+  assert.equal(resultCeilingFor("coder"), 5000, "the flat file key beats the env var")
+
+  withSettings({ maxResultTokens: 5000, resultTokens: { coder: 20000 } })
+  assert.equal(resultCeilingFor("coder"), 20000, "the type's own entry beats the flat key")
+  assert.equal(resultCeilingFor("planner"), 5000, "a type without an entry keeps the flat value")
+  clearEnv()
+})
+
+test("0 is a real reply ceiling at every level and means no ceiling", () => {
+  clearEnv()
+  // Per type: 0 beats a non-zero flat value.
+  withSettings({ maxResultTokens: 2000, resultTokens: { researcher: 0 } })
+  assert.equal(resultCeilingFor("researcher"), 0)
+  assert.equal(resultCeilingFor("coder"), 2000)
+
+  // As the flat key: every type without an entry of its own is uncapped.
+  withSettings({ maxResultTokens: 0, resultTokens: { coder: 4000 } })
+  assert.equal(resultCeilingFor("planner"), 0)
+  assert.equal(resultCeilingFor("coder"), 4000)
+
+  // As the env var.
+  isolate()
+  process.env[RESULT_ENV] = "0"
+  resetSettings()
+  assert.equal(resultCeilingFor("coder"), 0)
+  clearEnv()
+})
+
+test("a malformed resultTokens map is dropped entry by entry", () => {
+  clearEnv()
+  withSettings({
+    maxResultTokens: 2000,
+    resultTokens: { coder: "lots", planner: -1, reviewer: 2.5, designer: 8000, "": 5 },
+  })
+  assert.equal(resultCeilingFor("coder"), 2000, "non-integer entry must be dropped")
+  assert.equal(resultCeilingFor("planner"), 2000, "negative entry must be dropped")
+  assert.equal(resultCeilingFor("reviewer"), 2000, "fractional entry must be dropped")
+  assert.equal(resultCeilingFor("designer"), 8000, "the one valid entry must survive")
+  assert.deepEqual(getSettings().resultTokens, { designer: 8000 })
+})
+
+test("a resultTokens that is not a plain object leaves the map empty", () => {
+  clearEnv()
+  for (const bad of [[1, 2], "2000", null, 42]) {
+    withSettings({ resultTokens: bad })
+    assert.deepEqual(getSettings().resultTokens, {}, `bad map ${JSON.stringify(bad)}`)
+    assert.equal(resultCeilingFor("coder"), DEFAULT_MAX_RESULT_TOKENS)
+  }
+})
+
+test("a malformed flat maxResultTokens leaves the env-or-default resolution standing", () => {
+  clearEnv()
+  isolate()
+  process.env[RESULT_ENV] = "1500"
+  resetSettings()
+  for (const bad of [-1, 2.5, "3000", null]) {
+    const file = withSettings({ maxResultTokens: bad })
+    assert.equal(resultCeilingFor("coder"), 1500, `bad value ${JSON.stringify(bad)} in ${file}`)
+  }
   clearEnv()
 })

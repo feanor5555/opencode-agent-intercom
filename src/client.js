@@ -224,35 +224,6 @@ export async function archiveSession(client, sessionID) {
 // subagent's whole LLM turn (the transform hook awaits this before injecting).
 const SNAPSHOT_TIMEOUT_MS = 5000
 
-// Hard cap on the subagent's final-result text that gets pushed into the
-// orchestrator's wake notice. Defends against small models that paste whole
-// file contents, base64 image blobs or screenshot dumps into their reply —
-// without a cap the orchestrator's context blows up and it can't read its
-// own wake notice. Counted in code points (not bytes) so multi-byte
-// characters don't double-charge. 0 disables the cap.
-//
-// Env override: OPENCODE_AGENT_INTERCOM_RESULT_CHARS — useful when a big
-// model legitimately needs the full output, or for debugging the truncation.
-const DEFAULT_RESULT_CHARS = 8000
-const resultCharCap = (() => {
-  const env = process.env.OPENCODE_AGENT_INTERCOM_RESULT_CHARS
-  if (env === undefined || env === "") return DEFAULT_RESULT_CHARS
-  const n = Number(env)
-  return Number.isInteger(n) && n >= 0 ? n : DEFAULT_RESULT_CHARS
-})()
-
-function capResult(text, sessionID) {
-  if (!text || resultCharCap <= 0) return text
-  const arr = [...text]
-  if (arr.length <= resultCharCap) return text
-  const omitted = arr.length - resultCharCap
-  return (
-    arr.slice(0, resultCharCap).join("") +
-    `\n\n[truncated — ${omitted} more characters omitted to fit the orchestrator's context. ` +
-    `Open subagent session ${sessionID} in the TUI for the full output.]`
-  )
-}
-
 // Best-effort fetch of a session's full message list (Array<{info, parts}>).
 // Returns [] on any failure — callers treat "no messages" and "fetch failed"
 // alike (e.g. the handoff's last-user-goal lookup degrades to an empty goal).
@@ -276,6 +247,12 @@ export async function fetchMessages(client, sessionID) {
 // its context size (tokens of the most recent assistant step), and the full
 // text of its final assistant message (its result). Any field may be undefined
 // if unavailable. One messages() call serves all three.
+//
+// `result` is the reply WHOLE and is never shortened here. The reply token
+// ceiling is applied where the text crosses into another agent's context —
+// resultfile.js `capReplyForAgent`, called from the two wake paths in hooks.js
+// — so a caller that only parses the reply (the handoff's open-points fetch)
+// gets all of it, and this function keeps to being a read.
 export async function fetchSnapshot(client, sessionID) {
   try {
     const resp = unwrap(
@@ -293,7 +270,7 @@ export async function fetchSnapshot(client, sessionID) {
       messageCount: messages.length,
       lastActivity: latestActivity(messages),
       ctxTokens: latestContextTokens(messages),
-      result: capResult(finalResult(messages), sessionID),
+      result: finalResult(messages),
     }
   } catch (err) {
     log("session.messages failed", errMsg(err))

@@ -40,6 +40,7 @@ import {
   DEFAULT_ENDLESS_MODE,
   DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_NESTED_SPAWNS,
+  DEFAULT_MAX_RESULT_TOKENS,
   DEFAULT_MAX_RETAINED_SUBAGENTS,
   DEFAULT_MAX_REUSE_CONTEXT,
   DEFAULT_MAX_SUBAGENTS,
@@ -47,6 +48,7 @@ import {
   DEFAULT_SHOW_AGENTCOM,
   contextBudgetFor,
   reuseCeilingFor,
+  resultCeilingFor,
   getSettings,
   resetSettings,
   setSettingsPath,
@@ -63,12 +65,14 @@ import {
   DEFAULT_ENDLESS_MODE as TUI_DEFAULT_ENDLESS_MODE,
   DEFAULT_MAX_CONTEXT as TUI_DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_NESTED_SPAWNS as TUI_DEFAULT_MAX_NESTED_SPAWNS,
+  DEFAULT_MAX_RESULT_TOKENS as TUI_DEFAULT_MAX_RESULT_TOKENS,
   DEFAULT_MAX_RETAINED_SUBAGENTS as TUI_DEFAULT_MAX_RETAINED_SUBAGENTS,
   DEFAULT_MAX_REUSE_CONTEXT as TUI_DEFAULT_MAX_REUSE_CONTEXT,
   DEFAULT_MAX_SUBAGENTS as TUI_DEFAULT_MAX_SUBAGENTS,
   DEFAULT_RETAINED_SUBAGENT_TTL_MS as TUI_DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_SHOW_AGENTCOM as TUI_DEFAULT_SHOW_AGENTCOM,
   effectiveAgentContext,
+  effectiveResultTokens,
   effectiveReuseContext,
   readSettings,
   setSettingsPath as setTuiSettingsPath,
@@ -93,6 +97,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS
   delete process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS
 })
 
 // Every setting both sides carry, as each resolves it right now. The plugin
@@ -114,6 +119,8 @@ function bothSides() {
       retainedSubagentTtlMs: plugin.retainedSubagentTtlMs,
       maxReuseContext: plugin.maxReuseContext,
       reuseContext: plugin.reuseContext,
+      maxResultTokens: plugin.maxResultTokens,
+      resultTokens: plugin.resultTokens,
       showAgentcom: plugin.showAgentcom,
     },
     tui,
@@ -156,6 +163,25 @@ function assertCeiling(agent, value, source) {
   assert.equal(tui.source, source)
 }
 
+// The reply ceiling both sides resolve for one agent type, plus the TUI's own
+// verdict on whether the type carries a value of its own.
+function replyCeilingBothSides(agent) {
+  resetSettings()
+  const plugin = resultCeilingFor(agent)
+  const tui = effectiveResultTokens(readSettings(), agent)
+  return [plugin, tui]
+}
+
+// Asserts the two halves agree on one type's reply ceiling and on where it
+// came from. Enforced at one number and displayed at another would mean a user
+// tuning a row that governs nothing.
+function assertReplyCeiling(agent, value, source) {
+  const [plugin, tui] = replyCeilingBothSides(agent)
+  assert.equal(plugin, value)
+  assert.equal(tui.value, value)
+  assert.equal(tui.source, source)
+}
+
 test("the two modules carry the same built-in defaults", () => {
   assert.equal(DEFAULT_MAX_SUBAGENTS, TUI_DEFAULT_MAX_SUBAGENTS)
   assert.equal(DEFAULT_MAX_CONTEXT, TUI_DEFAULT_MAX_CONTEXT)
@@ -166,6 +192,7 @@ test("the two modules carry the same built-in defaults", () => {
   assert.equal(DEFAULT_MAX_RETAINED_SUBAGENTS, TUI_DEFAULT_MAX_RETAINED_SUBAGENTS)
   assert.equal(DEFAULT_RETAINED_SUBAGENT_TTL_MS, TUI_DEFAULT_RETAINED_SUBAGENT_TTL_MS)
   assert.equal(DEFAULT_MAX_REUSE_CONTEXT, TUI_DEFAULT_MAX_REUSE_CONTEXT)
+  assert.equal(DEFAULT_MAX_RESULT_TOKENS, TUI_DEFAULT_MAX_RESULT_TOKENS)
   assert.deepEqual(DEFAULT_AGENT_CONTEXT, TUI_DEFAULT_AGENT_CONTEXT)
 })
 
@@ -242,6 +269,8 @@ test("with neither file nor env both resolve the built-in defaults", () => {
     retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
     maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
     reuseContext: {},
+    maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
+    resultTokens: {},
     showAgentcom: DEFAULT_SHOW_AGENTCOM,
   })
   assert.deepEqual(tui, plugin)
@@ -267,6 +296,8 @@ test("with env alone both resolve the env value", () => {
     retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
     maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
     reuseContext: {},
+    maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
+    resultTokens: {},
     showAgentcom: false,
   })
   assert.deepEqual(tui, plugin)
@@ -303,6 +334,8 @@ test("with file and env both let the file win", () => {
     retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
     maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
     reuseContext: {},
+    maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
+    resultTokens: {},
     showAgentcom: true,
   })
   assert.deepEqual(tui, plugin)
@@ -327,6 +360,8 @@ test("both reject the same file values and fall back to env or default", () => {
     retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
     maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
     reuseContext: {},
+    maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
+    resultTokens: {},
     showAgentcom: DEFAULT_SHOW_AGENTCOM,
   })
   assert.deepEqual(tui, plugin)
@@ -350,6 +385,8 @@ test("both keep 0 as a value in its own right", () => {
     retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
     maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
     reuseContext: {},
+    maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
+    resultTokens: {},
     showAgentcom: DEFAULT_SHOW_AGENTCOM,
   })
   assert.deepEqual(tui, plugin)
@@ -677,4 +714,83 @@ test("both keep the budget map and the reuse map apart", () => {
   assertCeiling("coder", 150000, "agent")
   assertBudget("planner", DEFAULT_AGENT_CONTEXT.planner, "inherited")
   assertCeiling("planner", DEFAULT_MAX_REUSE_CONTEXT, "inherited")
+})
+
+// The reply token ceiling, pinned over its whole chain: the constant, the env
+// var name, the flat key, the per-type map and the `0` that means no ceiling.
+// The plugin cuts a subagent's reply at this number and the sidebar row edits
+// it, so a divergence would let a user raise a ceiling that stays where it was.
+test("both resolve the reply ceiling keys file > env > default and reject the same values", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS = "1200"
+  const [envOnly, tuiEnvOnly] = bothSides()
+  assert.equal(envOnly.maxResultTokens, 1200, "env over the built-in default")
+  assert.deepEqual(tuiEnvOnly, envOnly)
+  assertReplyCeiling("coder", 1200, "inherited")
+
+  writeFileSync(file, JSON.stringify({ maxResultTokens: 3000, resultTokens: { coder: 20000 } }))
+  const [fromFile, tuiFromFile] = bothSides()
+  assert.equal(fromFile.maxResultTokens, 3000, "the file wins over the env var")
+  assert.deepEqual(fromFile.resultTokens, { coder: 20000 })
+  assert.deepEqual(tuiFromFile, fromFile)
+  assertReplyCeiling("coder", 20000, "agent")
+  assertReplyCeiling("planner", 3000, "inherited")
+
+  for (const bad of [1.5, -1, "2", null]) {
+    writeFileSync(file, JSON.stringify({ maxResultTokens: bad }))
+    const [plugin, tui] = bothSides()
+    assert.equal(plugin.maxResultTokens, 1200, `${bad} must be rejected by both`)
+    assert.deepEqual(tui, plugin)
+  }
+})
+
+test("both drop the same resultTokens entries and keep the rest of the map", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ resultTokens: { coder: 8000, planner: -1, reviewer: 2.5, designer: "lots" } }),
+  )
+  const [plugin, tui] = bothSides()
+  assert.deepEqual(plugin.resultTokens, { coder: 8000 })
+  assert.deepEqual(tui, plugin)
+  assertReplyCeiling("coder", 8000, "agent")
+  for (const agent of ["planner", "reviewer", "designer"]) {
+    assertReplyCeiling(agent, DEFAULT_MAX_RESULT_TOKENS, "inherited")
+  }
+})
+
+test("both ignore a resultTokens that is not a plain object", () => {
+  for (const bad of [[2000], "2000", 2000, null]) {
+    writeFileSync(file, JSON.stringify({ resultTokens: bad }))
+    const [plugin, tui] = bothSides()
+    assert.deepEqual(plugin.resultTokens, {})
+    assert.deepEqual(tui, plugin)
+    assertReplyCeiling("coder", DEFAULT_MAX_RESULT_TOKENS, "inherited")
+  }
+})
+
+test("both keep 0 as a reply ceiling in its own right, per type and flat", () => {
+  writeFileSync(file, JSON.stringify({ resultTokens: { coder: 0 } }))
+  assertReplyCeiling("coder", 0, "agent")
+  assertReplyCeiling("planner", DEFAULT_MAX_RESULT_TOKENS, "inherited")
+
+  writeFileSync(file, JSON.stringify({ maxResultTokens: 0, resultTokens: { coder: 4000 } }))
+  assertReplyCeiling("planner", 0, "inherited")
+  assertReplyCeiling("coder", 4000, "agent")
+})
+
+// The three per-type maps are separate settings and none reads another: a
+// context budget says nothing about a reuse ceiling, and neither says anything
+// about how much of that type's reply reaches the orchestrator.
+test("both keep the reply map apart from the budget and reuse maps", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({
+      agentContext: { coder: 40000 },
+      reuseContext: { coder: 150000 },
+      resultTokens: { coder: 20000 },
+    }),
+  )
+  assertBudget("coder", 40000, "agent")
+  assertCeiling("coder", 150000, "agent")
+  assertReplyCeiling("coder", 20000, "agent")
+  assertReplyCeiling("planner", DEFAULT_MAX_RESULT_TOKENS, "inherited")
 })

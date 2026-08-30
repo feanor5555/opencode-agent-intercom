@@ -111,6 +111,30 @@ test("a nested spawn does not move a delegating subagent's stable element", asyn
   assert.ok(before.includes("limits on the work you delegate"), "the block under test is there")
 })
 
+// The reply-cap block carries a figure, and a figure in element [0] is what
+// this file exists to police. It is resolved from the settings file per call,
+// so it belongs where the limits block sits: still inside the stable element,
+// moving only when a person moves the settings.
+test("the reply-cap block sits in the stable element and does not move between turns", async () => {
+  const hooks = await plugin(makeCtx())
+  upsertSession("ses_researcher", {
+    agent: "researcher",
+    prompt: "its own task",
+    parentID: PRIMARY,
+    directory: fixtureDir,
+  })
+
+  const before = await stableElement(hooks, "ses_researcher")
+  assert.ok(
+    before.includes("agent-intercom: your final reply is capped."),
+    "the block under test is in element [0]",
+  )
+  assert.match(before, /at most ~2000 tokens \(~7000 characters\)/)
+
+  const after = await stableElement(hooks, "ses_researcher")
+  assert.equal(after, before, "the reply-cap block moved between two turns of one session")
+})
+
 test("a failed session.get does not move the primary's stable element", async () => {
   const ctx = makeCtx()
   const hooks = await plugin(ctx)

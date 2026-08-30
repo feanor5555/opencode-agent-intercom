@@ -64,7 +64,9 @@ After restarting opencode, two things still have to happen before the
    value and `off` for a ceiling of `0`; stepping a type's own value below
    zero drops the entry so it falls back to the inherited ceiling again),
    plus the selected type's reuse ceiling as `reuse Token(k)` (the same
-   own-versus-inherited marker; `0` means never reused),
+   own-versus-inherited marker; `0` means never reused), plus the selected
+   type's reply ceiling as `result Token` (whole tokens rather than
+   thousands, stepped in 500s; `0` means that type's reply is never cut),
    and the orchestrator's system prompt also carries a `Limits` block with headroom per agent type — each entry lists the budget, the fixed overhead (subagent guides, PROJECT.md, the project snapshot prepended to every spawn, AGENTS.md where that type keeps it) and the headroom left for the orchestrator's prompt and the subagent's work, in the form `coder 100.0k (−12.4k fixed → 87.6k)`. The fixed overhead occupies part of every budget before the orchestrator's words do; the limits block names it so the orchestrator can see why its own prompt has less room than the bare budget suggests. The work-package size gate below measures the package against the same budget the headroom was computed from. The same block names `off` for any type whose budget is disabled. The sidebar itself also exposes collapsed `TUI settings` / `LLM params` / `Prompts` sections.
    SDK's `layout` field is `"auto" | "stretch"` and marked deprecated with
    "Always uses stretch layout", and `tui.json` has no `sidebar` block,
@@ -97,8 +99,8 @@ second line.
   primary is yours, always.
 
 - **A primary that lasts dozens of turns.** Hard tool-gating on the
-  orchestrator (it coordinates only — no edits, no shells), an 8 KB cap on
-  subagent replies, and a live snapshot of running work injected each turn
+  orchestrator (it coordinates only — no edits, no shells), a per-type token
+  ceiling on subagent replies, and a live snapshot of running work injected each turn
   instead of a status-poll tool. Its context stays clean for the long haul.
   When the orchestrator's context does approach the limit, the plugin hands
   the session off to a fresh orchestrator — the threshold is configurable
@@ -465,6 +467,14 @@ exposes every runtime knob:
   `"reuseContext": { "<agent>": tokens }` and inherits the flat
   `maxReuseContext` (env `OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT`,
   default `70000`) wherever the map has no entry.
+- **`result Token`** — the selected type's reply ceiling, the maximum number
+  of tokens of that type's final reply forwarded to the orchestrator.
+  Everything past it is cut out of the wake notice and written to a file the
+  notice names. The same agent cycler edits it; `★` marks an own value, the
+  row shows `off` at `0`. Writes `"resultTokens": { "<agent>": tokens }` and
+  inherits the flat `maxResultTokens` (env
+  `OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS`, default `2000`) wherever the
+  map has no entry. Stepped in 500s (the other two rows step in thousands).
 - **`retained subs [-N+]`** — how many finished subagents the process holds
   at once; `0` switches retention off and the sidebar then has no held
   rows. Writes `"maxRetainedSubagents"`.
@@ -602,9 +612,11 @@ All optional. The subagent and context caps usually live in
 `~/.config/opencode/agent-intercom.json` (written by the TUI panel); that file
 also takes `"maxRetainedSubagents"`, `"retainedSubagentTtlMs"`,
 `"maxReuseContext"` and the per-agent-type `"reuseContext"` map for the
-`reuse`/retention feature, `"searxngUrl"` and `"exaApiKey"` (each overriding its
-environment variable), and `"forumBangs"` (no env var — the array REPLACES the
-built-in set rather than extending it). Everything else is environment-variable-driven:
+`reuse`/retention feature, `"maxResultTokens"` and the per-agent-type
+`"resultTokens"` map for the reply ceiling, `"searxngUrl"` and `"exaApiKey"`
+(each overriding its environment variable), and `"forumBangs"` (no env var —
+the array REPLACES the built-in set rather than extending it). Everything else
+is environment-variable-driven:
 
 `forumBangs` defaults to `["!st", "!ubuntu", "!su", "!hn", "!lo"]` — Stack Overflow, Ask Ubuntu, Super User, Hacker News, lobste.rs. A non-empty `"forumBangs"` array in the file replaces this set entirely; an empty, missing, or non-array value leaves the defaults in effect. The key exists so a project whose topic lives on a product Discourse instance — `!dpy`, `!caddy`, `!pi` and the like — can list those engines once for the plugin to use.
 
@@ -618,7 +630,7 @@ built-in set rather than extending it). Everything else is environment-variable-
 | `OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS` | `0` | How many finished subagents may be held as retained sessions in this process. `"0"` switches retention off — every subagent's session is deleted the moment its result is delivered, the one-shot behaviour. Recommended non-zero value: `3`. TUI file overrides. **Enabling retention needs an opencode restart** — the tool surface is resolved at plugin load, so the `reuse` tool only appears once the next instance boots with this set. Disabling takes effect at once. |
 | `OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS` | `3600000` | Retention window per held subagent, in ms. Clamped to a floor of `1`. The TUI's row steps in whole minutes with a one-minute floor. |
 | `OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT` | `70000` | Reuse ceiling for every agent type the `reuseContext` map does not name. `"0"` means that type is never reused at all. The TUI panel shows and edits the per-type map; the flat key is only what an untouched type inherits. |
-| `OPENCODE_AGENT_INTERCOM_RESULT_CHARS` | `8000` | Cap on a subagent's final reply forwarded to the primary. `"0"` disables. |
+| `OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS` | `2000` | Per-type token ceiling on a subagent's final reply forwarded to the primary. `"0"` disables — that type's reply is never cut. The TUI panel shows and edits the per-type `resultTokens` map; the flat key is only what an untouched type inherits. Everything past the ceiling is cut out of the wake notice and written to a file under `~/.cache/opencode-agent-intercom/results/` (mode `0600`, pruned after 7 days) — the orchestrator receives the path, and only a subagent can read the file. |
 | `OPENCODE_AGENT_INTERCOM_PROJECT_CONTEXT` | on | `"0"` skips the project snapshot prepended to spawn prompts |
 | `OPENCODE_AGENT_INTERCOM_RESPECT_TASK_PERMS` | on | `"0"` ignores `permission.task` allowlist in `spawn` |
 | `OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH` / `_DISABLE_OUTLINE` / `_DISABLE_FORUM_SEARCH` | off | `"1"` skips that tool |

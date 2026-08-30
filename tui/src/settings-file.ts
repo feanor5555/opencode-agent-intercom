@@ -1,7 +1,7 @@
 // The runtime settings on disk, shared with the main plugin: it reads this file
 // (file > env > default) for the subagent cap, the context budget, endless mode,
 // the nested-spawn quota, the subagent-retention window, the per-type reuse
-// ceiling and the agentcom visibility switch. Writing it here changes them
+// ceiling, the per-type result ceiling and the agentcom visibility switch. Writing it here changes them
 // live, no opencode restart needed.
 //
 // The context budget is a value PER AGENT TYPE, held in the `agentContext` map.
@@ -23,6 +23,14 @@
 // table behind it and no legacy key, so there is no source flag either. `0` is
 // a real value and means that type is never reused.
 //
+// The result ceiling — the number of tokens of a finished subagent's final
+// reply that reach the orchestrator, everything past it cut out of the notice
+// and kept in a file — is a value PER AGENT TYPE the same way, held in the
+// `resultTokens` map, with the same one-level-shorter chain as the reuse
+// ceiling: own entry, then the flat `maxResultTokens` key, then the env var,
+// then DEFAULT_MAX_RESULT_TOKENS. `0` is a real value and means that type's
+// reply is never cut.
+//
 // Every write goes through a read-modify-write: the sidebar seeds its signals
 // once at mount, so its copy is stale as soon as the file is edited elsewhere.
 // Only the key the user just touched goes into what disk currently holds — the
@@ -36,10 +44,11 @@
 // A key the file carries in a form the plugin rejects is dropped by the next
 // write, so the file cannot keep a setting that silently is not in effect.
 //
-// The two writes that materialise keys are `stepAgentContext` and
-// `stepReuseContext`: the first edit of either freezes the value every listed
-// agent has in effect into `agentContext` resp. `reuseContext` and drops the
-// flat key behind it — `maxContext` resp. `maxReuseContext` — so one type's
+// The three writes that materialise keys are `stepAgentContext`,
+// `stepReuseContext` and `stepResultTokens`: the first edit of any of them
+// freezes the value every listed agent has in effect into `agentContext` resp.
+// `reuseContext` resp. `resultTokens` and drops the flat key behind it —
+// `maxContext` resp. `maxReuseContext` resp. `maxResultTokens` — so one type's
 // ceiling lives in one place from then on.
 //
 // A file that cannot be read, and a write that does not reach the disk, both
@@ -71,6 +80,8 @@ export interface Settings {
   retainedSubagentTtlMs: number;
   maxReuseContext: number;
   reuseContext: AgentContext;
+  maxResultTokens: number;
+  resultTokens: AgentContext;
   showAgentcom: boolean;
 }
 
@@ -82,7 +93,8 @@ export interface Settings {
 // for parity with the plugin, and no row edits it. maxReuseContext is not one
 // for a different reason: the reuse ceiling is edited per agent type, in
 // reuseContext through stepReuseContext, and the flat key is only what a type
-// without an own entry inherits.
+// without an own entry inherits. maxResultTokens is out for that same reason,
+// with resultTokens and stepResultTokens behind it.
 export type LimitKey =
   | "maxSubagents"
   | "endlessContext"
@@ -124,6 +136,15 @@ export const DEFAULT_RETAINED_SUBAGENT_TTL_MS = 3600000;
 // divergence. No row steps this flat key: the panel edits the ceiling per agent
 // type through stepReuseContext, and this is what an untouched type inherits.
 export const DEFAULT_MAX_REUSE_CONTEXT = 70000;
+// How many tokens of a finished subagent's final reply reach the orchestrator
+// for an agent type the resultTokens map does not name; everything past it is
+// cut out of the wake notice and written to a file the notice names. `0` means
+// no ceiling — the whole reply is forwarded and no file is written. The
+// plugin's own copy is DEFAULT_MAX_RESULT_TOKENS in src/settings.js and
+// test/settings-defaults-parity.test.js fails on a divergence. No row steps
+// this flat key: the panel edits the ceiling per agent type through
+// stepResultTokens, and this is what an untouched type inherits.
+export const DEFAULT_MAX_RESULT_TOKENS = 2000;
 // The floor under the retention window, applied wherever the value came from:
 // the plugin never holds a session on a window of 0, because nothing outside it
 // ever deletes a subagent session. Retention is switched off through
@@ -184,6 +205,8 @@ const SETTING_VALIDATORS: { [K in FileKey]: (v: unknown) => boolean } = {
   retainedSubagentTtlMs: isLimit,
   maxReuseContext: isLimit,
   reuseContext: (v) => filterAgentContext(v) !== null,
+  maxResultTokens: isLimit,
+  resultTokens: (v) => filterAgentContext(v) !== null,
   showAgentcom: isFlag,
 };
 
@@ -239,6 +262,11 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
       DEFAULT_MAX_REUSE_CONTEXT,
     ),
     reuseContext: {},
+    maxResultTokens: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS",
+      DEFAULT_MAX_RESULT_TOKENS,
+    ),
+    resultTokens: {},
     showAgentcom: envFlag("OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM", DEFAULT_SHOW_AGENTCOM),
   };
   if (isLimit(raw.maxSubagents)) s.maxSubagents = raw.maxSubagents;
@@ -260,6 +288,9 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
   if (isLimit(raw.maxReuseContext)) s.maxReuseContext = raw.maxReuseContext;
   const perAgentReuse = filterAgentContext(raw.reuseContext);
   if (perAgentReuse !== null) s.reuseContext = perAgentReuse;
+  if (isLimit(raw.maxResultTokens)) s.maxResultTokens = raw.maxResultTokens;
+  const perAgentResult = filterAgentContext(raw.resultTokens);
+  if (perAgentResult !== null) s.resultTokens = perAgentResult;
   if (isFlag(raw.showAgentcom)) s.showAgentcom = raw.showAgentcom;
   return s;
 }
@@ -314,15 +345,34 @@ export function effectiveReuseContext(
   return { value: settings.maxReuseContext, source: "inherited" };
 }
 
+// The result ceiling in effect for one agent type, and whether that value is
+// the type's own or the inherited flat one — the same { value, source } pair
+// the other two ceiling rows read their ★ from. Same order as the plugin's
+// resultCeilingFor: own entry > the flat maxResultTokens, itself resolved
+// file > env > DEFAULT_MAX_RESULT_TOKENS.
+//
+// Two levels, like effectiveReuseContext: no built-in per-type table stands
+// behind this map and no legacy key. `0` is a real value here too and means
+// that type's reply is forwarded whole, which is what the row shows as "off".
+export function effectiveResultTokens(
+  settings: Settings,
+  agent: string,
+): { value: number; source: "agent" | "inherited" } {
+  if (Object.hasOwn(settings.resultTokens, agent)) {
+    return { value: settings.resultTokens[agent], source: "agent" };
+  }
+  return { value: settings.maxResultTokens, source: "inherited" };
+}
+
 // Drops every setting the plugin would reject, so the file cannot keep one that
 // silently is not in effect while the panel displays the env-or-default value
 // instead. Each key is checked against its own validator, so a step on a limit
 // does not drop the boolean and toggling the boolean does not drop a limit.
-// agentContext is normalised rather than judged as a whole: the plugin drops a
-// bad entry and keeps the rest of the map, and a map left with nothing is a key
-// worth nothing.
+// Each per-type map is normalised rather than judged as a whole: the plugin
+// drops a bad entry and keeps the rest of the map, and a map left with nothing
+// is a key worth nothing.
 function pruneSettings(merged: Record<string, unknown>): Record<string, unknown> {
-  for (const key of ["agentContext", "reuseContext"] as const) {
+  for (const key of ["agentContext", "reuseContext", "resultTokens"] as const) {
     if (!(key in merged)) continue;
     const kept = filterAgentContext(merged[key]);
     if (kept === null || Object.keys(kept).length === 0) delete merged[key];
@@ -408,8 +458,8 @@ export function stepSetting(
 // merged state for the signals; an unreadable file or a failed write leaves the
 // file as it is and hands back the state on disk.
 function stepPerAgentCeiling(
-  mapKey: "agentContext" | "reuseContext",
-  flatKey: "maxContext" | "maxReuseContext",
+  mapKey: "agentContext" | "reuseContext" | "resultTokens",
+  flatKey: "maxContext" | "maxReuseContext" | "maxResultTokens",
   effective: (settings: Settings, agent: string) => { value: number },
   agent: string,
   delta: number,
@@ -471,6 +521,27 @@ export function stepReuseContext(
     "reuseContext",
     "maxReuseContext",
     effectiveReuseContext,
+    agent,
+    delta,
+    agents,
+  );
+}
+
+// Steps one agent type's result ceiling by `delta`: how many tokens of that
+// type's final reply reach the orchestrator. Same migration as the two above,
+// on `resultTokens` and the flat `maxResultTokens` key. `0` is reachable and
+// means that type's reply is never cut — the loosest value on the row, the way
+// the budget row's 0 is; a step below it drops the entry so the inherited
+// ceiling shows again.
+export function stepResultTokens(
+  agent: string,
+  delta: number,
+  agents: string[],
+): Settings {
+  return stepPerAgentCeiling(
+    "resultTokens",
+    "maxResultTokens",
+    effectiveResultTokens,
     agent,
     delta,
     agents,

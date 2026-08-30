@@ -66,6 +66,7 @@
 //       "maxNestedSpawns": N,
 //       "maxRetainedSubagents": N, "retainedSubagentTtlMs": N,
 //       "maxReuseContext": N, "reuseContext": { "<agent>": N },
+//       "maxResultTokens": N, "resultTokens": { "<agent>": N },
 //       "showAgentcom": true|false }
 
 import { readFileSync } from "node:fs"
@@ -141,6 +142,21 @@ export const DEFAULT_RETAINED_SUBAGENT_TTL_MS = 3600000
 // exported for (tui/src/settings-file.ts,
 // test/settings-defaults-parity.test.js).
 export const DEFAULT_MAX_REUSE_CONTEXT = 70000
+// The ceiling, in estimated tokens, on the part of a subagent's FINAL REPLY
+// that reaches the orchestrator's context: the value for every agent type the
+// `resultTokens` map does not name. Everything past it is cut out of the wake
+// notice and kept in an overflow file whose path the notice carries — see
+// resultCeilingFor for the resolution order and for what `0` means.
+//
+// Measured with estimateReplyTokens (src/format.js), which runs deliberately
+// high, so the figure is a ceiling on what the orchestrator can be charged and
+// not a promise about a particular tokenizer. 2000 tokens is roughly 7000
+// characters of English prose: a findings-and-paths reply fits whole, a pasted
+// file does not.
+//
+// Exported for the parity the retention scalars above are exported for
+// (tui/src/settings-file.ts, test/settings-defaults-parity.test.js).
+export const DEFAULT_MAX_RESULT_TOKENS = 2000
 // How many subagents ONE subagent run may start (a nested spawn). Delegation
 // exists for preparatory work whose answer the caller then uses — summarising a
 // long document, a broad lookup — not as a working mode, so the ceiling is
@@ -298,6 +314,8 @@ export function getSettings() {
     ),
     maxReuseContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT", DEFAULT_MAX_REUSE_CONTEXT),
     reuseContext: {},
+    maxResultTokens: envNum("OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS", DEFAULT_MAX_RESULT_TOKENS),
+    resultTokens: {},
     searxngUrl: envStr("OPENCODE_AGENT_INTERCOM_SEARXNG_URL", ""),
     exaApiKey: envStr("EXA_API_KEY", ""),
     forumBangs: [...DEFAULT_FORUM_BANGS],
@@ -361,6 +379,21 @@ export function getSettings() {
         if (name !== "" && Number.isInteger(value) && value >= 0) perAgent[name] = value
       }
       resolved.reuseContext = perAgent
+    }
+    if (Number.isInteger(raw?.maxResultTokens) && raw.maxResultTokens >= 0) {
+      resolved.maxResultTokens = raw.maxResultTokens
+    }
+    // Per-agent reply ceilings, read with exactly the discipline reuseContext
+    // is read with above: a key survives only as a whole non-negative integer,
+    // one garbage entry costs the user that entry and not the map, and a value
+    // that is not a plain object leaves the map empty so every type falls
+    // through to the flat value. Nothing is materialised.
+    if (raw?.resultTokens && typeof raw.resultTokens === "object" && !Array.isArray(raw.resultTokens)) {
+      const perAgent = {}
+      for (const [name, value] of Object.entries(raw.resultTokens)) {
+        if (name !== "" && Number.isInteger(value) && value >= 0) perAgent[name] = value
+      }
+      resolved.resultTokens = perAgent
     }
     if (typeof raw?.searxngUrl === "string" && raw.searxngUrl.trim() !== "") {
       resolved.searxngUrl = raw.searxngUrl.trim()
@@ -487,6 +520,31 @@ export function reuseCeilingFor(agent) {
   const s = getSettings()
   if (Object.hasOwn(s.reuseContext, agent)) return s.reuseContext[agent]
   return s.maxReuseContext
+}
+
+// The reply ceiling in effect for one agent type, in estimated tokens: how much
+// of that type's final reply reaches the orchestrator's context before the rest
+// is cut out and filed. Order, the three levels reuseCeilingFor has:
+//   1. the type's own `resultTokens` entry from the file,
+//   2. the flat `maxResultTokens` — file, else the env var
+//      OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS,
+//   3. DEFAULT_MAX_RESULT_TOKENS, which is what the flat value already
+//      resolves to when neither file nor env names one.
+//
+// `0` means NO ceiling for this type: the whole reply is forwarded, no overflow
+// file is written, no cut marker is appended, and the reply-cap prompt block is
+// omitted from that type's system prompt. This is the `0` of a cap that is
+// switched off, not reuseCeilingFor's `0` (an admission threshold nothing
+// clears) — a type that must hand its whole output up carries either a large
+// entry or this one.
+//
+// Resolved per call, never cached on a registry entry, for the reason
+// contextBudgetFor states: a freshly spawned subagent is tracked under a
+// provisional type name until the spawn tool upgrades it.
+export function resultCeilingFor(agent) {
+  const s = getSettings()
+  if (Object.hasOwn(s.resultTokens, agent)) return s.resultTokens[agent]
+  return s.maxResultTokens
 }
 
 // Whether this process offers retention at all, decided at the first read and

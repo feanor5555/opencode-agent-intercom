@@ -8,7 +8,7 @@
 
 import test, { beforeEach } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, rmSync } from "node:fs"
 import { tmpdir, homedir } from "node:os"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
@@ -1263,8 +1263,14 @@ test("a finished subagent's full result is pushed to the primary's wake notice",
   assert.match(notices.at(-1), /THE FULL SUBAGENT RESULT/)
 })
 
-test("an oversized subagent result is truncated before it lands in the wake notice", async () => {
-  // 20 000 chars >> default 8000-char cap; the orchestrator must NOT see the tail.
+test("an oversized subagent result is cut at the token ceiling and filed in full", async () => {
+  // 20 000 chars ≈ 5700 estimated tokens, well past the default 2000-token
+  // ceiling: the orchestrator must NOT see the tail, and the tail must not be
+  // lost either — it is the overflow file the marker names.
+  //
+  // HOME is repointed for the duration so the file lands in a temp results dir
+  // and never in the developer's own ~/.cache. cacheDir() resolves HOME per
+  // call, so this reaches the write below.
   const huge = "A".repeat(10000) + "MIDDLE_MARKER" + "B".repeat(10000)
   const messages = [
     {
@@ -1272,19 +1278,42 @@ test("an oversized subagent result is truncated before it lands in the wake noti
       parts: [{ type: "text", text: huge }],
     },
   ]
-  const { ctx, created, notices } = makeCtx({ messages })
-  const hooks = await plugin(ctx)
-  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  const home = mkdtempSync(join(tmpdir(), "intercom-plugin-home-"))
+  const realHome = process.env.HOME
+  process.env.HOME = home
+  let wake
+  try {
+    const { ctx, created, notices } = makeCtx({ messages })
+    const hooks = await plugin(ctx)
+    await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
 
-  await hooks.event({ event: { type: "session.idle", properties: { sessionID: created[0] } } })
-  const wake = notices.find((n) => /finished and been destroyed/.test(n))
-  assert.ok(wake, "wake notice missing")
-  assert.match(wake, /\[truncated — \d+ more characters omitted/)
-  // The tail of the original output must be gone (we kept only the head).
-  assert.doesNotMatch(wake, /B{100}/)
-  // The completion notice still fits comfortably — well under the 20 000-char
-  // unsafe size, with reasonable headroom for the notice framing.
-  assert.ok(wake.length < 12000, `wake notice unexpectedly large: ${wake.length} chars`)
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: created[0] } } })
+    wake = notices.find((n) => /finished and been destroyed/.test(n))
+    assert.ok(wake, "wake notice missing")
+    assert.match(wake, /\[cut at 2000 tokens — \d+ more tokens of this reply are not shown here/)
+    // The tail of the original output must be gone (we kept only the head).
+    assert.doesNotMatch(wake, /B{100}/)
+    assert.doesNotMatch(wake, /MIDDLE_MARKER/)
+    // The completion notice still fits comfortably — well under the 20 000-char
+    // unsafe size, with reasonable headroom for the notice framing.
+    assert.ok(wake.length < 12000, `wake notice unexpectedly large: ${wake.length} chars`)
+
+    // The path the marker names is a real file, private, and holds the reply
+    // whole — including the part the orchestrator was not shown.
+    const path = /^(\/\S+\.md)$/m.exec(wake)?.[1]
+    assert.ok(path, `no overflow file path in the notice: ${wake}`)
+    assert.ok(
+      path.startsWith(join(home, ".cache", "opencode-agent-intercom", "results")),
+      `overflow file outside the results dir: ${path}`,
+    )
+    assert.equal(statSync(path).mode & 0o777, 0o600)
+    const filed = readFileSync(path, "utf8")
+    assert.ok(filed.endsWith(huge), "the overflow file must carry the reply verbatim and whole")
+    assert.match(filed, /^# subagent result — researcher#1 \(researcher\)$/m)
+  } finally {
+    process.env.HOME = realHome
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
 test("spawn and subagent-idle emit TUI toasts", async () => {

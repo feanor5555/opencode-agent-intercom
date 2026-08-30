@@ -261,20 +261,72 @@ test("endlessMaxCycles reaches the cycle: a spent ceiling stops it before the qu
 // The pause a self-stop leaves behind
 // ---------------------------------------------------------------------------
 
-test("a paused primary arms nothing on its next over-threshold turn", async () => {
-  settings({ endlessMode: true, endlessContext: 1, maxPrimaryContext: 1 })
+test("a paused primary arms the plain handoff instead of a cycle", async () => {
+  // The stop ends the loop, not the session's relief from its own context: with
+  // the endless threshold left in effect nothing would arm at all — the pause
+  // refuses the cycle — and the session would grow until the provider's own
+  // limit ended it.
+  settings({ endlessMode: true, endlessContext: 250000, maxPrimaryContext: 80000 })
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   pauseEndless(SID, "cycle ceiling reached (1/1) — paused for this session")
 
-  await primaryTurn(hooks, 5000)
+  await primaryTurn(hooks, 100000)
 
   assert.equal(hasEndlessPending(SID), false, "the pause suppresses the re-arm")
   assert.equal(
     hasHandoffPending(SID),
-    false,
-    "and the mode still owns the threshold, so the plain handoff does not step in",
+    true,
+    "maxPrimaryContext owns the threshold on a paused primary, and it is crossed",
   )
+})
+
+test("a paused primary below maxPrimaryContext arms neither", async () => {
+  settings({ endlessMode: true, endlessContext: 250000, maxPrimaryContext: 80000 })
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  pauseEndless(SID, "no open points left — paused for this session")
+
+  await primaryTurn(hooks, 50000)
+
+  assert.equal(hasEndlessPending(SID), false)
+  assert.equal(hasHandoffPending(SID), false, "the plain threshold is a threshold, not a trigger")
+})
+
+test("the plain handoff a paused primary arms does not lift the pause", async () => {
+  // The re-entry the pause exists to prevent: were the pause cleared by the
+  // branch that arms the plain handoff, endless mode would own the threshold
+  // again on the very next turn and the stop would have lasted one turn.
+  settings({ endlessMode: true, endlessContext: 250000, maxPrimaryContext: 80000 })
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  pauseEndless(SID, "cycle ceiling reached (1/1) — paused for this session")
+
+  await primaryTurn(hooks, 100000)
+  await primaryTurn(hooks, 300000)
+
+  assert.equal(isEndlessPaused(SID), true, "the pause survives the handoff decision")
+  assert.equal(
+    hasEndlessPending(SID),
+    false,
+    "even over endlessContext the paused primary starts no cycle",
+  )
+  assert.equal(hasHandoffPending(SID), true)
+})
+
+test("a paused primary drops an unclaimed endless latch on its next turn", async () => {
+  // The latch can only be one set before the stop landed. It has to go, or the
+  // spawn freeze holds on a session that will never run the cycle.
+  settings({ endlessMode: true, endlessContext: 250000, maxPrimaryContext: 80000 })
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  markEndlessPending(SID)
+  pauseEndless(SID, "no open points left — paused for this session")
+
+  await primaryTurn(hooks, 100000)
+
+  assert.equal(hasEndlessPending(SID), false, "the freeze lifts with the latch")
+  assert.equal(hasHandoffPending(SID), true)
 })
 
 test("the paused primary is told so in its own limits block", async () => {
@@ -290,6 +342,16 @@ test("the paused primary is told so in its own limits block", async () => {
 
   assert.match(system, /Endless mode is PAUSED for this session — no open points left/)
   assert.match(system, /nothing was written to the settings/)
+  assert.match(
+    system,
+    /ordinary orchestrator handoff still applies/,
+    "the block stays truthful: the paused session is still relieved at the plain limit",
+  )
+  assert.doesNotMatch(
+    system,
+    /no further context refresh/,
+    "the sentence that described the unrelieved paused session is gone",
+  )
 })
 
 test("a fresh primary is not paused, so the mode is available again after a replacement", async () => {

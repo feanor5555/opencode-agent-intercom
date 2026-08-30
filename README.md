@@ -673,9 +673,12 @@ A cycle runs in this order:
 Endless mode is a loop, so it stops itself rather than waiting for someone to
 watch it. A self-stop **pauses** the mode for the orchestrator session in hand:
 it never writes `endlessMode: false`, because the mode is on by default and the
-key is the user's own switch. A paused session gets no further cycle and no
-replacement — it is told so in its own limits block — and the pause dies with
-it, so the next orchestrator session starts with the mode available again.
+key is the user's own switch. A paused session gets no further cycle — it is
+told so in its own limits block — but it is still relieved of its context: the
+threshold falls back to `maxPrimaryContext` and the plain orchestrator handoff
+owns it, exactly as in a session with the mode switched off. The pause dies with
+the session it was set on, so the next orchestrator starts with the mode
+available again.
 
 - **Nothing left to do.** When the orchestrator reports no new open points
   *and* the todo file has no open tasks, the mode pauses instead of starting

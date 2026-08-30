@@ -1,7 +1,8 @@
 // Unit tests for the endless-mode settings keys (src/settings.js):
 // `endlessMode` (the file's only boolean key), `endlessContext`,
 // `endlessQuiesceTimeoutMs`, `endlessMaxCycles` and the single resolution
-// point `primaryContextThreshold()`.
+// point `primaryContextThreshold()`, which reads the switch and the caller's
+// per-session pause together (`endlessModeInEffect`).
 //
 // `endlessMode` is the USER's switch: nothing in src/ writes it. The mode's own
 // stops pause one primary session instead (test/endless-pause.test.js), and the
@@ -23,6 +24,7 @@ import {
   setSettingsPath,
   resetSettings,
   primaryContextThreshold,
+  endlessModeInEffect,
   DEFAULT_ENDLESS_MODE,
   DEFAULT_ENDLESS_CONTEXT,
 } from "../src/settings.js"
@@ -130,4 +132,53 @@ test("primaryContextThreshold: endless on with endlessContext 0 arms nothing", (
     false,
     "endless mode on with a zero threshold is a legal state that arms nothing",
   )
+})
+
+test("primaryContextThreshold: a paused primary resolves maxPrimaryContext and arms on it", () => {
+  // The mode is on and the file says so; only THIS session stopped itself. It
+  // starts no cycle, so leaving endlessContext in effect on it would arm
+  // nothing at all and the session would grow until the provider's own context
+  // limit ended it.
+  isolate({ endlessMode: true, maxPrimaryContext: 80000, endlessContext: 250000 })
+
+  assert.equal(primaryContextThreshold({ endlessPaused: true }), 80000)
+  assert.equal(
+    primaryContextThreshold({ endlessPaused: false }),
+    250000,
+    "an unpaused primary still hands the threshold to endlessContext",
+  )
+  assert.equal(primaryContextThreshold(), 250000, "and that is the default reading")
+
+  recordPrimaryContext("ses-endless-paused-threshold", 100_000)
+  assert.equal(
+    shouldTriggerPrimaryHandoff(
+      "ses-endless-paused-threshold",
+      primaryContextThreshold({ endlessPaused: true }),
+    ),
+    true,
+    "100k is over the plain threshold, so the plain handoff arms on a paused primary",
+  )
+  assert.equal(
+    shouldTriggerPrimaryHandoff(
+      "ses-endless-paused-threshold",
+      primaryContextThreshold({ endlessPaused: false }),
+    ),
+    false,
+    "and under the endless one, which is why the pause may not keep it",
+  )
+})
+
+test("endlessModeInEffect: the switch and the per-session pause together", () => {
+  isolate({ endlessMode: true })
+  assert.equal(endlessModeInEffect(), true)
+  assert.equal(endlessModeInEffect({ endlessPaused: false }), true)
+  assert.equal(
+    endlessModeInEffect({ endlessPaused: true }),
+    false,
+    "a paused session is a session with the mode off, for the threshold",
+  )
+
+  isolate({ endlessMode: false })
+  assert.equal(endlessModeInEffect(), false)
+  assert.equal(endlessModeInEffect({ endlessPaused: true }), false)
 })

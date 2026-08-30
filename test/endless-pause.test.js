@@ -27,7 +27,7 @@ import { mkdtempSync, writeFileSync, readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { resetState, endlessProgress } from "../src/state.js"
+import { resetState, endlessProgress, endlessPauses } from "../src/state.js"
 import {
   markEndlessPending,
   claimPendingEndless,
@@ -38,9 +38,15 @@ import {
   endlessPauseReason,
   clearEndlessPause,
   scheduleEndlessIfNeeded,
+  scheduleHandoffIfNeeded,
+  hasHandoffPending,
   recordPrimaryContext,
   recordEndlessCycle,
   forgetPrimary,
+  beginHandoffDrain,
+  bindHandoffDrainTarget,
+  flushHandoffDrain,
+  handoffGeneration,
 } from "../src/registry.js"
 import { runEndlessCycle, ENDLESS_MAX_STALLED_CYCLES } from "../src/endless.js"
 import {
@@ -307,5 +313,86 @@ test("a pause resets the cross-cycle progress record", () => {
     endlessProgress.lastOpenTasks,
     null,
     "the record measures one run of the mode, and this run has stopped",
+  )
+})
+
+// ---------------------------------------------------------------------------
+// What the pause does NOT stop: the session's relief from its own context
+// ---------------------------------------------------------------------------
+
+test("a paused primary is handed to the plain handoff, and nothing is written to get there", () => {
+  const fixture = settingsFixture({
+    ...USER_FILE,
+    maxPrimaryContext: 80000,
+    endlessContext: 250000,
+  })
+  recordPrimaryContext(SID, 100_000)
+
+  // Unpaused: endlessContext owns the threshold, and 100k is under it — this is
+  // the state the pause must not leave standing, because the cycle it waits for
+  // is the one thing a paused primary never runs.
+  assert.equal(primaryContextThreshold({ endlessPaused: isEndlessPaused(SID) }), 250_000)
+  assert.equal(
+    scheduleHandoffIfNeeded(SID, primaryContextThreshold({ endlessPaused: isEndlessPaused(SID) })),
+    false,
+  )
+
+  pauseEndless(SID, "cycle ceiling reached (10/10) — paused for this session")
+
+  const threshold = primaryContextThreshold({ endlessPaused: isEndlessPaused(SID) })
+  assert.equal(threshold, 80_000, "the plain threshold owns a paused primary")
+  assert.equal(scheduleHandoffIfNeeded(SID, threshold), true, "and 100k is over it")
+  assert.equal(hasHandoffPending(SID), true)
+  assert.equal(
+    scheduleEndlessIfNeeded(SID, 250_000),
+    false,
+    "while the cycle stays refused — the pause bounds the loop, not the handoff",
+  )
+  assertUntouched(fixture, "a paused primary handed to the plain handoff")
+})
+
+test("the pause is in-process only — nothing on disk carries it into a fresh process", () => {
+  const fixture = settingsFixture()
+  recordPrimaryContext(SID, 300_000)
+  pauseEndless(SID, "no open points left — paused for this session")
+
+  assert.equal(endlessPauses.size, 1, "the whole record of the stop is one map row")
+  assertUntouched(fixture, "the pause itself")
+
+  // What a restart leaves: the process state is gone, the file never held it.
+  resetState()
+  resetSettings()
+
+  assert.equal(isEndlessPaused(SID), false)
+  assert.equal(getSettings().endlessMode, true)
+  assert.equal(
+    primaryContextThreshold({ endlessPaused: isEndlessPaused(SID) }),
+    getSettings().endlessContext,
+    "a fresh process arms endless mode again — the stop bound one run, not the installation",
+  )
+})
+
+test("the successor of a paused primary inherits the cycle ceiling's count", () => {
+  // The pause dies with the session the plain handoff retires, so the successor
+  // has the mode available again — by design. What keeps that from being a way
+  // around the ceiling: every handoff, plain or endless, records the redirect
+  // (buildPrimaryHandoffDeps supplies the same drain to both paths), and
+  // handoffGeneration counts the chain, so the successor's first cycle is
+  // counted against endlessMaxCycles rather than starting from one.
+  pauseEndless(SID, "cycle ceiling reached (10/10) — paused for this session")
+  assert.equal(handoffGeneration(SID), 1)
+
+  // What the plain handoff runs on the way out: open the drain, bind the new
+  // primary, flush.
+  beginHandoffDrain(SID)
+  bindHandoffDrainTarget(SID, NEW_SID)
+  flushHandoffDrain(SID)
+  forgetPrimary(SID)
+
+  assert.equal(isEndlessPaused(NEW_SID), false, "the successor has the mode again")
+  assert.equal(
+    handoffGeneration(NEW_SID),
+    2,
+    "and the chain it continues is one generation longer, so the ceiling keeps counting",
   )
 })

@@ -423,9 +423,14 @@ that default for good. What a self-stop leaves behind is a runtime pause on ONE 
 session (`pauseEndless`, `src/registry.js`): `scheduleEndlessIfNeeded` refuses to arm a paused
 primary, so the still-over-threshold session cannot re-arm on its next idle, and the pause
 dies with that session (`forgetPrimary`), so the orchestrator that takes over has the mode
-available again. While it holds, the mode is still on and still owns the threshold, so the
-plain handoff does not step in either: the paused session runs on with the context it has and
-is told so in its per-turn limits block. Only the sidebar's toggle writes `endlessMode`.
+available again. While it holds, the session is treated as one with the mode off for the
+threshold alone: `primaryContextThreshold({ endlessPaused })` resolves `maxPrimaryContext`
+and the plain handoff arms and runs on it, so a paused primary is still relieved of its
+context — a self-stop ends the loop, not the session's ability to be replaced. Nothing else
+about the pause changes: the settings file stays untouched, and only a switch-off in the
+sidebar clears the pause (`clearEndlessPause` runs in the mode-off branch alone), so a paused
+primary cannot re-enter the cycle through the branch that relieves it. It is told its state in
+its per-turn limits block. Only the sidebar's toggle writes `endlessMode`.
 
 1. **Nothing left to do.** When §3.4's confirmed point list is empty *and* `listOpen` reports
    no open task, the cycle stops before the replacement: latch released, freeze lifted, the

@@ -57,6 +57,7 @@ import {
   cancelPendingHandoff,
   resetEndlessProgress,
   endlessPauseReason,
+  isEndlessPaused,
   clearEndlessPause,
   nestedQuotaDecision,
   sessionAgentName,
@@ -73,6 +74,7 @@ import {
 import {
   getSettings,
   primaryContextThreshold,
+  endlessModeInEffect,
   contextBudgetFor,
   reuseCeilingFor,
   retentionOffered,
@@ -315,20 +317,28 @@ export function createTransformSystem(client) {
         // in-progress both gate), so the toast fires once per scheduling.
         //
         // Which threshold is armed is resolved in ONE place —
-        // primaryContextThreshold(): while endless mode is on, endlessContext
-        // DISPLACES maxPrimaryContext. Arming both would be inert, the lower
-        // one always firing first.
-        const threshold = primaryContextThreshold()
+        // primaryContextThreshold(): while endless mode is in effect,
+        // endlessContext DISPLACES maxPrimaryContext. Arming both would be
+        // inert, the lower one always firing first.
+        //
         // What the mode's own stops leave behind: a pause on THIS session,
-        // never a written `endlessMode: false`. scheduleEndlessIfNeeded refuses
-        // to arm a paused primary, so the branch below simply schedules
-        // nothing while it holds — no cycle, and no plain handoff either, since
-        // the mode is still on and owns the threshold. The session runs on with
-        // the context it has; the pause dies with it and the next orchestrator
-        // has the mode available again. The orchestrator is told so in its
-        // limits block below.
+        // never a written `endlessMode: false`. A paused primary takes the
+        // plain-handoff branch and arms at maxPrimaryContext exactly as a
+        // primary with the mode off does: the stop ends the LOOP, not the
+        // session's relief from its own context. Leaving the endless threshold
+        // on it would arm nothing — scheduleEndlessIfNeeded refuses a paused
+        // primary — and the session would grow until the provider's own limit
+        // ended it.
+        //
+        // The pause survives that decision: only the mode being switched OFF
+        // clears it (below), so a paused primary cannot re-enter the cycle by
+        // taking the plain branch. It is dropped when the primary is actually
+        // replaced (forgetPrimary), which is what gives the successor session
+        // the mode again.
+        const endlessPaused = isEndlessPaused(sessionID)
         const pausedReason = endlessPauseReason(sessionID)
-        if (getSettings().endlessMode) {
+        const threshold = primaryContextThreshold({ endlessPaused })
+        if (endlessModeInEffect({ endlessPaused })) {
           // The switch was turned on between the mark and this turn: drop an
           // unclaimed PLAIN-handoff latch, the mirror of the off-branch below.
           // Both latches live at once otherwise — the primary crossed
@@ -345,22 +355,28 @@ export function createTransformSystem(client) {
             })
           }
         } else {
-          // The switch was turned off between the mark and this turn: drop a
-          // latch that has not been claimed yet, so the freeze lifts and the
-          // plain handoff owns the threshold again. A cycle already executing
-          // is not touched — it has written to the todo file and must not
-          // leave the primary half-replaced.
+          // Reached two ways: the user switched the mode off, or the mode
+          // stopped itself for this session. Either way no cycle may start, so
+          // drop a latch that has not been claimed yet — the freeze lifts with
+          // it and the plain handoff owns the threshold. A cycle already
+          // executing is not touched: it has written to the todo file and must
+          // not leave the primary half-replaced.
           cancelPendingEndless(sessionID)
-          // A pause is state of the endless mode, and the mode is off: the
-          // plain handoff owns the threshold now and must not be held back by
-          // a stop that belongs to a mode nobody is running.
-          clearEndlessPause(sessionID)
-          // The cross-cycle progress record belongs to a run of the mode, not
-          // to the process: with the mode off it has nothing to measure, and
-          // carrying its streak into the next arming would spend the user's
-          // re-arm on a single cycle before the no-progress bound — the very
-          // bound that switched the mode off — fired again.
-          resetEndlessProgress()
+          if (!getSettings().endlessMode) {
+            // The switch is off. A pause is state of the endless mode, and the
+            // mode is not running: the plain handoff owns the threshold now
+            // and must not be held back by a stop that belongs to a mode
+            // nobody is running. Only THIS branch clears a pause — clearing it
+            // while the switch is still on would undo the mode's own stop
+            // within one turn and let the next crossing arm a cycle again.
+            clearEndlessPause(sessionID)
+            // The cross-cycle progress record belongs to a run of the mode, not
+            // to the process: with the mode off it has nothing to measure, and
+            // carrying its streak into the next arming would spend the user's
+            // re-arm on a single cycle before the no-progress bound — the very
+            // bound that switched the mode off — fired again.
+            resetEndlessProgress()
+          }
           if (scheduleHandoffIfNeeded(sessionID, threshold)) {
             log("primary handoff scheduled (idle-gated)", { sessionID })
             showToast(client, {
@@ -898,9 +914,12 @@ async function notifyParentOfDenialLoop(client, entry) {
 // stopped itself for THIS session (cycle ceiling, no progress, nothing left to
 // do). It is the state the orchestrator cannot infer — the mode reads as on
 // everywhere else, because the settings file was deliberately not written —
-// and it changes what the session can expect: no further context refresh in
-// it. A session the user switched the mode off in gets no such sentence: there
-// the row reads `[off]` and the plain handoff owns the threshold again.
+// and it changes what the session can expect: no further cycle, so its open
+// points are not written to the todo file again. What it does NOT change is
+// the ordinary handoff: a paused primary is relieved at `maxPrimaryContext`
+// like any session with the mode off, and the sentence says so. A session the
+// user switched the mode off in gets no such sentence: there the row reads
+// `[off]` and there is nothing the orchestrator could not read off the panel.
 function formatLimitsNotice({
   sessionDir,
   projectMd = "",
@@ -938,8 +957,10 @@ function formatLimitsNotice({
       ? `Endless mode is PAUSED for this session — ${endlessPausedReason}. The mode itself ` +
         "is not switched off: nothing was written to the settings, the switch stays the " +
         "user's, and the next orchestrator session starts with it available again. For THIS " +
-        "session there is no further context refresh and no replacement: bring the work you " +
-        "have to a close and say so to the user.\n"
+        "session no further cycle runs, so your open points are not saved to the todo file " +
+        "again — the ordinary orchestrator handoff still applies and can replace this " +
+        "session at the plain context limit. Bring the work you have to a close and say so " +
+        "to the user.\n"
       : "") +
     "---\n"
   )

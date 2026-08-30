@@ -30,13 +30,15 @@
 //
 // Endless mode resolves the same way: `endlessMode`, `endlessContext`,
 // `endlessQuiesceTimeoutMs` and `endlessMaxCycles`.
-// While `endlessMode` is on, `endlessContext` is the primary threshold in
-// effect instead of `maxPrimaryContext` — see `primaryContextThreshold`.
+// While `endlessMode` is on and the mode has not paused itself for the session
+// in hand, `endlessContext` is the primary threshold in effect instead of
+// `maxPrimaryContext` — see `primaryContextThreshold`.
 // `endlessMode` is the USER's switch and this module never writes it: when one
 // of the mode's own bounds ends the loop, the plugin pauses the mode for that
 // one primary session (pauseEndless, src/registry.js) and leaves the file
 // alone. The mode is on by default, so a self-stop that persisted `false` here
-// would disable that default for good.
+// would disable that default for good. A paused session resolves its threshold
+// as if the mode were off, so the plain handoff still relieves it of context.
 //
 // `showAgentcom` resolves the same way and is the second boolean key. While it
 // is OFF, every message the plugin posts into a session carries `synthetic:
@@ -548,15 +550,36 @@ export function getForumBangs() {
   return getSettings().forumBangs
 }
 
+// Whether endless mode is the mode actually in effect for ONE primary session:
+// the user's switch is on AND the mode has not stopped itself for that session.
+// `endlessPaused` is the caller's read of registry.isEndlessPaused — passed in
+// rather than imported, because this module resolves settings and holds no
+// per-session state.
+//
+// A self-stop pauses the mode for that one session (pauseEndless,
+// src/registry.js) and writes nothing. For everything downstream of this
+// predicate a paused primary is a primary with endless mode off: it starts no
+// further cycle, and the plain handoff owns its threshold again. What stays
+// different is that nothing was persisted — the pause dies with the session and
+// the next orchestrator has the mode available.
+export function endlessModeInEffect({ endlessPaused = false } = {}) {
+  return getSettings().endlessMode && !endlessPaused
+}
+
 // The context threshold in effect for the primary session right now. One
-// resolution point for the whole plugin: while endless mode is on,
+// resolution point for the whole plugin: while endless mode is in effect,
 // `endlessContext` DISPLACES `maxPrimaryContext` — arming both would mean the
 // lower one always fires first and the endless threshold is never reached.
 // `endlessContext: 0` arms nothing, the way `maxPrimaryContext: 0` disables
 // the plain handoff; "endless mode on, threshold 0" is a legal state.
-export function primaryContextThreshold() {
+//
+// A paused primary resolves to `maxPrimaryContext`: it starts no cycle, so
+// leaving the endless threshold armed on it would arm nothing at all and the
+// session would grow until the provider's own context limit ended it. Relief
+// from context is not what a self-stop stops — only the loop is.
+export function primaryContextThreshold({ endlessPaused = false } = {}) {
   const s = getSettings()
-  return s.endlessMode ? s.endlessContext : s.maxPrimaryContext
+  return endlessModeInEffect({ endlessPaused }) ? s.endlessContext : s.maxPrimaryContext
 }
 
 function dropSettingsCache() {

@@ -1445,6 +1445,12 @@ export function endlessCooldownActive(sessionID) {
 // it resolves to) and the next primary session has the mode available again.
 // Only the user's own switch-off in the sidebar writes the file.
 //
+// The pause stops the LOOP and nothing else. For the threshold the paused
+// session counts as one with the mode off (`primaryContextThreshold`,
+// src/settings.js): the plain handoff arms at `maxPrimaryContext` and still
+// relieves it, because a session left with an armed endless threshold nobody
+// will act on grows until the provider's own context limit ends it.
+//
 // `reason` is the same sentence the stop logs and toasts; it is what the
 // orchestrator's per-turn limits block quotes back, so the two states the
 // orchestrator can be in — paused for this session, switched off in the file —

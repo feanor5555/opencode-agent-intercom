@@ -80,7 +80,10 @@ export function parseOpenPoints(rawText) {
   return points
 }
 
-function capChars(text, max) {
+// Truncation with a visible marker. Exported because the endless kickoff
+// (src/endless.js) lists the todo file back under the same per-field cap this
+// parser writes it with, and both ends must cut a long line the same way.
+export function capChars(text, max) {
   if (text.length <= max) return text
   return text.slice(0, max - 1).replace(/\s+$/, "") + "…"
 }

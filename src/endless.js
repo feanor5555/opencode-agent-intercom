@@ -34,8 +34,10 @@
 //   5. Nothing left to do: an empty point list AND an empty todo file pause
 //      the mode instead of starting a session that would have nothing to
 //      work on.
-//   6. Replace: the handoff runs with the endless kickoff block and with the
-//      open-points text standing in for the doc-summary turn.
+//   6. Replace: the handoff runs with the endless kickoff block — which
+//      carries the read-back's open tasks in full, because the successor
+//      primary cannot open the todo file itself — and with the open-points
+//      text standing in for the doc-summary turn.
 //   7. Record the open-task count the cycle found (before its own write) and
 //      apply the no-progress bound to it.
 //
@@ -51,7 +53,12 @@
 // Like `runScheduledHandoff`, this function NEVER throws — its caller is an
 // event handler.
 
-import { parseOpenPoints } from "./openpoints.js"
+import {
+  parseOpenPoints,
+  capChars,
+  OPEN_POINTS_MAX,
+  OPEN_POINT_MAX_CHARS,
+} from "./openpoints.js"
 import { log, errMsg } from "./log.js"
 
 // Cadence of the quiesce wait. Mirrors DOC_SUMMARIES_POLL_MS: the wait is
@@ -75,15 +82,58 @@ function normaliseTitle(title) {
   return typeof title === "string" ? title.trim().toLowerCase().replace(/\s+/g, " ") : ""
 }
 
+// Bounds on the task listing the kickoff carries. Both are the ceilings the
+// other half of the same hand-over already uses (openpoints.js): a cycle saves
+// at most OPEN_POINTS_MAX points and caps each of a point's two fields at
+// OPEN_POINT_MAX_CHARS before writing it. Listing the file back under the same
+// two numbers keeps the round trip symmetric and bounds the block at roughly
+// 40 × 400 characters — about 4k tokens against the primary's own 80k budget —
+// instead of at the size of a todo file that has no bound at all.
+export const KICKOFF_TASKS_MAX = OPEN_POINTS_MAX
+export const KICKOFF_TASK_FIELD_MAX_CHARS = OPEN_POINT_MAX_CHARS
+
+// The open tasks rendered in the todo file's OWN two-line shape, so the ids in
+// the kickoff are literally the ids the orchestrator puts on the first line of
+// each spawn prompt. Order is the file's order, which is feasibility order.
+// Past KICKOFF_TASKS_MAX the listing says how many more stand in the file
+// rather than dropping them silently — the successor cannot open the file
+// itself, so an unannounced cut would read as a complete list.
+function formatOpenTasks(openTasks) {
+  const listed = openTasks.slice(0, KICKOFF_TASKS_MAX)
+  const lines = []
+  for (const task of listed) {
+    const id = typeof task?.id === "string" ? task.id.trim() : ""
+    const text = capChars(String(task?.text ?? "").trim(), KICKOFF_TASK_FIELD_MAX_CHARS)
+    if (!id && !text) continue
+    lines.push(`- ${id ? `${id}: ` : ""}${text}`)
+    const accept = capChars(String(task?.accept ?? "").trim(), KICKOFF_TASK_FIELD_MAX_CHARS)
+    if (accept) lines.push(`  accept: ${accept}`)
+  }
+  const rest = openTasks.length - listed.length
+  if (lines.length > 0 && rest > 0) {
+    lines.push(`- … and ${rest} further task(s) below these in the file.`)
+  }
+  return lines.join("\n")
+}
+
 // The block the new orchestrator's kickoff carries in an endless cycle,
 // inserted right after the handoff summary. States only what the save step
-// confirmed: the ids come from the read-back, never from the parse alone.
+// confirmed: the ids and the task texts alike come from the read-back of the
+// resolved todo file, never from the parse alone.
+//
+// The listing is not a convenience. A primary holds spawn / abort / list /
+// reuse and nothing else (PRIMARY_TOOLS, src/hooks.js), so the successor
+// cannot open the todo file; naming the file alone would hand a cycle whose
+// points were all deduped away a session with nothing concrete in it.
 //
 // @param {Object} io
 // @param {string} io.todoFileName  name of the file the tasks were written to
 // @param {string[]} io.ids         the confirmed task ids, in write order
+// @param {Array<{ id: string, text: string, accept?: string }>} io.openTasks
+//   every open task in that file after the write, in file order — the same
+//   read-back that confirmed the ids, so the two cannot disagree
 // @returns {string}
-export function endlessKickoffBlock({ todoFileName, ids = [] }) {
+export function endlessKickoffBlock({ todoFileName, ids = [], openTasks = [] }) {
   const file = todoFileName || "the project's todo file"
   const head =
     ids.length > 0
@@ -91,9 +141,19 @@ export function endlessKickoffBlock({ todoFileName, ids = [] }) {
         `were saved to ${file} as ${ids.length} task(s): ${ids.join(", ")}.`
       : `The previous orchestrator session reached its context ceiling. It reported no new ` +
         `open points; ${file} still carries the work that is open.`
+  const listing = formatOpenTasks(Array.isArray(openTasks) ? openTasks : [])
+  // No listing means the plugin could not read a single open task out of the
+  // file. Say so and name the way out the successor actually has — it cannot
+  // read the file itself, a subagent can.
+  const tasks = listing
+    ? `The tasks standing in ${file} right now:\n\n${listing}`
+    : `The plugin could not read any open task out of ${file}. Have a subagent list ` +
+      `the file before you plan the session — you cannot read it yourself.`
   return (
     "## Endless mode — work off the todo file\n\n" +
     head +
+    "\n\n" +
+    tasks +
     "\n\n" +
     "Your job for this session: work that todo file off, top to bottom. The first task " +
     "is the next one to do. Spawn one subagent per task with the task id on the first " +
@@ -341,7 +401,12 @@ export async function runEndlessCycle({
   let result
   try {
     result = await performHandoff({
-      extraKickoffBlock: endlessKickoffBlock({ todoFileName: fileName, ids }),
+      // `openTasks` is the read-back of 4d — the resolved todo file's own open
+      // tasks, obtained through the injected `listOpen` (case-insensitive
+      // lookup, "missing" reading as empty, "multiple" having abandoned the
+      // cycle above). Deliberately NOT re-read here: a second read could
+      // disagree with the very list the ids were just confirmed against.
+      extraKickoffBlock: endlessKickoffBlock({ todoFileName: fileName, ids, openTasks }),
       openPointsText,
     })
   } catch (err) {

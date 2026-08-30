@@ -27,7 +27,13 @@ import {
   endlessCooldownActive,
   isEndlessFrozen,
 } from "../src/registry.js"
-import { runEndlessCycle, endlessKickoffBlock, ENDLESS_MAX_STALLED_CYCLES } from "../src/endless.js"
+import {
+  runEndlessCycle,
+  endlessKickoffBlock,
+  ENDLESS_MAX_STALLED_CYCLES,
+  KICKOFF_TASKS_MAX,
+  KICKOFF_TASK_FIELD_MAX_CHARS,
+} from "../src/endless.js"
 import {
   addTask,
   listOpen,
@@ -247,6 +253,14 @@ test("a timed-out open-points turn abandons at save", async () => {
 // The kickoff
 // ---------------------------------------------------------------------------
 
+// The paragraph the e2e kickoff check parses out of the block
+// (test/e2e/endless-task.sh: `block.split("\n\n")[1]`) — the sentence naming
+// the save, and the only place an id may come from THIS cycle's write.
+function headParagraph(block) {
+  const parts = block.split("## Endless mode — work off the todo file")[1].split("\n\n")
+  return parts[1] ?? ""
+}
+
 test("the kickoff block names the confirmed ids, the confirmed count and the file", async () => {
   const dir = tempProject({ "todos.md": "- T7: an older task\n" })
   const { io, state } = makeCycle({ directory: dir })
@@ -255,7 +269,11 @@ test("the kickoff block names the confirmed ids, the confirmed count and the fil
   const { extraKickoffBlock, openPointsText } = state.handoffCalls[0]
   assert.match(extraKickoffBlock, /^## Endless mode — work off the todo file$/m)
   assert.match(extraKickoffBlock, /saved to todos\.md as 2 task\(s\): T8, T9\./)
-  assert.doesNotMatch(extraKickoffBlock, /\bT7\b/, "only ids the write returned are named")
+  assert.doesNotMatch(
+    headParagraph(extraKickoffBlock),
+    /\bT7\b/,
+    "the saving sentence names only ids the write returned",
+  )
   assert.match(extraKickoffBlock, /DONE: T<n>/)
   assert.equal(
     openPointsText,
@@ -264,11 +282,104 @@ test("the kickoff block names the confirmed ids, the confirmed count and the fil
   )
 })
 
+test("the kickoff carries the todo file's open tasks, not only its name", async () => {
+  const dir = tempProject({
+    "todos.md": "- T7: an older task\n  accept: the older criterion holds\n",
+  })
+  const { io, state } = makeCycle({ directory: dir })
+  await runEndlessCycle(io)
+
+  const { extraKickoffBlock } = state.handoffCalls[0]
+  assert.match(extraKickoffBlock, /The tasks standing in todos\.md right now:/)
+  // The pre-existing task the write did not produce is in the listing: the
+  // successor primary holds no todo tool and cannot read the file itself.
+  assert.match(extraKickoffBlock, /^- T7: an older task$/m)
+  assert.match(extraKickoffBlock, /^ {2}accept: the older criterion holds$/m)
+  assert.match(extraKickoffBlock, /^- T8: Finish the migration script$/m)
+  assert.match(extraKickoffBlock, /^ {2}accept: `npm run migrate` exits 0$/m)
+  assert.match(extraKickoffBlock, /^- T9: Write the rollback procedure$/m)
+  // File order, which is feasibility order: the oldest task stays first.
+  assert.ok(
+    extraKickoffBlock.indexOf("- T7:") <
+      extraKickoffBlock.indexOf("- T8:") &&
+      extraKickoffBlock.indexOf("- T8:") < extraKickoffBlock.indexOf("- T9:"),
+    "the listing keeps the file's own order",
+  )
+})
+
+test("a cycle whose every point was deduped away still hands over the open tasks", async () => {
+  // The gap the listing closes: the reply restates what already stands in the
+  // file, so no id is written and the head paragraph has none to name.
+  const dir = tempProject({
+    "todos.md":
+      "- T1: Finish the migration script\n  accept: `npm run migrate` exits 0\n" +
+      "- T2: Write the rollback procedure\n  accept: the file exists\n",
+  })
+  const { io, state } = makeCycle({ directory: dir })
+  const res = await runEndlessCycle(io)
+
+  assert.equal(res.outcome, "complete")
+  assert.deepEqual(res.ids, [], "every point was already in the file")
+  const { extraKickoffBlock } = state.handoffCalls[0]
+  assert.match(extraKickoffBlock, /no new open points/)
+  assert.match(extraKickoffBlock, /^- T1: Finish the migration script$/m)
+  assert.match(extraKickoffBlock, /^- T2: Write the rollback procedure$/m)
+})
+
 test("endlessKickoffBlock: with no new points it states the file rather than an empty id list", () => {
-  const block = endlessKickoffBlock({ todoFileName: "TODO.md", ids: [] })
+  const block = endlessKickoffBlock({
+    todoFileName: "TODO.md",
+    ids: [],
+    openTasks: [{ id: "T4", text: "an open task" }],
+  })
   assert.match(block, /no new open points/)
   assert.doesNotMatch(block, /0 task\(s\)/)
   assert.match(block, /work that todo file off, top to bottom/)
+  assert.match(block, /^- T4: an open task$/m)
+})
+
+test("endlessKickoffBlock: the listing stops at KICKOFF_TASKS_MAX and says how many it left", () => {
+  const openTasks = Array.from({ length: KICKOFF_TASKS_MAX + 3 }, (_, i) => ({
+    id: `T${i + 1}`,
+    text: `task number ${i + 1}`,
+  }))
+  const block = endlessKickoffBlock({ todoFileName: "TODO.md", ids: ["T1"], openTasks })
+  assert.match(block, new RegExp(`^- T${KICKOFF_TASKS_MAX}: `, "m"))
+  assert.doesNotMatch(block, new RegExp(`^- T${KICKOFF_TASKS_MAX + 1}: `, "m"))
+  assert.match(block, /^- … and 3 further task\(s\) below these in the file\.$/m)
+})
+
+test("endlessKickoffBlock: a runaway task line is capped per field, not dumped whole", () => {
+  const long = "x".repeat(KICKOFF_TASK_FIELD_MAX_CHARS + 500)
+  const block = endlessKickoffBlock({
+    todoFileName: "TODO.md",
+    ids: ["T1"],
+    openTasks: [{ id: "T1", text: long, accept: long }],
+  })
+  const titleLine = block.split("\n").find((l) => l.startsWith("- T1: "))
+  const acceptLine = block.split("\n").find((l) => l.startsWith("  accept: "))
+  assert.equal(titleLine.length, "- T1: ".length + KICKOFF_TASK_FIELD_MAX_CHARS)
+  assert.equal(acceptLine.length, "  accept: ".length + KICKOFF_TASK_FIELD_MAX_CHARS)
+  assert.ok(titleLine.endsWith("…"), "the cut is marked")
+})
+
+test("endlessKickoffBlock: with no readable task it names the way out the primary has", () => {
+  const block = endlessKickoffBlock({ todoFileName: "TODO.md", ids: [], openTasks: [] })
+  assert.match(block, /could not read any open task out of TODO\.md/)
+  assert.match(block, /Have a subagent list the file/)
+  assert.doesNotMatch(block, /The tasks standing in/)
+})
+
+test("endlessKickoffBlock: the saving sentence stays the second paragraph", () => {
+  // Pinned because test/e2e/endless-task.sh parses exactly that paragraph and
+  // fails on any T-id in it that this cycle's write did not return.
+  const block = endlessKickoffBlock({
+    todoFileName: "TODO.md",
+    ids: ["T8"],
+    openTasks: [{ id: "T7", text: "older" }, { id: "T8", text: "newer" }],
+  })
+  const head = headParagraph(block)
+  assert.deepEqual(head.match(/\bT\d+\b/g), ["T8"])
 })
 
 // ---------------------------------------------------------------------------
@@ -417,9 +528,14 @@ test("a point whose title is already a task is not written a second time", async
   )
   assert.match(content, /- T8: Write the rollback procedure/)
   assert.doesNotMatch(
-    state.handoffCalls[0].extraKickoffBlock,
+    headParagraph(state.handoffCalls[0].extraKickoffBlock),
     /T7/,
-    "the kickoff names only what this cycle wrote",
+    "the saving sentence names only what this cycle wrote",
+  )
+  assert.match(
+    state.handoffCalls[0].extraKickoffBlock,
+    /^- T7: finish {3}the Migration Script$/m,
+    "the deduped task is still listed — it is open work the successor cannot read itself",
   )
   assert.match(state.handoffCalls[0].extraKickoffBlock, /1 task\(s\): T8\./)
 })

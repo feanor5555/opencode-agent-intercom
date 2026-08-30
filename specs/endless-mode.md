@@ -391,6 +391,12 @@ injected dependencies differ in an endless cycle:
   The previous orchestrator session reached its context ceiling. Its open points
   were saved to <todo file name> as <n> task(s): T<a>, T<b>, …
 
+  The tasks standing in <todo file name> right now:
+
+  - T<a>: <title>
+    accept: <criterion>
+  - T<b>: <title>
+
   Your job for this session: work that todo file off, top to bottom. The first task
   is the next one to do. Spawn one subagent per task with the task id on the first
   line of the spawn prompt. A task is finished when its subagent reports
@@ -399,6 +405,21 @@ injected dependencies differ in an endless cycle:
   ```
 
   The ids are the ones §3.4 confirmed, so the message states nothing it did not verify.
+
+  **The task listing carries the file's contents, not only its name.** A primary holds
+  `spawn` / `abort` / `list` / `reuse` and nothing else (`PRIMARY_TOOLS`, `src/hooks.js:129`),
+  so the successor cannot open the todo file. Naming the file alone would hand a cycle whose
+  every point was deduped away (§3.4) a session with nothing concrete in it. The listing is
+  the §3.4 read-back itself — the same list that confirmed the ids, never a second read that
+  could disagree with it — rendered in the todo file's own two-line shape and in the file's
+  own order, so the ids in the kickoff are the ids that go on the first line of each spawn
+  prompt. It is bounded by `KICKOFF_TASKS_MAX` and `KICKOFF_TASK_FIELD_MAX_CHARS`
+  (`src/endless.js`), which are `OPEN_POINTS_MAX` (40) and `OPEN_POINT_MAX_CHARS` (200) — the
+  ceilings the saving half of the same hand-over already applies, so the round trip is
+  symmetric and the block stays at roughly 40 × 400 characters instead of the size of an
+  unbounded todo file. Tasks past the cap are announced by count rather than dropped
+  silently, and a file from which no open task could be read is stated as such with the one
+  way out the primary has: have a subagent list it.
 
 Everything else stands: the drain buffers notices from the moment the sequence starts
 (`src/handoff.js:134`), reparent happens before the kickoff is composed (`:197`), the old

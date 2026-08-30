@@ -87,12 +87,13 @@ export default async (ctx) => {
   // will ever delete it — no session TTL, no garbage collection, and no
   // shutdown hook the plugin could have used. One pass at load deletes what can
   // only be such a leftover; it makes no call at all where retention is off,
-  // which is the shipped default.
-  try {
-    await sweepOrphanedSubagentSessions(client, { directory })
-  } catch (err) {
-    log("bootstrap sweep failed", err?.message ?? String(err))
-  }
+  // which is the shipped default. The sweep starts on the next event-loop turn
+  // so its session.list request cannot hold up this factory or server bootstrap.
+  setImmediate(() => {
+    void sweepOrphanedSubagentSessions(client, { directory }).catch((err) => {
+      log("bootstrap sweep failed", err?.message ?? String(err))
+    })
+  })
 
   const permissionGuard = createPermissionGuard(client)
   const transformSystem = createTransformSystem(client)

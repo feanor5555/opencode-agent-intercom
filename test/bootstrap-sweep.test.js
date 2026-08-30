@@ -119,6 +119,7 @@ function makeClient({ sessions = [], failList = false } = {}) {
 }
 
 const ctxFor = (client) => ({ client, directory: fixtureDir, worktree: fixtureDir, project: {} })
+const nextImmediate = () => new Promise((resolve) => setImmediate(resolve))
 
 // ---- what it deletes ---------------------------------------------------------
 
@@ -134,8 +135,33 @@ test("the sweep runs at plugin load, scoped to this project's directory", async 
   withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: TTL })
   const { client, deleted, listCalls } = makeClient({ sessions: [session("ses_leaked")] })
   await plugin(ctxFor(client))
+  await nextImmediate()
   assert.deepEqual(deleted, ["ses_leaked"])
   assert.deepEqual(listCalls, [{ query: { directory: fixtureDir } }])
+})
+
+test("the plugin factory does not wait for a bootstrap sweep failure", async () => {
+  withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: TTL })
+  let rejectList
+  const listGate = new Promise((_, reject) => {
+    rejectList = reject
+  })
+  const { client } = makeClient()
+  client.session.list = () => listGate
+  const factory = plugin(ctxFor(client))
+  let factorySettled = false
+  factory.then(() => {
+    factorySettled = true
+  })
+
+  try {
+    await nextImmediate()
+    await Promise.resolve()
+    assert.equal(factorySettled, true, "plugin factory waited for session.list")
+  } finally {
+    rejectList(new Error("connection reset"))
+    await factory
+  }
 })
 
 // ---- what it never touches ---------------------------------------------------

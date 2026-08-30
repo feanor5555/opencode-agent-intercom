@@ -8,16 +8,26 @@
 // across every hook invocation: `spawn` runs while the subagent's
 // `chat.system.transform` hook runs, and they must see the same registry.
 
-// handle -> { handle, sessionID, agent, prompt, parentID, status, spawnedAt,
-//             lastActivityAt, lastActivity, ctxTokens, lastTokensFetchAt,
-//             timedOut }
+// handle -> { handle, sessionID, agent, prompt, parentID, status, lifecycle,
+//             spawnedAt, retainedAt, lastActivityAt, lastActivity, ctxTokens,
+//             lastTokensFetchAt, timedOut }
+//
+// `status` is what opencode reports the session is doing; `lifecycle` is what
+// the entry means to this plugin, and is what decides whether the entry counts
+// as a running subagent (see isActiveEntry in registry.js).
 //
 // One-shot subagent lifecycle: each entry lives from `spawn` until the
 // subagent goes idle (= completed its single reply). At that point the event
 // hook delivers the result to the primary, removes the entry from this map,
-// and deletes the underlying opencode session. There is no follow-up channel
-// to a finished subagent; if more work is needed, the orchestrator spawns a
-// fresh one.
+// and deletes the underlying opencode session. If more work is needed, the
+// orchestrator spawns a fresh one.
+//
+// The one exception is retention, and it is off unless `maxRetainedSubagents`
+// is configured above 0: a top-level subagent that ended cleanly keeps its
+// entry and its opencode session after the wake, with `lifecycle` on
+// "retained" and `retainedAt` stamped. Such an entry holds no concurrency slot
+// and is deleted when its retention window runs out, when capacity evicts it,
+// or on any other teardown.
 export const registry = new Map()
 
 // sessionID -> handle (reverse lookup)

@@ -959,10 +959,18 @@ half of the path is untouched.
 
 ### 7.2 `countActiveSubagents` and its five consumers — `registry.js:237-243`
 
-Change: count only `lifecycle === "running"`. Consumers that inherit it for
-free: the cap (`registry.js:263-270`), the quiesce predicate
-(`registry.js:1076-1082`), both slot lines (`notices.js:174-179`,
-`tools.js:663-679`).
+Change: count an entry only where it is **not aborted AND**
+`lifecycle === "running"`. The two terms are a conjunction, not alternatives:
+no path sets a lifecycle other than `running` — the abort paths included, since
+an abort is recorded in the `aborted` set and leaves `lifecycle` alone — so
+dropping the aborted term would put aborted entries back into the count.
+
+Both terms live in one exported predicate, `isActiveEntry(entry)` in
+`registry.js`, and every consumer calls it rather than restating either term.
+That predicate is the definition of "active" for the whole plugin, so the
+consumers cannot drift apart. Consumers that inherit it for free: the cap
+(`registry.js:263-270`), the quiesce predicate (`registry.js:1076-1082`), both
+slot lines (`notices.js:174-179`, `tools.js:663-679`).
 
 **If unchanged, this is the collision that breaks everything else, and the
 longer window makes it worse rather than better.** With
@@ -978,8 +986,9 @@ it. **The count split is not an optional refinement of this design; it is its
 precondition**, which is why it is step 1 below and lands on its own. The new
 requirement does not weaken this finding — it makes it more load-bearing.
 
-Sibling with the same shape: `activeTaskIdsFor` (`registry.js:414-421`) must
-also skip retained entries, or a retained entry still holding `T5` refuses
+Sibling with the same shape: `activeTaskIdsFor` (`registry.js:414-421`) reads
+the same `isActiveEntry` and so skips retained entries too — without that, a
+retained entry still holding `T5` refuses
 every fresh spawn for `T5` for the whole retention window
 (`tools.js:430-442`) — an hour, not five minutes.
 
@@ -1186,12 +1195,18 @@ on its own.
 
 **Step 1 — split "an entry exists" from "a run is in flight".** Add
 `entry.lifecycle`, set to `"running"` by `createEntry` (`registry.js:1121`) and
-by nothing else. Make `countActiveSubagents` (`registry.js:237`),
-`activeTaskIdsFor` (`:414`), `formatSubagentSnapshot` (`hooks.js:932`) and
-`listHandler` (`tools.js:766`) read it instead of "not aborted". Behaviour-
-neutral: no value other than `running` is ever set yet. Tests: the whole suite
-green, plus new tests pinning that a non-`running` entry is invisible to the
-cap, to `isQuiesced`, to `activeTaskIdsFor` and to both renderings.
+by nothing else. Add the exported predicate `isActiveEntry(entry)` to
+`registry.js` — not aborted **and** `lifecycle === "running"`, with a missing
+field read as `running` so a hand-built entry keeps counting — and make
+`countActiveSubagents` (`registry.js:237`), `activeTaskIdsFor` (`:414`),
+`formatSubagentSnapshot` (`hooks.js:932`) and `listHandler` (`tools.js:766`)
+call it in place of their own aborted check. The aborted check is kept inside
+the predicate, not replaced by the lifecycle one: nothing sets a lifecycle
+other than `running`, so a lifecycle-only test would count aborted entries as
+active. Behaviour-neutral: no value other than `running` is ever set yet.
+Tests: the whole suite green, plus new tests pinning that a non-`running` entry
+is invisible to the cap, to `isQuiesced`, to `activeTaskIdsFor` and to both
+renderings, and that an aborted entry stays excluded from all four.
 *Depends on: nothing.* This is the dangerous step and it lands alone.
 
 **Step 2 — settings, constants and the pure decision functions, still inert.**

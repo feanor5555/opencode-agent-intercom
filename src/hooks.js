@@ -36,6 +36,12 @@ import {
   upsertSession,
   isPrimary,
   effectiveState,
+  isActiveEntry,
+  entryLifecycle,
+  LIFECYCLE_RUNNING,
+  retentionDecision,
+  retainEntryLocked,
+  claimRetentionEvictionsLocked,
   removeEntryLocked,
   reservePendingDelivery,
   releasePendingDelivery,
@@ -77,7 +83,7 @@ import {
 import { tokens as fmtTokens, ageSeconds, estimateTokens, percent } from "./format.js"
 import { postParentNotice, teardownSubagent, signalSessionIdle } from "./teardown.js"
 import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
-import { completionNotice, errorNotice, denialLoopNotice } from "./notices.js"
+import { completionNotice, errorNotice, denialLoopNotice, isBlockedResult } from "./notices.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
 import { maybeRunPendingHandoff, maybeRunPendingEndless } from "./handoffwiring.js"
 
@@ -926,11 +932,13 @@ function fixedOverheadFor(agent, { projectMd, agentsMd, snapshot }) {
 // see subagents spawned by other primaries too (those still consume the shared
 // slot budget). Injected into the primary's system prompt so it always knows
 // what is running. Fed from the module-level registry, kept fresh by the
-// `event` hook (status/idle). Aborted subagents are filtered out; finished
-// subagents are not in the registry at all (event hook removes them on idle).
-// Returns the empty string when nothing is active.
+// `event` hook (status/idle). Rows are the entries isActiveEntry admits — the
+// same predicate the concurrency cap counts on — so an entry that holds no
+// slot is not listed here either; finished subagents are not in the registry
+// at all (event hook removes them on idle). Returns the empty string when
+// nothing is active.
 function formatSubagentSnapshot(primaryID) {
-  const active = [...registry.values()].filter((e) => effectiveState(e) !== "aborted")
+  const active = [...registry.values()].filter((e) => isActiveEntry(e))
   if (active.length === 0) return ""
   const rows = active.map((e) => {
     const state = effectiveState(e)
@@ -1110,6 +1118,11 @@ async function onSessionIdle({ sessionID }, client) {
   const wake = await registryMutex.runExclusive(() => {
     const e = entryForSession(sessionID)
     if (!e || aborted.has(sessionID) || e.timedOut || e.errored || e.dispatched) return null
+    // A retained or closing entry has already delivered the one result this
+    // path exists to deliver. Its session is alive, so a stray idle can still
+    // reach us — from the user typing into it, or from a reload — and must not
+    // wake the parent a second time with the same reply.
+    if (entryLifecycle(e) !== LIFECYCLE_RUNNING) return null
     // A subagent that is blocked on a child of its own has NOT finished: an
     // idle event reaching us here is the session falling quiet around a tool
     // call that has not returned, not the one-shot reply this path exists to
@@ -1146,11 +1159,22 @@ async function onSessionIdle({ sessionID }, client) {
     // Returns a real boolean synchronously, so the truthy-branch below is
     // correct (a missing entry now actually returns null instead of leaking
     // a truthy Promise object — that was the regression slice 1a introduced).
-    const removed = removeEntryLocked(sessionID)
-    if (!removed) return null
-    // The entry is out of the registry from here on, so countActiveSubagents
-    // no longer sees this subagent — but its result has not been delivered
-    // yet. Reserve the delivery window in the SAME critical section, so the
+    // Retention: with `maxRetainedSubagents` above 0 a top-level subagent that
+    // ended cleanly keeps its entry and its opencode session instead of being
+    // disposed of here — the delivery above is untouched either way, the
+    // orchestrator gets its result at the same moment. The decision is taken on
+    // what this section already holds; the one condition it cannot see, a
+    // `Blocked:` reply, is applied below once the result snapshot is in.
+    const retention = retentionDecision(e, getSettings().maxRetainedSubagents)
+    if (retention.retain) {
+      retainEntryLocked(sessionID)
+    } else {
+      const removed = removeEntryLocked(sessionID)
+      if (!removed) return null
+    }
+    // The entry is out of the registry (or, retained, no longer active) from
+    // here on, so countActiveSubagents no longer sees this subagent — but its
+    // result has not been delivered yet. Reserve the delivery window in the SAME critical section, so the
     // quiesce predicate never observes the gap between the two: an endless
     // cycle that fired its open-points prompt in that gap would replace the
     // primary while this very result was still on its way to it. Released in
@@ -1167,12 +1191,21 @@ async function onSessionIdle({ sessionID }, client) {
       // the notice needs: the entry is removed a few lines above and is gone
       // by the time the notice is composed.
       nested: { runs: e.nestedRuns ?? 0, tokens: e.nestedTokens ?? 0 },
+      retained: retention.retain,
     }
   })
   if (!wake) return
   const { handle, parentID, agent, taskId, directory, packageTokens, nested } = wake
+  // Whether the session survives this path. Starts false and is only raised
+  // once the result is in hand: a snapshot fetch or a notice that throws falls
+  // through to the delete below, exactly as it did before retention existed.
+  let retain = false
   try {
     const snapshot = await fetchSnapshot(client, sessionID)
+    // The retention condition the critical section could not evaluate: a
+    // `Blocked:` report is not a session to hand more work to — the task
+    // continues through a fresh spawn carrying the orchestrator's decision.
+    retain = wake.retained && !isBlockedResult(snapshot.result)
     // Hand the reply to a session blocked on this one, if there is one. This
     // is the only ending path that has a RESULT rather than just a cause, so
     // it settles here rather than leaving it to teardownSubagent's fallback —
@@ -1217,17 +1250,47 @@ async function onSessionIdle({ sessionID }, client) {
   } catch (err) {
     log("notify parent failed", errMsg(err))
     // Fall through to cleanup of the underlying opencode session — keeping it
-    // around would only leak: a one-shot subagent gets exactly one wake
-    // attempt. If it failed, the user can re-prompt via the primary.
+    // around would only leak: a subagent whose wake failed gets no retention
+    // and no second attempt. If it failed, the user can re-prompt via the
+    // primary.
+    retain = false
   }
   try {
     await teardownSubagent(
       client,
       { sessionID, handle, parentID, agent },
-      { entryRemoved: true, label: "" },
+      // `entryRemoved` is false whenever the critical section left the entry in
+      // place: either it is being retained, and the teardown stops before the
+      // delete, or the retention was revoked above and the teardown is the
+      // thing that has to remove it.
+      { entryRemoved: !wake.retained, retain, label: "" },
     )
+    if (retain) await evictRetainedOverCapacity(client)
   } finally {
     releasePendingDelivery()
+  }
+}
+
+// Trims the retained set back to `maxRetainedSubagents` after one more entry
+// joined it, oldest first. The newest retention always wins: what strikes the
+// orchestrator later is a question about a subagent it has already read, and
+// the one it just heard about is the likeliest to be asked.
+//
+// The claim runs under the mutex and moves the victims to "closing" before it
+// returns, so the watchdog's reap cannot take the same entry; the teardowns
+// themselves run outside the lock. Silent by design — the parent was woken
+// when each of these runs finished, and a second notice would cost it an LLM
+// turn to be told something it may never ask about again is gone.
+async function evictRetainedOverCapacity(client) {
+  const victims = await registryMutex.runExclusive(() =>
+    claimRetentionEvictionsLocked(getSettings().maxRetainedSubagents),
+  )
+  for (const victim of victims) {
+    log("retention: evicting the oldest retained subagent", {
+      handle: victim.handle,
+      sessionID: victim.sessionID,
+    })
+    await teardownSubagent(client, victim, { label: "retention" })
   }
 }
 

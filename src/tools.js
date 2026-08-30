@@ -19,6 +19,7 @@ import {
   trackPrimary,
   countActiveSubagents,
   effectiveState,
+  isActiveEntry,
   reservePendingSpawn,
   releasePendingSpawn,
   activeTaskIdsFor,
@@ -772,7 +773,7 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // (and try to abort) the previous primary's children.
     const active = [...registry.values()].filter((e) => {
       if (e.parentID !== toolCtx.sessionID) return false
-      return effectiveState(e) !== "aborted"
+      return isActiveEntry(e)
     })
     if (active.length === 0) return { output: "No active subagents." }
     return { output: active.map(formatListRow).join("\n") }

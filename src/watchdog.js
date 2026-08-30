@@ -21,7 +21,13 @@
 import { registry, aborted } from "./state.js"
 import { getSettings } from "./settings.js"
 import { abortSession } from "./client.js"
-import { entryForSession } from "./registry.js"
+import {
+  entryForSession,
+  entryLifecycle,
+  isRetainedExpired,
+  LIFECYCLE_CLOSING,
+  LIFECYCLE_RETAINED,
+} from "./registry.js"
 import { liveChildSessionIDs } from "./childwait.js"
 import { teardownSubagent } from "./teardown.js"
 import { timeoutNotice } from "./notices.js"
@@ -61,17 +67,48 @@ export function ensureWatchdogStarted(client) {
   log("watchdog started", { intervalMs: WATCHDOG_INTERVAL_MS })
 }
 
-// Sweeps the registry once and times out any subagent whose last event is
-// older than the configured inactivity window. Best-effort: a single failed
-// abort on one entry doesn't stop the others from being checked.
+// Sweeps the registry once. Two clocks run on this one tick, one per
+// lifecycle, and they never meet:
+//
+//   running  — times out any subagent whose last event is older than the
+//              configured inactivity window (`maxSubagentAgeMs`).
+//   retained — reaps any finished subagent whose retention window
+//              (`retainedSubagentTtlMs`, measured from `retainedAt`) is up.
+//   closing  — skipped; a teardown is already in flight.
+//
+// `maxSubagentAgeMs` is never read for a retained entry and `lastActivityAt`
+// is never compared against it: a retained session emits no events, so its
+// last-activity stamp stands still at the last event of the run that ended,
+// and the inactivity window would tear it down about 90 s later with a false
+// hang report about a subagent that finished cleanly. The switch below is what
+// keeps the two apart; the `status === "idle"` skip in the running branch
+// stays what its comment says it is, a race guard for the removal gap.
+//
+// For the same reason `maxSubagentAgeMs <= 0` — the watchdog switched off —
+// disables the running branch alone. It must not also switch off the reap:
+// nothing outside this plugin ever deletes a subagent session, so a user who
+// turns the inactivity timer off precisely because they do not want subagents
+// killed on a clock would otherwise be given an unbounded leak instead.
+//
+// Best-effort: a single failed abort or delete on one entry doesn't stop the
+// others from being checked.
 export async function sweepWatchdog() {
-  const maxAge = getSettings().maxSubagentAgeMs
-  if (maxAge <= 0) return // watchdog disabled
+  const settings = getSettings()
+  const maxAge = settings.maxSubagentAgeMs
+  const ttl = settings.retainedSubagentTtlMs
   const now = Date.now()
   // Snapshot the entries first — we mutate the registry (removeEntry) below,
   // so iterating the live Map would skip or revisit entries.
   const entries = [...registry.values()]
   for (const entry of entries) {
+    const lifecycle = entryLifecycle(entry)
+    if (lifecycle === LIFECYCLE_CLOSING) continue
+    if (lifecycle === LIFECYCLE_RETAINED) {
+      if (!isRetainedExpired(entry, ttl, now)) continue
+      await reapRetainedSubagent(entry, ttl, now - (entry.retainedAt ?? 0))
+      continue
+    }
+    if (maxAge <= 0) continue // watchdog disabled
     if (entry.timedOut) continue
     if (entry.errored) continue
     if (aborted.has(entry.sessionID)) continue
@@ -160,6 +197,34 @@ export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
     markAborted: true,
     label: "watchdog",
   })
+}
+
+// Deletes one retained subagent whose retention window is up: the session goes,
+// the entry goes, the slot was never held. Silent towards the parent — it was
+// woken when this subagent's run finished, and a second notice would cost it an
+// LLM turn to be told that something it may never think about again has gone.
+// No abort call either: a retained session is idle, there is nothing to stop.
+export async function reapRetainedSubagent(entry, ttlMs, retainedForMs) {
+  // Latch before any I/O, exactly as the timeout path does, so a racing
+  // eviction or a second sweep skips this entry.
+  entry.lifecycle = LIFECYCLE_CLOSING
+  log("retention window expired", {
+    handle: entry.handle,
+    sessionID: entry.sessionID,
+    agent: entry.agent,
+    retainedForMs,
+    ttlMs,
+  })
+  await teardownSubagent(
+    watchdogClient,
+    {
+      sessionID: entry.sessionID,
+      handle: entry.handle,
+      parentID: entry.parentID,
+      agent: entry.agent,
+    },
+    { notice: null, markAborted: false, label: "retention" },
+  )
 }
 
 // Test-only: stop the watchdog interval so unit tests don't leak timers.

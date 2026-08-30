@@ -224,12 +224,169 @@ export function effectiveState(entry) {
   return entry.status ?? "unknown"
 }
 
+// The lifecycle of a registry entry, orthogonal to `status`. `status` mirrors
+// what opencode reports the session is doing; `lifecycle` says what the entry
+// means to this plugin, and specifically whether it occupies a concurrency
+// slot.
+//
+// Three values:
+//   "running"  — a turn is in flight or about to be; the entry occupies a
+//                concurrency slot. Set by `createEntry` and by nothing else.
+//   "retained" — the wake was delivered and the opencode session was NOT
+//                deleted: it is idle, alive and re-promptable until the
+//                retention window runs out. Set by `retainEntryLocked`.
+//   "closing"  — a teardown is in flight; the entry holds no slot and no path
+//                may pick it up again. Set by `markEntryClosing` and by the
+//                watchdog's reap before its first await.
+// An entry built without the field reads as running, so a hand-built fixture
+// keeps counting exactly as it did before the field existed.
+export const LIFECYCLE_RUNNING = "running"
+export const LIFECYCLE_RETAINED = "retained"
+export const LIFECYCLE_CLOSING = "closing"
+
+// The lifecycle of one entry, with the default applied.
+export function entryLifecycle(entry) {
+  return entry?.lifecycle ?? LIFECYCLE_RUNNING
+}
+
+// Whether an entry counts as a running subagent. This is the single definition
+// of "active" behind the concurrency cap, the quiesce predicate, the in-flight
+// taskId set and both renderings of the active list, so those four cannot
+// drift apart.
+//
+// Two reasons an entry does not count: it was aborted (it no longer occupies a
+// slot even before opencode has confirmed the abort), or its lifecycle is not
+// "running". The two terms are a conjunction and neither can stand for the
+// other: an abort is recorded in the `aborted` set and leaves `lifecycle`
+// alone, so a lifecycle-only test would count aborted entries as active; and a
+// retained or closing entry is not aborted at all, so an aborted-only test
+// would count a finished session that is merely being held.
+export function isActiveEntry(entry) {
+  if (!entry) return false
+  if (effectiveState(entry) === "aborted") return false
+  return entryLifecycle(entry) === LIFECYCLE_RUNNING
+}
+
+// Whether the subagent that has just delivered its result may be held alive as
+// a retained session instead of having its opencode session deleted.
+//
+// Pure and synchronous: it is called from inside the wake critical section, on
+// the values that section already holds, and does no I/O. `maxRetained` is
+// passed in rather than read from the settings, exactly as `spawnCapDecision`
+// takes `maxSubagents` — the registry does not resolve settings.
+//
+// Retained only when all of:
+//   1. retention is switched on at all (`maxRetained > 0`). At 0 — the default
+//      — this is the only term that is ever reached, and every subagent is
+//      deleted at idle exactly as it always was;
+//   2. the entry has a parent to have been woken;
+//   3. the subagent is top level. A nested child — one whose parent is itself
+//      a tracked subagent — is never retained: its rows would be wiped
+//      mid-life by its parent's own recursive DELETE, because the child-first
+//      sweep reads its children from the waiter map and a finished child has
+//      no waiter left. The parent having a registry entry IS the plugin's
+//      definition of "the parent is a subagent" (see trackPrimary).
+//
+// A fourth condition is not decidable here and is the caller's: only a clean
+// idle may retain. The error, timeout and abort paths never run this decision
+// — they go straight to `teardownSubagent` — and a `Blocked:` reply is
+// classified from the result snapshot, which the critical section has not
+// fetched yet (see onSessionIdle).
+//
+// Capacity is not a term either. A retention that overshoots `maxRetained` is
+// resolved by evicting the OLDEST retained entries afterwards
+// (`claimRetentionEvictionsLocked`), not by refusing the newest: the entry the
+// orchestrator was just told about is the one most likely to be asked a
+// follow-up question.
+export function retentionDecision(entry, maxRetained) {
+  if (!entry) return { retain: false, reason: "no-entry" }
+  if (!(maxRetained > 0)) return { retain: false, reason: "retention-off" }
+  if (!entry.parentID) return { retain: false, reason: "no-parent" }
+  if (entryForSession(entry.parentID)) return { retain: false, reason: "nested" }
+  return { retain: true, reason: "retained" }
+}
+
+// Turns the entry of `sessionID` into a retained one, in place. The exact
+// opposite of removeEntryLocked: the entry stays in `registry` and
+// `bySession`, its handle is NOT released back to the counter and the agent
+// name recorded for its session is NOT forgotten, because the whole point is
+// that the handle keeps addressing a session that is still there.
+//
+// `dispatched` is cleared: the latch means "a wake for THIS run is in flight",
+// and that run is over. The idle path is kept off a retained entry by the
+// lifecycle instead, which is a state rather than a one-way claim.
+//
+// Must be called with the registry mutex held (the "Locked" suffix, as in
+// removeEntryLocked).
+export function retainEntryLocked(sessionID, now = Date.now()) {
+  const handle = bySession.get(sessionID)
+  if (!handle) return false
+  const entry = registry.get(handle)
+  if (!entry) return false
+  entry.lifecycle = LIFECYCLE_RETAINED
+  entry.retainedAt = now
+  entry.dispatched = false
+  return true
+}
+
+// How many finished subagents are being held alive right now.
+export function countRetainedSubagents() {
+  let n = 0
+  for (const e of registry.values()) {
+    if (entryLifecycle(e) === LIFECYCLE_RETAINED) n += 1
+  }
+  return n
+}
+
+// Trims the retained set down to `maxRetained`, oldest `retainedAt` first, and
+// returns one teardown descriptor per evicted entry. The entries are moved to
+// "closing" here, before the caller does any I/O, so the watchdog's reap and a
+// second eviction pass cannot pick up the same entry twice.
+//
+// Must be called with the registry mutex held; the teardowns themselves run
+// after it is released.
+export function claimRetentionEvictionsLocked(maxRetained) {
+  const retained = []
+  for (const e of registry.values()) {
+    if (entryLifecycle(e) === LIFECYCLE_RETAINED) retained.push(e)
+  }
+  const surplus = retained.length - Math.max(0, maxRetained)
+  if (surplus <= 0) return []
+  retained.sort((a, b) => (a.retainedAt ?? 0) - (b.retainedAt ?? 0))
+  return retained.slice(0, surplus).map((e) => {
+    e.lifecycle = LIFECYCLE_CLOSING
+    return { sessionID: e.sessionID, handle: e.handle, parentID: e.parentID, agent: e.agent }
+  })
+}
+
+// Whether a retained entry's window has run out. Only a retained entry can
+// expire; a running one is governed by the inactivity watchdog and a closing
+// one is already on its way out. An entry that is retained but carries no
+// `retainedAt` reads as expired, so a half-written state is reaped rather than
+// held forever.
+export function isRetainedExpired(entry, ttlMs, now = Date.now()) {
+  if (entryLifecycle(entry) !== LIFECYCLE_RETAINED) return false
+  return (entry.retainedAt ?? 0) + ttlMs < now
+}
+
+// Moves a retained entry to "closing" before its teardown does any I/O. A
+// running entry is left alone: its slot is accounted for by `removeEntry` and
+// the pending-delivery reservation inside the teardown itself, and re-labelling
+// it here would free its slot one network call earlier than it is freed today.
+export function markEntryClosing(sessionID) {
+  const entry = entryForSession(sessionID)
+  if (!entry) return false
+  if (entryLifecycle(entry) !== LIFECYCLE_RETAINED) return false
+  entry.lifecycle = LIFECYCLE_CLOSING
+  return true
+}
+
 // Counts ALL active subagents across every primary in this opencode process —
-// the cap is global, not per-primary. Aborted subagents are excluded (they no
-// longer occupy a concurrency slot, even before opencode has confirmed the
-// abort). Finished subagents are not in the registry at all, so no special
-// case for them. Pending spawns (between cap-check and upsertSession) are
-// included so parallel spawn() calls in the same turn cannot bypass the cap.
+// the cap is global, not per-primary. What counts is isActiveEntry, not bare
+// registry membership: an entry that does not hold a slot is invisible here.
+// Finished subagents are not in the registry at all, so no special case for
+// them. Pending spawns (between cap-check and upsertSession) are included so
+// parallel spawn() calls in the same turn cannot bypass the cap.
 //
 // The `primaryID` arg is preserved for backwards compatibility with existing
 // call sites but is ignored: with a global cap, the count is the same
@@ -237,7 +394,7 @@ export function effectiveState(entry) {
 export function countActiveSubagents(primaryID) {
   let n = pendingSpawns.count
   for (const e of registry.values()) {
-    if (effectiveState(e) === "aborted") continue
+    if (!isActiveEntry(e)) continue
     n += 1
   }
   return n
@@ -407,7 +564,8 @@ export function upsertSession(
   return createEntry(sessionID, agent || "subagent", prompt || "", parentID, taskId, directory, packageTokens)
 }
 
-// Returns the set of taskIds currently held by active subagents of a primary.
+// Returns the set of taskIds currently held by active subagents of a primary,
+// "active" being isActiveEntry — the same predicate the concurrency cap uses.
 // Used by `spawn` to reject a duplicate spawn for a task that's already in
 // flight — without this, a small model that gets confused and re-spawns the
 // same T-id would silently double-tick (or, worse, race) on completion.
@@ -415,7 +573,7 @@ export function activeTaskIdsFor(primaryID) {
   const ids = new Set()
   for (const e of registry.values()) {
     if (e.parentID !== primaryID) continue
-    if (effectiveState(e) === "aborted") continue
+    if (!isActiveEntry(e)) continue
     if (e.taskId) ids.add(e.taskId)
   }
   return ids
@@ -1145,6 +1303,9 @@ function createEntry(sessionID, agent, prompt, parentID, taskId, directory, pack
     // that sprawled once it was running.
     packageTokens: packageTokens || undefined,
     status: "busy",
+    // Whether this entry occupies a concurrency slot; see isActiveEntry. Set
+    // here and nowhere else, so every registry entry is "running".
+    lifecycle: LIFECYCLE_RUNNING,
     spawnedAt: now,
     // Wall-clock ms of the most recent lifecycle event observed for this
     // subagent (session.created / .status / .idle / any). Initialized at

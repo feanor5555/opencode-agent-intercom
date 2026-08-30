@@ -59,6 +59,7 @@
 //       "endlessMode": true|false, "endlessContext": N,
 //       "endlessQuiesceTimeoutMs": N, "endlessMaxCycles": N,
 //       "maxNestedSpawns": N,
+//       "maxRetainedSubagents": N, "retainedSubagentTtlMs": N,
 //       "showAgentcom": true|false }
 
 import { readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs"
@@ -108,6 +109,20 @@ const DEFAULT_MAX_PRIMARY_CONTEXT = 80000
 // window measures the CHILD, and the parent outlives it by construction.
 // It also sets the child-waiter's own rescue ceiling — see childwait.js.
 const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
+// How many finished subagents may be held as retained sessions in this
+// process at once. A retained subagent has delivered its result and had its
+// wake posted, but its opencode session was NOT deleted, so it stays
+// re-promptable. 0 switches retention off entirely: every subagent's session
+// is deleted the moment its result is delivered, which is the one-shot
+// behaviour this plugin has always had, and is the default.
+const DEFAULT_MAX_RETAINED_SUBAGENTS = 0
+// How long one retained subagent is held, in ms, measured from the moment it
+// was retained (`entry.retainedAt`). The watchdog sweep reaps a retained entry
+// once this window is past. Clamped to a minimum of 1 ms: "hold forever" is
+// deliberately not offered, because nothing outside this plugin ever deletes a
+// subagent session — opencode has neither a session TTL nor a garbage
+// collector, so an unbounded window would be an unbounded leak.
+const DEFAULT_RETAINED_SUBAGENT_TTL_MS = 3600000
 // How many subagents ONE subagent run may start (a nested spawn). Delegation
 // exists for preparatory work whose answer the caller then uses — summarising a
 // long document, a broad lookup — not as a working mode, so the ceiling is
@@ -258,6 +273,11 @@ function envStr(name, def) {
 // number of cycles one process runs; 0 disables the cycle ceiling.
 // maxNestedSpawns is how many subagents one subagent run may start; 0 disables
 // nesting.
+// maxRetainedSubagents is how many finished subagents may be held alive as
+// retained sessions at once; 0 (the default) switches retention off and every
+// subagent's session is deleted as soon as its result is delivered.
+// retainedSubagentTtlMs is how long one retained subagent is held before the
+// watchdog reaps it, floored at 1 ms — the window is never "forever".
 // showAgentcom shows the plugin's own postings in the transcript; while it is
 // off they are hidden from it and still left in the model's payload.
 export function getSettings() {
@@ -270,6 +290,14 @@ export function getSettings() {
     agentContext: {},
     maxPrimaryContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT", DEFAULT_MAX_PRIMARY_CONTEXT),
     maxSubagentAgeMs: envNum("OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS", DEFAULT_MAX_SUBAGENT_AGE_MS),
+    maxRetainedSubagents: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS",
+      DEFAULT_MAX_RETAINED_SUBAGENTS,
+    ),
+    retainedSubagentTtlMs: envNum(
+      "OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS",
+      DEFAULT_RETAINED_SUBAGENT_TTL_MS,
+    ),
     searxngUrl: envStr("OPENCODE_AGENT_INTERCOM_SEARXNG_URL", ""),
     exaApiKey: envStr("EXA_API_KEY", ""),
     forumBangs: [...DEFAULT_FORUM_BANGS],
@@ -312,6 +340,12 @@ export function getSettings() {
     }
     if (Number.isInteger(raw?.maxSubagentAgeMs) && raw.maxSubagentAgeMs >= 0) {
       resolved.maxSubagentAgeMs = raw.maxSubagentAgeMs
+    }
+    if (Number.isInteger(raw?.maxRetainedSubagents) && raw.maxRetainedSubagents >= 0) {
+      resolved.maxRetainedSubagents = raw.maxRetainedSubagents
+    }
+    if (Number.isInteger(raw?.retainedSubagentTtlMs) && raw.retainedSubagentTtlMs >= 0) {
+      resolved.retainedSubagentTtlMs = raw.retainedSubagentTtlMs
     }
     if (typeof raw?.searxngUrl === "string" && raw.searxngUrl.trim() !== "") {
       resolved.searxngUrl = raw.searxngUrl.trim()
@@ -367,6 +401,11 @@ export function getSettings() {
       endlessOverride = null
     }
   }
+  // The retention window has a floor of 1 ms, wherever its value came from:
+  // a 0 here would mean a retained session nothing ever reaps, and this plugin
+  // is the only thing that deletes a subagent session. 0 switches retention
+  // off through `maxRetainedSubagents`, not through the window.
+  resolved.retainedSubagentTtlMs = Math.max(1, resolved.retainedSubagentTtlMs)
   cache = resolved
   cachedAt = now
   // exaApiKey is a secret: log only whether one is in effect, never its value.

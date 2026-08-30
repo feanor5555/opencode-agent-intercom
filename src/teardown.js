@@ -7,6 +7,7 @@ import {
   routeParentNotice,
   removeEntry,
   entryForSession,
+  markEntryClosing,
   reservePendingDelivery,
   releasePendingDelivery,
 } from "./registry.js"
@@ -210,6 +211,14 @@ export async function endLiveChildrenOf(client, sessionID, { label = "", seen } 
 // the helper must not remove it a second time. The errored/timeout paths remove
 // it here.
 //
+// `retain` is what makes a finished subagent a retained one: the notice half
+// of this function still runs, and everything that disposes of the session
+// then does not. No `removeEntry` — the entry stays, on `lifecycle` "retained"
+// — no child teardown, no quiescence wait, no `deleteSession`, and no
+// `forgetSessionDirectory`: the directory cache is part of what a later reuse
+// needs. Only the idle path passes it, and only after the retention decision
+// has been taken on the delivered result; every other ending path deletes.
+//
 // `label` prefixes the debug logs so each caller stays greppable. `notice`/
 // `toast` are optional; the idle path posts its own completion notice inline
 // (it needs the fetched snapshot + task outcome), the errored/timeout paths let
@@ -245,6 +254,7 @@ export async function teardownSubagent(
     toast = null,
     markAborted = false,
     entryRemoved = false,
+    retain = false,
     label = "",
     outcome = null,
     seen = undefined,
@@ -274,6 +284,16 @@ export async function teardownSubagent(
         log(`${tag}postNotice failed`, { handle, parentID, err: errMsg(err) })
       }
     }
+    if (retain) {
+      // The session stays. Everything below this point exists to dispose of
+      // it, so this is the end of the path for a retained subagent; the
+      // watchdog's reap runs the rest when the retention window is up.
+      log(`${tag}retained opencode session`, { handle, sessionID })
+      return
+    }
+    // A retained entry on its way out moves to "closing" before the first
+    // network call below, so no reap and no eviction can claim it twice.
+    markEntryClosing(sessionID)
     if (!entryRemoved) {
       if (await removeEntry(sessionID, { clearAborted: false })) {
         log(`${tag}removed subagent`, { handle, sessionID })

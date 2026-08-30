@@ -10,4 +10,3 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 ## Pending
 
 - `test/retention-texts.test.js` flakes intermittently in a full run — a different test name each time, always green in isolation and on a re-run. Cause unknown.
-- The wiring of the plugin into `/home/user/testopencode` is gone: neither `opencode.json` nor `.opencode/tui.json` exists there any more. TUI captures currently run against the fixture `/tmp/intercom-retention-project`, which wires the same absolute path.

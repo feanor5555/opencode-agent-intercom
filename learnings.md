@@ -339,3 +339,27 @@ tool part at all. Two independent checks catch it:
    real render produces are the fingerprint of a replayed string.
 
 Apply both before treating any text the primary quotes as a tool result.
+
+## Global plugin wiring loads the plugin in every directory
+
+opencode honours `plugin` in the global config at
+`${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json` for the server
+half and `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/tui.json` for the TUI
+half (`.jsonc` also accepted on either side). Both paths are honoured, and
+project `plugin` entries merge with the global ones rather than replace
+them — a later entry of the same identity wins, and an empty later list
+does not clear earlier entries. An absolute path works identically from
+either place; a relative path resolves against the config file that
+declared it.
+
+With the absolute plugin path written into both global files, a fresh
+`opencode` instance started in an empty scratch directory with no
+`opencode.json` and no `.opencode/` loads the plugin normally:
+`opencode debug info` reports
+`plugins: - file:///home/user/opencode-agent-intercom`, the plugin's debug
+log gains an `agent-intercom initialized` line, `opencode serve` serves
+the plugin's tool ids (`spawn`, `abort`, `list`, the todo tools,
+`web_search`, `outline`), and the TUI sidebar renders the subagent panel
+reflecting the global `~/.config/opencode/agent-intercom.json`.
+
+Source: `/home/user/opencode-agent-intercom/work/research-opencode-global-plugin-wiring.md`.

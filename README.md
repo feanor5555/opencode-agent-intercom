@@ -34,12 +34,30 @@ That is the whole setup. The installer wires both halves of the plugin
 Chromium for the `pw` browser CLI, and writes a `.bak` of every config file it
 touches. Restart opencode. Done.
 
-Manual fallback: add `"opencode-agent-intercom"` to your project's
+### Global wiring (active everywhere)
+
+For the plugin to load in every project, without per-project config, add the
+absolute path to both halves of the user-global opencode config:
+
+- `~/.config/opencode/opencode.json` — `"plugin": ["/home/user/opencode-agent-intercom"]` (server half)
+- `~/.config/opencode/tui.json` — `"plugin": ["/home/user/opencode-agent-intercom"]` (TUI half; `tui.jsonc` also accepted)
+
+opencode honours `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json`
+and `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/tui.json` for the global
+config. Global and project plugin entries merge rather than replace — a later
+entry of the same identity wins, and an absolute path works identically from
+either place. With both global entries present the plugin loads in any
+directory, with no `opencode.json` and no `.opencode/` needed.
+
+### Manual fallback (project-scoped)
+
+Add `"opencode-agent-intercom"` to your project's
 `opencode.json` `plugin` array and `"opencode-agent-intercom-tui"` to
 `~/.config/opencode/tui.json` (user-global, **not** the project file). The TUI
 plugin does **not** resolve from a directory path — for a local checkout,
 point at the built file directly (`/path/to/.../tui/dist/tui.js`, after
 `npm run build` in `tui/`).
+
 
 ### How you actually see it
 

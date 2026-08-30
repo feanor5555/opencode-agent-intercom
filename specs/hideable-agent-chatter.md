@@ -1,11 +1,11 @@
 # Hideable agent chatter — the plugin's own messages stop rendering, keep reaching the model
 
 Sources for the opencode behaviour of §2: the installed binary
-`/home/user/.opencode/bin/opencode`, the installed packages under `node_modules/@opencode-ai/`,
+`~/.opencode/bin/opencode`, the installed packages under `node_modules/@opencode-ai/`,
 this repository's live capture `test/e2e/out/11-endless.new-session-messages.json`, and the
 upstream check recorded in `work/research-opencode-message-visibility.md`.
 
-Boundary: the plugin at `/home/user/opencode-agent-intercom`, both halves — the server-side
+Boundary: the plugin at `~/opencode-agent-intercom`, both halves — the server-side
 plugin under `src/` and the sidebar plugin under `tui/`. Against opencode `1.18.25`.
 
 Today every text the plugin pushes between the orchestrator and its subagents stands in the
@@ -122,7 +122,7 @@ export type TextPartInput = {
 
 Their meaning comes from opencode's MCP content mapping, which is where the two flags are
 minted from an `annotations.audience` list. In the installed binary
-`/home/user/.opencode/bin/opencode`:
+`~/.opencode/bin/opencode`:
 
 ```js
 function aP(C){ if(C?.length===1&&C[0]==="assistant") return {synthetic:!0};

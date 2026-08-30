@@ -2,7 +2,7 @@
 
 Status: implemented, 2026-08-29.
 
-Scope: the `opencode-agent-intercom` plugin (`/home/user/opencode-agent-intercom`),
+Scope: the `opencode-agent-intercom` plugin (`~/opencode-agent-intercom`),
 opencode 1.18.25. Two defects of one shape, answered together:
 
 - **A** — a project file `.opencode/agent/<name>.md` displaces a plugin role

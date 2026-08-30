@@ -7,7 +7,7 @@ what the delegation cost against the parent's own quota.
 The mechanism that makes this safe — the wait state, the lifecycle exemption, the
 quota counter — is built and tested. The depth bound is structural: the only legal
 target is the one role that is itself `spawn: deny`, so a nested child cannot have
-children. Boundary: the plugin at `/home/user/opencode-agent-intercom/src/`. The TUI is
+children. Boundary: the plugin at `~/opencode-agent-intercom/src/`. The TUI is
 out of scope; this is a server-side feature.
 
 ---
@@ -245,7 +245,7 @@ burned in their own sessions, which an ending without a snapshot does not report
 ## 7. Live-run bounds
 
 `work/s7-live-nesting-durchstich.md` ran the feature end to end against a real
-`opencode serve` 1.18.25 in `/home/user/testopencode`, model `xai/grok-4.6`. The
+`opencode serve` 1.18.25 in `~/testopencode`, model `xai/grok-4.6`. The
 capture directory is `work/s7-nested-live-captures/`; the driver is
 `test/e2e/nested-task.sh`; the asserted criteria are 13/13 passed, exit 0. Two
 properties the design guarantees are bounded by what that run shows.

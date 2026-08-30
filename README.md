@@ -39,8 +39,8 @@ touches. Restart opencode. Done.
 For the plugin to load in every project, without per-project config, add the
 absolute path to both halves of the user-global opencode config:
 
-- `~/.config/opencode/opencode.json` — `"plugin": ["/home/user/opencode-agent-intercom"]` (server half)
-- `~/.config/opencode/tui.json` — `"plugin": ["/home/user/opencode-agent-intercom"]` (TUI half; `tui.jsonc` also accepted)
+- `~/.config/opencode/opencode.json` — `"plugin": ["/absolute/path/to/opencode-agent-intercom"]` (server half)
+- `~/.config/opencode/tui.json` — `"plugin": ["/absolute/path/to/opencode-agent-intercom"]` (TUI half; `tui.jsonc` also accepted)
 
 opencode honours `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json`
 and `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/tui.json` for the global

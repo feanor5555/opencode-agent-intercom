@@ -1,6 +1,6 @@
 # Concept: endless mode — a self-restarting orchestrator that works off its own TODO.md
 
-Boundary: the plugin at `/home/user/opencode-agent-intercom`, both halves — the
+Boundary: the plugin at `~/opencode-agent-intercom`, both halves — the
 server-side plugin under `src/` and the sidebar plugin under `tui/`.
 
 Endless mode is on by default and is also a switch in the sidebar. While it is on, the

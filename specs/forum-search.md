@@ -1,7 +1,7 @@
 # Concept: `forum_search` — a forum route for the plugin's web search
 
 Status: wired; this file is the design it is built to. Boundary: the plugin at
-`/home/user/opencode-agent-intercom`.
+`~/opencode-agent-intercom`.
 Model: the forum route in `~/.claude/agents/researcher.md` (lines 52–66).
 
 ## 1. What the code does today (read, with the lines behind it)

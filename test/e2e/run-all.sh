@@ -14,7 +14,7 @@
 #
 # Env:
 #   RUN_ALL_PORT           4567   port for the server this script starts
-#   PROJECT_DIR            /home/user/testopencode by default — the project
+#   PROJECT_DIR            $HOME/testopencode by default — the project
 #                          sessions are created against, passed on to the drivers
 #   OUT_DIR                ./out  captures, server log and pid file
 #   SERVER_START_TIMEOUT_S 60     readiness probe budget
@@ -33,7 +33,7 @@ PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
 . "$HERE/server-lifecycle.sh"
 
 PORT=${RUN_ALL_PORT:-4567}
-PROJECT=${PROJECT_DIR:-/home/user/testopencode}
+PROJECT=${PROJECT_DIR:-$HOME/testopencode}
 OUTDIR=${OUT_DIR:-$HERE/out}
 START_TIMEOUT=${SERVER_START_TIMEOUT_S:-60}
 

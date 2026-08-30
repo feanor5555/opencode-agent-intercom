@@ -6,7 +6,7 @@
 #
 # Env (optional):
 #   OPENCODE_URL    default http://localhost:4567
-#   PROJECT_DIR     default /home/user/testopencode
+#   PROJECT_DIR     default $HOME/testopencode
 #   OUT_DIR         default ./out
 #
 # Expected golden output: see ./golden/10-multi.full.json — 90+ messages,
@@ -15,7 +15,7 @@
 # commit performed.
 set -e
 BASE=${OPENCODE_URL:-http://localhost:4567}
-PROJECT=${PROJECT_DIR:-/home/user/testopencode}
+PROJECT=${PROJECT_DIR:-$HOME/testopencode}
 OUTDIR=${OUT_DIR:-$(dirname "$0")/out}
 PREFIX=10-multi
 mkdir -p "$OUTDIR"

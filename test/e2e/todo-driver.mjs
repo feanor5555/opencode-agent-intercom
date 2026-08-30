@@ -7,9 +7,9 @@
 //
 // Prereqs:
 //   - opencode serve running (port from arg, default 4567), with THIS plugin
-//     loaded — see CLAUDE.md "lokaler file:-Pointer wirkt nur, wenn man IM
-//     Projekt mit dem Pointer arbeitet": start `opencode serve` from
-//     /home/user/echomodus (its opencode.json has the file: pointer).
+//     loaded. A `file:` pointer only takes effect for the project that carries
+//     it, so start `opencode serve` from a project whose opencode.json holds
+//     the pointer, or wire the plugin globally.
 //   - A local LLM reachable (the test uses whatever omnicoder /v1 endpoint
 //     opencode detected). Single-spawn turns; budget ~5-15 min wall-clock per
 //     scenario depending on the model.
@@ -25,12 +25,16 @@ import { Agent, setGlobalDispatcher } from "undici"
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 
 setGlobalDispatcher(new Agent({ headersTimeout: 30 * 60 * 1000, bodyTimeout: 30 * 60 * 1000 }))
 
 const baseUrl = process.argv[2] || "http://localhost:4567"
 const projectDir =
   process.argv[3] || mkdtempSync(join(tmpdir(), "intercom-todo-e2e-"))
+
+// This checkout, resolved from the driver's own location: test/e2e/ -> repo root.
+const pluginRoot = fileURLToPath(new URL("../../", import.meta.url)).replace(/\/$/, "")
 
 const client = createOpencodeClient({ baseUrl })
 const u = (r) => (r && typeof r === "object" && "data" in r ? r.data : r)
@@ -94,7 +98,7 @@ function writePermissiveConfig(model) {
     JSON.stringify(
       {
         $schema: "https://opencode.ai/config.json",
-        plugin: ["file:/home/user/opencode-agent-intercom"],
+        plugin: [`file:${pluginRoot}`],
         ...(model ? { model } : {}),
         permission: {
           edit: "allow",

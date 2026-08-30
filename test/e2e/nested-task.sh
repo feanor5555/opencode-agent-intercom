@@ -46,7 +46,7 @@
 #   OUT_DIR=/somewhere/kept bash test/e2e/nested-task.sh
 #
 # Parameters (env, all with defaults chosen so one run is quick and cheap):
-#   NESTED_PROJECT_DIR /home/user/testopencode  directory this plugin is wired
+#   NESTED_PROJECT_DIR $HOME/testopencode  directory this plugin is wired
 #                      into, globally or by its own opencode.json; the server runs in it and
 #                      every session is created with ?directory= pointing at it.
 #                      Its own name, not PROJECT_DIR, so run-all.sh's value for
@@ -95,7 +95,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # are shared with run-all.sh and endless-task.sh.
 . "$HERE/server-lifecycle.sh"
 
-PROJECT_DIR=${NESTED_PROJECT_DIR:-/home/user/testopencode}
+PROJECT_DIR=${NESTED_PROJECT_DIR:-$HOME/testopencode}
 PORT=${NESTED_PORT:-4602}
 BASE=$(e2e_server_url "$PORT")
 CALLER_ROLE=${NESTED_CALLER:-coder}

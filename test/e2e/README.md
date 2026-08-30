@@ -20,7 +20,7 @@ that opencode upgrades don't shift the system-prompt composition.
 - `run-all.sh` — runs the 8 single-agent tests, the multi-agent test and the
   endless-mode cycle. Owns the server the first ten use: builds the TUI, starts
   a fresh `opencode serve` in the configured directory (default
-  `/home/user/testopencode`), and stops it again on the way out.
+  `$HOME/testopencode`), and stops it again on the way out.
 - `server-lifecycle.sh` — sourced library, not a driver. Holds the four server
   steps `run-all.sh` and `endless-task.sh` share: `e2e_build_tui`,
   `e2e_server_start`, `e2e_server_wait_ready`, `e2e_server_stop`, plus
@@ -30,6 +30,17 @@ that opencode upgrades don't shift the system-prompt composition.
   `test/e2e-server-lifecycle.test.js`, which drives it against a stub server.
 - `golden/` — reference captures from 2026-05-16 (opencode 1.15.0, omnicoder
   Qwen3.5-9B). Diff fresh `out/*.full*.json` against these to detect drift.
+  The captures carry absolute paths from the machine they were taken on, and
+  the home directory in them is redacted to `/home/user/` before they are
+  committed. A capture promoted from `out/` into `golden/` gets the same
+  treatment — the repository is public:
+
+  ```bash
+  sed -i "s#$HOME/#/home/user/#g" test/e2e/golden/*.json
+  ```
+
+  Nothing compares these files byte for byte, so the redaction changes no
+  outcome; the documented diff below counts messages.
 - `out/` — created at runtime; `.gitignore` covers it.
 
 ## How to run
@@ -37,7 +48,7 @@ that opencode upgrades don't shift the system-prompt composition.
 `run-all.sh` needs no server of its own started by hand. It builds
 `tui/dist/tui.js` — the sidebar is served from that bundle, so a restart alone
 would keep the previous one — then starts `opencode serve` on `RUN_ALL_PORT`
-(4567) in `PROJECT_DIR` (default `/home/user/testopencode`), waits for
+(4567) in `PROJECT_DIR` (default `$HOME/testopencode`), waits for
 `/global/health`, exports `OPENCODE_URL` for the drivers, and stops the server's
 process group again on the way out, including on a failing driver and on
 Ctrl-C. Every run therefore uses the plugin code in the working tree against the
@@ -45,7 +56,7 @@ wired test project.
 
 ```bash
 # 1. Run the suite:
-cd /home/user/opencode-agent-intercom
+cd ~/opencode-agent-intercom
 bash test/e2e/run-all.sh
 
 # 2. Diff against the golden reference (loose — message IDs and timestamps
@@ -103,7 +114,7 @@ three places is enough:
 | project | `plugin` array of `$PROJECT_DIR/.opencode/tui.json` or `tui.jsonc` |
 
 ```json
-{ "plugin": ["/home/user/opencode-agent-intercom"] }
+{ "plugin": ["/absolute/path/to/opencode-agent-intercom"] }
 ```
 
 When it refuses, it lists every one of those files, keeping a file that does not
@@ -112,7 +123,7 @@ exist apart from one that exists without the entry, and prints the remedy.
 On this machine both wirings are global — that entry stands in
 `~/.config/opencode/opencode.json` for the server half and in
 `~/.config/opencode/tui.json` for the TUI half — so both checks pass in any
-directory, the `PROJECT_DIR` default `/home/user/testopencode` included, which
+directory, the `PROJECT_DIR` default `$HOME/testopencode` included, which
 carries no config of its own. The default is kept for what it still decides: the
 server's working directory and the `?directory=` every session is created with,
 which is what keeps subagent reads on real paths (see "Known caveats").
@@ -122,7 +133,7 @@ which is what keeps subagent reads on real paths (see "Known caveats").
 
 Settings used for the golden references:
 - `~/.config/opencode/agent-intercom.json` → `maxSubagents: 8, maxContext: 130000`
-- `opencode serve` started in `/home/user/testopencode`
+- `opencode serve` started in `$HOME/testopencode`
 - llama-server: omnicoder (`Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf`)
   with reasoning on, the params from `start-qwen.sh`
 - Multi-agent test: 4 subagent spawns (planner / coder / reviewer / gitter), all
@@ -141,7 +152,7 @@ through the same `server-lifecycle.sh`:
 bash test/e2e/endless-task.sh                       # defaults, ~3-5 min
 ENDLESS_CONTEXT=6000 SUBAGENT_SLEEP_S=20 \
   bash test/e2e/endless-task.sh                     # cheaper still
-ENDLESS_PROJECT_DIR=/home/user/testopencode \
+ENDLESS_PROJECT_DIR="$HOME/testopencode" \
 ENDLESS_PORT=4599 KEEP_SERVER=1 \
   bash test/e2e/endless-task.sh                     # leave the server up
 ```

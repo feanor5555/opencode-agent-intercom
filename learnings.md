@@ -10,7 +10,7 @@ A `plugin` entry added to `opencode.json` while an opencode instance is running
 never reaches that instance — it must be restarted.
 
 Evidence: a running `opencode acp` (PID 3291359) logged
-`run=174ec834 message=loading path=/home/user/testopencode/opencode.json` at
+`run=174ec834 message=loading path=~/testopencode/opencode.json` at
 12:59:54.621 UTC (14:59:54 local). The `plugin` line was written to that file
 at 15:06:27 local — 6 min 32 s after the read. The plugin's debug log
 (`~/.cache/opencode-agent-intercom/debug.log`) received no `agent-intercom
@@ -21,7 +21,7 @@ This is the single most likely cause when a correctly configured plugin "is not
 there" — diagnose the staleness of the running instance before changing the
 spec.
 
-Source: `/home/user/opencode-agent-intercom/work/diagnosis-plugin-load.md`.
+Source: `work/diagnosis-plugin-load.md`.
 
 ## Accepted plugin spec forms
 
@@ -51,9 +51,9 @@ directory syntax; Arborist reifies it into a cache directory literally named
 
 The plain absolute path is the clean form and avoids the npm reify and the
 `file:` cache directory on every bootstrap. opencode normalises it internally
-to `file:///home/user/opencode-agent-intercom`.
+to `file:///absolute/path/to/opencode-agent-intercom`.
 
-Source: `/home/user/opencode-agent-intercom/work/diagnosis-plugin-load.md`.
+Source: `work/diagnosis-plugin-load.md`.
 
 ## An unrecognised plugin spec fails silently
 
@@ -64,7 +64,7 @@ may have been rejected silently.
 
 The TUI-side loader does log it (`xF("tui plugin has no entrypoint", ...)`).
 
-Source: `/home/user/opencode-agent-intercom/work/diagnosis-plugin-load.md`.
+Source: `work/diagnosis-plugin-load.md`.
 
 ## How to prove a plugin actually loaded
 
@@ -73,7 +73,7 @@ Two checks, in increasing strength.
 1. **`opencode debug info` in the project directory.** Bootstraps plugins
    without any model call. The plugin's own
    `agent-intercom initialized` line in
-   `/home/user/.cache/opencode-agent-intercom/debug.log` (on by default per
+   `~/.cache/opencode-agent-intercom/debug.log` (on by default per
    `src/index.js`) increments on every load. Count the lines before and
    after to confirm a delta.
 
@@ -82,7 +82,7 @@ Two checks, in increasing strength.
    (`spawn`, `abort`, `list`, `todos_open`, `todo_done`, `todo_add`,
    `todo_edit`, `web_search`, `outline`).
 
-Source: `/home/user/opencode-agent-intercom/work/diagnosis-plugin-load.md`.
+Source: `work/diagnosis-plugin-load.md`.
 
 ## Reaching the TUI plugin manager
 
@@ -133,7 +133,7 @@ inherited working directory and silently tests the wrong project. Then
 confirm either of:
 
 - the TUI plugin metadata showing `id agent-intercom.tui` with target
-  `file:///home/user/opencode-agent-intercom`, or
+  `file:///absolute/path/to/opencode-agent-intercom`, or
 - `strace` catching the `openat` of `tui/dist/tui.js`.
 
 **What does NOT cause the absence.** Agent tool permissions were cleared as
@@ -141,7 +141,7 @@ a non-cause: `opencode debug agent orchestrator` in the project shows all
 nine plugin tools enabled (`spawn`, `abort`, `list`, `todos_open`,
 `todo_done`, `todo_add`, `todo_edit`, `web_search`, `outline`).
 
-Source: `/home/user/opencode-agent-intercom/work/diagnosis-plugin-visibility.md`.
+Source: `work/diagnosis-plugin-visibility.md`.
 
 
 ## Project-scoped registration that works
@@ -153,7 +153,7 @@ Three working forms; choose one per project.
    identity; an empty later list does not clear earlier entries).
 
    ```json
-   "plugin": ["/home/user/opencode-agent-intercom"]
+   "plugin": ["/absolute/path/to/opencode-agent-intercom"]
    ```
 
 2. **Drop-in file in `.opencode/plugin/` or `.opencode/plugins/`**
@@ -167,7 +167,7 @@ Three working forms; choose one per project.
    `~/.cache/opencode/node_modules/` does not match this version's
    implementation).
 
-Source: `/home/user/opencode-agent-intercom/work/research-opencode-plugin-scope.md`.
+Source: `work/research-opencode-plugin-scope.md`.
 
 ## Seeing the TUI half of the plugin
 
@@ -185,7 +185,7 @@ overlay the content). Two conditions must both hold for a user to see it:
    result — that is expected, not a missing command. Until the user runs the
    toggle the plugin loads successfully but the `Subagents` section never
    paints. Verified in the installed opencode 1.18.25 binary at
-   `/home/user/.opencode/bin/opencode`.
+   `~/.opencode/bin/opencode`.
 
 2. **A session route must be active.** The `sidebar_content` slot is rendered
    inside the session view (the slot's `session_id` is bound to the active
@@ -244,8 +244,8 @@ PR #6092 proposed a configurable overlay; neither is supported. The 1.18.0
 release notes describe a Desktop v2 layout switch, not a TUI sidebar change —
 no official 1.18.x release note describes any TUI sidebar layout change.
 
-Sources: `/home/user/opencode-agent-intercom/work/research-sidebar-layout.md`,
-`/home/user/opencode-agent-intercom/work/sidebar-layout-options.md`.
+Sources: `work/research-sidebar-layout.md`,
+`work/sidebar-layout-options.md`.
 
 Combined navigation once everything is wired:
 
@@ -261,7 +261,7 @@ Combined navigation once everything is wired:
   value here suppresses plugin loading on the next start; unsetting it
   restores the plugin.
 
-Source: `/home/user/opencode-agent-intercom/work/diagnosis-plugin-visibility.md`
+Source: `work/diagnosis-plugin-visibility.md`
 (verified against the installed opencode 1.18.25 binary).
 
 ## Local development loop with a path-wired test project
@@ -356,10 +356,10 @@ With the absolute plugin path written into both global files, a fresh
 `opencode` instance started in an empty scratch directory with no
 `opencode.json` and no `.opencode/` loads the plugin normally:
 `opencode debug info` reports
-`plugins: - file:///home/user/opencode-agent-intercom`, the plugin's debug
+`plugins: - file:///absolute/path/to/opencode-agent-intercom`, the plugin's debug
 log gains an `agent-intercom initialized` line, `opencode serve` serves
 the plugin's tool ids (`spawn`, `abort`, `list`, the todo tools,
 `web_search`, `outline`), and the TUI sidebar renders the subagent panel
 reflecting the global `~/.config/opencode/agent-intercom.json`.
 
-Source: `/home/user/opencode-agent-intercom/work/research-opencode-global-plugin-wiring.md`.
+Source: `work/research-opencode-global-plugin-wiring.md`.

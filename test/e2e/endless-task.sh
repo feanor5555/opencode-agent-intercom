@@ -31,7 +31,7 @@
 #   bash test/e2e/endless-task.sh
 #
 # Parameters (env, all with defaults chosen so one run is quick and cheap):
-#   ENDLESS_PROJECT_DIR /home/user/testopencode  directory this plugin is wired
+#   ENDLESS_PROJECT_DIR $HOME/testopencode  directory this plugin is wired
 #                      into, globally or by its own opencode.json; the server runs in it and
 #                      the session is created with ?directory= pointing at it.
 #                      Its own name, not PROJECT_DIR: run-all.sh passes that one
@@ -77,7 +77,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # are shared with run-all.sh.
 . "$HERE/server-lifecycle.sh"
 
-PROJECT_DIR=${ENDLESS_PROJECT_DIR:-/home/user/testopencode}
+PROJECT_DIR=${ENDLESS_PROJECT_DIR:-$HOME/testopencode}
 PORT=${ENDLESS_PORT:-4599}
 BASE=$(e2e_server_url "$PORT")
 ENDLESS_CONTEXT=${ENDLESS_CONTEXT:-8000}

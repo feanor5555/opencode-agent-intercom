@@ -268,7 +268,7 @@ forms, chosen by what actually happened.
 
 [cut at 2000 tokens — 3412 more tokens of this reply are not shown here.
 The reply IN FULL, including everything cut, is the file
-/home/user/.cache/opencode-agent-intercom/results/researcher-1-ses_7c1f.md
+~/.cache/opencode-agent-intercom/results/researcher-1-ses_7c1f.md
 You cannot read that file yourself. If the rest is needed, spawn a subagent and put the path in its prompt — it reads the file. This file is the only copy; the subagent's session is gone.]
 ```
 
@@ -278,7 +278,7 @@ You cannot read that file yourself. If the rest is needed, spawn a subagent and 
 
 [cut at 2000 tokens — 3412 more tokens of this reply are not shown here.
 The reply IN FULL, including everything cut, is the file
-/home/user/.cache/opencode-agent-intercom/results/researcher-1-ses_7c1f.md
+~/.cache/opencode-agent-intercom/results/researcher-1-ses_7c1f.md
 You cannot read that file yourself. If the rest is needed, spawn a subagent and put the path in its prompt — it reads the file. The session is also still held, so reuse("researcher#1", "…") can ask it about the cut part directly.]
 ```
 

@@ -181,6 +181,7 @@ ASSERTED=0
 WAIT_LINE=""
 WAIT_LINENO=0
 WAIT_REASON=""
+POLL_URL=""
 RESOLVED_MODEL="(unresolved)"
 SERVER_VERSION="(unknown)"
 # The in-flight subagent's handle, taken from the plugin's own `spawned` line,
@@ -273,6 +274,28 @@ wait_for_pattern() {
   done
 }
 
+# Poll a message capture through a small verdict reader. The reader prints
+# state|verdict|evidence; a non-running state ends the poll, while a running
+# state keeps waiting until the shared step bound, or until the server dies.
+# POLL_URL is set by each criterion because it is not part of the reader's args.
+poll_verdict() {
+  local capture="$1" script="$2"
+  shift 2
+  local deadline=$(( $(date +%s) + STEP_TIMEOUT_S ))
+  local result="running|pending|no verdict was read" state
+  while :; do
+    curl -s -m 30 "$POLL_URL" > "$capture"
+    result=$(python3 "$script" "$capture" "$@")
+    state=${result%%|*}
+    [ "$state" != running ] && break
+    if [ "$(date +%s)" -ge "$deadline" ] || ! e2e_server_alive; then
+      break
+    fi
+    sleep "$POLL_S"
+  done
+  printf '%s\n' "$result"
+}
+
 # ---------- cleanup --------------------------------------------------------
 
 cleanup() {
@@ -291,13 +314,10 @@ cleanup() {
     fi
   done
 
-  # The server, before the two files are put back. Two plugin paths write the
-  # todo file while a session of this run is alive — the cycle's own save and
-  # the `DONE: T<n>` removal on any subagent's wake — so a restore made with the
-  # server still up could be overwritten by a late wake and leave the project's
-  # file changed. With the server gone, the restore below is the last write.
-  # KEEP_SERVER=1 keeps the server but not the sessions: those were deleted
-  # above, which is what ends the writing.
+  # No session of this run is alive from here on. With KEEP_SERVER=1 the server
+  # survives but its sessions do not, which is what ends the run's writes; when
+  # it is not kept, stopping the server also ends any remaining plugin activity
+  # before the restores below.
   if [ "$KEEP_SERVER" = 1 ]; then
     say "KEEP_SERVER=1 — leaving pid $E2E_SERVER_PID (pgid $E2E_SERVER_PGID) running on $BASE"
   else
@@ -305,29 +325,41 @@ cleanup() {
   fi
 
   # The project's todo file goes back to what it was before the cycle wrote to
-  # it: byte-identical from the backup where there was one, and removed again
-  # where the cycle created it. Runs on the failure path too — it hangs on
+  # it: remove every name not present in the baseline, then restore the backup
+  # where there was one. Runs on the failure path too — it hangs on
   # TODO_GUARDED, which is set once the baseline was taken, not on any assertion.
   if [ "$TODO_GUARDED" = 1 ]; then
+    local f todo_after
+    todo_after=$(todo_names)
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      if ! printf '%s\n' "$TODO_BEFORE" | grep -Fqx -- "$f"; then
+        [ -f "$PROJECT_DIR/$f" ] && rm -f "$PROJECT_DIR/$f" && \
+          say "removed $PROJECT_DIR/$f (the cycle created it; it was not in the baseline)"
+      fi
+    done <<< "$todo_after"
     if [ "$TODO_EXISTED" = 1 ]; then
-      cp "$TODO_BAK" "$PROJECT_DIR/$TODO_BAK_NAME" && say "restored $PROJECT_DIR/$TODO_BAK_NAME"
-    else
-      local f
-      for f in "$PROJECT_DIR"/[Tt][Oo][Dd][Oo].md "$PROJECT_DIR"/[Tt][Oo][Dd][Oo][Ss].md; do
-        [ -f "$f" ] && rm -f "$f" && say "removed $f (the cycle created it; there was none before)"
-      done
+      if cp "$TODO_BAK" "$PROJECT_DIR/$TODO_BAK_NAME"; then
+        say "restored $PROJECT_DIR/$TODO_BAK_NAME"
+      else
+        say "CLEANUP FAILED: could not restore $PROJECT_DIR/$TODO_BAK_NAME from $TODO_BAK — the project's todo file is not back at its baseline"
+        code=2
+      fi
     fi
   fi
 
-  # Settings last, and likewise after the server: the plugin resolves this file
-  # every 2 000 ms while it runs (src/settings.js TTL_MS), so replacing it under
-  # a live server would arm a threshold nothing asserts. The plugin never writes
-  # the file itself — a self-stop only pauses the mode at runtime
-  # (src/endless.js) — so what stands here at the end is what this driver wrote,
-  # and it is only ever touched when the driver wrote it in the first place.
+  # Settings are restored after the run's sessions too. The plugin resolves this
+  # file every 2 000 ms while it runs (src/settings.js TTL_MS), but it never
+  # writes the file itself — a self-stop only pauses the mode at runtime
+  # (src/endless.js) — so this driver's write is the only one being restored.
   if [ "$SETTINGS_WRITTEN" = 1 ]; then
     if [ "$SETTINGS_EXISTED" = 1 ]; then
-      cp "$SETTINGS_BAK" "$SETTINGS_FILE" && say "restored $SETTINGS_FILE from $SETTINGS_BAK"
+      if cp "$SETTINGS_BAK" "$SETTINGS_FILE"; then
+        say "restored $SETTINGS_FILE from $SETTINGS_BAK"
+      else
+        say "CLEANUP FAILED: could not restore $SETTINGS_FILE from $SETTINGS_BAK — endless mode is still armed in it"
+        code=2
+      fi
     elif [ -f "$SETTINGS_FILE" ]; then
       rm -f "$SETTINGS_FILE" && say "removed $SETTINGS_FILE (the driver created it; there was none before)"
     fi
@@ -613,7 +645,7 @@ say "[$PREFIX] turn 2 (spawn) done $(date +%H:%M:%S)"
 
 # The handle is the in-flight state the rest of the run is gated on. Without it
 # nothing below can be told apart from a cycle that had nothing to wait for.
-if ! wait_for_pattern "spawned" "spawned .*\"agent\":\"$SPAWN_AGENT\"" "$STEP_TIMEOUT_S"; then
+if ! wait_for_pattern "spawned" "spawned .*\"agent\":\"$SPAWN_AGENT\".*\"directory\":\"$PROJECT_DIR\"" "$STEP_TIMEOUT_S"; then
   die "no \"spawned\" line for agent $SPAWN_AGENT within ${STEP_TIMEOUT_S}s — the primary never got a subagent in flight, so criterion (b) would have nothing to observe ($WAIT_REASON)"
 fi
 SPAWN_HANDLE=$(printf '%s' "$WAIT_LINE" | sed -E 's/.*"handle":"([^"]+)".*/\1/')
@@ -621,7 +653,7 @@ SPAWN_HANDLE=$(printf '%s' "$WAIT_LINE" | sed -E 's/.*"handle":"([^"]+)".*/\1/')
   die "the \"spawned\" line carries no handle to gate on: $WAIT_LINE"
 # One spawn, and the handle above is its. A second one would mean the gates
 # below watch a subagent the cycle is not waiting for.
-SPAWNED_COUNT=$(grep -cE -- 'spawned .*"handle":' "$SLICE_FILE")
+SPAWNED_COUNT=$(grep -cE -- "spawned .*\"handle\":.*\"directory\":\"$PROJECT_DIR\"" "$SLICE_FILE")
 [ "$SPAWNED_COUNT" = 1 ] ||
   die "$SPAWNED_COUNT \"spawned\" lines in the slice, expected exactly one — the primary started subagents beyond the one this run gates on, so the in-flight state below would be ambiguous"
 say "[$PREFIX] subagent $SPAWN_HANDLE in flight (slice line $WAIT_LINENO)"
@@ -796,57 +828,17 @@ fi
 
 if [ -n "$NEWSID" ] && [ -n "$SAVED_IDS" ]; then
   # The kickoff can take a moment to appear as a message on the new session.
-  KICKOFF_DEADLINE=$(( $(date +%s) + STEP_TIMEOUT_S ))
-  KICK_RESULT="pending|no message list was read from the new session"
-  while :; do
-    curl -s -m 30 "$BASE/session/$NEWSID/message" > "$OUT_DIR/$PREFIX.new-session-messages.json"
-    KICK_RESULT=$(python3 - "$OUT_DIR/$PREFIX.new-session-messages.json" "$SAVED_IDS" <<'PY'
-import json, re, sys
-HEADING = "## Endless mode — work off the todo file"
-try:
-    payload = json.load(open(sys.argv[1]))
-except Exception as err:
-    print(f"pending|the message list was unreadable: {err}"); raise SystemExit
-expected = [i for i in sys.argv[2].split(",") if i]
-
-# Every string anywhere in the payload, so the check does not depend on the
-# exact message/part nesting the server returns.
-def strings(node):
-    if isinstance(node, str):
-        yield node
-    elif isinstance(node, dict):
-        for v in node.values():
-            yield from strings(v)
-    elif isinstance(node, list):
-        for v in node:
-            yield from strings(v)
-
-hit = next((t for t in strings(payload) if HEADING in t), None)
-if hit is None:
-    print("pending|no message on the new session carries the endless kickoff heading yet")
-    raise SystemExit
-block = hit.split(HEADING, 1)[1]
-head = block.split("\n\n")[1] if len(block.split("\n\n")) > 1 else block
-named = re.findall(r"\bT\d+\b", head)
-missing = [i for i in expected if i not in named]
-extra = [i for i in named if i not in expected]
-first = " ".join(head.split())[:200]
-if missing or extra:
-    print(f"fail|kickoff names {named or 'no id'}; missing {missing or 'none'}, not from this save {extra or 'none'} — \"{first}\"")
-else:
-    print(f"pass|kickoff names exactly {named} — \"{first}\"")
-PY
-)
-    case "$KICK_RESULT" in
-      pass\|*|fail\|*) break ;;
-    esac
-    if [ "$(date +%s)" -ge "$KICKOFF_DEADLINE" ] || ! e2e_server_alive; then break; fi
-    sleep "$POLL_S"
-  done
-  case "$KICK_RESULT" in
-    pass\|*) record "kickoff — the new session is told to work off exactly the saved ids" 1 "${KICK_RESULT#*|}" ;;
-    fail\|*) record "kickoff — the new session is told to work off exactly the saved ids" 0 "${KICK_RESULT#*|}" ;;
-    *)       record "kickoff — the new session is told to work off exactly the saved ids" 0 "${KICK_RESULT#*|} (within ${STEP_TIMEOUT_S}s)" ;;
+  POLL_URL="$BASE/session/$NEWSID/message"
+  KICK_RESULT=$(poll_verdict "$OUT_DIR/$PREFIX.new-session-messages.json" \
+    "$HERE/lib/kickoff-ids.py" "$SAVED_IDS")
+  KICK_STATE=${KICK_RESULT%%|*}
+  KICK_REST=${KICK_RESULT#*|}
+  KICK_VERDICT=${KICK_REST%%|*}
+  KICK_EVIDENCE=${KICK_REST#*|}
+  case "$KICK_VERDICT" in
+    pass) record "kickoff — the new session is told to work off exactly the saved ids" 1 "$KICK_EVIDENCE" ;;
+    fail) record "kickoff — the new session is told to work off exactly the saved ids" 0 "$KICK_EVIDENCE" ;;
+    *)    record "kickoff — the new session is told to work off exactly the saved ids" 0 "$KICK_EVIDENCE (within ${STEP_TIMEOUT_S}s)" ;;
   esac
 else
   record "kickoff — the new session is told to work off exactly the saved ids" 0 \
@@ -877,9 +869,10 @@ fi
 # pass this criterion.
 #
 # Where the turn ends is read off the persisted messages: an assistant message
-# whose `finish` is anything other than `tool-calls` is the last step of the
-# turn, and a further user message — a subagent's completion notice — already
-# belongs to the next one. Both bound the capture, and so does STEP_TIMEOUT_S:
+# whose `finish` is set to a terminal value other than `tool-calls` or `unknown`
+# is the last step of the turn, and a further user message — a subagent's
+# completion notice — already belongs to the next one. Both bound the capture,
+# and so does STEP_TIMEOUT_S:
 # a turn still running at that bound is judged on what it produced by then and
 # the evidence says so.
 #
@@ -891,122 +884,13 @@ fi
 # evidence under this criterion rather than asserted as one.
 if [ -n "$NEWSID" ] && [ -n "$SAVED_IDS" ]; then
   WORK_CAPTURE="$OUT_DIR/$PREFIX.successor-first-turn.json"
-  WORK_DEADLINE=$(( $(date +%s) + STEP_TIMEOUT_S ))
-  WORK_STATE=running
-  WORK_VERDICT=pending
-  WORK_EVIDENCE="no successor message list was read"
-  while :; do
-    curl -s -m 30 "$BASE/session/$NEWSID/message" > "$WORK_CAPTURE"
-    WORK_READ=$(python3 - "$WORK_CAPTURE" "$SAVED_IDS" <<'PY'
-import json, re, sys
-try:
-    payload = json.load(open(sys.argv[1]))
-except Exception as err:
-    print(f"running|pending|the successor message list was unreadable: {err}")
-    raise SystemExit
-expected = [i for i in sys.argv[2].split(",") if i]
-expected_set = set(expected)
-
-messages = payload.get("data") if isinstance(payload, dict) else payload
-if not isinstance(messages, list):
-    print("running|pending|the successor message list carried no messages")
-    raise SystemExit
-
-# The server nests each message as {"info": …, "parts": […]}; older shapes put
-# the fields on the message itself.
-def info_of(message):
-    if not isinstance(message, dict):
-        return {}
-    inner = message.get("info")
-    return inner if isinstance(inner, dict) else message
-
-start = next((i for i, m in enumerate(messages) if info_of(m).get("role") == "user"), None)
-if start is None:
-    print("running|pending|the successor carries no user message yet — the kickoff has not landed")
-    raise SystemExit
-
-turn = []
-state = "running"
-for message in messages[start + 1:]:
-    info = info_of(message)
-    if info.get("role") == "user":
-        state = "complete"
-        break
-    turn.append(message)
-    finish = info.get("finish")
-    completed = (info.get("time") or {}).get("completed")
-    if completed and finish and finish != "tool-calls":
-        state = "complete"
-        break
-
-# OpenCode stores a tool call in an assistant message part. The input is in
-# part.state.input once the call is complete; accept the direct input shape as
-# well so this remains useful across the server's message representations.
-def spawn_prompts(node):
-    if isinstance(node, dict):
-        if node.get("tool") == "spawn":
-            candidates = []
-            inner = node.get("state")
-            if isinstance(inner, dict):
-                candidates.append(inner.get("input"))
-            candidates.append(node.get("input"))
-            for candidate in candidates:
-                if isinstance(candidate, dict) and isinstance(candidate.get("prompt"), str):
-                    yield candidate["prompt"]
-                    break
-        for value in node.values():
-            yield from spawn_prompts(value)
-    elif isinstance(node, list):
-        for value in node:
-            yield from spawn_prompts(value)
-
-prompts = list(spawn_prompts(turn))
-observed = []
-invalid = []
-for prompt in prompts:
-    first = next((line.strip() for line in prompt.splitlines() if line.strip()), "")
-    match = re.match(r"^(T\d+)\s*[:.\-]\s*", first)
-    task_id = match.group(1) if match else None
-    observed.append((task_id or "?", first[:160]))
-    if task_id is None or task_id not in expected_set:
-        invalid.append((task_id or "no id", first[:160]))
-
-seen_ids = [task_id for task_id, _ in observed if task_id != "?"]
-unmatched = len([task_id for task_id, _ in observed if task_id not in expected_set])
-tally = " ".join(f"{task}={seen_ids.count(task)}" for task in expected)
-turn_state = "ended" if state == "complete" else "still running at the bound"
-tally_text = (
-    f"first turn {turn_state} after {len(prompts)} spawn call(s), "
-    f"per saved task: {tally}"
-)
-if unmatched:
-    tally_text += f", carrying no saved id: {unmatched}"
-
-# The first saved point is the next task by contract. A spawn for another
-# saved point is still useful evidence, but a prompt without a saved id is a
-# failed work-off regardless of any valid call beside it.
-first_expected = expected[0] if expected else None
-if not prompts:
-    if state == "complete":
-        print(f"complete|fail|the successor's first turn ended with no spawn tool call — {tally_text}")
-    else:
-        print("running|pending|no successor spawn tool call has appeared yet")
-elif invalid:
-    print(f"{state}|fail|spawn prompts {observed}; invalid first lines {invalid} — {tally_text}")
-elif first_expected not in seen_ids:
-    print(f"{state}|fail|spawn prompts {observed}; first saved task {first_expected} was not spawned — {tally_text}")
-else:
-    print(f"{state}|pass|spawn prompts carry saved ids on line one: {observed} — {tally_text}")
-PY
-)
-    WORK_STATE=${WORK_READ%%|*}
-    WORK_REST=${WORK_READ#*|}
-    WORK_VERDICT=${WORK_REST%%|*}
-    WORK_EVIDENCE=${WORK_REST#*|}
-    [ "$WORK_STATE" = complete ] && break
-    if [ "$(date +%s)" -ge "$WORK_DEADLINE" ] || ! e2e_server_alive; then break; fi
-    sleep "$POLL_S"
-  done
+  POLL_URL="$BASE/session/$NEWSID/message"
+  WORK_READ=$(poll_verdict "$WORK_CAPTURE" "$HERE/lib/successor-turn.py" "$SAVED_IDS")
+  WORK_STATE=${WORK_READ%%|*}
+  WORK_REST=${WORK_READ#*|}
+  WORK_VERDICT=${WORK_REST%%|*}
+  WORK_EVIDENCE=${WORK_REST#*|}
+  [ "$WORK_STATE" = setup ] && die "$WORK_EVIDENCE"
   say "[$PREFIX] successor first turn $WORK_STATE — capture: $WORK_CAPTURE"
   case "$WORK_VERDICT" in
     pass) record "(e) work-off — successor spawn prompts carry saved task ids on their first line" 1 "$WORK_EVIDENCE" ;;

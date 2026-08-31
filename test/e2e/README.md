@@ -21,6 +21,8 @@ that opencode upgrades don't shift the system-prompt composition.
   endless-mode cycle. Owns the server the first ten use: builds the TUI, starts
   a fresh `opencode serve` in the configured directory (default
   `$HOME/testopencode`), and stops it again on the way out.
+- `lib/` — the Python evidence readers used by `endless-task.sh`, plus their
+  shared recursive payload walker.
 - `server-lifecycle.sh` — sourced library, not a driver. Holds the four server
   steps `run-all.sh` and `endless-task.sh` share: `e2e_build_tui`,
   `e2e_server_start`, `e2e_server_wait_ready`, `e2e_server_stop`, plus
@@ -181,9 +183,9 @@ live criteria §7:
 **The successor's first turn is captured whole.** The kickoff starts that turn
 asynchronously, and the driver follows it to its end — every tool call, not only
 up to the first spawn — into `out/11-endless.successor-first-turn.json`. The end
-is read off the persisted messages: an assistant message whose `finish` is
-anything other than `tool-calls` is the turn's last step, and a further user
-message (a subagent's completion notice) already belongs to the next turn;
+is read off the persisted messages: an assistant message whose `finish` is a
+terminal value other than `tool-calls` or `unknown` is the turn's last step, and
+a further user message (a subagent's completion notice) already belongs to the next turn;
 `STEP_TIMEOUT_S` bounds the wait, and a turn still running at that bound is
 judged on what it produced by then, with the evidence saying so. The evidence
 line of (e) therefore ends in `first turn ended after N spawn call(s), per saved

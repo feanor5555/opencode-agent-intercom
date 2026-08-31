@@ -18,6 +18,10 @@
 #   (e) work-off the successor's first turn is captured to its end and its spawn
 #              prompts carry saved task ids on line one; the per-task spawn
 #              tally of that turn is reported as evidence beside it
+#   (e) removal one of those subagents replies `DONE: T<n>` and the plugin
+#              removes that task from the todo file
+#                                                        → `notified primary of completion … "kind":"done","id":"T<n>"`
+#                                                          plus the id gone from the file on disk
 #   order      the five evidence lines appear in that order in the debug log
 #
 # How the run is sequenced, and why in this order:
@@ -37,6 +41,16 @@
 #           it at or above the armed ceiling and latches the cycle. The turn
 #           spawns nothing — the freeze is already on from the latch.
 #   turn 4  the post-trigger spawn attempt of (a).
+#   work-off the successor's first turn, its spawn prompts, and the removal of a
+#           saved task when one of its subagents replies `DONE: T<n>`.
+#
+# The whole work-off phase is observed BEFORE anything is torn down. Deleting
+# the successor's session takes its running subagents with it, and restoring the
+# todo file puts a removed task straight back, so a teardown that ran first
+# would make the removal unobservable. cleanup() therefore keeps this order:
+# the two sessions (which needs a live server), then the server, then the todo
+# file — once no plugin is running, the restore is the last write to that file —
+# then the settings.
 #
 # The precondition of criterion (b) is that the subagent is STILL in flight when
 # the cycle starts waiting. The driver checks the handle twice — before it arms
@@ -83,6 +97,9 @@
 #                      run is gated on the observed handle, not on this number
 #   TURN_TIMEOUT_S     600                     per blocking prompt POST
 #   STEP_TIMEOUT_S     300                     per awaited log line
+#   WORKOFF_TIMEOUT_S  600                     bound for the removal step alone:
+#                      it waits for a successor subagent to finish a real task,
+#                      not for a log line the cycle emits by itself
 #   SERVER_START_TIMEOUT_S 60                  readiness probe budget
 #   POLL_S             2                       log poll cadence
 #   OUT_DIR            ./out                   captures and backups
@@ -96,9 +113,12 @@
 #   2  preflight or setup error — nothing was asserted
 #
 # What it changes and puts back: ~/.config/opencode/agent-intercom.json (the
-# four endless keys; backed up and restored, including the `endlessMode: false`
-# the plugin writes back itself when the cycle ceiling ends the loop), the todo
-# file of the driven project, the two sessions of the cycle, and the server.
+# four endless keys; backed up and restored — the plugin itself never writes
+# that file, a self-stop such as the cycle ceiling only pauses the mode for the
+# session at runtime, src/endless.js), the todo file of the driven project —
+# which the cycle appends to and the work-off removes from, restored
+# byte-identically from the backup, or deleted again where the cycle created it
+# — the two sessions of the cycle, and the server.
 #
 # Prerequisites: curl, python3, setsid, npm, an `opencode` on PATH, and a model
 # provider that the project resolves.
@@ -127,6 +147,7 @@ SPAWN_AGENT=${SPAWN_AGENT:-coder}
 SUBAGENT_SLEEP_S=${SUBAGENT_SLEEP_S:-45}
 TURN_TIMEOUT_S=${TURN_TIMEOUT_S:-600}
 STEP_TIMEOUT_S=${STEP_TIMEOUT_S:-300}
+WORKOFF_TIMEOUT_S=${WORKOFF_TIMEOUT_S:-600}
 SERVER_START_TIMEOUT_S=${SERVER_START_TIMEOUT_S:-60}
 POLL_S=${POLL_S:-2}
 OUT_DIR=${OUT_DIR:-$HERE/out}
@@ -270,7 +291,23 @@ cleanup() {
     fi
   done
 
-  # The project's todo file goes back to what it was before the cycle wrote to it.
+  # The server, before the two files are put back. Two plugin paths write the
+  # todo file while a session of this run is alive — the cycle's own save and
+  # the `DONE: T<n>` removal on any subagent's wake — so a restore made with the
+  # server still up could be overwritten by a late wake and leave the project's
+  # file changed. With the server gone, the restore below is the last write.
+  # KEEP_SERVER=1 keeps the server but not the sessions: those were deleted
+  # above, which is what ends the writing.
+  if [ "$KEEP_SERVER" = 1 ]; then
+    say "KEEP_SERVER=1 — leaving pid $E2E_SERVER_PID (pgid $E2E_SERVER_PGID) running on $BASE"
+  else
+    e2e_server_stop
+  fi
+
+  # The project's todo file goes back to what it was before the cycle wrote to
+  # it: byte-identical from the backup where there was one, and removed again
+  # where the cycle created it. Runs on the failure path too — it hangs on
+  # TODO_GUARDED, which is set once the baseline was taken, not on any assertion.
   if [ "$TODO_GUARDED" = 1 ]; then
     if [ "$TODO_EXISTED" = 1 ]; then
       cp "$TODO_BAK" "$PROJECT_DIR/$TODO_BAK_NAME" && say "restored $PROJECT_DIR/$TODO_BAK_NAME"
@@ -282,16 +319,12 @@ cleanup() {
     fi
   fi
 
-  # The server.
-  if [ "$KEEP_SERVER" = 1 ]; then
-    say "KEEP_SERVER=1 — leaving pid $E2E_SERVER_PID (pgid $E2E_SERVER_PGID) running on $BASE"
-  else
-    e2e_server_stop
-  fi
-
-  # Settings last: the plugin writes `endlessMode: false` back itself when a
-  # bound ends the loop, so the restore has to happen after the server is gone.
-  # Only ever touched when this driver wrote the file in the first place.
+  # Settings last, and likewise after the server: the plugin resolves this file
+  # every 2 000 ms while it runs (src/settings.js TTL_MS), so replacing it under
+  # a live server would arm a threshold nothing asserts. The plugin never writes
+  # the file itself — a self-stop only pauses the mode at runtime
+  # (src/endless.js) — so what stands here at the end is what this driver wrote,
+  # and it is only ever touched when the driver wrote it in the first place.
   if [ "$SETTINGS_WRITTEN" = 1 ]; then
     if [ "$SETTINGS_EXISTED" = 1 ]; then
       cp "$SETTINGS_BAK" "$SETTINGS_FILE" && say "restored $SETTINGS_FILE from $SETTINGS_BAK"
@@ -450,7 +483,7 @@ endless ceiling     held at $ENDLESS_CONTEXT_CEILING until armed, then ${ARMED_C
 debug log           $DEBUG_LOG   (read from byte $LOG_OFFSET)
 todo baseline       $TODO_BASELINE   (backup: $TODO_BAK)
 in-flight subagent  spawn("$SPAWN_AGENT", sleep ${SUBAGENT_SLEEP_S}s) -> handle ${SPAWN_HANDLE:-(spawned in turn 2)}
-timeouts            turn=${TURN_TIMEOUT_S}s step=${STEP_TIMEOUT_S}s start=${SERVER_START_TIMEOUT_S}s poll=${POLL_S}s
+timeouts            turn=${TURN_TIMEOUT_S}s step=${STEP_TIMEOUT_S}s work-off=${WORKOFF_TIMEOUT_S}s start=${SERVER_START_TIMEOUT_S}s poll=${POLL_S}s
 out dir             $OUT_DIR
 EOF
 }
@@ -681,6 +714,7 @@ fi
 # ---------- (c) the save ---------------------------------------------------
 
 SAVED_IDS=""
+SAVED_FILE=""
 if wait_for_pattern "endless: saved" "endless: saved [0-9]+ point\(s\) as .* confirmed=[0-9]+ .*\"sessionID\":\"$SID\"" "$STEP_TIMEOUT_S" \
      "endless: cycle [0-9]+/[^ ]+ complete"; then
   LINE_SAVED=$WAIT_LINENO
@@ -984,6 +1018,55 @@ else
     "not reachable: no new session id and/or no saved ids from the save step"
 fi
 
+# ---------- (e) the removal ------------------------------------------------
+
+# The second half of §7 (e): "the `DONE: T<n>` path removes it from the file".
+# The spawn half above only shows the successor picking the task up. The removal
+# is the plugin's own wake-path write — autoMarkTask -> removeTask
+# (src/hooks.js, src/todofile.js) — which fires when the subagent's final reply
+# carries `DONE: T<n>` on its first or last non-empty line and the id matches
+# the one its spawn prompt was prefixed with.
+#
+# Both sides are asserted, because either alone would be weak: the plugin's own
+# completion line, which carries the outcome as `"kind":"done","id":"T<n>"`, and
+# the todo file on disk, from which that id has to be gone. A line without the
+# file write would be a claim; a file without the line would not say who wrote
+# it.
+#
+# This step waits for a subagent to finish real work, not for a line the cycle
+# emits by itself, so it has its own bound (WORKOFF_TIMEOUT_S) rather than
+# STEP_TIMEOUT_S. It runs before the teardown for the reason stated at the top:
+# the session delete would take the subagent and the todo restore would put the
+# task back.
+if [ -n "$NEWSID" ] && [ -n "$SAVED_IDS" ] && [ -n "$SAVED_FILE" ]; then
+  if wait_for_pattern "DONE removal" \
+       "notified primary of completion .*\"parentID\":\"$NEWSID\".*\"kind\":\"done\",\"id\":\"T[0-9]+\"" \
+       "$WORKOFF_TIMEOUT_S"; then
+    REMOVAL_LINE=$WAIT_LINE
+    REMOVED_ID=$(printf '%s' "$REMOVAL_LINE" | sed -E 's/.*"kind":"done","id":"(T[0-9]+)".*/\1/')
+    OPEN_NOW=$(sed -nE 's/^- (T[0-9]+):.*/\1/p' "$PROJECT_DIR/$SAVED_FILE" 2>/dev/null | tr '\n' ' ')
+    if ! printf ' %s ' "$(printf '%s' "$SAVED_IDS" | tr ',' ' ')" | grep -q " $REMOVED_ID "; then
+      record "(e) removal — a DONE: T<n> reply removed the task from the todo file" 0 \
+        "the plugin removed $REMOVED_ID, which is not one of this cycle's saved ids $SAVED_IDS — $REMOVAL_LINE"
+    elif [ ! -f "$PROJECT_DIR/$SAVED_FILE" ]; then
+      record "(e) removal — a DONE: T<n> reply removed the task from the todo file" 0 \
+        "$PROJECT_DIR/$SAVED_FILE does not exist any more — a removal takes the task's lines out of the file, it does not take the file — $REMOVAL_LINE"
+    elif grep -qE "^- $REMOVED_ID:" "$PROJECT_DIR/$SAVED_FILE"; then
+      record "(e) removal — a DONE: T<n> reply removed the task from the todo file" 0 \
+        "$PROJECT_DIR/$SAVED_FILE still carries \"- $REMOVED_ID:\" after the plugin reported it removed; open ids now: ${OPEN_NOW:-none} — $REMOVAL_LINE"
+    else
+      record "(e) removal — a DONE: T<n> reply removed the task from the todo file" 1 \
+        "$REMOVED_ID is gone from $PROJECT_DIR/$SAVED_FILE (saved $SAVED_IDS, still open: ${OPEN_NOW:-none}) — $REMOVAL_LINE"
+    fi
+  else
+    record "(e) removal — a DONE: T<n> reply removed the task from the todo file" 0 \
+      "no completion line reporting a removed task for the successor $NEWSID within ${WORKOFF_TIMEOUT_S}s — $WAIT_REASON"
+  fi
+else
+  record "(e) removal — a DONE: T<n> reply removed the task from the todo file" 0 \
+    "not reachable: no new session id, no saved ids and/or no todo file name from the save step"
+fi
+
 # ---------- what this driver does not assert -------------------------------
 
 say ""
@@ -991,8 +1074,13 @@ note_uncovered "(f) view switch and (g) sidebar (specs/endless-mode.md §7)" \
   "both require a screenshot of the rendered TUI; a shell driver cannot produce visual evidence"
 
 say ""
-print_setup >/dev/null
+# The copy at the top of the report was printed before the run resolved its own
+# figures: it names the armed ceiling as "(armed after the spawn turn)" and the
+# in-flight handle as "(spawned in turn 2)". The same block written again here,
+# into the report alone rather than onto the terminal a second time, carries
+# both filled in, so the report holds a setup a rerun can be driven from.
+{ printf '\n'; print_setup; } >> "$REPORT_FILE"
 say "=== $((ASSERTED - FAILURES))/$ASSERTED asserted criteria passed ==="
-say "(setup for reproduction is at the top of $REPORT_FILE)"
+say "(the setup for reproduction stands at the top of $REPORT_FILE and again, fully resolved, at its end)"
 [ "$FAILURES" = 0 ] && exit 0
 exit 1

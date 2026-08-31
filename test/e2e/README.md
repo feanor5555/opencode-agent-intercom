@@ -175,6 +175,7 @@ live criteria §7:
 | (d) replacement | `endless: cycle K/M complete, new session …`; the new session is readable, the old one is readable **and** archived |
 | kickoff | the new session carries `## Endless mode — work off the todo file` naming exactly the ids of (c) |
 | (e) work-off | the successor's first turn contains a `spawn` tool call whose `input.prompt` carries the first saved task id as the first non-empty line (`T<n>:` / `T<n>.` / `T<n>-` …) and every further spawn prompt of that turn likewise carries a saved id; the turn's per-task spawn tally rides along as evidence |
+| (e) removal | a successor subagent's `DONE: T<n>` reply removes that task: `notified primary of completion` for the successor carrying `"kind":"done","id":"T<n>"`, the id one of (c)'s, and the line `- T<n>:` gone from the todo file on disk while the file itself stays |
 | order | the five cycle lines — scheduled, refused, quiesced, saved, complete — appear in that order in the debug-log slice |
 
 **The successor's first turn is captured whole.** The kickoff starts that turn
@@ -195,6 +196,31 @@ and the kickoff of §3.5 tells the successor to work the file off top to bottom
 starting with the first task, so a first turn that spawns only `T1` satisfies
 the concept. The tally is what makes the actual distribution visible.
 
+**The removal is asserted on both sides.** §7 (e) has a second half — the
+`DONE: T<n>` path removes the task from the file — and the spawn prompts alone
+only show the task being picked up. The driver therefore waits for the plugin's
+own wake-path outcome (`autoMarkTask` → `removeTask`, `src/hooks.js`,
+`src/todofile.js`), which rides on the successor's `notified primary of
+completion` line as `"kind":"done","id":"T<n>"`, and then reads the todo file:
+the id must be one of (c)'s, the `- T<n>:` line must be gone, and the file
+itself must still be there. The log line without the file write would be a
+claim, the file without the line would not say who wrote it. This step waits on
+a subagent finishing real work rather than on a line the cycle emits by itself,
+so it has its own bound, `WORKOFF_TIMEOUT_S` (600 s), instead of
+`STEP_TIMEOUT_S`.
+
+**The teardown runs after the whole work-off phase**, and in this order:
+the two sessions (which needs a live server), then the server, then the todo
+file, then the settings file. Deleting the successor's session takes its
+running subagents with it and restoring the todo file puts a removed task
+straight back, so a teardown before the observation above would make the
+removal unobservable; and the todo file is restored only once the server is
+gone, because a late wake writes that file too and would otherwise overwrite
+the restore. `KEEP_SERVER=1` keeps the server but not the sessions — those are
+deleted either way, which is what ends the writing. The restore path hangs on
+the baseline having been taken, not on any assertion, so it runs on a failing
+run as well.
+
 Not asserted, and reported as such rather than silently passed: §7 (f) view
 switch and (g) sidebar, which need a screenshot of the rendered TUI.
 
@@ -205,11 +231,15 @@ Parameters are env vars with cheap defaults — `ENDLESS_PROJECT_DIR`,
 `ENDLESS_MAX_CYCLES` (1), `ENDLESS_QUIESCE_TIMEOUT_MS`, `SPAWN_AGENT`,
 `SUBAGENT_SLEEP_S` (45, and the preflight refuses a value within 10 s of
 `maxSubagentAgeMs`, where the watchdog would abort the subagent instead),
-`TURN_TIMEOUT_S`, `STEP_TIMEOUT_S`, `SERVER_START_TIMEOUT_S`, `POLL_S`,
-`OUT_DIR`, `KEEP_SERVER`, `E2E_TUI_BUILT`. The resolved setup is printed at the
-top of every run and again into `out/11-endless.report.txt`, together with the
-`armed` line carrying the measured context and the threshold derived from it, so
-a run can be reproduced from its own output.
+`TURN_TIMEOUT_S`, `STEP_TIMEOUT_S`, `WORKOFF_TIMEOUT_S` (600, the removal step's
+own bound), `SERVER_START_TIMEOUT_S`, `POLL_S`, `OUT_DIR`, `KEEP_SERVER`,
+`E2E_TUI_BUILT`. The setup is printed at the top of every run and into
+`out/11-endless.report.txt`, together with the `armed` line carrying the
+measured context and the threshold derived from it; at the end of the run the
+same block is written into the report a second time, into the file alone, with
+the figures the run resolved along the way — the armed ceiling, the in-flight
+handle, the server pid — filled in, so a run can be reproduced from its own
+output.
 
 Run on its own it builds the TUI first, like `run-all.sh`; started *by*
 `run-all.sh` it skips that build, because `E2E_TUI_BUILT=1` is exported once the
@@ -237,11 +267,13 @@ Three things the lifecycle library is deliberate about:
   which keeps the state in the driver's own shell and is unaffected.
 
 `ENDLESS_MAX_CYCLES=1` is what keeps the loop from running on: the cycle the
-driver asserts completes, and the next one stops at the ceiling and switches
-endless mode off. The driver backs up and restores
-`~/.config/opencode/agent-intercom.json` (the plugin writes `endlessMode: false`
-into it itself when a bound fires) and the driven project's todo file, deletes
-the two sessions of the cycle, and stops the server's process group.
+driver asserts completes, and the next one stops at the ceiling with
+`endless: cycle ceiling reached (1/1) — paused for this session`. That stop is a
+runtime pause on the successor session and nothing else — the plugin never
+writes the settings file, `endlessMode` stays the user's own switch
+(`src/endless.js`). The driver backs up and restores
+`~/.config/opencode/agent-intercom.json` and the driven project's todo file,
+deletes the two sessions of the cycle, and stops the server's process group.
 
 ## Nested delegation
 

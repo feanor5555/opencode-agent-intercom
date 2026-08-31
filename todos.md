@@ -11,9 +11,7 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- Assert the removal half of `specs/endless-mode.md` §7 (e) in `test/e2e/endless-task.sh`: that a `DONE: T<n>` reply removes the task. It needs a different cleanup order than the driver currently uses.
 - `test/retention-texts.test.js` flakes intermittently in a full run — a different test name each time, always green in isolation and on a re-run. Its name has never been captured; capture it next time the suite fails.
 - Decide whether to ask GitHub Support to delete the GitHub-managed ref `refs/pull/1/head` of the public repository, which still serves pre-rewrite history: 34 commits carrying the developer home directory spelled literally under the user name (about 2000 lines, in `test/e2e/*`, `test/e2e/golden/*` and `test/fixtures/agent-task-snapshots/*`) and a private LAN address of the house network in `test/fixtures/agent-task-snapshots/requests.jsonl`. A force-push cannot reach that ref and the repository owner cannot delete it; only GitHub Support can. The API keys are NOT affected — they are absent from that ref too. That same ref also still serves the recorded session captures that were deleted from the working tree and purged from every branch and tag (25 objects under the two capture directories are reachable from it and from nothing else).
 - Draft the GitHub Support request that would delete the pull-request ref (the existing item covers the decision itself; this notes that the drafting was offered and is undecided).
 - Rewrite the eight `Source:` pointers in `learnings.md`, which reference files under `work/`; `work/` is no longer tracked, so they resolve locally but dangle for anyone reading the published repository.
-- Remove or give a purpose to the `print_setup >/dev/null` call near the end of `test/e2e/endless-task.sh`: it discards its own output and does nothing.

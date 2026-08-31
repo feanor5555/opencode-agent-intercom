@@ -543,11 +543,11 @@ signals, so a change made by hand or by the plugin's own switch-off (§3.6) appe
 One line per cycle transition, on the existing `log` helper (`src/log.js`):
 
 ```
-endless: scheduled sessionID=<id> ctx=<n> threshold=<n>
-endless: quiesced after <ms>ms, activeAtStart=<n>
-endless: saved <n> point(s) as T<a>,T<b>,… confirmed=<n> file=<name>
+endless: scheduled {"sessionID":"<id>","ctx":<n>,"threshold":<n>}
+endless: quiesced after <ms>ms, activeAtStart=<n> {"sessionID":"<id>"}
+endless: saved <n> point(s) as T<a>,T<b>,… confirmed=<n> skipped=<n> file=<name> {"sessionID":"<id>"}
 endless: cycle <k>/<max> complete, new session <id>, open tasks <before>→<after> completed=<n>
-endless: abandoned at <stage> — <reason>
+endless: abandoned at <stage> — <reason> {"sessionID":"<id>"}
 ```
 
 The `completed=<n>` field is what §3.6's no-progress bound reads — the number of the previous

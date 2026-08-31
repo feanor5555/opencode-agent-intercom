@@ -34,7 +34,7 @@ const withFakeTimers = (t) => {
 test("a tap fires the action exactly once and arms nothing beyond it", (t) => {
   const timers = withFakeTimers(t)
   let calls = 0
-  const button = holdRepeat(() => {
+  const button = holdRepeat("button", () => {
     calls += 1
   })
 
@@ -55,7 +55,7 @@ test("a press whose action rebuilds the handler pair still ends on release", (t)
   // the old pair is still running. The release then reaches the new pair.
   let mounted
   const build = () => {
-    mounted = holdRepeat(() => {
+    mounted = holdRepeat("mounted", () => {
       calls += 1
       build()
     })
@@ -76,7 +76,7 @@ test("a press whose action rebuilds the handler pair still ends on release", (t)
 test("holding repeats only after the delay, and only while held", (t) => {
   const timers = withFakeTimers(t)
   let calls = 0
-  const button = holdRepeat(() => {
+  const button = holdRepeat("button", () => {
     calls += 1
   })
 
@@ -99,7 +99,7 @@ test("a rebuilt pair cancels the repeat a held press already started", (t) => {
   let calls = 0
   let mounted
   const build = () => {
-    mounted = holdRepeat(() => {
+    mounted = holdRepeat("mounted", () => {
       calls += 1
       build()
     })
@@ -120,7 +120,7 @@ test("a rebuilt pair cancels the repeat a held press already started", (t) => {
 test("mouseout ends the run the same way mouseup does", (t) => {
   const timers = withFakeTimers(t)
   let calls = 0
-  const button = holdRepeat(() => {
+  const button = holdRepeat("button", () => {
     calls += 1
   })
 
@@ -131,14 +131,53 @@ test("mouseout ends the run the same way mouseup does", (t) => {
   assert.equal(calls, 1)
 })
 
+test("disposing the panel stops a held run with no release event", (t) => {
+  const timers = withFakeTimers(t)
+  let calls = 0
+  const button = holdRepeat("button", () => {
+    calls += 1
+  })
+
+  button.onMouseDown()
+  timers.tick(HOLD_REPEAT_DELAY_MS)
+  timers.tick(2 * HOLD_REPEAT_INTERVAL_MS)
+  const callsAtDispose = calls
+
+  // The panel's dispose callback has no mouse event to deliver.
+  stopHoldRepeat()
+  assert.equal(isHoldRepeatActive(), false)
+  timers.tick(100 * HOLD_REPEAT_INTERVAL_MS)
+  assert.equal(calls, callsAtDispose, "dispose cancelled the pending repeat")
+})
+
+test("another button's mouseout does not stop the owner run", (t) => {
+  const timers = withFakeTimers(t)
+  let calls = 0
+  const a = holdRepeat("a", () => {
+    calls += 1
+  })
+  const b = holdRepeat("b", () => {})
+
+  a.onMouseDown()
+  timers.tick(HOLD_REPEAT_DELAY_MS)
+  timers.tick(2 * HOLD_REPEAT_INTERVAL_MS)
+  const callsBeforeOtherMouseout = calls
+  b.onMouseOut()
+
+  assert.equal(isHoldRepeatActive(), true)
+  timers.tick(HOLD_REPEAT_INTERVAL_MS)
+  assert.equal(calls, callsBeforeOtherMouseout + 1)
+  a.onMouseUp()
+})
+
 test("a second press replaces the run instead of stacking one beside it", (t) => {
   const timers = withFakeTimers(t)
   let first = 0
   let second = 0
-  const a = holdRepeat(() => {
+  const a = holdRepeat("a", () => {
     first += 1
   })
-  const b = holdRepeat(() => {
+  const b = holdRepeat("b", () => {
     second += 1
   })
 

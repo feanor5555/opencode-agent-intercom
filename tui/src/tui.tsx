@@ -35,7 +35,7 @@ import {
   sameModel,
   setLlmModel,
 } from "./llm-models-file.ts";
-import { holdRepeat } from "./hold-repeat.ts";
+import { holdRepeat, stopHoldRepeat } from "./hold-repeat.ts";
 import {
   composeSubagentLabel,
   subagentLabelWidth,
@@ -251,8 +251,8 @@ function modelBadges(
 
 // What the effort row shows for an agent, and whether its cycler is live.
 // Priority, the one the other rows use:
-//   1. the effort stored for this agent   — shown with ★
-//   2. the effort opencode resolved       — shown without ★
+//   1. the effort stored for this agent   — shown as it stands
+//   2. the effort opencode resolved       — shown in parentheses and muted
 //   3. "default"
 // The row goes inert where the ladder cannot be offered: a resolved model
 // known to have no reasoning, an unknown model, or none. A stored effort stays
@@ -1248,6 +1248,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     if (refreshTimer) clearTimeout(refreshTimer);
     if (armTimer) clearTimeout(armTimer);
     commandDispose();
+    stopHoldRepeat();
     for (const dispose of disposers) dispose();
     disposeRoot();
   });
@@ -1674,11 +1675,11 @@ function SubagentPanel(props: {
           </Show>
           <box flexDirection="row">
             <text fg={props.theme.textMuted}>{rowLabel("max subagents")}</text>
-            <text fg={props.theme.accent} {...holdRepeat(() => props.onAdjust("maxSubagents", -1))}>
+            <text fg={props.theme.accent} {...holdRepeat("max-subagents-decrease", () => props.onAdjust("maxSubagents", -1))}>
               {"[-]"}
             </text>
             <text fg={props.theme.text}>{numCell(props.maxSubagents() === 0 ? "unlimited" : props.maxSubagents())}</text>
-            <text fg={props.theme.accent} {...holdRepeat(() => props.onAdjust("maxSubagents", 1))}>
+            <text fg={props.theme.accent} {...holdRepeat("max-subagents-increase", () => props.onAdjust("maxSubagents", 1))}>
               {"[+]"}
             </text>
           </box>
@@ -1692,7 +1693,7 @@ function SubagentPanel(props: {
             <text fg={props.theme.textMuted}>{rowLabel("retained subs")}</text>
             <text
               fg={props.theme.accent}
-              {...holdRepeat(() => props.onAdjust("maxRetainedSubagents", -1))}
+              {...holdRepeat("retained-subagents-decrease", () => props.onAdjust("maxRetainedSubagents", -1))}
             >
               {"[-]"}
             </text>
@@ -1705,7 +1706,7 @@ function SubagentPanel(props: {
             </text>
             <text
               fg={props.theme.accent}
-              {...holdRepeat(() => props.onAdjust("maxRetainedSubagents", 1))}
+              {...holdRepeat("retained-subagents-increase", () => props.onAdjust("maxRetainedSubagents", 1))}
             >
               {"[+]"}
             </text>
@@ -1714,8 +1715,9 @@ function SubagentPanel(props: {
             <text fg={props.theme.textMuted}>{rowLabel("retain (min)")}</text>
             <text
               fg={props.theme.accent}
-              {...holdRepeat(() =>
-                props.onAdjust("retainedSubagentTtlMs", -RETAINED_SUBAGENT_TTL_STEP_MS),
+              {...holdRepeat(
+                "retained-subagent-ttl-decrease",
+                () => props.onAdjust("retainedSubagentTtlMs", -RETAINED_SUBAGENT_TTL_STEP_MS),
               )}
             >
               {"[-]"}
@@ -1729,8 +1731,9 @@ function SubagentPanel(props: {
             </text>
             <text
               fg={props.theme.accent}
-              {...holdRepeat(() =>
-                props.onAdjust("retainedSubagentTtlMs", RETAINED_SUBAGENT_TTL_STEP_MS),
+              {...holdRepeat(
+                "retained-subagent-ttl-increase",
+                () => props.onAdjust("retainedSubagentTtlMs", RETAINED_SUBAGENT_TTL_STEP_MS),
               )}
             >
               {"[+]"}
@@ -1761,7 +1764,7 @@ function SubagentPanel(props: {
                 <text fg={props.theme.textMuted}>{rowLabel("max Token(k)")}</text>
                 <text
                   fg={props.theme.accent}
-                  {...holdRepeat(() => props.onAdjustContext(-CONTEXT_STEP))}
+                  {...holdRepeat("context-decrease", () => props.onAdjustContext(-CONTEXT_STEP))}
                 >
                   {"[-]"}
                 </text>
@@ -1770,7 +1773,7 @@ function SubagentPanel(props: {
                 </text>
                 <text
                   fg={props.theme.accent}
-                  {...holdRepeat(() => props.onAdjustContext(CONTEXT_STEP))}
+                  {...holdRepeat("context-increase", () => props.onAdjustContext(CONTEXT_STEP))}
                 >
                   {"[+]"}
                 </text>
@@ -1796,7 +1799,7 @@ function SubagentPanel(props: {
                 <text fg={props.theme.textMuted}>{rowLabel("reuse Token(k)")}</text>
                 <text
                   fg={props.theme.accent}
-                  {...holdRepeat(() => props.onAdjustReuse(-CONTEXT_STEP))}
+                  {...holdRepeat("reuse-context-decrease", () => props.onAdjustReuse(-CONTEXT_STEP))}
                 >
                   {"[-]"}
                 </text>
@@ -1805,7 +1808,7 @@ function SubagentPanel(props: {
                 </text>
                 <text
                   fg={props.theme.accent}
-                  {...holdRepeat(() => props.onAdjustReuse(CONTEXT_STEP))}
+                  {...holdRepeat("reuse-context-increase", () => props.onAdjustReuse(CONTEXT_STEP))}
                 >
                   {"[+]"}
                 </text>
@@ -1836,7 +1839,7 @@ function SubagentPanel(props: {
                 <text fg={props.theme.textMuted}>{rowLabel("result Token")}</text>
                 <text
                   fg={props.theme.accent}
-                  {...holdRepeat(() => props.onAdjustResultTokens(-RESULT_TOKEN_STEP))}
+                  {...holdRepeat("result-tokens-decrease", () => props.onAdjustResultTokens(-RESULT_TOKEN_STEP))}
                 >
                   {"[-]"}
                 </text>
@@ -1845,7 +1848,7 @@ function SubagentPanel(props: {
                 </text>
                 <text
                   fg={props.theme.accent}
-                  {...holdRepeat(() => props.onAdjustResultTokens(RESULT_TOKEN_STEP))}
+                  {...holdRepeat("result-tokens-increase", () => props.onAdjustResultTokens(RESULT_TOKEN_STEP))}
                 >
                   {"[+]"}
                 </text>
@@ -1866,11 +1869,11 @@ function SubagentPanel(props: {
           </box>
           <box flexDirection="row">
             <text fg={props.theme.textMuted}>{rowLabel("endless (k)")}</text>
-            <text fg={props.theme.accent} {...holdRepeat(() => props.onAdjust("endlessContext", -10000))}>
+            <text fg={props.theme.accent} {...holdRepeat("endless-context-decrease", () => props.onAdjust("endlessContext", -10000))}>
               {"[-]"}
             </text>
             <text fg={props.theme.text}>{numCell(props.endlessContext() / 1000)}</text>
-            <text fg={props.theme.accent} {...holdRepeat(() => props.onAdjust("endlessContext", 10000))}>
+            <text fg={props.theme.accent} {...holdRepeat("endless-context-increase", () => props.onAdjust("endlessContext", 10000))}>
               {"[+]"}
             </text>
           </box>
@@ -1971,24 +1974,21 @@ function SubagentPanel(props: {
             );
             const badgeColour = (glyph: string) =>
               glyph === "V" || glyph === "R" ? props.theme.success : props.theme.textMuted;
-            // Built once, outside the JSX. A handler pair produced inside the
-            // spread would be rebuilt whenever `effort()` changes — which is
-            // exactly what cycling the effort does — and the mouseup would then
-            // land on a pair that never started the press. The row's inert
-            // state stays a matter of the colour plus this guard in the action,
-            // so a model without reasoning still shows [<] [>] muted and dead.
+            // Built once, outside the JSX, for a stable handler pair. The
+            // `live` gate stays inside the action, so the row remains wired while
+            // inert and a model without reasoning still shows muted, dead [<] [>].
             const cycleEffort = (delta: number): void => {
               if (effort().live) props.onCycleLlmEffort(delta);
             };
-            const effortDown = holdRepeat(() => cycleEffort(-1));
-            const effortUp = holdRepeat(() => cycleEffort(1));
+            const effortDown = holdRepeat("llm-effort-decrease", () => cycleEffort(-1));
+            const effortUp = holdRepeat("llm-effort-increase", () => cycleEffort(1));
             return (
               <>
                 <box flexDirection="row">
                   <text fg={props.theme.textMuted}>{rowLabel("model")}</text>
                   <text
                     fg={props.theme.accent}
-                    {...holdRepeat(() => props.onCycleLlmModel(-1))}
+                    {...holdRepeat("llm-model-decrease", () => props.onCycleLlmModel(-1))}
                   >
                     {"[<]"}
                   </text>
@@ -2000,7 +2000,7 @@ function SubagentPanel(props: {
                   </text>
                   <text
                     fg={props.theme.accent}
-                    {...holdRepeat(() => props.onCycleLlmModel(1))}
+                    {...holdRepeat("llm-model-increase", () => props.onCycleLlmModel(1))}
                   >
                     {"[>]"}
                   </text>
@@ -2065,7 +2065,7 @@ function SubagentPanel(props: {
                   <text fg={props.theme.textMuted}>{rowLabel(def.label)}</text>
                   <text
                     fg={props.theme.accent}
-                    {...holdRepeat(() => props.onAdjustLlmParam(def, -def.step))}
+                    {...holdRepeat(`llm-param-${def.key}-decrease`, () => props.onAdjustLlmParam(def, -def.step))}
                   >
                     {"[-]"}
                   </text>
@@ -2074,7 +2074,7 @@ function SubagentPanel(props: {
                   </text>
                   <text
                     fg={props.theme.accent}
-                    {...holdRepeat(() => props.onAdjustLlmParam(def, def.step))}
+                    {...holdRepeat(`llm-param-${def.key}-increase`, () => props.onAdjustLlmParam(def, def.step))}
                   >
                     {"[+]"}
                   </text>

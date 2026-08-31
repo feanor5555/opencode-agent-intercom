@@ -28,20 +28,10 @@ that opencode upgrades don't shift the system-prompt composition.
   alike, server half and TUI half), `e2e_server_alive`,
   `e2e_server_url` and the subshell guard `e2e_require_caller_shell`. Covered by
   `test/e2e-server-lifecycle.test.js`, which drives it against a stub server.
-- `golden/` — reference captures from 2026-05-16 (opencode 1.15.0, omnicoder
-  Qwen3.5-9B). Diff fresh `out/*.full*.json` against these to detect drift.
-  The captures carry absolute paths from the machine they were taken on, and
-  the home directory in them is redacted to `/home/user/` before they are
-  committed. A capture promoted from `out/` into `golden/` gets the same
-  treatment — the repository is public:
-
-  ```bash
-  sed -i "s#$HOME/#/home/user/#g" test/e2e/golden/*.json
-  ```
-
-  Nothing compares these files byte for byte, so the redaction changes no
-  outcome; the documented diff below counts messages.
-- `out/` — created at runtime; `.gitignore` covers it.
+- `out/` — created at runtime; `.gitignore` covers it. Every driver writes its
+  message-tree capture there. A capture is the output of the run that produced
+  it and is not committed; a driver decides pass or fail from its own assertions
+  on the live session, not from a comparison against a stored capture.
 
 ## How to run
 
@@ -55,24 +45,8 @@ Ctrl-C. Every run therefore uses the plugin code in the working tree against the
 wired test project.
 
 ```bash
-# 1. Run the suite:
 cd ~/opencode-agent-intercom
 bash test/e2e/run-all.sh
-
-# 2. Diff against the golden reference (loose — message IDs and timestamps
-#    change every run; the interesting bits are subagent picks, tool calls
-#    and final orchestrator text):
-python3 - <<'PY'
-import json, sys
-from pathlib import Path
-for f in sorted(Path("test/e2e/golden").glob("*.json")):
-    cur = Path("test/e2e/out") / f.name
-    if not cur.exists():
-        print(f"missing: {cur}"); continue
-    g = json.load(open(f))
-    c = json.load(open(cur))
-    print(f"{f.name:40s} golden={len(g)} msgs  current={len(c)} msgs")
-PY
 ```
 
 `run-task.sh` and `multi-task.sh` keep their own env contract — `OPENCODE_URL`,
@@ -131,7 +105,7 @@ which is what keeps subagent reads on real paths (see "Known caveats").
 `endless-task.sh` and `nested-task.sh` make the same two checks against
 `ENDLESS_PROJECT_DIR` and `NESTED_PROJECT_DIR`.
 
-Settings used for the golden references:
+The setup the drivers are written against:
 - `~/.config/opencode/agent-intercom.json` → `maxSubagents: 8, maxContext: 130000`
 - `opencode serve` started in `$HOME/testopencode`
 - llama-server: omnicoder (`Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf`)

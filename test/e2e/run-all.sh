@@ -1,6 +1,6 @@
 #!/bin/bash
 # Runs all 8 single-agent end-to-end tests, the multi-agent test and the
-# endless-mode cycle, writes captures under ./out for diffing against ./golden.
+# endless-mode cycle, writes captures under ./out.
 #
 # It owns the server the message-tree drivers use: it builds the TUI half of the
 # plugin, starts a fresh `opencode serve` in the configured project, exports
@@ -83,9 +83,9 @@ trap 'exit 130' INT TERM
 
 e2e_build_tui "$PLUGIN_ROOT"
 
-# The request log is what the golden captures were taken with. Set around the
-# server start only: it belongs to this server, not to the drivers below or to
-# the server endless-task.sh starts for itself.
+# The request log records what each driver sent. Set around the server start
+# only: it belongs to this server, not to the drivers below or to the server
+# endless-task.sh starts for itself.
 export OPENCODE_AGENT_INTERCOM_LOG_REQUESTS=1
 e2e_server_start "$PORT" "$PROJECT" "$OUTDIR/00-suite.server.log" "$OUTDIR/00-suite.serverpid"
 e2e_server_wait_ready "$START_TIMEOUT" "$OUTDIR/00-suite.health.json"

@@ -9,10 +9,9 @@
 #   PROJECT_DIR     default $HOME/testopencode
 #   OUT_DIR         default ./out
 #
-# Expected golden output: see ./golden/10-multi.full.json — 90+ messages,
-# four spawn calls (planner, coder, reviewer, gitter) all status=completed,
-# bytes() exists in src/format.js, 5 new tests in test/plugin.test.js, no
-# commit performed.
+# Expected outcome: 90+ messages, four spawn calls (planner, coder, reviewer,
+# gitter) all status=completed, bytes() exists in src/format.js, 5 new tests in
+# test/plugin.test.js, no commit performed.
 set -e
 BASE=${OPENCODE_URL:-http://localhost:4567}
 PROJECT=${PROJECT_DIR:-$HOME/testopencode}

@@ -9,9 +9,9 @@
 //     `/absolute/path/to/…` in a config example the reader fills in;
 //   - shell drivers: `${PROJECT_DIR:-$HOME/testopencode}` and friends, and
 //     `todo-driver.mjs` derives this checkout from its own module URL;
-//   - captures under `test/e2e/golden/` and `test/fixtures/`: the home
-//     directory is redacted to the placeholder `/home/user/`, which is the
-//     single spelling this test allows.
+//   - a recorded capture that has to keep an absolute path: the home directory
+//     is redacted to the placeholder `/home/user/`, the single spelling under
+//     `/home/` this test allows.
 //
 // The scan runs over `git ls-files`, so it sees exactly what is published and
 // ignores the untracked `work/` scratch. It skips itself — the file has to be

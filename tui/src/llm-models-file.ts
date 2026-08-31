@@ -34,6 +34,20 @@ export const EFFORT_LADDER = ["default", "low", "medium", "high"] as const;
 
 export type EffortValue = (typeof EFFORT_LADDER)[number];
 
+// Text of the effort cell. An effort opencode resolved for the agent — the one
+// standing where this panel has stored none — is shown in parentheses, so it
+// reads as the inherited default and not as a setting made here. It is drawn
+// from opencode's own vocabulary, which is wider than EFFORT_LADDER: without
+// the marking a value the ladder cannot produce looks like a step the row
+// jumped to by itself. Parentheses rather than colour alone, so the row still
+// reads with colour off.
+export function formatLlmEffort(
+  text: string,
+  source: "agent" | "opencode" | null,
+): string {
+  return source === "opencode" ? `(${text})` : text;
+}
+
 // An entry as it stands in the file: the model pair, plus the optional effort
 // override. `variant` is absent for "default".
 export interface ModelEntry extends ModelRef {

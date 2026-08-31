@@ -16,6 +16,7 @@ import {
   EFFORT_LADDER,
   cycleLlmModel,
   cycleLlmVariant,
+  formatLlmEffort,
   readLlmModels,
   setLlmModel,
   setLlmModelsPath,
@@ -222,6 +223,21 @@ const OPUS = { providerID: "anthropic", modelID: "opus" }
 
 test("the ladder is the one the effort row cycles, default first", () => {
   assert.deepEqual([...EFFORT_LADDER], ["default", "low", "medium", "high"])
+})
+
+test("an effort chosen in the panel is shown as it stands", () => {
+  assert.equal(formatLlmEffort("high", "agent"), "high")
+})
+
+test("an effort opencode resolved is marked as the inherited default", () => {
+  // opencode's vocabulary is wider than the ladder — an unmarked "xhigh" would
+  // read as a step the row had cycled to.
+  assert.equal(formatLlmEffort("xhigh", "opencode"), "(xhigh)")
+})
+
+test("an effort from neither source carries no marking", () => {
+  assert.equal(formatLlmEffort("default", null), "default")
+  assert.equal(formatLlmEffort("n/a", null), "n/a")
 })
 
 test("an entry without an effort reads exactly as it did before", () => {

@@ -28,12 +28,14 @@ import {
   type ModelRef,
   EFFORT_LADDER,
   cycleLlmModel,
+  formatLlmEffort,
   cycleLlmVariant,
   isModelRef,
   readLlmModels,
   sameModel,
   setLlmModel,
 } from "./llm-models-file.ts";
+import { holdRepeat } from "./hold-repeat.ts";
 import {
   composeSubagentLabel,
   subagentLabelWidth,
@@ -87,13 +89,6 @@ const PULSE_TICK_MS = 600;
 const POLL_FALLBACK_MS = 5000;
 const REFRESH_DEBOUNCE_MS = 250;
 const TOKEN_REFRESH_MS = 8000;
-// Press-and-hold on +/- buttons. After firing once on mousedown we wait for
-// HOLD_DELAY (so a tap is just a single increment), then auto-repeat every
-// INTERVAL ms. Both timers cancel on mouseup or mouseout so moving the cursor
-// off the button reliably stops the run — terminals can drop button-release
-// events under load.
-const HOLD_REPEAT_DELAY_MS = 350;
-const HOLD_REPEAT_INTERVAL_MS = 60;
 const FOCUS_LIST_COMMAND = "agent-intercom.focus-sidebar-list";
 const ABORT_COMMAND = "agent-intercom.abort-selected";
 
@@ -1332,41 +1327,6 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   void refresh();
 }
 
-// Returns mouse handlers that fire `action` once on press, then auto-repeat
-// for as long as the button is held. Used by the limits +/- buttons so the
-// user can sweep from 1 to 20 subagents (or 50 to 500k tokens) without
-// clicking 20+ times. Each call creates its own timer pair — one button
-// holding does not interfere with another button's state.
-function holdRepeat(action: () => void): {
-  onMouseDown: () => void;
-  onMouseUp: () => void;
-  onMouseOut: () => void;
-} {
-  let holdTimer: ReturnType<typeof setTimeout> | undefined;
-  let repeatTimer: ReturnType<typeof setInterval> | undefined;
-  const stop = (): void => {
-    if (holdTimer !== undefined) {
-      clearTimeout(holdTimer);
-      holdTimer = undefined;
-    }
-    if (repeatTimer !== undefined) {
-      clearInterval(repeatTimer);
-      repeatTimer = undefined;
-    }
-  };
-  return {
-    onMouseDown: () => {
-      stop();
-      action();
-      holdTimer = setTimeout(() => {
-        repeatTimer = setInterval(action, HOLD_REPEAT_INTERVAL_MS);
-      }, HOLD_REPEAT_DELAY_MS);
-    },
-    onMouseUp: stop,
-    onMouseOut: stop,
-  };
-}
-
 function SubagentPanel(props: {
   sessionID: string;
   subagents: () => Map<string, SubagentEntry>;
@@ -2011,6 +1971,17 @@ function SubagentPanel(props: {
             );
             const badgeColour = (glyph: string) =>
               glyph === "V" || glyph === "R" ? props.theme.success : props.theme.textMuted;
+            // Built once, outside the JSX. A handler pair produced inside the
+            // spread would be rebuilt whenever `effort()` changes — which is
+            // exactly what cycling the effort does — and the mouseup would then
+            // land on a pair that never started the press. The row's inert
+            // state stays a matter of the colour plus this guard in the action,
+            // so a model without reasoning still shows [<] [>] muted and dead.
+            const cycleEffort = (delta: number): void => {
+              if (effort().live) props.onCycleLlmEffort(delta);
+            };
+            const effortDown = holdRepeat(() => cycleEffort(-1));
+            const effortUp = holdRepeat(() => cycleEffort(1));
             return (
               <>
                 <box flexDirection="row">
@@ -2043,20 +2014,26 @@ function SubagentPanel(props: {
                   <text fg={badgeColour(badges().vision)}>{` ${badges().vision}`}</text>
                   <text fg={badgeColour(badges().reasoning)}>{badges().reasoning}</text>
                 </box>
-                {/* Reasoning effort for the same agent. Inert — muted buttons,
-                    no handler — where the model cannot take one or is unknown. */}
+                {/* Reasoning effort for the same agent. Inert — muted
+                    buttons, a dead cycler — where the model cannot take an
+                    effort or is unknown. An effort opencode resolved rather
+                    than one chosen here shows muted and in parentheses. */}
                 <box flexDirection="row">
                   <text fg={props.theme.textMuted}>{rowLabel("effort")}</text>
                   <text
                     fg={effort().live ? props.theme.accent : props.theme.textMuted}
-                    {...(effort().live ? holdRepeat(() => props.onCycleLlmEffort(-1)) : {})}
+                    {...effortDown}
                   >
                     {"[<]"}
                   </text>
-                  <text fg={props.theme.text}>{fitCell(effort().text, MODEL_NAME_W)}</text>
+                  <text
+                    fg={effort().source === "opencode" ? props.theme.textMuted : props.theme.text}
+                  >
+                    {fitCell(formatLlmEffort(effort().text, effort().source), MODEL_NAME_W)}
+                  </text>
                   <text
                     fg={effort().live ? props.theme.accent : props.theme.textMuted}
-                    {...(effort().live ? holdRepeat(() => props.onCycleLlmEffort(1)) : {})}
+                    {...effortUp}
                   >
                     {"[>]"}
                   </text>

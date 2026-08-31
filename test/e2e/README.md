@@ -174,8 +174,26 @@ live criteria §7:
 | (c) save | `endless: saved N point(s) as T…`, every id present as `- T<n>:` in the todo file, exactly one todo file in the directory |
 | (d) replacement | `endless: cycle K/M complete, new session …`; the new session is readable, the old one is readable **and** archived |
 | kickoff | the new session carries `## Endless mode — work off the todo file` naming exactly the ids of (c) |
-| (e) work-off | the successor's messages include a `spawn` tool call whose `input.prompt` carries the first saved task id as the first non-empty line (`T<n>:` / `T<n>.` / `T<n>-` …) and any further spawn prompts likewise carry a saved id |
+| (e) work-off | the successor's first turn contains a `spawn` tool call whose `input.prompt` carries the first saved task id as the first non-empty line (`T<n>:` / `T<n>.` / `T<n>-` …) and every further spawn prompt of that turn likewise carries a saved id; the turn's per-task spawn tally rides along as evidence |
 | order | the five cycle lines — scheduled, refused, quiesced, saved, complete — appear in that order in the debug-log slice |
+
+**The successor's first turn is captured whole.** The kickoff starts that turn
+asynchronously, and the driver follows it to its end — every tool call, not only
+up to the first spawn — into `out/11-endless.successor-first-turn.json`. The end
+is read off the persisted messages: an assistant message whose `finish` is
+anything other than `tool-calls` is the turn's last step, and a further user
+message (a subagent's completion notice) already belongs to the next turn;
+`STEP_TIMEOUT_S` bounds the wait, and a turn still running at that bound is
+judged on what it produced by then, with the evidence saying so. The evidence
+line of (e) therefore ends in `first turn ended after N spawn call(s), per saved
+task: T1=… T2=… T3=…`, so the distribution over the saved tasks is readable from
+a run's own report.
+
+Spawning one subagent per saved task in the first turn is deliberately **not**
+asserted: `specs/endless-mode.md` §7 (e) requires a subagent for the first task,
+and the kickoff of §3.5 tells the successor to work the file off top to bottom
+starting with the first task, so a first turn that spawns only `T1` satisfies
+the concept. The tally is what makes the actual distribution visible.
 
 Not asserted, and reported as such rather than silently passed: §7 (f) view
 switch and (g) sidebar, which need a screenshot of the rendered TUI.

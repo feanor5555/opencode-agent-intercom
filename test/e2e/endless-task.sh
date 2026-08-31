@@ -15,7 +15,9 @@
 #              not deleted                               → `endless: cycle K/M complete, new session …`
 #   kickoff    the new session's first message is the endless kickoff and names
 #              exactly the ids of (c)
-#   (e) work-off the successor's spawn prompts carry saved task ids on line one
+#   (e) work-off the successor's first turn is captured to its end and its spawn
+#              prompts carry saved task ids on line one; the per-task spawn
+#              tally of that turn is reported as evidence beside it
 #   order      the five evidence lines appear in that order in the debug log
 #
 # How the run is sequenced, and why in this order:
@@ -834,24 +836,74 @@ fi
 
 # ---------- (e) the work-off -----------------------------------------------
 
-# The kickoff prompt starts the successor's model turn asynchronously. Read the
-# successor's persisted messages until a real spawn tool part appears, then
-# inspect the tool input itself. Looking only at the kickoff text would let a
-# model that ignored the task ids pass this criterion.
+# The kickoff prompt starts the successor's model turn asynchronously. The
+# capture follows that FIRST turn to its END — every tool call it makes, not
+# only up to the first spawn — and inspects the spawn tool inputs themselves;
+# looking at the kickoff text alone would let a model that ignored the task ids
+# pass this criterion.
+#
+# Where the turn ends is read off the persisted messages: an assistant message
+# whose `finish` is anything other than `tool-calls` is the last step of the
+# turn, and a further user message — a subagent's completion notice — already
+# belongs to the next one. Both bound the capture, and so does STEP_TIMEOUT_S:
+# a turn still running at that bound is judged on what it produced by then and
+# the evidence says so.
+#
+# What is asserted is what the concept states: the successor spawns the FIRST
+# saved task, and every spawn prompt carries a saved id on its first line
+# (specs/endless-mode.md §7 (e), §3.5). One spawn per saved task in the first
+# turn is NOT required — the kickoff's own instruction is "top to bottom, the
+# first task is the next one to do" — so the per-task spawn tally is carried as
+# evidence under this criterion rather than asserted as one.
 if [ -n "$NEWSID" ] && [ -n "$SAVED_IDS" ]; then
+  WORK_CAPTURE="$OUT_DIR/$PREFIX.successor-first-turn.json"
   WORK_DEADLINE=$(( $(date +%s) + STEP_TIMEOUT_S ))
-  WORK_RESULT="pending|no successor spawn tool call has appeared yet"
+  WORK_STATE=running
+  WORK_VERDICT=pending
+  WORK_EVIDENCE="no successor message list was read"
   while :; do
-    curl -s -m 30 "$BASE/session/$NEWSID/message" > "$OUT_DIR/$PREFIX.new-session-messages.json"
-    WORK_RESULT=$(python3 - "$OUT_DIR/$PREFIX.new-session-messages.json" "$SAVED_IDS" <<'PY'
+    curl -s -m 30 "$BASE/session/$NEWSID/message" > "$WORK_CAPTURE"
+    WORK_READ=$(python3 - "$WORK_CAPTURE" "$SAVED_IDS" <<'PY'
 import json, re, sys
 try:
     payload = json.load(open(sys.argv[1]))
 except Exception as err:
-    print(f"pending|the successor message list was unreadable: {err}")
+    print(f"running|pending|the successor message list was unreadable: {err}")
     raise SystemExit
 expected = [i for i in sys.argv[2].split(",") if i]
 expected_set = set(expected)
+
+messages = payload.get("data") if isinstance(payload, dict) else payload
+if not isinstance(messages, list):
+    print("running|pending|the successor message list carried no messages")
+    raise SystemExit
+
+# The server nests each message as {"info": …, "parts": […]}; older shapes put
+# the fields on the message itself.
+def info_of(message):
+    if not isinstance(message, dict):
+        return {}
+    inner = message.get("info")
+    return inner if isinstance(inner, dict) else message
+
+start = next((i for i, m in enumerate(messages) if info_of(m).get("role") == "user"), None)
+if start is None:
+    print("running|pending|the successor carries no user message yet — the kickoff has not landed")
+    raise SystemExit
+
+turn = []
+state = "running"
+for message in messages[start + 1:]:
+    info = info_of(message)
+    if info.get("role") == "user":
+        state = "complete"
+        break
+    turn.append(message)
+    finish = info.get("finish")
+    completed = (info.get("time") or {}).get("completed")
+    if completed and finish and finish != "tool-calls":
+        state = "complete"
+        break
 
 # OpenCode stores a tool call in an assistant message part. The input is in
 # part.state.input once the call is complete; accept the direct input shape as
@@ -860,9 +912,9 @@ def spawn_prompts(node):
     if isinstance(node, dict):
         if node.get("tool") == "spawn":
             candidates = []
-            state = node.get("state")
-            if isinstance(state, dict):
-                candidates.append(state.get("input"))
+            inner = node.get("state")
+            if isinstance(inner, dict):
+                candidates.append(inner.get("input"))
             candidates.append(node.get("input"))
             for candidate in candidates:
                 if isinstance(candidate, dict) and isinstance(candidate.get("prompt"), str):
@@ -874,11 +926,7 @@ def spawn_prompts(node):
         for value in node:
             yield from spawn_prompts(value)
 
-prompts = list(spawn_prompts(payload))
-if not prompts:
-    print("pending|no successor spawn tool call has appeared yet")
-    raise SystemExit
-
+prompts = list(spawn_prompts(turn))
 observed = []
 invalid = []
 for prompt in prompts:
@@ -889,29 +937,47 @@ for prompt in prompts:
     if task_id is None or task_id not in expected_set:
         invalid.append((task_id or "no id", first[:160]))
 
+seen_ids = [task_id for task_id, _ in observed if task_id != "?"]
+unmatched = len([task_id for task_id, _ in observed if task_id not in expected_set])
+tally = " ".join(f"{task}={seen_ids.count(task)}" for task in expected)
+turn_state = "ended" if state == "complete" else "still running at the bound"
+tally_text = (
+    f"first turn {turn_state} after {len(prompts)} spawn call(s), "
+    f"per saved task: {tally}"
+)
+if unmatched:
+    tally_text += f", carrying no saved id: {unmatched}"
+
 # The first saved point is the next task by contract. A spawn for another
 # saved point is still useful evidence, but a prompt without a saved id is a
 # failed work-off regardless of any valid call beside it.
 first_expected = expected[0] if expected else None
-seen_ids = [task_id for task_id, _ in observed if task_id != "?"]
-if invalid:
-    print(f"fail|spawn prompts {observed}; invalid first lines {invalid}")
+if not prompts:
+    if state == "complete":
+        print(f"complete|fail|the successor's first turn ended with no spawn tool call — {tally_text}")
+    else:
+        print("running|pending|no successor spawn tool call has appeared yet")
+elif invalid:
+    print(f"{state}|fail|spawn prompts {observed}; invalid first lines {invalid} — {tally_text}")
 elif first_expected not in seen_ids:
-    print(f"fail|spawn prompts {observed}; first saved task {first_expected} was not spawned")
+    print(f"{state}|fail|spawn prompts {observed}; first saved task {first_expected} was not spawned — {tally_text}")
 else:
-    print(f"pass|spawn prompts carry saved ids on line one: {observed}")
+    print(f"{state}|pass|spawn prompts carry saved ids on line one: {observed} — {tally_text}")
 PY
 )
-    case "$WORK_RESULT" in
-      pass\|*|fail\|*) break ;;
-    esac
+    WORK_STATE=${WORK_READ%%|*}
+    WORK_REST=${WORK_READ#*|}
+    WORK_VERDICT=${WORK_REST%%|*}
+    WORK_EVIDENCE=${WORK_REST#*|}
+    [ "$WORK_STATE" = complete ] && break
     if [ "$(date +%s)" -ge "$WORK_DEADLINE" ] || ! e2e_server_alive; then break; fi
     sleep "$POLL_S"
   done
-  case "$WORK_RESULT" in
-    pass\|*) record "(e) work-off — successor spawn prompts carry saved task ids on their first line" 1 "${WORK_RESULT#*|}" ;;
-    fail\|*) record "(e) work-off — successor spawn prompts carry saved task ids on their first line" 0 "${WORK_RESULT#*|}" ;;
-    *)         record "(e) work-off — successor spawn prompts carry saved task ids on their first line" 0 "${WORK_RESULT#*|} (within ${STEP_TIMEOUT_S}s)" ;;
+  say "[$PREFIX] successor first turn $WORK_STATE — capture: $WORK_CAPTURE"
+  case "$WORK_VERDICT" in
+    pass) record "(e) work-off — successor spawn prompts carry saved task ids on their first line" 1 "$WORK_EVIDENCE" ;;
+    fail) record "(e) work-off — successor spawn prompts carry saved task ids on their first line" 0 "$WORK_EVIDENCE" ;;
+    *)    record "(e) work-off — successor spawn prompts carry saved task ids on their first line" 0 "$WORK_EVIDENCE (within ${STEP_TIMEOUT_S}s)" ;;
   esac
 else
   record "(e) work-off — successor spawn prompts carry saved task ids on their first line" 0 \

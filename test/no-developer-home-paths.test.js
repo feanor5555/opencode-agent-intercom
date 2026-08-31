@@ -8,10 +8,7 @@
 //   - prose and documentation: `~/opencode-agent-intercom`, `$HOME/…`, or
 //     `/absolute/path/to/…` in a config example the reader fills in;
 //   - shell drivers: `${PROJECT_DIR:-$HOME/testopencode}` and friends, and
-//     `todo-driver.mjs` derives this checkout from its own module URL;
-//   - a recorded capture that has to keep an absolute path: the home directory
-//     is redacted to the placeholder `/home/user/`, the single spelling under
-//     `/home/` this test allows.
+//     `todo-driver.mjs` derives this checkout from its own module URL.
 //
 // The scan runs over `git ls-files`, so it sees exactly what is published and
 // ignores the untracked `work/` scratch. It skips itself — the file has to be
@@ -30,11 +27,7 @@ import { join, relative } from "node:path"
 const repoRoot = fileURLToPath(new URL("../", import.meta.url))
 const selfPath = relative(repoRoot, fileURLToPath(import.meta.url))
 
-// The redaction placeholder used in the recorded captures. Everything else
-// under /home/ is a real account name.
-const PLACEHOLDER = "user"
-
-// `/home/<name>` where <name> is anything but the placeholder.
+// `/home/<name>` where <name> is an account name.
 const HOME_PATH = /\/home\/([A-Za-z0-9._-]+)/g
 
 function trackedFiles() {
@@ -66,7 +59,6 @@ test("no tracked file names a developer home directory", () => {
     }
     if (!text.includes("/home/")) continue
     for (const match of text.matchAll(HOME_PATH)) {
-      if (match[1] === PLACEHOLDER) continue
       offenders.push(`${file}: ${match[0]}`)
     }
   }
@@ -74,16 +66,13 @@ test("no tracked file names a developer home directory", () => {
   assert.deepEqual(
     offenders,
     [],
-    `tracked files name a home directory; use ~/…, $HOME/… or the /home/${PLACEHOLDER}/ capture placeholder instead:\n${offenders.join("\n")}`,
+    `tracked files name a home directory; use ~/…, $HOME/… or /absolute/path/to/… instead:\n${offenders.join("\n")}`,
   )
 })
 
 test("the scan would catch a home path if one came back", () => {
-  // Keep the sample account distinct from PLACEHOLDER so redaction cannot hide
-  // this control by filtering its matches.
+  // Guards the matcher itself, so a green suite cannot mean "matched nothing".
   const sample = 'PROJECT=${PROJECT_DIR:-/home/example/testopencode}\n"plugin": ["/home/example/x"]'
-  const hits = [...sample.matchAll(HOME_PATH)]
-    .filter((m) => m[1] !== PLACEHOLDER)
-    .map((m) => m[0])
+  const hits = [...sample.matchAll(HOME_PATH)].map((m) => m[0])
   assert.deepEqual(hits, ["/home/example", "/home/example"])
 })

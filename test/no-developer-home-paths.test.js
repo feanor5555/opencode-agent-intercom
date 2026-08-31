@@ -79,10 +79,11 @@ test("no tracked file names a developer home directory", () => {
 })
 
 test("the scan would catch a home path if one came back", () => {
-  // Guards the matcher itself, so a green suite cannot mean "matched nothing".
-  const sample = 'PROJECT=${PROJECT_DIR:-/home/user/testopencode}\n"plugin": ["/home/user/x"]'
+  // Keep the sample account distinct from PLACEHOLDER so redaction cannot hide
+  // this control by filtering its matches.
+  const sample = 'PROJECT=${PROJECT_DIR:-/home/example/testopencode}\n"plugin": ["/home/example/x"]'
   const hits = [...sample.matchAll(HOME_PATH)]
     .filter((m) => m[1] !== PLACEHOLDER)
     .map((m) => m[0])
-  assert.deepEqual(hits, ["/home/user"])
+  assert.deepEqual(hits, ["/home/example", "/home/example"])
 })

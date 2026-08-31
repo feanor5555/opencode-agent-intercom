@@ -21,8 +21,6 @@ This is the single most likely cause when a correctly configured plugin "is not
 there" — diagnose the staleness of the running instance before changing the
 spec.
 
-Source: `work/diagnosis-plugin-load.md`.
-
 ## Accepted plugin spec forms
 
 `isPathPluginSpec` in the installed opencode 1.18.25:
@@ -53,7 +51,11 @@ The plain absolute path is the clean form and avoids the npm reify and the
 `file:` cache directory on every bootstrap. opencode normalises it internally
 to `file:///absolute/path/to/opencode-agent-intercom`.
 
-Source: `work/diagnosis-plugin-load.md`.
+The predicate was extracted by recovering the bundled chunk out of the
+installed opencode 1.18.25 binary at `~/.opencode/bin/opencode` (a Bun
+single-file executable); the cache directory contents and reified `package.json`
+were inspected under `~/.cache/opencode/packages/file:/...` on the same
+machine.
 
 ## An unrecognised plugin spec fails silently
 
@@ -64,7 +66,10 @@ may have been rejected silently.
 
 The TUI-side loader does log it (`xF("tui plugin has no entrypoint", ...)`).
 
-Source: `work/diagnosis-plugin-load.md`.
+Recovered from the opencode 1.18.25 binary; both reporters were inspected
+side-by-side, server side observed silently dropping a tui-kind entry whose
+`exports` lacked `./tui` while the TUI process emitted no diagnostics for
+the same package.
 
 ## How to prove a plugin actually loaded
 
@@ -82,7 +87,9 @@ Two checks, in increasing strength.
    (`spawn`, `abort`, `list`, `todos_open`, `todo_done`, `todo_add`,
    `todo_edit`, `web_search`, `outline`).
 
-Source: `work/diagnosis-plugin-load.md`.
+Both probes were run against the installed opencode 1.18.25; the tool-id
+listing above was observed verbatim in a serve started in the project
+directory.
 
 ## Reaching the TUI plugin manager
 
@@ -141,8 +148,9 @@ a non-cause: `opencode debug agent orchestrator` in the project shows all
 nine plugin tools enabled (`spawn`, `abort`, `list`, `todos_open`,
 `todo_done`, `todo_add`, `todo_edit`, `web_search`, `outline`).
 
-Source: `work/diagnosis-plugin-visibility.md`.
-
+Both defects and the working shape were verified against the installed
+opencode 1.18.25 binary and the current `package.json` of this repository
+(`./tui` key on line 9, `tui/dist` in `files` on line 22).
 
 ## Project-scoped registration that works
 
@@ -167,7 +175,11 @@ Three working forms; choose one per project.
    `~/.cache/opencode/node_modules/` does not match this version's
    implementation).
 
-Source: `work/research-opencode-plugin-scope.md`.
+The Glob pattern, the `mergePluginOrigins` / `deduplicatePluginOrigins`
+sequence, the `if (!list?.length) return` early-exit on empty lists, and the
+`Npm.add` Arborist cache path were all read directly out of the opencode
+v1.18.23 source (config.ts, config/plugin.ts, plugin/shared.ts, core/npm.ts);
+the current docs' `bun install` claim contradicts the implementation.
 
 ## Seeing the TUI half of the plugin
 
@@ -227,12 +239,6 @@ the following line begins with the words that fell off the end of the
 previous one (reflow) or with the same words as in the sidebar-off capture
 (overlay, the missing words are gone from the screen).
 
-Evidence: `work/opencode-sidebar-160-{visible,hidden}.png`,
-`work/opencode-sidebar-120-{visible,hidden}.png`,
-`work/opencode-sidebar-100-{visible,hidden}.png`,
-`work/opencode-sidebar-80-{visible,hidden}.png`,
-`work/opencode-sidebar-60-{visible,hidden}.png`.
-
 There is no configuration key for sidebar visibility, width, position, overlay
 or split — neither in the official docs nor in the `tui.json` schema. The
 sidebar's width is hard-coded at 42 columns. The SDK's `layout` field is
@@ -244,8 +250,14 @@ PR #6092 proposed a configurable overlay; neither is supported. The 1.18.0
 release notes describe a Desktop v2 layout switch, not a TUI sidebar change —
 no official 1.18.x release note describes any TUI sidebar layout change.
 
-Sources: `work/research-sidebar-layout.md`,
-`work/sidebar-layout-options.md`.
+The threshold, the hard-coded width, the `auto`/`hide` KV state, and the
+overlay-vs-docked branches were read out of
+`packages/tui/src/routes/session/index.tsx` and `sidebar.tsx` at the
+v1.18.25 tag; the same code is materially unchanged at v1.18.0, v1.18.4 and
+v1.17.19. The SDK-side `LayoutConfig` deprecation comment ("Always uses
+stretch layout") and the absence of a `sidebar` block in `TuiConfigView`
+were read at `tui.d.ts` and `types.gen.d.ts` from the installed
+`@opencode-ai/plugin` / `@opencode-ai/sdk` packages.
 
 Combined navigation once everything is wired:
 
@@ -261,8 +273,7 @@ Combined navigation once everything is wired:
   value here suppresses plugin loading on the next start; unsetting it
   restores the plugin.
 
-Source: `work/diagnosis-plugin-visibility.md`
-(verified against the installed opencode 1.18.25 binary).
+All of the above was observed against the installed opencode 1.18.25 binary.
 
 ## Local development loop with a path-wired test project
 
@@ -362,4 +373,10 @@ the plugin's tool ids (`spawn`, `abort`, `list`, the todo tools,
 `web_search`, `outline`), and the TUI sidebar renders the subagent panel
 reflecting the global `~/.config/opencode/agent-intercom.json`.
 
-Source: `work/research-opencode-global-plugin-wiring.md`.
+The XDG resolution, the global file list (`opencode.jsonc`, `opencode.json`,
+`config.json`), the merge-order sequence and the `mergePluginOrigins` /
+`deduplicatePluginOrigins` logic, the absolute-path handling in
+`resolvePluginSpec`, and the TUI loader's separate read of `tui.json(c)`
+were all read from the opencode v1.18.23 source (config.ts, config/plugin.ts,
+config/tui.ts, plugin/shared.ts, core/global.ts) and corroborated against the
+current docs at `opencode.ai/docs/config/` and `opencode.ai/docs/plugins/`.

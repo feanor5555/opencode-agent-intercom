@@ -117,19 +117,46 @@ The setup the drivers are written against:
 ## Endless mode
 
 `endless-task.sh` is the one driver that does **not** use the server
-`run-all.sh` starts. A cycle needs endless mode armed with a threshold low
-enough to be crossed in one turn, and it is read off the plugin's debug log, so
-the driver starts its own server on its own port and tears it down again,
-through the same `server-lifecycle.sh`:
+`run-all.sh` starts. A cycle needs endless mode armed with a threshold the
+primary is known to cross, and it is read off the plugin's debug log, so the
+driver starts its own server on its own port and tears it down again, through
+the same `server-lifecycle.sh`:
 
 ```bash
 bash test/e2e/endless-task.sh                       # defaults, ~3-5 min
-ENDLESS_CONTEXT=6000 SUBAGENT_SLEEP_S=20 \
-  bash test/e2e/endless-task.sh                     # cheaper still
+SUBAGENT_SLEEP_S=30 bash test/e2e/endless-task.sh   # shorter flight window
+ENDLESS_CONTEXT=6000 bash test/e2e/endless-task.sh  # a fixed ceiling, verified
 ENDLESS_PROJECT_DIR="$HOME/testopencode" \
 ENDLESS_PORT=4599 KEEP_SERVER=1 \
   bash test/e2e/endless-task.sh                     # leave the server up
 ```
+
+**The ceiling is derived, not guessed.** `endlessContext` is held at
+`ENDLESS_CONTEXT_CEILING` (100 000 000) for the whole preparation, so no
+preparation turn can start a cycle. The driver then reads the primary's real
+context off `GET /session/{id}/message` — the sum `input + output + cache.read +
+cache.write` of the newest assistant message with a non-zero sum, which is what
+`latestContextTokens` (`src/client.js`) compares against `endlessContext` — and
+writes the key at `ENDLESS_CONTEXT_MARGIN` (1 000) below that measurement. The
+next turn's transform hook re-reads the same figure and latches. Giving
+`ENDLESS_CONTEXT` a value uses it verbatim and **verifies** it against the
+measurement instead: a value the session never reaches ends the run as a setup
+error naming both numbers. Where the ceiling is not crossed within
+`STEP_TIMEOUT_S` the trigger criterion fails with the armed threshold, the
+measured context and the context read again at that moment.
+
+**The in-flight subagent is observed, not assumed.** The run is sequenced
+turn 1 open points → turn 2 the one `spawn` → arm the ceiling → turn 3 the
+crossing → turn 4 the post-trigger spawn attempt. The driver takes the handle
+out of the plugin's own `spawned` line and treats the subagent as in flight
+until `notified primary of completion` names that handle. It checks twice, once
+before arming and once immediately before the crossing turn; a subagent that
+finished earlier ends the run as a **setup error (exit 2)** naming exactly that,
+because criterion (b) would otherwise be asserted over a cycle that had nothing
+to wait for. A completion that lands between the arming and the trigger is
+caught at (b) itself, whose failure text names the two slice lines. More than
+one `spawned` line in the slice is likewise a setup error — the gate would be
+watching a subagent the cycle is not waiting for.
 
 Exit `0` = every asserted criterion passed, `1` = at least one failed, `2` =
 preflight/setup error (nothing was asserted). Each criterion is reported as
@@ -141,25 +168,30 @@ live criteria §7:
 
 | criterion | evidence |
 |---|---|
-| trigger | `endless: scheduled` for the primary, with `ctx` and `threshold` |
+| trigger | `endless: scheduled` for the primary, with `ctx` and `threshold`, the threshold being the armed one |
 | (a) freeze | `spawn refused: endless cycle in progress` after a post-trigger `spawn` |
-| (b) quiesce | `notified primary of completion` appears **before** `endless: quiesced …, activeAtStart>=1` |
+| (b) quiesce | `notified primary of completion` appears **before** `endless: quiesced …, activeAtStart>=1`, and after the trigger line |
 | (c) save | `endless: saved N point(s) as T…`, every id present as `- T<n>:` in the todo file, exactly one todo file in the directory |
 | (d) replacement | `endless: cycle K/M complete, new session …`; the new session is readable, the old one is readable **and** archived |
 | kickoff | the new session carries `## Endless mode — work off the todo file` naming exactly the ids of (c) |
 | (e) work-off | the successor's messages include a `spawn` tool call whose `input.prompt` carries the first saved task id as the first non-empty line (`T<n>:` / `T<n>.` / `T<n>-` …) and any further spawn prompts likewise carry a saved id |
-| order | the six cycle lines appear in that order in the debug-log slice |
+| order | the five cycle lines — scheduled, refused, quiesced, saved, complete — appear in that order in the debug-log slice |
 
 Not asserted, and reported as such rather than silently passed: §7 (f) view
 switch and (g) sidebar, which need a screenshot of the rendered TUI.
 
 Parameters are env vars with cheap defaults — `ENDLESS_PROJECT_DIR`,
-`ENDLESS_PORT`, `ENDLESS_CONTEXT` (8000), `ENDLESS_MAX_CYCLES` (1),
-`ENDLESS_QUIESCE_TIMEOUT_MS`, `SPAWN_AGENT`, `SUBAGENT_SLEEP_S`,
+`ENDLESS_PORT`, `ENDLESS_CONTEXT` (empty, i.e. derived),
+`ENDLESS_CONTEXT_CEILING` (100000000), `ENDLESS_CONTEXT_MARGIN` (1000),
+`SETTINGS_TTL_WAIT_S` (3, past the plugin's 2 000 ms settings cache),
+`ENDLESS_MAX_CYCLES` (1), `ENDLESS_QUIESCE_TIMEOUT_MS`, `SPAWN_AGENT`,
+`SUBAGENT_SLEEP_S` (45, and the preflight refuses a value within 10 s of
+`maxSubagentAgeMs`, where the watchdog would abort the subagent instead),
 `TURN_TIMEOUT_S`, `STEP_TIMEOUT_S`, `SERVER_START_TIMEOUT_S`, `POLL_S`,
 `OUT_DIR`, `KEEP_SERVER`, `E2E_TUI_BUILT`. The resolved setup is printed at the
-top of every run and again into `out/11-endless.report.txt`, so a run can be
-reproduced from its own output.
+top of every run and again into `out/11-endless.report.txt`, together with the
+`armed` line carrying the measured context and the threshold derived from it, so
+a run can be reproduced from its own output.
 
 Run on its own it builds the TUI first, like `run-all.sh`; started *by*
 `run-all.sh` it skips that build, because `E2E_TUI_BUILT=1` is exported once the

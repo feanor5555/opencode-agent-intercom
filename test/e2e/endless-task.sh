@@ -18,6 +18,30 @@
 #   (e) work-off the successor's spawn prompts carry saved task ids on line one
 #   order      the five evidence lines appear in that order in the debug log
 #
+# How the run is sequenced, and why in this order:
+#
+#   turn 1  the primary names its open points          (context grows)
+#   turn 2  the primary spawns ONE sleeping subagent and ends its turn
+#           → the driver waits for the plugin's own `spawned` line and takes the
+#             handle from it; that handle is the in-flight state everything below
+#             is gated on. From here the subagent counts as in flight until
+#             `notified primary of completion` names it.
+#   arming  the driver reads the primary's REAL context off the session
+#           (the sum `latestContextTokens` computes, src/client.js) and only then
+#           writes `endlessContext` below it. Until this moment the key sits at
+#           ENDLESS_CONTEXT_CEILING, high enough that no turn crosses it, so the
+#           cycle cannot start before the subagent is in flight.
+#   turn 3  one short turn whose transform hook re-reads that same context, finds
+#           it at or above the armed ceiling and latches the cycle. The turn
+#           spawns nothing — the freeze is already on from the latch.
+#   turn 4  the post-trigger spawn attempt of (a).
+#
+# The precondition of criterion (b) is that the subagent is STILL in flight when
+# the cycle starts waiting. The driver checks the handle twice — before it arms
+# and again immediately before turn 3 — and refuses to run a vacuous quiesce:
+# a subagent that finished early is a setup error (exit 2) naming exactly that,
+# never a quietly recorded pass.
+#
 # This driver owns its server: it builds the TUI, starts one on its own port,
 # waits for it, and tears it down again — a cycle needs its own settings (endless
 # mode on, a low threshold) and a known debug-log offset, so it never shares the
@@ -38,12 +62,23 @@
 #                      to the message-tree drivers and it must not redirect the
 #                      cycle by accident
 #   ENDLESS_PORT       4599                    own port, kept clear of run-all's 4567
-#   ENDLESS_CONTEXT    8000                    the threshold the primary must cross
+#   ENDLESS_CONTEXT    (empty)                 the armed threshold. Empty — the
+#                      default — derives it from the primary's measured context;
+#                      a value given here is used verbatim and VERIFIED against
+#                      that measurement, the run stopping as a setup error when
+#                      the session never reaches it
+#   ENDLESS_CONTEXT_CEILING 100000000          the threshold in force until the
+#                      driver arms; high enough that no preparation turn crosses it
+#   ENDLESS_CONTEXT_MARGIN 1000                how far below the measured context
+#                      the derived threshold is placed
+#   SETTINGS_TTL_WAIT_S 3                      wait after arming, past the
+#                      plugin's 2 000 ms settings cache (src/settings.js TTL_MS)
 #   ENDLESS_MAX_CYCLES 1                       ceiling; 1 = the loop stops itself
 #                      after the one cycle this driver asserts
 #   ENDLESS_QUIESCE_TIMEOUT_MS 120000          the plugin's own quiesce bound
 #   SPAWN_AGENT        coder                   the in-flight subagent's role
-#   SUBAGENT_SLEEP_S   30                      how long it stays in flight
+#   SUBAGENT_SLEEP_S   45                      how long it stays in flight; the
+#                      run is gated on the observed handle, not on this number
 #   TURN_TIMEOUT_S     600                     per blocking prompt POST
 #   STEP_TIMEOUT_S     300                     per awaited log line
 #   SERVER_START_TIMEOUT_S 60                  readiness probe budget
@@ -80,11 +115,14 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 PROJECT_DIR=${ENDLESS_PROJECT_DIR:-$HOME/testopencode}
 PORT=${ENDLESS_PORT:-4599}
 BASE=$(e2e_server_url "$PORT")
-ENDLESS_CONTEXT=${ENDLESS_CONTEXT:-8000}
+ENDLESS_CONTEXT=${ENDLESS_CONTEXT:-}
+ENDLESS_CONTEXT_CEILING=${ENDLESS_CONTEXT_CEILING:-100000000}
+ENDLESS_CONTEXT_MARGIN=${ENDLESS_CONTEXT_MARGIN:-1000}
+SETTINGS_TTL_WAIT_S=${SETTINGS_TTL_WAIT_S:-3}
 ENDLESS_MAX_CYCLES=${ENDLESS_MAX_CYCLES:-1}
 ENDLESS_QUIESCE_TIMEOUT_MS=${ENDLESS_QUIESCE_TIMEOUT_MS:-120000}
 SPAWN_AGENT=${SPAWN_AGENT:-coder}
-SUBAGENT_SLEEP_S=${SUBAGENT_SLEEP_S:-30}
+SUBAGENT_SLEEP_S=${SUBAGENT_SLEEP_S:-45}
 TURN_TIMEOUT_S=${TURN_TIMEOUT_S:-600}
 STEP_TIMEOUT_S=${STEP_TIMEOUT_S:-300}
 SERVER_START_TIMEOUT_S=${SERVER_START_TIMEOUT_S:-60}
@@ -122,6 +160,11 @@ WAIT_LINENO=0
 WAIT_REASON=""
 RESOLVED_MODEL="(unresolved)"
 SERVER_VERSION="(unknown)"
+# The in-flight subagent's handle, taken from the plugin's own `spawned` line,
+# and the context figures the ceiling is armed from.
+SPAWN_HANDLE=""
+MEASURED_CTX=""
+ARMED_CONTEXT=""
 
 # ---------- reporting ------------------------------------------------------
 
@@ -316,7 +359,12 @@ else
   rm -f "$SETTINGS_BAK"
 fi
 
-python3 - "$SETTINGS_FILE" "$ENDLESS_CONTEXT" "$ENDLESS_QUIESCE_TIMEOUT_MS" "$ENDLESS_MAX_CYCLES" <<'PY' || die "could not write the endless keys into the settings file"
+# The four endless keys, with `endlessContext` as the caller passes it. Called
+# twice: once here with the unreachable ceiling, and once from arm_ceiling with
+# the threshold derived from the primary's real context. Every other key in the
+# file is left as it stands.
+write_endless_settings() {
+  python3 - "$SETTINGS_FILE" "$1" "$ENDLESS_QUIESCE_TIMEOUT_MS" "$ENDLESS_MAX_CYCLES" <<'PY'
 import json, os, sys
 path, ctx, quiesce, cycles = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 raw = {}
@@ -336,6 +384,10 @@ with open(path, "w") as fh:
     json.dump(raw, fh, indent=2)
     fh.write("\n")
 PY
+}
+
+write_endless_settings "$ENDLESS_CONTEXT_CEILING" ||
+  die "could not write the endless keys into the settings file"
 SETTINGS_WRITTEN=1
 
 # ---------- todo-file baseline --------------------------------------------
@@ -391,10 +443,11 @@ server pid / pgid   $E2E_SERVER_PID / $E2E_SERVER_PGID
 opencode version    $SERVER_VERSION
 default model       $RESOLVED_MODEL
 settings file       $SETTINGS_FILE   (backup: $SETTINGS_BAK, existed=$SETTINGS_EXISTED)
-settings written    endlessMode=true endlessContext=$ENDLESS_CONTEXT endlessQuiesceTimeoutMs=$ENDLESS_QUIESCE_TIMEOUT_MS endlessMaxCycles=$ENDLESS_MAX_CYCLES
+settings written    endlessMode=true endlessQuiesceTimeoutMs=$ENDLESS_QUIESCE_TIMEOUT_MS endlessMaxCycles=$ENDLESS_MAX_CYCLES
+endless ceiling     held at $ENDLESS_CONTEXT_CEILING until armed, then ${ARMED_CONTEXT:-(armed after the spawn turn)}   (ENDLESS_CONTEXT=${ENDLESS_CONTEXT:-derive from the measured context}, margin $ENDLESS_CONTEXT_MARGIN, settings-cache wait ${SETTINGS_TTL_WAIT_S}s)
 debug log           $DEBUG_LOG   (read from byte $LOG_OFFSET)
 todo baseline       $TODO_BASELINE   (backup: $TODO_BAK)
-in-flight subagent  spawn("$SPAWN_AGENT", sleep ${SUBAGENT_SLEEP_S}s)
+in-flight subagent  spawn("$SPAWN_AGENT", sleep ${SUBAGENT_SLEEP_S}s) -> handle ${SPAWN_HANDLE:-(spawned in turn 2)}
 timeouts            turn=${TURN_TIMEOUT_S}s step=${STEP_TIMEOUT_S}s start=${SERVER_START_TIMEOUT_S}s poll=${POLL_S}s
 out dir             $OUT_DIR
 EOF
@@ -409,6 +462,90 @@ post_prompt() {
   body=$(python3 -c 'import json,sys; print(json.dumps({"agent":"orchestrator","parts":[{"type":"text","text":sys.argv[1]}]}))' "$text")
   curl -s --max-time "$TURN_TIMEOUT_S" -X POST "$BASE/session/$SID/message" \
     -H 'content-type: application/json' -d "$body" > "$outfile" 2>&1
+}
+
+# The primary's context as the PLUGIN counts it against `endlessContext`:
+# input + output + cache.read + cache.write of the newest assistant message
+# whose sum is non-zero — `latestContextTokens` (src/client.js), read off the
+# same `GET /session/{id}/message` the plugin's own snapshot reads. Prints that
+# number, or nothing when no message carries a non-zero token sum yet.
+primary_ctx_tokens() {
+  curl -s -m 30 "$BASE/session/$SID/message" > "$OUT_DIR/$PREFIX.primary-messages.json"
+  python3 - "$OUT_DIR/$PREFIX.primary-messages.json" <<'PY'
+import json, sys
+try:
+    payload = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit
+messages = payload.get("data") if isinstance(payload, dict) else payload
+if not isinstance(messages, list):
+    raise SystemExit
+for message in reversed(messages):
+    if not isinstance(message, dict):
+        continue
+    info = message.get("info")
+    tokens = info.get("tokens") if isinstance(info, dict) else None
+    if not isinstance(tokens, dict):
+        continue
+    cache = tokens.get("cache")
+    total = (tokens.get("input") or 0) + (tokens.get("output") or 0)
+    if isinstance(cache, dict):
+        total += (cache.get("read") or 0) + (cache.get("write") or 0)
+    if total > 0:
+        print(int(total))
+        break
+PY
+}
+
+# The completion notice for the handle the `spawned` line named: "<lineno>:<text>"
+# once the subagent has finished, nothing while it is still in flight. The same
+# line criterion (b) reads, matched on the handle rather than on the parent, so
+# it names THIS subagent.
+subagent_completion_line() {
+  [ -n "$SPAWN_HANDLE" ] || return 0
+  refresh_slice
+  grep -nE -m1 -- "notified primary of completion .*\"handle\":\"$SPAWN_HANDLE\"" "$SLICE_FILE"
+}
+
+# Criterion (b) asserts that the cycle waited for a subagent that was really in
+# flight; the plugin reports that as `activeAtStart`. A subagent that has already
+# finished would make the assertion vacuous, so the run stops here — before the
+# ceiling is armed and before anything is asserted — and says exactly that,
+# instead of arriving at a quiesce over nothing.
+require_subagent_in_flight() {
+  local where="$1" done_line
+  done_line=$(subagent_completion_line)
+  [ -z "$done_line" ] && return 0
+  die "the in-flight subagent $SPAWN_HANDLE finished $where — criterion (b) needs it still running when the cycle starts waiting, and a quiesce with activeAtStart=0 asserts nothing. Its completion notice: ${done_line#*:} — raise SUBAGENT_SLEEP_S (it has to stay below maxSubagentAgeMs=$MAX_AGE_MS) or use a faster SPAWN_AGENT model"
+}
+
+# Puts `endlessContext` where the primary's MEASURED context is known to reach
+# it, so the crossing of the next turn follows from a figure read off the session
+# rather than from a guessed constant. Until this runs the key sits at
+# ENDLESS_CONTEXT_CEILING and no preparation turn can start a cycle.
+arm_ceiling() {
+  MEASURED_CTX=$(primary_ctx_tokens)
+  case "$MEASURED_CTX" in
+    '' | *[!0-9]*)
+      die "could not read the primary's context from $BASE/session/$SID/message — with no measurement the ceiling could only be guessed (capture: $OUT_DIR/$PREFIX.primary-messages.json)"
+      ;;
+  esac
+  if [ -n "$ENDLESS_CONTEXT" ]; then
+    ARMED_CONTEXT=$ENDLESS_CONTEXT
+    if [ "$MEASURED_CTX" -lt "$ARMED_CONTEXT" ]; then
+      die "ENDLESS_CONTEXT=$ARMED_CONTEXT was given, but the primary's context measures $MEASURED_CTX tokens after its preparation turns — that ceiling would not be crossed. Leave ENDLESS_CONTEXT unset and the driver derives it from the measurement"
+    fi
+  else
+    ARMED_CONTEXT=$((MEASURED_CTX - ENDLESS_CONTEXT_MARGIN))
+    [ "$ARMED_CONTEXT" -lt 1 ] && ARMED_CONTEXT=1
+  fi
+  write_endless_settings "$ARMED_CONTEXT" ||
+    die "could not arm endlessContext=$ARMED_CONTEXT in $SETTINGS_FILE"
+  printf 'armed               endlessContext=%s, from a measured %s tokens on %s (handle %s in flight)\n' \
+    "$ARMED_CONTEXT" "$MEASURED_CTX" "$SID" "$SPAWN_HANDLE" | tee -a "$REPORT_FILE"
+  # The plugin caches its settings for TTL_MS = 2000 (src/settings.js), so the
+  # crossing turn has to start after that cache can have expired.
+  sleep "$SETTINGS_TTL_WAIT_S"
 }
 
 SID=$(curl -s -X POST "$BASE/session?directory=$PROJECT_DIR" -H 'content-type: application/json' \
@@ -426,26 +563,78 @@ if ! wait_for_pattern "agent-intercom initialized" "agent-intercom initialized" 
 fi
 say "[$PREFIX] plugin loaded (slice line $WAIT_LINENO)"
 
-TURN1="Do exactly two things and nothing else. First, call spawn(\"$SPAWN_AGENT\", \"Run the shell command: sleep $SUBAGENT_SLEEP_S. Then reply with the single line: slept $SUBAGENT_SLEEP_S seconds.\") exactly once. Second, name three short open points you would still have to verify in this project, and keep them in mind. End your turn after the spawn returns. Do not poll, do not call list(), do not spawn a second subagent."
+# Turn 1 — the open points the cycle will later be asked to save, and the bulk
+# of the context the ceiling is derived from. No spawn: a subagent started here
+# would spend its flight time on the turns below.
+TURN1="Name three short open points you would still have to verify in this project, one line each, and keep them in mind. Call no tool at all — do not spawn, do not list — and end your turn."
 post_prompt "$TURN1" "$OUT_DIR/$PREFIX.turn1.json"
-say "[$PREFIX] turn 1 (spawn + open points) done $(date +%H:%M:%S)"
+say "[$PREFIX] turn 1 (open points) done $(date +%H:%M:%S)"
+
+# Turn 2 — the in-flight subagent, spawned as late as the sequence allows and in
+# its own short turn, so its flight overlaps the trigger rather than the setup.
+TURN2="Call spawn(\"$SPAWN_AGENT\", \"Run the shell command: sleep $SUBAGENT_SLEEP_S. Then reply with the single line: slept $SUBAGENT_SLEEP_S seconds.\") exactly once and end your turn as soon as it returns. Do not poll, do not call list(), do not spawn a second subagent, do not write anything else."
+post_prompt "$TURN2" "$OUT_DIR/$PREFIX.turn2.json"
+say "[$PREFIX] turn 2 (spawn) done $(date +%H:%M:%S)"
+
+# The handle is the in-flight state the rest of the run is gated on. Without it
+# nothing below can be told apart from a cycle that had nothing to wait for.
+if ! wait_for_pattern "spawned" "spawned .*\"agent\":\"$SPAWN_AGENT\"" "$STEP_TIMEOUT_S"; then
+  die "no \"spawned\" line for agent $SPAWN_AGENT within ${STEP_TIMEOUT_S}s — the primary never got a subagent in flight, so criterion (b) would have nothing to observe ($WAIT_REASON)"
+fi
+SPAWN_HANDLE=$(printf '%s' "$WAIT_LINE" | sed -E 's/.*"handle":"([^"]+)".*/\1/')
+[ -n "$SPAWN_HANDLE" ] && [ "$SPAWN_HANDLE" != "$WAIT_LINE" ] ||
+  die "the \"spawned\" line carries no handle to gate on: $WAIT_LINE"
+# One spawn, and the handle above is its. A second one would mean the gates
+# below watch a subagent the cycle is not waiting for.
+SPAWNED_COUNT=$(grep -cE -- 'spawned .*"handle":' "$SLICE_FILE")
+[ "$SPAWNED_COUNT" = 1 ] ||
+  die "$SPAWNED_COUNT \"spawned\" lines in the slice, expected exactly one — the primary started subagents beyond the one this run gates on, so the in-flight state below would be ambiguous"
+say "[$PREFIX] subagent $SPAWN_HANDLE in flight (slice line $WAIT_LINENO)"
+
+# Gate 1: still in flight before the ceiling is armed.
+require_subagent_in_flight "before the ceiling was armed"
+
+# The ceiling, derived from the primary's real context rather than guessed.
+arm_ceiling
+
+# Gate 2: still in flight after the arming, immediately before the turn that
+# crosses. Everything between here and the cycle's own quiesce is one short turn.
+require_subagent_in_flight "while the ceiling was being armed"
+
+# Turn 3 — the crossing. Its transform hook re-reads the same context the arming
+# measured, finds it at or above the armed ceiling and latches the cycle; the
+# turn itself stays short so the subagent is still in flight at the primary's
+# idle, which is where the cycle starts waiting.
+TURN3="Reply with the single line: ceiling check. Call no tool at all — do not spawn, do not list."
+post_prompt "$TURN3" "$OUT_DIR/$PREFIX.turn3.json"
+say "[$PREFIX] turn 3 (context crossing) done $(date +%H:%M:%S)"
 
 # trigger — the precondition of everything below
 if wait_for_pattern "endless: scheduled" "endless: scheduled .*\"sessionID\":\"$SID\"" "$STEP_TIMEOUT_S"; then
   LINE_SCHEDULED=$WAIT_LINENO
-  record "trigger — the primary crossed endlessContext=$ENDLESS_CONTEXT" 1 "$WAIT_LINE"
+  record "trigger — the primary crossed endlessContext=$ARMED_CONTEXT" 1 "$WAIT_LINE"
 else
   LINE_SCHEDULED=0
-  record "trigger — the primary crossed endlessContext=$ENDLESS_CONTEXT" 0 "$WAIT_REASON"
+  CTX_NOW=$(primary_ctx_tokens)
+  record "trigger — the primary crossed endlessContext=$ARMED_CONTEXT" 0 \
+    "the ceiling was not crossed within ${STEP_TIMEOUT_S}s: endlessContext armed at $ARMED_CONTEXT from a measured $MEASURED_CTX tokens, the primary's context now reads ${CTX_NOW:-unreadable} — $WAIT_REASON"
   say ""
   say "the cycle never started — the steps below cannot be observed"
   say "=== $((ASSERTED - FAILURES))/$ASSERTED asserted criteria passed ==="
   exit 1
 fi
 
-TURN2="Call spawn(\"$SPAWN_AGENT\", \"Reply with the single line: second subagent.\") exactly once. If the tool refuses, report the refusal text verbatim and end your turn immediately. Do not retry, do not call any other tool."
-post_prompt "$TURN2" "$OUT_DIR/$PREFIX.turn2.json"
-say "[$PREFIX] turn 2 (post-trigger spawn attempt) done $(date +%H:%M:%S)"
+# Whether the subagent outlived the trigger. Read once, here, so criterion (b)
+# can name the sequencing rather than only the plugin's activeAtStart=0.
+COMPLETION_BEFORE_TRIGGER=""
+COMPLETION_LINE=$(subagent_completion_line)
+if [ -n "$COMPLETION_LINE" ] && [ "${COMPLETION_LINE%%:*}" -lt "$LINE_SCHEDULED" ]; then
+  COMPLETION_BEFORE_TRIGGER="the subagent $SPAWN_HANDLE finished at slice line ${COMPLETION_LINE%%:*}, before the trigger at slice line $LINE_SCHEDULED — nothing was left in flight for the cycle to wait for: ${COMPLETION_LINE#*:}"
+fi
+
+TURN4="Call spawn(\"$SPAWN_AGENT\", \"Reply with the single line: second subagent.\") exactly once. If the tool refuses, report the refusal text verbatim and end your turn immediately. Do not retry, do not call any other tool."
+post_prompt "$TURN4" "$OUT_DIR/$PREFIX.turn4.json"
+say "[$PREFIX] turn 4 (post-trigger spawn attempt) done $(date +%H:%M:%S)"
 
 # ---------- (a) the freeze -------------------------------------------------
 
@@ -467,12 +656,14 @@ if wait_for_pattern "endless: quiesced" "endless: quiesced after [0-9]+ms, activ
   ACTIVE_AT_START=$(printf '%s' "$QUIESCE_LINE" | sed -E 's/.*activeAtStart=([0-9]+).*/\1/')
   NOTICE_HIT=$(grep -nE -m1 -- "notified primary of completion .*\"parentID\":\"$SID\"" "$SLICE_FILE")
   NOTICE_NO=${NOTICE_HIT%%:*}
-  if [ -z "$NOTICE_HIT" ]; then
+  if [ -n "$COMPLETION_BEFORE_TRIGGER" ]; then
+    record "(b) quiesce — waited for the in-flight subagent" 0 "$COMPLETION_BEFORE_TRIGGER"
+  elif [ -z "$NOTICE_HIT" ]; then
     record "(b) quiesce — waited for the in-flight subagent" 0 \
       "no \"notified primary of completion\" line for parentID=$SID before the quiesce: $QUIESCE_LINE"
   elif [ "$ACTIVE_AT_START" = 0 ]; then
     record "(b) quiesce — waited for the in-flight subagent" 0 \
-      "activeAtStart=0: nothing was in flight when the cycle began waiting — $QUIESCE_LINE"
+      "activeAtStart=0: $SPAWN_HANDLE was no longer in flight when the cycle began waiting, so the wait asserted nothing — $QUIESCE_LINE"
   elif [ "$NOTICE_NO" -lt "$LINE_QUIESCED" ]; then
     record "(b) quiesce — waited for the in-flight subagent" 1 \
       "completion notice (slice line $NOTICE_NO) precedes the quiesce (slice line $LINE_QUIESCED): $QUIESCE_LINE"

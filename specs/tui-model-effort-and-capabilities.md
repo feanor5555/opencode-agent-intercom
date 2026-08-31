@@ -111,15 +111,16 @@ wants a token budget or an exotic effort name is served by hand-editing
 
 **What the cell shows,** resolved on the priority the other rows use:
 
-1. the `variant` stored for this agent → shown with `★`;
-2. otherwise the effort opencode resolved for this agent → shown without `★`;
+1. the `variant` stored for this agent → shown as it stands;
+2. otherwise the effort opencode resolved for this agent → shown in parentheses and muted;
 3. otherwise `default`.
 
 **When the model cannot do it:** the resolved model is in the pick list with
 `reasoning === false` → the cell shows `n/a`, and `[<]`/`[>]` render in
-`theme.textMuted` and are wired to no handler. The resolved model is not in the
-pick list, or there is none → the cell shows the stored `variant` where one is
-stored and `n/a` otherwise, cycler likewise inert. A stale or hand-written choice
+`theme.textMuted`; their handlers remain wired, but the action's `live` gate
+makes them inert. The resolved model is not in the pick list, or there is none
+→ the cell shows the stored `variant` where one is stored and `n/a` otherwise,
+with the same always-wired, in-action guard. A stale or hand-written choice
 stays visible rather than turning silently into `default`.
 
 **The inherited effort** comes from a new signal

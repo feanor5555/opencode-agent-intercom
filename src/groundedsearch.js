@@ -21,7 +21,7 @@ const z = tool.schema
 
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
-// Default Gemini model used when no grounding model override is configured.
+// Search grounding runs on this model and on no other.
 export const DEFAULT_GROUNDING_MODEL = "gemini-3.7-flash"
 
 // A grounded answer is a search, several page fetches and a generation behind
@@ -88,13 +88,6 @@ export function missingKeyMessage() {
     `auth file at ${authFilePath()} as its "key" field (\`opencode auth login\` writes it there). ` +
     `Nothing was sent.`
   )
-}
-
-export function groundingModel() {
-  const configured = process.env.OPENCODE_AGENT_INTERCOM_GROUNDING_MODEL
-  return typeof configured === "string" && configured.trim() !== ""
-    ? configured.trim()
-    : DEFAULT_GROUNDING_MODEL
 }
 
 export function groundingTimeoutMs() {
@@ -254,7 +247,7 @@ export function createGroundedSearchTool() {
         throw new Error(missingKeyMessage())
       }
 
-      const model = groundingModel()
+      const model = DEFAULT_GROUNDING_MODEL
       const maxSources = clampMaxSources(args.max_sources)
       const timeoutMs = groundingTimeoutMs()
 

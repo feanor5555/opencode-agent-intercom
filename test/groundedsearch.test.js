@@ -27,7 +27,6 @@ import {
   extractSources,
   generateContentUrl,
   groundedRequestBody,
-  groundingModel,
   httpErrorMessage,
   isGroundedSearchEnabled,
   missingKeyMessage,
@@ -45,7 +44,6 @@ const FILE_KEY = "authfile-placeholder-not-a-real-key"
 const TOUCHED_ENV = [
   ...API_KEY_ENV_VARS,
   "XDG_DATA_HOME",
-  "OPENCODE_AGENT_INTERCOM_GROUNDING_MODEL",
   "OPENCODE_AGENT_INTERCOM_GROUNDING_TIMEOUT_MS",
   "OPENCODE_AGENT_INTERCOM_DISABLE_GROUNDED_SEARCH",
 ]
@@ -305,23 +303,20 @@ test("the body is one user turn plus the snake_case google_search tool", async (
   }
 })
 
-test("the model defaults to gemini-3.7-flash and the env var overrides it", async () => {
+test("Search grounding always uses gemini-3.7-flash", async () => {
   const { cleanup } = isolate()
   const stub = stubFetch()
   try {
-    assert.equal(groundingModel(), "gemini-3.7-flash")
     assert.equal(DEFAULT_GROUNDING_MODEL, "gemini-3.7-flash")
 
     process.env.GEMINI_API_KEY = ENV_KEY_GEMINI
-    process.env.OPENCODE_AGENT_INTERCOM_GROUNDING_MODEL = " gemini-2.5-pro "
-    assert.equal(groundingModel(), "gemini-2.5-pro", "the value is trimmed")
-
     const res = await createGroundedSearchTool().execute({ query: "x" }, {})
-    assert.match(stub.calls[0].url, /models\/gemini-2\.5-pro:generateContent$/)
-    assert.equal(res.metadata.model, "gemini-2.5-pro")
 
-    process.env.OPENCODE_AGENT_INTERCOM_GROUNDING_MODEL = "   "
-    assert.equal(groundingModel(), DEFAULT_GROUNDING_MODEL, "a blank override counts as unset")
+    assert.equal(
+      stub.calls[0].url,
+      `https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_GROUNDING_MODEL}:generateContent`,
+    )
+    assert.equal(res.metadata.model, DEFAULT_GROUNDING_MODEL)
   } finally {
     stub.restore()
     cleanup()

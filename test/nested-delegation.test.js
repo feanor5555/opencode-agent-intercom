@@ -1,12 +1,14 @@
 // What step S6 of the role-delegation concept adds on top of the nested spawn
 // path (test/nested-spawn.test.js drives the path itself):
 //
-//   - the grant: five subagent roles hold `spawn`, three do not, and
+//   - the grant: six subagent roles hold `spawn`, three do not, and
 //     `mayDelegate` is derived from the permission maps rather than listed by
 //     hand, so the prompt a role is given cannot drift from the tool it holds;
-//   - the prompts: exactly one of the two delegation blocks reaches a subagent's
-//     system prompt, picked by whether that role may delegate AND whether
-//     nesting is switched on at all;
+//   - the target table (NESTED_SPAWN_TARGETS): who may name whom, and that it
+//     agrees with the permission maps;
+//   - the prompts: exactly one delegation block reaches a subagent's system
+//     prompt, picked by whether that role may delegate, by the target it may
+//     name, AND by whether nesting is switched on at all;
 //   - the reduced limits block a delegating role is shown in place of the
 //     orchestrator's, and its three figures;
 //   - the remaining nested-spawn quota, which is NOT one of them: it counts
@@ -37,15 +39,33 @@ import {
   PACKAGE_WARN_SHARE,
   PACKAGE_REFUSE_SHARE,
 } from "../src/settings.js"
-import { AGENTS, NESTED_SPAWN_TARGET, mayDelegate } from "../src/agents.js"
-import { SUBAGENT_DELEGATION_GUIDE, SUBAGENT_NO_SPAWN_GUIDE } from "../src/prompts.js"
+import {
+  AGENTS,
+  NESTED_SPAWN_TARGETS,
+  nestedSpawnTargets,
+  mayDelegate,
+} from "../src/agents.js"
+import {
+  SUBAGENT_DELEGATION_GUIDE,
+  SUBAGENT_GROUNDED_DELEGATION_GUIDE,
+  SUBAGENT_NO_SPAWN_GUIDE,
+  delegationGuideFor,
+  delegationGuideNameFor,
+} from "../src/prompts.js"
 import { completionNotice } from "../src/notices.js"
 import { tokens as fmtTokens, percent } from "../src/format.js"
 
 // The two sides of the grant, by name. Kept literal rather than derived, so a
 // role that changes side has to be moved here deliberately.
-const DELEGATING_ROLES = ["planner", "coder", "debugger", "reviewer", "documenter"]
-const NON_DELEGATING_ROLES = ["researcher", "grounder", "designer", "gitter"]
+const DELEGATING_ROLES = [
+  "planner",
+  "coder",
+  "debugger",
+  "reviewer",
+  "documenter",
+  "researcher",
+]
+const NON_DELEGATING_ROLES = ["grounder", "designer", "gitter"]
 
 const PRIMARY = "ses_primary"
 
@@ -171,16 +191,33 @@ test("mayDelegate is derived from the permission maps and matches the grant", ()
   assert.equal(mayDelegate(undefined), false)
 })
 
-test("the nesting target is the one role that keeps web access and denies spawn", () => {
-  assert.equal(NESTED_SPAWN_TARGET, "researcher")
-  // This pair is what bounds the nesting depth at one level with no counter:
-  // the only reachable target is a role that can never have children.
-  assert.equal(mayDelegate(NESTED_SPAWN_TARGET), false)
-  assert.notEqual(AGENTS[NESTED_SPAWN_TARGET].permission?.websearch, "deny")
-  // The grounder is the other web role and carries the same pair, so widening
-  // the target later cannot reach a role that could have children.
-  assert.equal(mayDelegate("grounder"), false)
+test("the target table maps each spawning role to what it may name", () => {
+  assert.deepEqual([...nestedSpawnTargets("planner")], ["researcher"])
+  assert.deepEqual([...nestedSpawnTargets("coder")], ["researcher"])
+  assert.deepEqual([...nestedSpawnTargets("debugger")], ["researcher"])
+  assert.deepEqual([...nestedSpawnTargets("reviewer")], ["researcher"])
+  assert.deepEqual([...nestedSpawnTargets("documenter")], ["researcher"])
+  // The researcher's own one target, and only that one.
+  assert.deepEqual([...nestedSpawnTargets("researcher")], ["grounder"])
+  // A role outside the table — denied here and unknown alike — answers with the
+  // empty set rather than null, so every caller can read it without a guard.
+  assert.deepEqual([...nestedSpawnTargets("grounder")], [])
+  assert.deepEqual([...nestedSpawnTargets("orchestrator")], [])
+  assert.deepEqual([...nestedSpawnTargets("some-project-agent")], [])
+  assert.deepEqual([...nestedSpawnTargets(undefined)], [])
+
+  // The table and mayDelegate are two statements of the same grant.
+  assert.deepEqual(Object.keys(NESTED_SPAWN_TARGETS).sort(), [...DELEGATING_ROLES].sort())
+  for (const role of Object.keys(NESTED_SPAWN_TARGETS)) {
+    assert.equal(mayDelegate(role), true, `${role} is in the table and must hold spawn`)
+  }
+
+  // The web roles keep their own search path, and the chain ends at the
+  // grounder: it may name nothing and its map denies `spawn` outright.
+  assert.notEqual(AGENTS.researcher.permission?.websearch, "deny")
   assert.notEqual(AGENTS.grounder.permission?.grounded_search, "deny")
+  assert.equal(AGENTS.grounder.permission?.spawn, "deny")
+  assert.equal(mayDelegate("grounder"), false)
 })
 
 // ---- the prompts: exactly one of the two blocks ----------------------------
@@ -194,6 +231,53 @@ test("a delegating role gets the delegation guide and not the no-spawn one", asy
   assert.ok(prompt.includes(SUBAGENT_DELEGATION_GUIDE), "the delegation guide is injected")
   assert.ok(!prompt.includes(SUBAGENT_NO_SPAWN_GUIDE), "the two blocks are mutually exclusive")
   assert.match(prompt, /spawn\("researcher", prompt\)/)
+})
+
+test("the researcher gets the grounded delegation block, not the researcher one", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  subagentCaller("ses_researcher", "researcher")
+
+  const prompt = await systemPromptFor(hooks, "ses_researcher")
+  assert.ok(prompt.includes(SUBAGENT_GROUNDED_DELEGATION_GUIDE), "its own target's block")
+  assert.ok(!prompt.includes(SUBAGENT_DELEGATION_GUIDE), "not the block pointing at itself")
+  assert.ok(!prompt.includes(SUBAGENT_NO_SPAWN_GUIDE))
+  assert.match(prompt, /spawn\("grounder", prompt\)/)
+  assert.doesNotMatch(prompt, /spawn\("researcher", prompt\)/)
+  // The block is picked by the role's target, and named by the same table the
+  // reference files read.
+  assert.equal(delegationGuideFor("researcher"), SUBAGENT_GROUNDED_DELEGATION_GUIDE)
+  assert.equal(delegationGuideNameFor("researcher"), "SUBAGENT_GROUNDED_DELEGATION_GUIDE")
+  assert.equal(delegationGuideFor("planner"), SUBAGENT_DELEGATION_GUIDE)
+  assert.equal(delegationGuideNameFor("planner"), "SUBAGENT_DELEGATION_GUIDE")
+})
+
+test("a researcher's limits block sizes against the grounder, not itself", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  subagentCaller("ses_researcher", "researcher")
+
+  const prompt = await systemPromptFor(hooks, "ses_researcher")
+  assert.match(prompt, /📐 agent-intercom: limits on the work you delegate\./)
+  assert.match(
+    prompt,
+    new RegExp(`Your own context budget: ${fmtTokens(contextBudgetFor("researcher"))} `),
+  )
+  const m = /Context budget of what you may spawn: grounder ([0-9.]+k?) \(−([0-9.]+k?) fixed → ([0-9.]+k?)\)/.exec(
+    prompt,
+  )
+  assert.ok(m, "the grounder entry renders budget, fixed overhead and headroom")
+  assert.equal(m[1], fmtTokens(contextBudgetFor("grounder")))
+  assert.ok(contextBudgetFor("grounder") > 0, "a grounder spawn is not gated away by a 0 budget")
+})
+
+test("a researcher is told its nested quota, and it is not zero", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  subagentCaller("ses_researcher", "researcher")
+
+  const notice = await turnNotice(hooks, "ses_researcher")
+  assert.match(notice, /agent-intercom: nested spawns left this run: 2 of 2\./)
 })
 
 test("a non-delegating role gets the no-spawn guide, word for word as before", async () => {

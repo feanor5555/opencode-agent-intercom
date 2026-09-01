@@ -52,7 +52,7 @@ import {
   SUBAGENT_SESSION_TITLE_MARKER,
 } from "./teardown.js"
 import { projectContext } from "./project.js"
-import { AGENTS, NESTED_SPAWN_TARGET, SPAWNABLE_ROLES } from "./agents.js"
+import { AGENTS, nestedSpawnTargets, SPAWNABLE_ROLES } from "./agents.js"
 import { knownAgentKinds } from "./config.js"
 import {
   getSettings,
@@ -161,16 +161,38 @@ function packageSizeVerdict(agent, fullPrompt) {
   return { estimate, budget, refusal: "", notice: "" }
 }
 
-// NESTED_SPAWN_TARGET (agents.js) is the one agent type a NESTED spawn — one
-// whose caller is itself a subagent — may name. `researcher` is the carve-out
-// of the delegation rule: web access is concentrated in it, so it is the one
-// thing another role cannot do for itself.
+// NESTED_SPAWN_TARGETS (agents.js) maps a spawning role to the agent types a
+// NESTED spawn of its — one whose caller is itself a subagent — may name. The
+// five non-web roles reach the `researcher`, because web access is
+// concentrated there and is the one thing they cannot do for themselves; the
+// `researcher` reaches the `grounder`, the second search path its own tools do
+// not give it.
 //
-// It is also what bounds the nesting depth at exactly one level, structurally,
-// with no counter and no walk of the session tree: the researcher role is
-// itself denied `spawn` (agents.js), so a nested child can never have children
-// of its own. Every teardown therefore has to consider one generation of
-// children, never a tree.
+// The table is also what bounds the nesting depth, structurally, with no
+// counter and no walk of the session tree: the chains it admits are finite and
+// acyclic (caller → researcher → grounder at the longest) because `grounder`
+// is a key of nothing and is itself denied `spawn`. A teardown therefore has
+// to consider a tree at most two deep — endLiveChildren recurses and bounds
+// itself with `seen`, so it needs no depth assumption of its own.
+
+// The refusal for a target outside the caller's own set: it names what that
+// caller MAY spawn, so the model has somewhere to go instead of retrying.
+function wrongTargetRefusal(caller, targets, asked) {
+  if (targets.length === 0) {
+    return (
+      `Spawn refused: a "${caller}" may spawn nothing at all — you asked for a "${asked}". ` +
+      `Name the agent and what it should do in your final reply; the orchestrator decides and ` +
+      `spawns it.`
+    )
+  }
+  const allowed = targets.map((name) => `"${name}"`).join(" or ")
+  return (
+    `Spawn refused: a "${caller}" may spawn ${allowed} and nothing else — you asked for a ` +
+    `"${asked}". Delegation from a subagent exists for the one thing you cannot do yourself, ` +
+    `and that is what the allowed target does. For anything else, name the agent and what it ` +
+    `should do in your final reply; the orchestrator decides and spawns it.`
+  )
+}
 
 // The refusal a nested spawn gets, or "" when it passes. Covers the three
 // checks that decide before anything is reserved or created; the per-run quota
@@ -195,20 +217,19 @@ async function nestedSpawnRefusal(permissionGuard, callerEntry, args, callerSess
       "and spawns it."
     )
   }
-  // Which target? One only, and the refusal names it, in the same shape as the
-  // agent-type gate below: a returned refusal that says what IS available, not
-  // a throw, because a throw is what small models retry into a loop.
-  if (args.agent !== NESTED_SPAWN_TARGET) {
-    log("spawn refused: nested target is not the researcher", {
+  // Which target? Only one the caller's OWN set names, and the refusal names
+  // that set, in the same shape as the agent-type gate below: a returned
+  // refusal that says what IS available, not a throw, because a throw is what
+  // small models retry into a loop.
+  const targets = nestedSpawnTargets(callerEntry.agent)
+  if (!targets.includes(args.agent)) {
+    log("spawn refused: nested target is outside the caller's set", {
       sessionID: callerSessionID,
+      caller: callerEntry.agent,
       agent: args.agent,
+      targets,
     })
-    return (
-      `Spawn refused: a subagent may spawn a "${NESTED_SPAWN_TARGET}" and nothing else — you ` +
-      `asked for a "${args.agent}". Delegation from a subagent exists for the one thing you ` +
-      `cannot do yourself: web search and fetching. For anything else, name the agent and what ` +
-      `it should do in your final reply; the orchestrator decides and spawns it.`
-    )
+    return wrongTargetRefusal(callerEntry.agent, targets, args.agent)
   }
   // No task id. The `T<n>` prefix drives the TODO.md auto-tick, and a nested
   // run is preparation for the caller's task, not a task of its own: left in,
@@ -223,7 +244,7 @@ async function nestedSpawnRefusal(permissionGuard, callerEntry, args, callerSess
     })
     return (
       `Spawn refused: a nested spawn carries no task id, and this prompt starts with ` +
-      `"${taskId}". The ${NESTED_SPAWN_TARGET} prepares material for YOUR task — the TODO.md ` +
+      `"${taskId}". The ${args.agent} prepares material for YOUR task — the TODO.md ` +
       `entry for ${taskId} stays yours to finish and to mark. Re-spawn with the prefix removed.`
     )
   }
@@ -509,7 +530,8 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
                 `what you still need; the orchestrator decides and spawns it. Open that reply ` +
                 `with "Blocked:" where the missing material stops the task.`
               : `Spawn refused: you have already started ${quota.used} of the ${quota.limit} ` +
-                `${NESTED_SPAWN_TARGET} spawns one subagent run gets, and the quota does not ` +
+                `${nestedSpawnTargets(callerEntry.agent).join("/") || "nested"} spawns one ` +
+                `subagent run gets, and the quota does not ` +
                 `reset. Do the rest of the work yourself and name in your final reply what is ` +
                 `still missing; the orchestrator decides and spawns it. Open that reply with ` +
                 `"Blocked:" where the missing material stops the task.`,

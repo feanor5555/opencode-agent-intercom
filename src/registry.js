@@ -650,7 +650,8 @@ export function countActiveSubagentsFor(parentID) {
 // `maxSubagents` is 1 (settings.js), the caller already occupies the only
 // slot, and the refusal it would get — wait for one to finish — names the very
 // thing it is itself. What bounds a nested run instead is the per-run quota
-// and the one-level depth bound of the delegation design.
+// and the finite, acyclic target graph of the delegation design (agents.js
+// NESTED_SPAWN_TARGETS).
 //
 // `nested` is the caller being a tracked subagent; `active` is reported back so
 // the refusal can name the figure it was decided on.

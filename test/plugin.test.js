@@ -559,16 +559,23 @@ test("tool.execute.before hard-denies the native `task` tool from a subagent", a
 
 // --- only-the-orchestrator-delegates enforcement ---------------------------
 
-// The five roles that may delegate: they hold `spawn`, and a spawn of theirs is
-// gated at run time (one target, no task id, a per-run quota) rather than by the
-// permission map. The four that may not: researcher and grounder, because they
-// are the roles WITH web tools and their own denial is what bounds nesting at
-// one level; designer and gitter, because neither does token-heavy preparatory
-// reading.
-const DELEGATING_ROLES = ["planner", "coder", "debugger", "reviewer", "documenter"]
-const NON_DELEGATING_ROLES = ["researcher", "grounder", "designer", "gitter"]
+// The six roles that may delegate: they hold `spawn`, and a spawn of theirs is
+// gated at run time (the caller's own target set, no task id, a per-run quota)
+// rather than by the permission map. The researcher is one of them — its target
+// is the `grounder` alone. The three that may not: grounder, because it is the
+// end of every chain and searches itself; designer and gitter, because neither
+// does token-heavy preparatory reading.
+const DELEGATING_ROLES = [
+  "planner",
+  "coder",
+  "debugger",
+  "reviewer",
+  "documenter",
+  "researcher",
+]
+const NON_DELEGATING_ROLES = ["grounder", "designer", "gitter"]
 
-test("spawn is granted to five subagent roles and denied to four; task never", () => {
+test("spawn is granted to six subagent roles and denied to three; task never", () => {
   const subagents = Object.entries(AGENTS).filter(([, def]) => def.mode === "subagent")
   assert.equal(subagents.length, 9, "expected 9 subagent roles")
   assert.deepEqual(
@@ -675,8 +682,17 @@ test("the denied roles' prompts route a lookup to the researcher instead of sear
   // designer neither searches nor advertises that it can.
   assert.doesNotMatch(AGENTS.designer.description, /research|web/i)
   assert.match(AGENTS.designer.prompt, /no web tools/)
-  // the researcher's carve-out: it searches itself and does not hand that on.
+  // the researcher's carve-out: it searches itself and hands only the grounded
+  // path on, and only where its briefing asked for one.
   assert.match(AGENTS.researcher.prompt, /never delegate the searching/)
+  assert.match(AGENTS.researcher.prompt, /the one agent you may spawn is a `grounder`/)
+  assert.match(AGENTS.researcher.prompt, /ONLY when, your briefing asks for one/)
+  assert.match(AGENTS.researcher.prompt, /you search exactly as before and spawn nothing/)
+  // and the orchestrator is told that the grounded path runs only where the
+  // briefing it writes asks for it.
+  assert.match(AGENTS.orchestrator.prompt, /Grounded search is not automatic/)
+  assert.match(AGENTS.orchestrator.prompt, /the briefing YOU write asks for a grounded search/)
+  assert.match(AGENTS.orchestrator.prompt, /Spawning a grounder directly stays yours/)
 })
 
 test("spawn from a NON-DELEGATING subagent is refused as a tool result and creates no session", async () => {
@@ -1256,9 +1272,11 @@ test("a delegating subagent under the context budget gets the quota line and not
 })
 
 test("a non-delegating subagent under the context budget gets no per-turn notice at all", async () => {
+  // A gitter: the researcher delegates now (its target is the grounder), so it
+  // is told its quota and is not the role this case is about.
   const { ctx, created } = makeCtx({ messages: UNDER_BUDGET_MESSAGES })
   const hooks = await plugin(ctx)
-  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  await hooks.tool.spawn.execute({ agent: "gitter", prompt: "x" }, toolCtx)
 
   assert.equal(await turnNotice(hooks, created[0]), "")
 })

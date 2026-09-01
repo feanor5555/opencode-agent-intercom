@@ -45,7 +45,11 @@ import { readFileSync, statSync, mkdirSync, writeFileSync, existsSync } from "no
 import { join } from "node:path"
 import { log, errMsg } from "./log.js"
 import { AGENTS, mayDelegate } from "./agents.js"
-import { PROMPT_CONTRACT, OUTLINE_DISABLED_AGENTS } from "./prompts.js"
+import {
+  PROMPT_CONTRACT,
+  OUTLINE_DISABLED_AGENTS,
+  delegationGuideNameFor,
+} from "./prompts.js"
 import { retentionOffered } from "./settings.js"
 import {
   classifyPromptFile,
@@ -432,7 +436,7 @@ export function renderOpencodeDefaultFile(agent) {
         )
       : [
           "SUBAGENT_GUIDE_CORE",
-          mayDelegate(agent) ? "SUBAGENT_DELEGATION_GUIDE" : "SUBAGENT_NO_SPAWN_GUIDE",
+          mayDelegate(agent) ? delegationGuideNameFor(agent) : "SUBAGENT_NO_SPAWN_GUIDE",
           ...(HAS_OUTLINE.has(agent) ? ["SUBAGENT_OUTLINE_GUIDE"] : []),
         ].join(" + ")
   const addNotes = [
@@ -441,7 +445,7 @@ export function renderOpencodeDefaultFile(agent) {
   ]
   if (mayDelegate(agent)) {
     addNotes.push(
-      "  - SUBAGENT_NO_SPAWN_GUIDE stands in for SUBAGENT_DELEGATION_GUIDE" +
+      `  - SUBAGENT_NO_SPAWN_GUIDE stands in for ${delegationGuideNameFor(agent)}` +
         " while nested spawning is switched off (maxNestedSpawns = 0)",
     )
   }

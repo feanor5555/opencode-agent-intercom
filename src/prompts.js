@@ -5,6 +5,10 @@
 
 import { PACKAGE_WARN_SHARE, PACKAGE_REFUSE_SHARE, resultCeilingFor } from "./settings.js"
 import { percent } from "./format.js"
+// agents.js does not import this module, so this closes no cycle: the role
+// table is the one source of what a role may spawn, and the block that tells
+// the role about it is built from that table rather than from a second list.
+import { nestedSpawnTargets } from "./agents.js"
 
 export const ABORT_NOTICE =
   "\n\n---\n🛑 agent-intercom: This subagent has been ABORTED by the orchestrator.\n" +
@@ -63,13 +67,15 @@ export const ORCHESTRATION_REUSE_GUIDE =
 // Injected into every subagent session so subagents share basic working
 // discipline — without per-project prompt engineering. Targets the failure
 // modes seen with small local models: editing blind and retrying no-op edits.
-// Split into CORE (always), the delegation block (one of two, picked by whether
-// the role may spawn — see hooks.js injection logic) and OUTLINE (only for
+// Split into CORE (always), the delegation block (picked by whether the role
+// may spawn and, where it does, by the target it may name — see hooks.js
+// injection logic and delegationGuideFor below) and OUTLINE (only for
 // subagents whose tool gating actually grants them the `outline` tool).
 //
-// The spawn sentence is NOT in CORE: five roles may delegate and three may not,
-// and a block every subagent shares cannot say both. CORE is what is true of
-// every subagent whatever its permission map says.
+// The spawn sentence is NOT in CORE: six roles may delegate and three may not,
+// and the six do not all name the same target — a block every subagent shares
+// cannot say all of that. CORE is what is true of every subagent whatever its
+// permission map says.
 export const SUBAGENT_GUIDE_CORE =
   "\n\n---\n🔧 agent-intercom: subagent discipline.\n" +
   "You are a one-shot subagent — do one focused task, then reply once and return.\n" +
@@ -79,17 +85,18 @@ export const SUBAGENT_GUIDE_CORE =
   "Blocked: on a problem your prompt does not cover — a blocker, a missing precondition, an ambiguity, a tool that keeps failing, a decision that is not yours to make — stop that step, still finish every part of the task that does not depend on it, and start the FIRST line of your final reply with `Blocked:` naming the problem, what you did complete, and what you need to go on. Do not invent a workaround, do not widen the task, do not drop the step in silence. The orchestrator decides what happens and spawns a fresh subagent if the task continues.\n" +
   "Reply to the orchestrator in English. Address the user directly only in the user's language.\n---\n"
 
-// For a subagent whose role denies `spawn` (researcher, grounder, designer,
-// gitter). The
+// For a subagent whose role denies `spawn` (grounder, designer, gitter). The
 // exact sentence these roles carried while no subagent could spawn at all, so
 // nothing changes for them.
 export const SUBAGENT_NO_SPAWN_GUIDE =
   "\n\n---\n🚫 agent-intercom: you do not delegate.\n" +
   "You cannot spawn agents. If the task needs another agent, name it and what it should do in your final reply — the orchestrator dispatches it; you never spawn. Where the task cannot go on without that agent, this is a blocker: open the reply with `Blocked:`.\n---\n"
 
-// For a subagent whose role allows `spawn` (planner, coder, debugger, reviewer,
-// documenter). States the one thing delegation is for, the one target it may
-// name, that it is not the normal working mode, and what comes back.
+// For a subagent whose role allows `spawn` and whose target is the researcher
+// (planner, coder, debugger, reviewer, documenter). States the one thing
+// delegation is for, the one target it may name, that it is not the normal
+// working mode, and what comes back. The researcher's own block, whose target
+// is the grounder, follows below.
 //
 // The quota FIGURE is not in here: this block is static and the quota is a
 // runtime setting that also counts down within a run. Because it moves inside
@@ -113,6 +120,54 @@ export const SUBAGENT_DELEGATION_GUIDE =
   "it does not take one over. You get a small quota of these per run (you are told each turn " +
   "what is left of it); past it, do the rest yourself and name what is still missing in your " +
   "final reply — opened with `Blocked:` where the missing material stops the task.\n---\n"
+
+// For the researcher, whose one target is the `grounder` (NESTED_SPAWN_TARGETS
+// in agents.js) rather than the researcher every other delegating role reaches.
+// It states the same four things as the block above — the target, what it is
+// for, that it is not the normal working mode, what comes back — for the one
+// case that target exists for: a briefing that asks for a grounded search.
+export const SUBAGENT_GROUNDED_DELEGATION_GUIDE =
+  "\n\n---\n⤷ agent-intercom: the second search path.\n" +
+  "You may call `spawn(\"grounder\", prompt)` — a `grounder` and nothing else. It holds " +
+  "`grounded_search`, the Google Search path your own tools do not give you, and it is the one " +
+  "thing you cannot do yourself.\n" +
+  "Spawn it ONLY where your briefing asks for a grounded search, and then once, with the same " +
+  "question you were given. Without that instruction in the briefing you search with your own " +
+  "tools and spawn nothing — this is not a fallback for a search that came back thin, and never " +
+  "a way to hand off your own answer.\n" +
+  "What you get back: the call BLOCKS until the grounder has finished, and its reply is the " +
+  "result of the call. There is no wake and no second chance to ask — one answer, then that " +
+  "subagent is gone. Fold its sources into your own answer beside what you found yourself and " +
+  "carry every URL from both onto your `Sources:` line.\n" +
+  "The prompt you send carries NO `T<n>:` prefix: the grounder answers a question for your task, " +
+  "it does not take one over. You get a small quota of these per run (you are told each turn " +
+  "what is left of it); past it, answer from what you have and name what is still missing in " +
+  "your final reply — opened with `Blocked:` where the missing material stops the task.\n---\n"
+
+// The delegation block a role gets: the one that names ITS target. Keyed on
+// the role's own target set, so a role added to NESTED_SPAWN_TARGETS with the
+// researcher as its target keeps the block every such role already gets, and
+// only a role pointed somewhere else needs a block of its own here.
+const DELEGATION_GUIDE_BY_TARGET = {
+  researcher: ["SUBAGENT_DELEGATION_GUIDE", SUBAGENT_DELEGATION_GUIDE],
+  grounder: ["SUBAGENT_GROUNDED_DELEGATION_GUIDE", SUBAGENT_GROUNDED_DELEGATION_GUIDE],
+}
+
+function delegationGuideEntry(agent) {
+  const [target] = nestedSpawnTargets(agent)
+  return DELEGATION_GUIDE_BY_TARGET[target] ?? DELEGATION_GUIDE_BY_TARGET.researcher
+}
+
+// The delegation block's text for `agent`, and its constant's name — the name
+// so the reference files (promptsfile.js) can say which block they mean
+// without a second table that could drift from this one.
+export function delegationGuideFor(agent) {
+  return delegationGuideEntry(agent)[1]
+}
+
+export function delegationGuideNameFor(agent) {
+  return delegationGuideEntry(agent)[0]
+}
 
 // Outline+read discipline. Injected only for subagents that actually have the
 // `outline` tool enabled (planner, coder, debugger, reviewer, documenter,
@@ -309,7 +364,7 @@ export function guideBlocks({
     // Exactly one of the two, always: the spawn rule is not in CORE because it
     // differs per role, so leaving both out would leave a subagent with nothing
     // said about spawning at all.
-    (delegates ? SUBAGENT_DELEGATION_GUIDE : SUBAGENT_NO_SPAWN_GUIDE) +
+    (delegates ? delegationGuideFor(agent) : SUBAGENT_NO_SPAWN_GUIDE) +
     (OUTLINE_DISABLED_AGENTS.has(agent) ? "" : SUBAGENT_OUTLINE_GUIDE) +
     // Last, because it is about the last thing the subagent does. Per type and
     // read from the settings at call time, like the limits block: it moves when

@@ -299,8 +299,15 @@ const DONE_MARKER_AGENTS = [
 ]
 
 // The roles whose permission map allows `spawn` (agents.js mayDelegate), i.e.
-// the ones the auto path gives SUBAGENT_DELEGATION_GUIDE to. Same pinning.
-const DELEGATING_AGENTS = ["planner", "coder", "debugger", "reviewer", "documenter"]
+// the ones the auto path gives a delegation block to. Same pinning.
+const DELEGATING_AGENTS = [
+  "planner",
+  "coder",
+  "debugger",
+  "reviewer",
+  "documenter",
+  "researcher",
+]
 
 // One probe per contract element: `agents: null` means every role, `re` is what
 // the file must carry, `why` is what breaks without it. Each probe is asserted
@@ -329,7 +336,11 @@ export const PROMPT_FILE_PROBES = Object.freeze([
   Object.freeze({
     id: "delegation-block",
     agents: Object.freeze(DELEGATING_AGENTS),
-    re: /spawn\("researcher"/,
+    // The alternation is the two targets the role table admits
+    // (NESTED_SPAWN_TARGETS in agents.js): the five non-web roles are told the
+    // researcher, the researcher is told the grounder. One element either way —
+    // what a file must carry is the sentence that names ITS target.
+    re: /spawn\("(?:researcher|grounder)"/,
     why: "a role that may delegate is otherwise never told the target it may name",
   }),
 ])

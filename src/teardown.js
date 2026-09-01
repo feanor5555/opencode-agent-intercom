@@ -151,8 +151,9 @@ export async function postParentNotice(client, parentID, notice) {
 // one being torn down.
 //
 // `seen` bounds the mutual recursion. The delegation design bounds the depth
-// structurally at one level, but a parentID cycle from a reparent race must
-// not spin here, and the cost of the guard is one Set.
+// structurally — the target table in agents.js admits no cycle and no chain
+// longer than caller → researcher → grounder — but a parentID cycle from a
+// reparent race must not spin here, and the cost of the guard is one Set.
 export async function endLiveChildrenOf(client, sessionID, { label = "", seen } = {}) {
   const children = liveChildSessionIDs(sessionID)
   if (children.length === 0) return []

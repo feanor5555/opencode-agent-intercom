@@ -83,7 +83,7 @@ import {
   PACKAGE_WARN_SHARE,
   PACKAGE_REFUSE_SHARE,
 } from "./settings.js"
-import { NESTED_SPAWN_TARGET, SPAWNABLE_ROLES, mayDelegate, defaultAgentName } from "./agents.js"
+import { nestedSpawnTargets, SPAWNABLE_ROLES, mayDelegate, defaultAgentName } from "./agents.js"
 import { overrideBlock, overrideToastText } from "./overrides.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
@@ -989,16 +989,17 @@ function delegatesNested(agent) {
 // The reduced limits block a DELEGATING subagent is shown, in place of the
 // orchestrator's. It is built only on the primary branch above, so without
 // this a planner sizing a researcher package would be working from numbers it
-// has never seen — its own ceiling, what a researcher costs, and the shares at
-// which the size gate warns and refuses are all invisible to it otherwise.
+// has never seen — its own ceiling, what its own target costs, and the shares
+// at which the size gate warns and refuses are all invisible to it otherwise.
 //
 // Three things and nothing more (the primary's block also carries maxSubagents,
 // every spawnable type's budget and the showAgentcom sentence — none of which a
 // subagent can act on):
 //   - its own context budget, the ceiling its run is enforced against;
-//   - the researcher's budget with the fixed overhead every researcher spawn
-//     pays and the headroom left of it, rendered exactly as the primary's block
-//     renders an entry so the two read as one number;
+//   - the budget of every type THIS role may spawn (nestedSpawnTargets), each
+//     with the fixed overhead a spawn of it pays and the headroom left of it,
+//     rendered exactly as the primary's block renders an entry so the two read
+//     as one number;
 //   - the two package shares, which the gate applies to a nested spawn the same
 //     way it applies them to the orchestrator's (packageSizeVerdict sizes
 //     against the TARGET type's budget, whoever the caller is).
@@ -1011,22 +1012,27 @@ function delegatesNested(agent) {
 // transformMessages).
 function formatDelegationLimitsNotice(agent, { projectMd, agentsMd, snapshot }) {
   const own = contextBudgetFor(agent)
-  const target = NESTED_SPAWN_TARGET
-  const budget = contextBudgetFor(target)
+  const targets = nestedSpawnTargets(agent)
   const targetLine =
-    budget <= 0
-      ? `${target} off (no context budget set — the package gate does not size against it)`
-      : (() => {
-          const fixed = fixedOverheadFor(target, { projectMd, agentsMd, snapshot })
-          const headroom = Math.max(0, budget - fixed)
-          return `${target} ${fmtTokens(budget)} (−${fmtTokens(fixed)} fixed → ${fmtTokens(headroom)})`
-        })()
+    targets.length === 0
+      ? "nothing"
+      : targets
+          .map((target) => {
+            const budget = contextBudgetFor(target)
+            if (budget <= 0) {
+              return `${target} off (no context budget set — the package gate does not size against it)`
+            }
+            const fixed = fixedOverheadFor(target, { projectMd, agentsMd, snapshot })
+            const headroom = Math.max(0, budget - fixed)
+            return `${target} ${fmtTokens(budget)} (−${fmtTokens(fixed)} fixed → ${fmtTokens(headroom)})`
+          })
+          .join(", ")
   return (
     "\n\n---\n📐 agent-intercom: limits on the work you delegate.\n" +
     `Your own context budget: ${own > 0 ? fmtTokens(own) : "off"} — the ceiling this whole run ` +
-    "is measured against, the researcher's returned text included.\n" +
+    "is measured against, the returned text of what you spawn included.\n" +
     `Context budget of what you may spawn: ${targetLine}.\n` +
-    "The second number is the fixed overhead every researcher spawn carries before your own " +
+    "The second number is the fixed overhead every spawn of that type carries before your own " +
     "words, the third the headroom left of the budget for your prompt and its work.\n" +
     `Size your spawn prompt against that budget: keep it at or under ${percent(PACKAGE_WARN_SHARE)} ` +
     `of it; over ${percent(PACKAGE_REFUSE_SHARE)} the spawn is REFUSED and no subagent starts. ` +
@@ -1037,7 +1043,7 @@ function formatDelegationLimitsNotice(agent, { projectMd, agentsMd, snapshot }) 
 // The one figure of a delegating subagent's limits that moves inside its run:
 // how much of the per-run nested quota is left. `chargeNestedSpawn` increments
 // the counter this reads on every admitted nested spawn, so the first LLM call
-// after a researcher returns renders a lower number — which is why the line is
+// after a nested child returns renders a lower number — which is why the line is
 // delivered on the last user message and not in the system prompt, where it
 // would invalidate the tool definitions and the whole stable element behind it
 // once per nested spawn.

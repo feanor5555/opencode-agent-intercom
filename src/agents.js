@@ -45,6 +45,7 @@ const ORCHESTRATOR_PROMPT = `# Role: Orchestrator
 Your only job is to delegate work to subagents — you have three tools (spawn, abort, list) and nothing else.
 Available subagents: planner, coder, debugger, reviewer, documenter, researcher, grounder, designer, gitter.
 Pick by artifact: planner for plans/design docs/tasks/todos/file lookups/projectinformation/softwarearchitecture, coder for code, debugger for error root-cause diagnosis, reviewer for code reviews, documenter for user-facing docs, researcher for web search, grounder for a web-search answer through Google Search grounding — send a plain factual question there and keep researcher for anything needing forum threads or a named page fetched, designer for images via gen, gitter for git operations. if you are not sure use planner.
+Grounded search is not automatic: a researcher spawns a grounder for its question only where the briefing YOU write asks for a grounded search, so put that request in the spawn prompt where one question is worth both search paths; without it the researcher searches alone. Spawning a grounder directly stays yours too, for a plain factual question that needs no researcher at all.
 Spawn prompts are written in English; reply to the user in the user's language.
 
 You orchestrate coding projects. You ask the planner for the rough project description. If none exists yet, you point this out to the user.
@@ -113,7 +114,8 @@ Final reply: one short paragraph naming the file path and the kind of update (cr
 const RESEARCHER_PROMPT = `# Role: Researcher (Subagent)
 
 You do web research — searches via the \`web_search\` and \`forum_search\` tools, fetches via \`webfetch\`; never curl/wget, never recall URLs from memory.
-You are the only role with web tools: you search and fetch yourself and never delegate the searching.
+You search and fetch yourself and never delegate the searching: the one agent you may spawn is a \`grounder\`, and only in the case below.
+Grounded search — when, and ONLY when, your briefing asks for one: call \`spawn("grounder", "<the same question>")\` once, then fold the sources it returns into your own answer beside what you found yourself, saying of each finding which of the two searches carried it and listing every URL from both on the \`Sources:\` line. Where the two disagree, report both and say so. Without that instruction in the briefing you search exactly as before and spawn nothing.
 For a question about lived experience — whether something works in practice, which settings people actually run, what breaks on them, what others hit before you — call \`forum_search\` FIRST; it replaces the general search for that question and is never a fallback for one that came back empty.
 For documentation, a release, an announcement, a version or an official fact use \`web_search\` — \`forum_search\` would keep exactly those answers out. A question carrying both takes \`forum_search\` first and \`web_search\` after it for the documented part.
 Forum excerpts are triage: pick the threads worth reading and \`webfetch\` them; a project's own documentation outranks a third-party page about that project.
@@ -166,19 +168,15 @@ const SUBAGENT_NO_DELEGATION = {
 // varies per role; the other three never do.
 //
 // Who carries it, and why:
-//   researcher — the carve-out of the delegation rule. It is a role WITH web
-//     tools, so it has nothing to delegate, and its own denial is what bounds
-//     the nesting depth at one level structurally: the only target a nested
-//     spawn may name is the researcher (NESTED_SPAWN_TARGET in tools.js), and
-//     a target that cannot spawn can never have children.
-//   grounder — the same carve-out for the other search path: it holds
-//     `grounded_search` and searches itself, so it has nothing to delegate,
-//     and denying it `spawn` keeps every web role childless.
+//   grounder — the end of every delegation chain. It holds `grounded_search`
+//     and searches itself, so it has nothing to delegate, and its denial is
+//     what terminates the chain structurally: the target graph in
+//     NESTED_SPAWN_TARGETS below leads to it and stops there.
 //   designer, gitter — neither does token-heavy preparatory reading; both are
 //     told in their role prompt to request web material in their final reply.
 //
-// planner, coder, debugger, reviewer and documenter do NOT carry it: they may
-// spawn, and a spawn of theirs is gated by the three checks in
+// planner, coder, debugger, reviewer, documenter and researcher do NOT carry
+// it: they may spawn, and a spawn of theirs is gated by the three checks in
 // nestedSpawnRefusal plus the per-run quota (maxNestedSpawns). The absence of
 // `spawn: "deny"` is the whole grant — the schema strip leaves the tool in
 // their schema and checkSpawnPermission resolves the same map at run time.
@@ -186,17 +184,40 @@ const NO_SPAWN = {
   spawn: "deny",
 }
 
-// The only agent type a NESTED spawn — one whose caller is itself a subagent —
-// may name. Lives here because it is a fact about the roles: it is a role that
-// keeps web tools (NO_WEB_ACCESS below) and carries NO_SPAWN for that reason,
-// so a nested spawn can never have children of its own. The spawn gate
-// (tools.js) enforces it and the delegating roles' limits block (hooks.js)
-// sizes against it.
+// What a NESTED spawn — one whose caller is itself a subagent — may name, per
+// spawning role. Lives here because it is a fact about the roles: each entry
+// names roles this module defines, and the set a role gets is the set of
+// things it cannot do itself. The spawn gate (tools.js) enforces it and the
+// delegating roles' limits block (hooks.js) sizes against it.
 //
-// A single name, not a set: `grounder` is the other web role and is NOT
-// reachable from a subagent, because widening this to a set would change the
-// spawn gate's signature in tools.js.
-export const NESTED_SPAWN_TARGET = "researcher"
+// The five non-web roles reach the `researcher`: web search and fetching is
+// the one thing they have no tool for. The `researcher` reaches the
+// `grounder` and nothing else: that is the second, independent search path
+// (Google Search grounding), which its own tools do not give it.
+//
+// The graph terminates: `grounder` is a key of nothing and carries NO_SPAWN,
+// so the longest chain is caller → researcher → grounder and no cycle exists.
+// A role absent from this table may name no target at all, whatever its
+// permission map says — the two are asserted against each other in
+// test/nested-delegation.test.js.
+const WEB_SEARCH_TARGETS = Object.freeze(["researcher"])
+export const NESTED_SPAWN_TARGETS = Object.freeze({
+  planner: WEB_SEARCH_TARGETS,
+  coder: WEB_SEARCH_TARGETS,
+  debugger: WEB_SEARCH_TARGETS,
+  reviewer: WEB_SEARCH_TARGETS,
+  documenter: WEB_SEARCH_TARGETS,
+  researcher: Object.freeze(["grounder"]),
+})
+
+const NO_NESTED_TARGETS = Object.freeze([])
+
+// The roles `agent` may name in a nested spawn, frozen and never null: a role
+// the table does not know answers with the empty set, so every caller of this
+// can read `.length` and iterate without a guard.
+export function nestedSpawnTargets(agent) {
+  return NESTED_SPAWN_TARGETS[agent] ?? NO_NESTED_TARGETS
+}
 
 // The subagent roles that may delegate, derived from the permission maps below
 // rather than listed by hand so the prompt a role is given and the tool it
@@ -312,7 +333,9 @@ export const AGENTS = {
     mode: "subagent",
     hidden: true,
     permission: {
-      ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN,
+      // No NO_SPAWN: the researcher may spawn, and NESTED_SPAWN_TARGETS bounds
+      // that grant to the `grounder` alone.
+      ...SUBAGENT_NO_DELEGATION,
       ...webAccessExcept("webfetch", "websearch", "web_search", "forum_search"),
       read: "deny", edit: "deny", write: "deny", bash: "deny",
       glob: "deny", grep: "deny",

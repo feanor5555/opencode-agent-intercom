@@ -26,7 +26,9 @@ import {
   ORCHESTRATION_REUSE_GUIDE,
   SUBAGENT_GUIDE_CORE,
   SUBAGENT_DELEGATION_GUIDE,
+  SUBAGENT_GROUNDED_DELEGATION_GUIDE,
   SUBAGENT_NO_SPAWN_GUIDE,
+  delegationGuideNameFor,
   SUBAGENT_OUTLINE_GUIDE,
 } from "../src/prompts.js"
 import { CONTRACT_STAMP_KEY } from "../src/overrides.js"
@@ -143,6 +145,7 @@ test("the substituted guide is the role's own — delegation and outline include
   subagent(coder, "coder", dir)
   const coderPrompt = await promptFor(hooks, coder)
   assert.ok(coderPrompt.includes(SUBAGENT_DELEGATION_GUIDE), "a delegating role is told its target")
+  assert.ok(!coderPrompt.includes(SUBAGENT_GROUNDED_DELEGATION_GUIDE), "and not another's")
   assert.ok(coderPrompt.includes(SUBAGENT_OUTLINE_GUIDE), "and keeps the reading discipline")
   assert.ok(!coderPrompt.includes(SUBAGENT_NO_SPAWN_GUIDE))
 
@@ -212,6 +215,7 @@ const GUIDE_CONSTANTS = [
   ["ORCHESTRATION_REUSE_GUIDE", ORCHESTRATION_REUSE_GUIDE],
   ["SUBAGENT_GUIDE_CORE", SUBAGENT_GUIDE_CORE],
   ["SUBAGENT_DELEGATION_GUIDE", SUBAGENT_DELEGATION_GUIDE],
+  ["SUBAGENT_GROUNDED_DELEGATION_GUIDE", SUBAGENT_GROUNDED_DELEGATION_GUIDE],
   ["SUBAGENT_NO_SPAWN_GUIDE", SUBAGENT_NO_SPAWN_GUIDE],
   ["SUBAGENT_OUTLINE_GUIDE", SUBAGENT_OUTLINE_GUIDE],
 ]
@@ -280,7 +284,10 @@ test("the reference file names the no-spawn stand-in for exactly the delegating 
   // instead (hooks.js), and only for those roles is the caveat true.
   for (const agent of AGENT_NAMES) {
     const file = renderOpencodeDefaultFile(agent)
-    const hasCaveat = file.includes("stands in for SUBAGENT_DELEGATION_GUIDE")
+    // Named by the role's own block: the researcher's stand-in replaces
+    // SUBAGENT_GROUNDED_DELEGATION_GUIDE, every other delegating role's the
+    // researcher-target block.
+    const hasCaveat = file.includes(`stands in for ${delegationGuideNameFor(agent)}`)
     assert.equal(hasCaveat, mayDelegate(agent), `${agent}: caveat iff the role may delegate`)
   }
 })

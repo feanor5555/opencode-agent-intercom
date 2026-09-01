@@ -33,13 +33,24 @@ A project that overrides a role's whole `permission` map moves the runtime gate 
 moving this set, the same limitation the outline and TODO role sets already carry
 (`src/hooks.js:70-73`).
 
-`NESTED_SPAWN_TARGET = "researcher"` (`src/agents.js:159-163`) is the one agent type a
-nested spawn may name. The spawn gate (`src/tools.js:174-184`) enforces it and the
-delegating roles' limits block (`src/hooks.js:710-749`) sizes against it. The target is
-exactly the role that keeps the web tools (`NO_WEB_ACCESS = { webfetch: "deny",
-websearch: "deny", web_search: "deny", forum_search: "deny" }`, `src/agents.js:181-185`)
-and exactly the role that carries `NO_SPAWN` for that reason. Depth is bounded at one
-level by construction: a target that cannot spawn can never have children.
+`NESTED_SPAWN_TARGETS` (`src/agents.js:204-211`) maps each spawning role to the agent
+types a nested spawn of its may name. The five non-web roles — `planner`, `coder`,
+`debugger`, `reviewer`, `documenter` — share `WEB_SEARCH_TARGETS = ["researcher"]`,
+because the web search and fetching the role itself has no tool for lives there. The
+`researcher` alone maps to `["grounder"]`, the second, independent search path
+(Google Search grounding) its own tools do not give it. Every other role maps to
+nothing — `designer`, `gitter` and `grounder` carry `NO_SPAWN` and answer the same
+empty set from the table. The accessor is `nestedSpawnTargets(agent)`
+(`src/agents.js:218-220`), which returns the role's set frozen and never `null`.
+
+The spawn gate (`src/tools.js:201-252`) enforces it and the delegating roles' limits
+block (`src/hooks.js:710-749`) sizes against the one target that role names. The
+graph terminates structurally, with no counter and no walk of the session tree: the
+chains it admits are finite and acyclic, at longest caller → researcher →
+grounder, because `grounder` is a key of nothing and is itself denied `spawn`. Depth
+is bounded at two levels by construction: a target that cannot spawn can never
+have children, and `researcher` is the only role whose target is itself denied
+`spawn`.
 
 ## 2. The call blocks; the result becomes the tool result
 
@@ -54,9 +65,10 @@ caller carries on:
      that does not delegate (`src/tools.js:157-169`). The text is the same one a
      caller received while no subagent could spawn at all, so a non-delegating role
      sees no change.
-  2. `args.agent !== NESTED_SPAWN_TARGET` — one target only (`src/tools.js:174-184`).
-     A refusal text names the one allowed target rather than throwing, because a
-     throw is what small models retry into a loop.
+  2. `!nestedSpawnTargets(callerEntry.agent).includes(args.agent)` — one entry
+     of the caller's own set, in a role that has no target there an empty set
+     (`src/tools.js:223-232`). A refusal names the caller's own allowed set rather
+     than throwing, because a throw is what small models retry into a loop.
   3. `extractTaskId(args.prompt)` — a `T<n>:` prefix is rejected (`src/tools.js:185-203`),
      because the nested run is preparation for the caller's task and the child's
      `DONE: T<n>` would otherwise tick a TODO the orchestrator is still tracking
@@ -281,4 +293,5 @@ hold would become load-bearing and would need its own live evidence.
 - Cross-primary nesting is not designed. A primary that calls `spawn` is non-nested
   by the `callerEntry` test (`src/tools.js:313-314`); its spawn returns a wake-notice
   shape exactly as today. The depth bound is one level at the structural limit
-  (`NESTED_SPAWN_TARGET` carries `NO_SPAWN`); going wider is not on offer.
+  (every value of `NESTED_SPAWN_TARGETS` either carries `NO_SPAWN` or maps to
+  nothing); going wider is not on offer.

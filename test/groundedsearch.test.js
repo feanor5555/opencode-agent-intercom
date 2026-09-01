@@ -305,12 +305,12 @@ test("the body is one user turn plus the snake_case google_search tool", async (
   }
 })
 
-test("the model defaults to gemini-3.6-flash and the env var overrides it", async () => {
+test("the model defaults to gemini-3.7-flash and the env var overrides it", async () => {
   const { cleanup } = isolate()
   const stub = stubFetch()
   try {
-    assert.equal(groundingModel(), "gemini-3.6-flash")
-    assert.equal(DEFAULT_GROUNDING_MODEL, "gemini-3.6-flash")
+    assert.equal(groundingModel(), "gemini-3.7-flash")
+    assert.equal(DEFAULT_GROUNDING_MODEL, "gemini-3.7-flash")
 
     process.env.GEMINI_API_KEY = ENV_KEY_GEMINI
     process.env.OPENCODE_AGENT_INTERCOM_GROUNDING_MODEL = " gemini-2.5-pro "

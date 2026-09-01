@@ -21,8 +21,8 @@ const z = tool.schema
 
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
-// Google refuses gemini-2.5-flash for new API keys and names gemini-3.6-flash in its place.
-export const DEFAULT_GROUNDING_MODEL = "gemini-3.6-flash"
+// Default Gemini model used when no grounding model override is configured.
+export const DEFAULT_GROUNDING_MODEL = "gemini-3.7-flash"
 
 // A grounded answer is a search, several page fetches and a generation behind
 // one request, so the ceiling sits far above the plain search tools'.

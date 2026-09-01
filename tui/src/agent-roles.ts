@@ -24,6 +24,7 @@ export const AGENT_NAMES = [
   "reviewer",
   "documenter",
   "researcher",
+  "grounder",
   "designer",
   "gitter",
 ];
@@ -84,6 +85,7 @@ export const DEFAULT_AGENT_CONTEXT: AgentContext = {
   reviewer: 100000,
   documenter: 100000,
   researcher: 100000,
+  grounder: 100000,
   designer: 100000,
   gitter: 100000,
 };

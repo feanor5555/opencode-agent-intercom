@@ -149,8 +149,8 @@ function availablePrimaryTools() {
 // planner (plans), coder (code), debugger (diagnoses), reviewer (reviews),
 // documenter (docs), designer (images). Each one can read AND write TODO.md
 // — list, add new tasks, edit existing ones, remove completed ones.
-// The other two subagents (researcher, gitter) get no TODO tools at all: they
-// hand off whatever they find to the others, who manage the list.
+// The other three subagents (researcher, grounder, gitter) get no TODO tools at
+// all: they hand off whatever they find to the others, who manage the list.
 export const TODO_TOOLS = new Set(["todos_open", "todo_done", "todo_add", "todo_edit"])
 export const TODO_AGENTS = new Set([
   "planner", "coder", "debugger", "reviewer", "documenter", "designer",
@@ -165,7 +165,7 @@ export const TODO_AGENTS = new Set([
 //   - planner / documenter strip it: planner writes design docs and is told
 //     in its role prompt to reference AGENTS.md via Sources when relevant;
 //     documenter writes user-facing docs that rarely need dev conventions.
-//   - researcher / designer / gitter strip it: web research, image
+//   - researcher / grounder / designer / gitter strip it: web research, image
 //     generation, git operations don't need project code conventions.
 const AGENTS_MD_SUBAGENTS = new Set([
   "coder",
@@ -1827,7 +1827,8 @@ export function createGuardToolExecute(client, permissionGuard) {
         })
         throw new Error(
           `agent-intercom: \`${input.tool}\` is restricted to planner / coder / debugger / ` +
-            "reviewer / documenter / designer. The researcher and gitter agents do not touch " +
+            "reviewer / documenter / designer. The researcher, grounder and gitter agents do not " +
+            "touch " +
             "TODO.md. Put `DONE: T<n>` on the FIRST or LAST non-empty line of your final message " +
             "if your spawn was task-tracked and you finished the work.",
         )

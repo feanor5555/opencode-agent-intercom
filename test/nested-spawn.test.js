@@ -41,7 +41,7 @@ import { AGENTS, NESTED_SPAWN_TARGET, SPAWNABLE_ROLES } from "../src/agents.js"
 // wrong: the map says who holds the tool, this file says what the gate does
 // with that.
 const DELEGATING_ROLES = ["planner", "coder", "debugger", "reviewer", "documenter"]
-const NON_DELEGATING_ROLES = ["researcher", "designer", "gitter"]
+const NON_DELEGATING_ROLES = ["researcher", "grounder", "designer", "gitter"]
 
 const PRIMARY = "ses_primary"
 const primaryCtx = { sessionID: PRIMARY, agent: "orchestrator", messageID: "m1" }
@@ -164,20 +164,20 @@ function subagentCaller(sessionID, agent) {
 
 // ---- the gate: which caller may nest at all -------------------------------
 
-test("the caller gate splits the eight roles exactly as S6 grants them", async () => {
+test("the caller gate splits the nine roles exactly as S6 grants them", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   const roles = Object.entries(AGENTS)
     .filter(([, def]) => def.mode === "subagent")
     .map(([name]) => name)
-  assert.equal(roles.length, 8, "expected 8 subagent roles")
+  assert.equal(roles.length, 9, "expected 9 subagent roles")
   assert.deepEqual(
     roles.slice().sort(),
     [...DELEGATING_ROLES, ...NON_DELEGATING_ROLES].sort(),
     "a new subagent role must be placed on one side of the grant here",
   )
 
-  // The three that may not delegate: the caller gate is the first check, so
+  // The four that may not delegate: the caller gate is the first check, so
   // they never reach the target check and no session is created for them.
   for (const role of NON_DELEGATING_ROLES) {
     const callerCtx = subagentCaller(`ses_caller_${role}`, role)

@@ -45,7 +45,7 @@ import { tokens as fmtTokens, percent } from "../src/format.js"
 // The two sides of the grant, by name. Kept literal rather than derived, so a
 // role that changes side has to be moved here deliberately.
 const DELEGATING_ROLES = ["planner", "coder", "debugger", "reviewer", "documenter"]
-const NON_DELEGATING_ROLES = ["researcher", "designer", "gitter"]
+const NON_DELEGATING_ROLES = ["researcher", "grounder", "designer", "gitter"]
 
 const PRIMARY = "ses_primary"
 
@@ -177,6 +177,10 @@ test("the nesting target is the one role that keeps web access and denies spawn"
   // the only reachable target is a role that can never have children.
   assert.equal(mayDelegate(NESTED_SPAWN_TARGET), false)
   assert.notEqual(AGENTS[NESTED_SPAWN_TARGET].permission?.websearch, "deny")
+  // The grounder is the other web role and carries the same pair, so widening
+  // the target later cannot reach a role that could have children.
+  assert.equal(mayDelegate("grounder"), false)
+  assert.notEqual(AGENTS.grounder.permission?.grounded_search, "deny")
 })
 
 // ---- the prompts: exactly one of the two blocks ----------------------------

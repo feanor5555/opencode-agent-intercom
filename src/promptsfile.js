@@ -7,7 +7,7 @@
 // Layout (per agent):
 //   <project>/.opencode/agent-intercom/orchestrator.md
 //   <project>/.opencode/agent-intercom/coder.md
-//   ...                                  ← 9 files total
+//   ...                                  ← 10 files total
 //
 // File format: free Markdown. The file content IS the system prompt the
 // model will see, modulo placeholder substitution at LLM-call time. A
@@ -479,7 +479,8 @@ export function renderOpencodeDefaultFile(agent) {
   ]
   // The reference template ALWAYS includes AGENTS.md because that is what
   // opencode itself would do — the active <agent>.md may omit it for some
-  // roles (planner/documenter/researcher/designer/gitter); the difference is
+  // roles (planner/documenter/researcher/grounder/designer/gitter); the
+  // difference is
   // exactly what the strip-notes above describe.
   parts.push("\n{{agents_md}}\n")
   return parts.join("")

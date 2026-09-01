@@ -97,6 +97,7 @@ export const DEFAULT_AGENT_CONTEXT = {
   reviewer: 100000,
   documenter: 100000,
   researcher: 100000,
+  grounder: 100000,
   designer: 100000,
   gitter: 100000,
 }

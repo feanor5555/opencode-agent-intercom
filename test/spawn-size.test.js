@@ -385,7 +385,7 @@ test("an unknown agent type is refused by name, with the available types listed"
   assert.equal(entryForSession("ses_sub1"), undefined)
 })
 
-test("the available types are the plugin's eight subagent roles and nothing else", async () => {
+test("the available types are the plugin's nine subagent roles and nothing else", async () => {
   const { ctx } = makeCtx({
     agentConfig: { scribe: { description: "writes" } },
     serverAgents: OPENCODE_BUILTINS,
@@ -397,12 +397,12 @@ test("the available types are the plugin's eight subagent roles and nothing else
   assert.deepEqual(listed, [...SPAWNABLE_ROLES].sort())
   assert.deepEqual(
     [...SPAWNABLE_ROLES].sort(),
-    ["coder", "debugger", "designer", "documenter", "gitter", "planner", "researcher", "reviewer"],
+    ["coder", "debugger", "designer", "documenter", "gitter", "grounder", "planner", "researcher", "reviewer"],
   )
 })
 
 test("every one of the plugin's roles spawns", async () => {
-  withSettings({ maxSubagents: 0 }) // unlimited: all eight run in one go
+  withSettings({ maxSubagents: 0 }) // unlimited: all nine run in one go
   const { ctx, created } = makeCtx({ serverAgents: OPENCODE_BUILTINS })
   const hooks = await plugin(ctx)
 

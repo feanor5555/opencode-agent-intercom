@@ -79,7 +79,8 @@ export const SUBAGENT_GUIDE_CORE =
   "Blocked: on a problem your prompt does not cover — a blocker, a missing precondition, an ambiguity, a tool that keeps failing, a decision that is not yours to make — stop that step, still finish every part of the task that does not depend on it, and start the FIRST line of your final reply with `Blocked:` naming the problem, what you did complete, and what you need to go on. Do not invent a workaround, do not widen the task, do not drop the step in silence. The orchestrator decides what happens and spawns a fresh subagent if the task continues.\n" +
   "Reply to the orchestrator in English. Address the user directly only in the user's language.\n---\n"
 
-// For a subagent whose role denies `spawn` (researcher, designer, gitter). The
+// For a subagent whose role denies `spawn` (researcher, grounder, designer,
+// gitter). The
 // exact sentence these roles carried while no subagent could spawn at all, so
 // nothing changes for them.
 export const SUBAGENT_NO_SPAWN_GUIDE =

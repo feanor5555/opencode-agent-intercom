@@ -11,4 +11,4 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- `test/retention-texts.test.js` flakes intermittently in a full run — a different test name each time, always green in isolation and on a re-run. Its name has never been captured; capture it next time the suite fails.
+- Make the assertion at `test/retention-texts.test.js:341` insensitive to elapsed setup time. It expects `48m left` and gets `47m left` under full-suite load because `retainedMinutesLeft` in `src/format.js:36-39` floors and the fixture pins `retainedAt` to a whole minute, so setup time crosses the boundary.

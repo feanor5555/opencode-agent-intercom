@@ -15,4 +15,6 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 - `specs/nested-delegation.md` is broadly stale on line references (~50, the `src/childwait.js` ones short by about 11); sweep the whole file against the current source.
 - The header comment of `test/child-waiter.test.js` claims nothing registers a child waiter in production; `registerChildWaiter` in `src/tools.js` does. Correct the comment.
 - Establish whether a message part streamed just before `abortSession` is persisted by the time `session.messages` is read, which bounds how much of a timed-out subagent's text `timeoutSubagent` can rescue.
-- Last commit: d8be38a fix: keep a busy subagent alive and hand back its work on timeout
+- Last commit: b4518bb feat: make the show agentcom switch hide notices already posted
+- `concepts/reusable-subagent-sessions.md` (around line 272) describes retention capacity only as eviction after a retention; the watchdog sweep now also trims the held set to a lowered capacity. Complete that section.
+- A retained entry whose session is deleted from outside is dropped silently and the orchestrator is never told (`src/hooks.js:1613-1625`). Give that drop a notice path to the parent.

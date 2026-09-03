@@ -106,7 +106,7 @@ const CONTEXT_STEP = 5000;
 // Step of the [-]/[+] buttons on the result-ceiling row, in tokens. Its own
 // step, an order of magnitude smaller: that row holds a reply ceiling in the
 // low thousands, which the 5000 of a context budget cannot edit at all.
-const RESULT_TOKEN_STEP = 500;
+const RESULT_TOKEN_STEP = 100;
 // The stepping rule of one parameter row plus the label it carries; the rule
 // itself is the store's, which applies it inside its read-modify-write.
 interface LlmParamDef extends LlmParamStep {

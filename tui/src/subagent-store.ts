@@ -122,6 +122,36 @@ export function retentionEnabled(settings: RetentionSettings): boolean {
   return settings.maxRetainedSubagents > 0;
 }
 
+// The two session sets the panel keeps: the sessions whose children the poll
+// asks for, and the sessions that have ever been seen as somebody's child or
+// been created carrying a parentID.
+//
+// `polled` grows with every subagent the panel discovers, because a subagent
+// that spawns has children of its own that have to be listed by somebody.
+// `subagents` only ever grows: what has once been spawned as a subagent stays
+// one.
+export interface SessionRoles {
+  polled: ReadonlySet<string>;
+  subagents: ReadonlySet<string>;
+}
+
+// Whether a session is an orchestrator: one the panel polls that was never
+// spawned as a subagent.
+//
+// This is the guarantee that lets the poll ask a subagent for its children
+// without turning it into an orchestrator. Being polled is not what makes an
+// orchestrator — a session that is polled AND known as a subagent is a
+// subagent, keeps its own row in its parent's list, and is polled purely so
+// that its own children get rows of their own. Orchestrator-ness is therefore
+// decided by the second set alone once a session is polled, and the second set
+// never forgets.
+export function isOrchestratorSession(
+  sessionID: string,
+  roles: SessionRoles,
+): boolean {
+  return roles.polled.has(sessionID) && !roles.subagents.has(sessionID);
+}
+
 // One session child as returned by the opencode API. The panel only uses the
 // fields needed to identify and display the row.
 export interface SessionChild {
@@ -292,9 +322,11 @@ export function retentionExpired(
 // a completed pass and never on a partial one. `polled` is the set of sessions
 // the pass asked for children of, and it is what makes an absence evidence: a
 // row whose parent was never asked about was not disproved by the pass, it was
-// simply out of its reach, so it stays. That is the nested case — a child of a
-// subagent the panel is not currently rendering for is listed by nobody in the
-// pass, and reaping it would delete a row for work that is running.
+// simply out of its reach, so it stays. A nested child is normally IN reach —
+// every session discovered as a subagent is polled for its own children — but
+// it is out of it in the window between a spawn and the first pass that lists
+// the spawning parent, and again once that parent has left the polled set on
+// its own deletion. Reaping either would delete a row for work that is running.
 //
 // Within that reach the rule is the existence rule and holds for every row,
 // held or not: a session no longer listed among its parent's children is one

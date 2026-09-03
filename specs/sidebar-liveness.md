@@ -129,16 +129,21 @@ session absent from a completed pass that actually polled it. `busy` and
 ### 4.1 The poll's status filter
 
 The poll iterates over every `polledIDs` session, fetches its children, files
-each child into `seen`, and asks `decideRow` for the row's fate. The skip on
-orchestrator rows (`tui/src/tui.tsx:848`, `if (isPrimarySession(child.id))
-continue`) is what stops an orchestrator from appearing as its own subagent.
+each child into `seen`, marks it a subagent, and puts it into `polledIDs` in
+turn, so that a subagent's own children are listed by somebody. A `Set` being
+iterated takes up what is added to it, so one pass reaches every depth of the
+chain. The skip on orchestrator rows (`tui/src/tui.tsx:873`,
+`if (isPrimarySession(child.id)) continue`) is what stops an orchestrator from
+appearing as its own subagent; it is taken after the child has been filed into
+`subagentIDs`, so a discovered session is never read as an orchestrator in the
+window between the two.
 The row decision itself never retires; the reap pass after the loop is the only
 thing that does.
 
 ### 4.2 `session.deleted`
 
-The panel subscribes to `session.deleted` (`tui/src/tui.tsx:1207`, registered
-at `:1234`). The plugin deletes a subagent's session at every ending it
+The panel subscribes to `session.deleted` (`tui/src/tui.tsx:1233`, registered
+at `:1266`). The plugin deletes a subagent's session at every ending it
 controls (`teardownSubagent`, `src/teardown.js:256`), so the event is the end
 of the row — the one signal that means "finished" rather than "not running
 just now". The handler routes the user out of the deleted session if it was
@@ -167,12 +172,30 @@ gets its own:
 isPrimarySession(sessionID) = polledIDs.has(sessionID) && !subagentIDs.has(sessionID)
 ```
 
-`polledIDs` is fed by the panel's own slot/route session and by every session
-the user navigates into; `subagentIDs` is fed by every `session.created` /
-`session.*` event carrying a `parentID` and by every child the poll lists, and
-it only grows — what has once been spawned as a subagent stays one. A
-subagent the user has navigated into is polled for its own children and still
-keeps its row in its parent's list.
+The rule itself is `isOrchestratorSession` in `tui/src/subagent-store.ts`, which
+`tui/src/tui.tsx` hands the two sets; the panel's poll and its row list both take
+it, so the two cannot drift apart.
+
+`polledIDs` is fed by the panel's own slot/route session, by every session the
+user navigates into, by every child the poll lists, and by the parent named on a
+`session.created` event. That last pair is what gives a nested child a row: a
+subagent that spawns is asked for its children like any other parent, at any
+depth, and without it a subagent's subagent is listed by nobody in the pass and
+its optimistic row is reaped again. `subagentIDs` is fed by every
+`session.created` event carrying a `parentID` and by every child the poll lists,
+and it only grows — what has once been spawned as a subagent stays one.
+
+Polling a session is therefore NOT what makes it an orchestrator, and that is the
+guarantee the two sets exist for: every id that enters `polledIDs` on a discovery
+enters `subagentIDs` first, so a spawning subagent keeps its own row in its
+parent's list while being polled for its children. A subagent the user has
+navigated into is the same case.
+
+`polledIDs` does not grow without bound. An id leaves it when opencode publishes
+`session.deleted` for that session and when a children request for it comes back
+404 — both keyed on the session id, so they bound the discovered ids exactly as
+they bound the seeded one. A deleted session can never re-enter: it is listed as
+nobody's child again and no spawn names it as a parent.
 
 ## 6. Teardown and the bootstrap sweep
 

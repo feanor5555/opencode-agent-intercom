@@ -21,6 +21,13 @@
 // on the list while opencode reports it idle, its child gets a row of its own,
 // and both go when their sessions are deleted.
 //
+// The depth is not two. Every session the panel discovers as a subagent is
+// polled for its own children, so the chain orchestrator → planner → nested →
+// deep gets one row per session and keeps it. What that must never do is turn
+// a polled subagent into an orchestrator, which is the one thing that would
+// take its row away again — `isOrchestratorSession` is polled AND never seen
+// as a subagent, and the second set never forgets.
+//
 // Run: node --test test/tui-sidebar-rows.test.js
 
 import test from "node:test"
@@ -28,7 +35,11 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { retentionStampedTitle } from "../src/teardown.js"
-import { decideRow, reapRows } from "../tui/src/subagent-store.ts"
+import {
+  decideRow,
+  isOrchestratorSession,
+  reapRows,
+} from "../tui/src/subagent-store.ts"
 
 const NOW = 1_700_000_000_000
 const UNTIL = NOW + 3600000
@@ -36,6 +47,15 @@ const UNTIL = NOW + 3600000
 const ORCHESTRATOR = "ses_primary"
 const PLANNER = "ses_planner"
 const NESTED = "ses_nested"
+// The grandchild of the orchestrator's subagent: spawned by the session that
+// was itself spawned by the planner.
+const DEEP = "ses_deep"
+
+// The polled set the panel builds for orchestrator → planner → nested → deep:
+// its own session plus every session discovered as a subagent. `deep` is in it
+// too once it has been listed, and is left out of the passes below only where
+// the pass is the one that discovers it.
+const POLLED_CHAIN = new Set([ORCHESTRATOR, PLANNER, NESTED])
 
 const PLAIN_TITLE = retentionStampedTitle("planning the run", 0)
 const HELD_TITLE = retentionStampedTitle("planning the run", UNTIL)
@@ -222,6 +242,126 @@ test("a busy row is reaped exactly like any other once its session is gone", () 
   )
 })
 
+// ----------------------------------------------- nesting, at any depth
+
+// The chain as the panel holds it: the planner blocked in its own spawn, the
+// session it spawned blocked in ITS own spawn, and the deepest one running.
+function chainRows() {
+  return [
+    row({ status: "waiting" }),
+    row({
+      sessionID: NESTED,
+      parentID: PLANNER,
+      agent: "researcher",
+      handle: "researcher#1",
+      status: "waiting",
+    }),
+    row({
+      sessionID: DEEP,
+      parentID: NESTED,
+      agent: "fetcher",
+      handle: "fetcher#1",
+      status: "busy",
+    }),
+  ]
+}
+
+test("a polled subagent is never an orchestrator, at any depth", () => {
+  // This is what makes the widened poll safe. The planner and the session it
+  // spawned are both polled — otherwise nobody would list their children — and
+  // both were seen as somebody's child, so both stay subagents with rows of
+  // their own. Only the session that is polled and was never spawned as a
+  // subagent is the orchestrator.
+  const roles = {
+    polled: POLLED_CHAIN,
+    subagents: new Set([PLANNER, NESTED, DEEP]),
+  }
+  assert.equal(isOrchestratorSession(ORCHESTRATOR, roles), true)
+  for (const id of [PLANNER, NESTED, DEEP]) {
+    assert.equal(
+      isOrchestratorSession(id, roles),
+      false,
+      `${id} was classified as an orchestrator and would lose its row`,
+    )
+  }
+  // A session nobody polls is not an orchestrator either — the panel makes the
+  // statement about its own sessions and about no others.
+  assert.equal(
+    isOrchestratorSession("ses_stranger", roles),
+    false,
+  )
+})
+
+test("the grandchild keeps its row across refresh after refresh", () => {
+  // The whole chain is listed by the pass, because every subagent in it is
+  // polled for its own children. Nothing is reaped, however long the two upper
+  // sessions sit idle inside their spawns.
+  const seen = new Set([PLANNER, NESTED, DEEP])
+  for (const pass of [0, 1, 2, 3, 4]) {
+    assert.deepEqual(
+      reapRows(chainRows(), { seen, polled: POLLED_CHAIN }, NOW + pass * 5000),
+      [],
+      `a nested row was reaped on pass ${pass}`,
+    )
+  }
+})
+
+test("a row is never reaped while its subagent is working", () => {
+  // The status has no say either way: busy, waiting or retrying, a listed
+  // session keeps its row, and an unlisted one loses it.
+  const seen = new Set([PLANNER, NESTED, DEEP])
+  for (const status of ["busy", "waiting", "retry"]) {
+    assert.deepEqual(
+      reapRows(
+        [row({ sessionID: DEEP, parentID: NESTED, status })],
+        { seen, polled: POLLED_CHAIN },
+        NOW,
+      ),
+      [],
+      `a ${status} row was reaped while its session was still listed`,
+    )
+  }
+})
+
+test("each nested row goes when its own session is deleted", () => {
+  // The plugin deletes a subagent's session at every ending it controls, and
+  // it ends the chain from the bottom up. Each pass disproves exactly the
+  // session that has gone, and leaves the ones still listed alone.
+  assert.deepEqual(
+    reapRows(
+      chainRows(),
+      { seen: new Set([PLANNER, NESTED]), polled: POLLED_CHAIN },
+      NOW,
+    ),
+    [DEEP],
+  )
+  assert.deepEqual(
+    reapRows(chainRows(), { seen: new Set([PLANNER]), polled: POLLED_CHAIN }, NOW),
+    [NESTED, DEEP],
+  )
+  assert.deepEqual(
+    reapRows(chainRows(), { seen: new Set(), polled: POLLED_CHAIN }, NOW),
+    [PLANNER, NESTED, DEEP],
+  )
+})
+
+test("a grandchild spawned before the pass reached its parent stays", () => {
+  // The window between the spawn and the first pass that lists the spawning
+  // session: `deep` has an optimistic row from session.created, but the pass
+  // has not asked `nested` for children yet, so its absence is no evidence.
+  assert.deepEqual(
+    reapRows(
+      chainRows(),
+      {
+        seen: new Set([PLANNER, NESTED]),
+        polled: new Set([ORCHESTRATOR, PLANNER]),
+      },
+      NOW,
+    ),
+    [],
+  )
+})
+
 // ------------------------------------------------- how the panel is wired
 
 // The panel is @opentui/solid JSX with no render seam a unit test can drive, so
@@ -303,20 +443,52 @@ test("a row is filed away as gone in one place only", () => {
   only("finished.set(sessionID, rows.get(sessionID))")
 })
 
-test("the polled set is seeded from the panel's own session alone", () => {
+test("every session discovered as a subagent is polled for its own children", () => {
   assert.equal(
     source.includes("trackPrimary"),
     false,
     "the old parenthood-based tracking is gone",
   )
-  only("trackPolled(sessionID)")
-  assert.equal(
-    source.includes("trackPolled(info.parentID)"),
-    false,
-    "being somebody's parent must not make a session an orchestrator",
-  )
   only("const polledIDs = new Set<string>()")
   only("for (const parentID of polledIDs) {")
+  // The panel's own route/slot session, as before.
+  only("trackPolled(sessionID)")
+  // Every child the poll lists — that is what gets a subagent's own children
+  // listed by somebody, at any depth, because a Set being iterated takes up
+  // what is added to it during the iteration.
+  const discovered = only("trackPolled(child.id);")
+  const markedChild = only("subagentIDs.add(child.id);")
+  assert.ok(
+    markedChild < discovered,
+    "a listed session must be a known subagent BEFORE it is polled, so it is never read as an orchestrator in between",
+  )
+  // And the parent named by a spawn event, so the child's row does not have to
+  // wait for a pass to discover the session that spawned it.
+  const spawner = only("trackPolled(info.parentID);")
+  const markedCreated = only("subagentIDs.add(info.id);")
+  assert.ok(
+    markedCreated < spawner,
+    "the created session is a known subagent before its parent is polled",
+  )
+})
+
+test("the polled set has one way in and loses every session that ends", () => {
+  // One insertion point, so the ses_ gate in trackPolled covers the discovered
+  // ids as well as the seeded one — a non-session id (message.updated carries
+  // a msg_ parentID) must never reach session.children.
+  only("polledIDs.add(sessionID);")
+  const gate = source.indexOf('if (!sessionID || !sessionID.startsWith("ses_")) return;')
+  assert.notEqual(gate, -1, "the ses_ gate must stand in trackPolled")
+  assert.ok(gate < source.indexOf("polledIDs.add(sessionID);"))
+  // Both removals, and nothing else: the 404 read and the deletion event. They
+  // are keyed on the session id, so they bound the discovered ids too.
+  assert.equal(
+    (source.match(/polledIDs\.delete\(/g) ?? []).length,
+    2,
+    "the polled set must shrink on a 404 children read and on session.deleted",
+  )
+  only("polledIDs.delete(parentID);")
+  only("polledIDs.delete(sessionID);")
 })
 
 test("deleted sessions leave the polled set", () => {
@@ -337,7 +509,11 @@ test("the row is assembled through the store helper", () => {
 
 test("orchestrator and subagent are decided by one test, taken in both places", () => {
   only(
-    "const isPrimarySession = (sessionID: string): boolean =>\n    polledIDs.has(sessionID) && !subagentIDs.has(sessionID);",
+    "const isPrimarySession = (sessionID: string): boolean =>\n" +
+      "    isOrchestratorSession(sessionID, {\n" +
+      "      polled: polledIDs,\n" +
+      "      subagents: subagentIDs,\n" +
+      "    });",
   )
   // The poll's skip and the row list take the same test, so a session cannot be
   // shown in one and skipped in the other.

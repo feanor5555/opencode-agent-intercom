@@ -56,6 +56,7 @@ import {
   type SubagentStatus,
   assembleSubagentEntry,
   decideRow,
+  isOrchestratorSession,
   isRetained,
   readSessionChildren,
   reapRows,
@@ -710,10 +711,22 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   };
 
   // Sessions whose children the poll asks for. Seeded from this panel's own
-  // route/slot session and from nothing else: being somebody's parent is what a
-  // subagent that spawns a subagent does, and it must not promote that subagent
-  // into an orchestrator — that is what used to make a nested parent's row
-  // vanish and freeze.
+  // route/slot session, and extended by every session discovered as a subagent:
+  // a subagent that spawns has children of its own, and nobody else in the pass
+  // would ever list them. Without that, a subagent's subagent is listed by no
+  // parent the pass asks about, and its row — put up optimistically on
+  // `session.created` — is reaped again as soon as a pass reaches it.
+  //
+  // Being polled does NOT make a session an orchestrator. That test is
+  // `isOrchestratorSession`: polled AND never seen as a subagent. Every id
+  // added here on a discovery is added to `subagentIDs` at the same moment and
+  // stays there for good, so a spawning subagent keeps its own row in its
+  // parent's list and is polled only so its children get rows of their own.
+  //
+  // The set does not grow without bound: an id leaves it when opencode
+  // publishes `session.deleted` for that session, and when a children request
+  // for it comes back 404 — both of which are keyed on the session id and so
+  // cover the discovered ids exactly as they cover the seeded one.
   const polledIDs = new Set<string>();
   // Every session ever listed as another session's child, or created carrying a
   // parentID. This is the panel's answer to "is this a subagent", and it
@@ -749,13 +762,17 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     return `${agent}#${n}`;
   };
 
-  // Whether this session is an orchestrator: one this panel has been rendered
-  // for that was never spawned as a subagent. It is the one test for "never a
-  // row of its own", and both the poll and the row list take it, so the two
-  // cannot drift apart. A subagent the user has navigated into is polled for
-  // its own children and still keeps its row in its parent's list.
+  // Whether this session is an orchestrator: one this panel polls that was
+  // never spawned as a subagent. It is the one test for "never a row of its
+  // own", and both the poll and the row list take it, so the two cannot drift
+  // apart. A subagent the panel polls — because the user navigated into it, or
+  // because it was discovered as a subagent that may spawn — still keeps its
+  // row in its parent's list, because it is in `subagentIDs` for good.
   const isPrimarySession = (sessionID: string): boolean =>
-    polledIDs.has(sessionID) && !subagentIDs.has(sessionID);
+    isOrchestratorSession(sessionID, {
+      polled: polledIDs,
+      subagents: subagentIDs,
+    });
 
   // Whether a row that is going counts as one more completed run. A held row
   // was counted when its run ended and is not counted again when the session it
@@ -830,6 +847,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         });
         const childRead = readSessionChildren(childRes);
         if (childRead.kind === "missing") {
+          // The session is gone from the server, so it can never list children
+          // again. This is what bounds the polled set for the subagent ids the
+          // pass itself puts in, exactly as it does for the seeded one.
           polledIDs.delete(parentID);
           continue;
         }
@@ -838,11 +858,18 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         }
         for (const child of childRead.children) {
           seen.add(child.id);
-          // Listed as somebody's child: a subagent, now and for good.
+          // Listed as somebody's child: a subagent, now and for good. This
+          // happens BEFORE the session enters the polled set, so it can never
+          // be read as an orchestrator in between.
           subagentIDs.add(child.id);
+          // A subagent may spawn subagents of its own, and this pass is the
+          // only thing that would list them. So it is polled from here on, at
+          // any depth: a Set being iterated takes up what is added to it, so a
+          // child added now is asked for its own children in this same pass.
+          trackPolled(child.id);
           // An orchestrator session is never a subagent row. It can only be one
-          // this panel is rendered for that has never been spawned as a
-          // subagent — being a parent no longer qualifies.
+          // this panel polls that has never been spawned as a subagent — being
+          // polled no longer qualifies, and neither does being a parent.
           if (isPrimarySession(child.id)) continue;
 
           // The row this session already has, or the one it went with. Either
@@ -948,11 +975,11 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     }, REFRESH_DEBOUNCE_MS);
   };
 
-  // Put one session into the set whose children the poll asks for. Only this
-  // panel's own route/slot session is ever passed in: a session seen as some
-  // other session's parent is a subagent that has spawned, and asking for its
-  // children is the slot's business when the panel is rendered for it. Deleted
-  // sessions leave this set on their event or on the next 404 response.
+  // Put one session into the set whose children the poll asks for: this panel's
+  // own route/slot session, every session discovered as a subagent, and the
+  // parent named by a spawn event. It is the only way into that set, so the
+  // ses_ gate below holds for all three. Deleted sessions leave the set again
+  // on their event or on the next 404 response, which is what bounds it.
   const trackPolled = (sessionID: string | undefined): void => {
     // Hard gate: only real session IDs (ses_*) may enter the polled set. Some
     // event payloads carry a parentID that is NOT a session — e.g.
@@ -1133,6 +1160,13 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       return;
     }
     subagentIDs.add(info.id);
+    // The session that spawned this one has a child to be listed from now on,
+    // so it joins the polled set at once rather than waiting for a pass to
+    // discover it. It is not made an orchestrator by that: the spawning session
+    // is either this panel's own primary, which was never a subagent and stays
+    // one, or a subagent, which is in `subagentIDs` from its own creation event
+    // and from the first pass that lists it as a child.
+    trackPolled(info.parentID);
     const current = subagents();
     if (
       !current.has(info.id) &&
@@ -1200,7 +1234,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     const sessionID = (event as { properties?: { info?: { id?: string } } })
       .properties?.info?.id;
     // A deleted session cannot produce children again. Remove it before the
-    // next fallback pass, including when no row was present for the event.
+    // next fallback pass, including when no row was present for the event, and
+    // whether it got into the set as this panel's own session or as a subagent
+    // the poll discovered — that is what keeps the set from growing without
+    // bound as subagents come and go.
     if (sessionID) polledIDs.delete(sessionID);
     const current = sessionID ? subagents() : undefined;
     const entry = sessionID && current ? current.get(sessionID) : undefined;

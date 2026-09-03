@@ -15,7 +15,8 @@ outside this repository changes.
 ## 1. The existence rule
 
 A sidebar row lives while its session is listed among its parent's children and
-carries no retention stamp. That is the whole rule, and it is a statement the
+carries no retention stamp. That is the whole rule for a row's LIFETIME —
+which panel draws that row is section 5. It is a statement the
 plugin makes rather than one the panel observes: every ending the plugin
 controls runs through `teardownSubagent` (`src/teardown.js`), which deletes the
 opencode session, so "still listed" IS "the plugin has not finished with it". A
@@ -109,17 +110,20 @@ The decision runs in strict precedence:
 1. **Aborted** — an abort this panel asked for is a row whose session is being
    torn down; the row says so (`status: "aborted"`) until it goes, and a
    retention is never granted for an ending that is not a clean idle.
-2. **Retention stamp** — a stamp on the title (`[retained:<epoch>]` directly
+2. **`busy` / `retry`** — a run fiber is alive in the session
+   (`GET /session/status` says so). The row carries that status. This step
+   sits above the retention stamp deliberately: `reuse` clears the stamp
+   best-effort, and a failed clear would otherwise paint a running subagent
+   as retained and get it reaped while it is still working.
+3. **Retention stamp** — a stamp on the title (`[retained:<epoch>]` directly
    after the marker) is the only statement that turns a live row into a held
    one. The plugin publishes it on its own clock; the panel renders the same
    figure.
-3. **`busy` / `retry`** — a run fiber is alive in the session
-   (`GET /session/status` says so). The row carries that status.
 4. **Everything else: `waiting`** — listed, unstamped, no run fiber. The run
    has not been forked yet, or the subagent is blocked in a nested spawn. The
    row keeps its slot.
 
-Steps 3 and 4 pick a status and never a lifetime: whichever of them applies,
+Steps 2 and 4 pick a status and never a lifetime: whichever of them applies,
 the answer is a row. The poll never retires a row; only `reapRows` does, on a
 session absent from a completed pass that actually polled it. `busy` and
 `retry` decide which status a row shows; they never decide that a row ends.
@@ -132,7 +136,7 @@ The poll iterates over every `polledIDs` session, fetches its children, files
 each child into `seen`, marks it a subagent, and puts it into `polledIDs` in
 turn, so that a subagent's own children are listed by somebody. A `Set` being
 iterated takes up what is added to it, so one pass reaches every depth of the
-chain. The skip on orchestrator rows (`tui/src/tui.tsx:873`,
+chain. The skip on orchestrator rows (`tui/src/tui.tsx:915`,
 `if (isPrimarySession(child.id)) continue`) is what stops an orchestrator from
 appearing as its own subagent; it is taken after the child has been filed into
 `subagentIDs`, so a discovered session is never read as an orchestrator in the
@@ -142,8 +146,8 @@ thing that does.
 
 ### 4.2 `session.deleted`
 
-The panel subscribes to `session.deleted` (`tui/src/tui.tsx:1233`, registered
-at `:1266`). The plugin deletes a subagent's session at every ending it
+The panel subscribes to `session.deleted` (`tui/src/tui.tsx:1285`, registered
+at `:1321`). The plugin deletes a subagent's session at every ending it
 controls (`teardownSubagent`, `src/teardown.js:256`), so the event is the end
 of the row — the one signal that means "finished" rather than "not running
 just now". The handler routes the user out of the deleted session if it was
@@ -162,11 +166,71 @@ held back while the session is listed and unstamped — that is a subagent the
 plugin has not finished with, and yanking the user out of a session that goes
 on working is the same mistake as dropping its row.
 
-## 5. Subagent vs orchestrator on the panel
+## 5. Which panel a row is drawn in
+
+The panel of an orchestrator session shows the WHOLE subagent tree beneath that
+session, at any depth — not its direct children alone. The host renders a
+sidebar only on a session that has no parent, so a row drawn in the panel of a
+spawning subagent is a row nobody can open: it belongs to a panel that is never
+put on screen and whose session the plugin deletes when the subagent ends. The
+orchestrator's panel is the one place every row of its tree can be seen, so
+that is where the tree is drawn.
+
+`descendantRows(entries, rootSessionID, options)` in
+`tui/src/subagent-store.ts` is the rule; the `rows` memo in `tui/src/tui.tsx`
+is nothing but the call, with the panel's own session as the root. It returns
+`{ entry, depth }` in render order and decides three things:
+
+- **Membership.** An entry is on the list exactly when its parent chain reaches
+  the panel's own session. A session whose ancestry does not reach it — another
+  orchestrator's subagent, a row whose origin nothing records — stays off, and
+  is neither shown nor counted. Nothing is adopted on the strength of being
+  unattached.
+- **Order.** Pre-order: a child follows its own parent. Ranking (`statusRank`:
+  running first, then what is waiting or settling, then the held rows, spawn
+  order within a rank) applies among siblings, which is the only place it ever
+  compared rows that share a parent. Ranking the flat list would tear a busy
+  grandchild away from the row that spawned it.
+- **Depth.** One level per generation, direct children at `depth` 0. The panel
+  indents a row by `rowIndent(depth)` = `depth * ROW_INDENT_COLUMNS`
+  (`ROW_INDENT_COLUMNS = 2`), and composes its label against the panel width
+  less that indent, so a deep row is cut to its own budget rather than by the
+  box it sits in.
+
+Everything the list does works off the same flattened order: `rowIDs` is the
+rendered rows' session ids, so `j`/`k`, `⏎` and the abort reach a nested row
+exactly as they reach a direct child, and a held row at depth is dropped by the
+same keypress as one at the top.
+
+A hole in the chain does not take a row down with it. A middle subagent can be
+torn down while the subagent it spawned is still working — that descendant is
+work in flight and belongs on screen, so the walk carries its ancestry across
+the hole through `parentOfGone`, the panel's record of a retired row's own
+parent (`finished` in `tui/src/tui.tsx`). It then hangs from the nearest
+ancestor still on the list, one level shallower. Where nothing records the gone
+parent the row is unattached and stays off — an unrelated session is exactly
+what must not be adopted. A parent chain that loops terminates: the upward walk
+stops at a session it has already stepped through and the downward walk emits
+each session once, so a cycle costs the rows in it their place and never a hang.
+
+The two figures that are not statuses follow the same tree:
+
+- `nextHandle` numbers handles per agent type across the whole panel, so no two
+  rows on screen ever carry the same handle however deep they sit.
+- The completed counter is kept per orchestrator tree, not per panel process.
+  A run that ends is booked to the first session up its parent chain that is
+  nobody's subagent (`rootSessionOf`, resolved over the live rows and the
+  retired ones together, so the chain still resolves for a subagent whose
+  parents ended before it), and a panel reads the figure for its own session
+  alone. `running` and `retained` are counted off the rendered rows themselves
+  (`summariseRows`). The header count, the summary line and the list therefore
+  name one and the same set of subagents.
+
+## 5.1 Subagent vs orchestrator on the panel
 
 A session counts as orchestrator only if it is polled and is not itself a known
 subagent, so a subagent that spawns a nested child keeps its row, and the child
-gets its own:
+gets its own row in the orchestrator's panel:
 
 ```
 isPrimarySession(sessionID) = polledIDs.has(sessionID) && !subagentIDs.has(sessionID)
@@ -187,9 +251,9 @@ and it only grows — what has once been spawned as a subagent stays one.
 
 Polling a session is therefore NOT what makes it an orchestrator, and that is the
 guarantee the two sets exist for: every id that enters `polledIDs` on a discovery
-enters `subagentIDs` first, so a spawning subagent keeps its own row in its
-parent's list while being polled for its children. A subagent the user has
-navigated into is the same case.
+enters `subagentIDs` first, so a spawning subagent keeps its own row on the
+orchestrator's list, at its own depth, while being polled for its children. A
+subagent the user has navigated into is the same case.
 
 `polledIDs` does not grow without bound. An id leaves it when opencode publishes
 `session.deleted` for that session and when a children request for it comes back
@@ -271,7 +335,7 @@ that arrived — never because one poll failed to find a session busy.**
 | A1 | opencode imposes no length or character limit on a session title that the marker would breach | `PATCH /session/{id}` accepts the composed title | a `400 BadRequest` from `updateSessionTitle`, which today is swallowed into the debug log |
 | A2 | A title write during a live run does not disturb the run | retention already writes titles on sessions the plugin owns, without a reported effect | a run interrupted or a prompt loop restarted at the moment of a publish |
 | A3 | `Session.children` returns direct children only | read from the 1.18.25 binary: `select … where parent_id = q` | a grandchild appearing in a primary's children list, which would double-count rows |
-| A4 | The marker implies "subagent, never a primary" | `src/teardown.js:467-473` states the handoff successor carries no marker | an orchestrator row disappearing from its own sidebar after a handoff |
+| A4 | The marker implies "subagent, never a primary" | `src/teardown.js:482-484` states the handoff successor carries no marker | an orchestrator row disappearing from its own sidebar after a handoff |
 | A5 | The status union stays `idle \| retry \| busy` and `idle` stays absence | pinned in the SDK types and in the binary schema | a fourth status value appearing, which would make `waiting` derivable from opencode itself and reduce the existence rule's job |
 | A6 | Every ending the plugin knows about runs through `teardownSubagent` | the registry's mutex, the `closing` latch, and the panel's "every ending deletes the session" rule all rest on it | an ending that leaves a session listed with no plugin-side handler for it — a subagent that never goes |
 
@@ -291,7 +355,22 @@ existing `src/teardown.js` tests. The cases that matter:
 1. `test/tui-subagent-label.test.js` — `RETENTION_STAMP_RE` and
    `readRetentionStamp` pinned against `src/teardown.js`'s writer; the marker
    stays first; `subagentTopic` strips the stamp.
-2. `test/tui-subagent-store.test.js` — `decideRow` precedence:
+2. `test/tui-sidebar-tree.test.js` — `descendantRows`, which is the `rows`
+   memo itself:
+   - a three-deep and a four-deep chain are one panel's list, every generation
+     present, depth 0/1/2/3 and the indent `depth * ROW_INDENT_COLUMNS`;
+   - pre-order: a busy grandchild stays under the parent that spawned it, and
+     siblings still rank running first, then spawn order;
+   - another orchestrator's subagents, and their descendants, stay off the
+     list and out of the counts;
+   - a descendant whose parent's row is gone keeps its place through
+     `parentOfGone` and moves one level shallower; an unattached row stays off;
+   - a parent cycle, a row that is its own parent, and a looping
+     `parentOfGone` chain each terminate without a hang;
+   - `summariseRows` counts exactly the rendered rows, and `rootSessionOf`
+     books a finished run to the orchestrator at the top of its chain, over
+     retired rows included.
+3. `test/tui-subagent-store.test.js` — `decideRow` precedence:
    - aborted → `aborted` (never `hold`);
    - retained stamp → `hold`, even when opencode also says `busy`;
    - `busy` → `busy`, `retry` → `retry`, otherwise → `waiting`;
@@ -302,7 +381,7 @@ existing `src/teardown.js` tests. The cases that matter:
    - leaves a row whose session is not in `seen` but whose parent was never
      asked about (out of reach of the pass);
    - retires a held row whose published window is past the grace.
-3. `test/sweep-orphaned.test.js` — the bootstrap sweep deletes a leaked
+4. `test/bootstrap-sweep.test.js` — the bootstrap sweep deletes a leaked
    subagent session at the shipped default too; the marker is the
    attribution; the bound is `ORPHAN_SWEEP_TTL_FACTOR * retainedSubagentTtlMs`
    floored at `ORPHAN_SWEEP_MIN_AGE_MS = 600000`; sessions this process still
@@ -313,8 +392,9 @@ existing `src/teardown.js` tests. The cases that matter:
 `test/e2e/nested-task.sh` already drives orchestrator → coder → researcher.
 The sidebar grandchild row is the case the existence rule exists for. With a
 rendered TUI and the sidebar open, a screenshot taken inside the blocked
-window must show the caller's row present and its age still advancing
-between two captures.
+window must show, in the ORCHESTRATOR's panel, the caller's row present with
+its age still advancing between two captures AND the nested subagent's own row
+one indent level under it, the header count naming both.
 
 The bootstrap sweep is observed by running an `opencode serve` against a
 fixture database with two pre-seeded subagent sessions (one under the marker,

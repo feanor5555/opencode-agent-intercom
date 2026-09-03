@@ -382,3 +382,165 @@ export function statusRank(status: SubagentStatus): number {
   if (status === "busy" || status === "retry") return 0;
   return status === "retained" ? 2 : 1;
 }
+
+// ---------------------------------------------------------------- the tree
+
+// One rendered row: the entry, and how deep beneath the panel's own session it
+// sits. `depth` 0 is a direct child of that session, 1 its child, and so on
+// without a ceiling.
+export interface SubagentRow {
+  entry: SubagentEntry;
+  depth: number;
+}
+
+// The columns one level of nesting indents a row by.
+export const ROW_INDENT_COLUMNS = 2;
+
+// The left offset of a row at this depth, in columns.
+export function rowIndent(depth: number): number {
+  return Math.max(0, depth) * ROW_INDENT_COLUMNS;
+}
+
+// What the row list needs beyond the entries themselves.
+export interface RowTreeOptions {
+  // An orchestrator session never gets a row of its own — it is the session a
+  // panel is rendered for, not a subagent of it. Same test the poll takes.
+  isOrchestrator?: (sessionID: string) => boolean;
+  // The parent of a session whose own row is already gone. A middle subagent
+  // can be torn down while the subagent it spawned is still working, and that
+  // descendant belongs on screen for as long as it works; this is what carries
+  // its ancestry across the hole. Returning undefined means "not known", which
+  // leaves the descendant unattached and therefore off this panel — an
+  // unrelated session is exactly the case that must not be adopted.
+  parentOfGone?: (sessionID: string) => string | undefined;
+}
+
+// The whole subagent tree beneath one session, flattened for display.
+//
+// A panel is rendered for the orchestrator session alone — the host draws no
+// sidebar inside a session that has a parent — so a row that belonged only to
+// its own parent's panel belonged to a panel nobody can open. Every descendant
+// of the panel's session is therefore its business, at any depth.
+//
+// Three things the walk fixes:
+//
+//   - membership: an entry is on this list only if its parent chain reaches
+//     the panel's session. Sessions from another tree, and rows whose ancestry
+//     cannot be established, stay off it.
+//   - order: pre-order, so a child follows its own parent rather than sorting
+//     away from it. Siblings keep the list's own order — running first, then
+//     what is waiting or settling, then the held rows, and spawn order within
+//     a rank — because that ordering only ever compared rows that share a
+//     parent anyway.
+//   - depth: one level per generation, which the panel indents by.
+//
+// A parent chain that loops, and an entry that is its own ancestor, terminate:
+// the upward walk stops at a session it has already stepped through, and the
+// downward walk emits each session once.
+export function descendantRows(
+  entries: Iterable<SubagentEntry>,
+  rootSessionID: string,
+  options: RowTreeOptions = {},
+): SubagentRow[] {
+  const isOrchestrator = options.isOrchestrator ?? (() => false);
+  const parentOfGone = options.parentOfGone ?? (() => undefined);
+
+  const candidates = new Map<string, SubagentEntry>();
+  for (const entry of entries) {
+    if (entry.sessionID === rootSessionID) continue;
+    if (isOrchestrator(entry.sessionID)) continue;
+    candidates.set(entry.sessionID, entry);
+  }
+
+  // The session this row hangs under on screen: its own parent where that
+  // parent still has a row, the panel's session where it is a direct child,
+  // and otherwise the nearest ancestor still on the list, found across the
+  // rows that have already gone. Undefined where no such ancestor exists.
+  const attachTo = (entry: SubagentEntry): string | undefined => {
+    let id: string | undefined = entry.parentID;
+    const walked = new Set<string>([entry.sessionID]);
+    while (typeof id === "string" && id !== "" && !walked.has(id)) {
+      if (id === rootSessionID) return rootSessionID;
+      if (candidates.has(id)) return id;
+      walked.add(id);
+      id = parentOfGone(id);
+    }
+    return undefined;
+  };
+
+  const children = new Map<string, SubagentEntry[]>();
+  for (const entry of candidates.values()) {
+    const parent = attachTo(entry);
+    if (parent === undefined) continue;
+    const siblings = children.get(parent);
+    if (siblings) siblings.push(entry);
+    else children.set(parent, [entry]);
+  }
+  for (const siblings of children.values()) {
+    siblings.sort((a, b) => {
+      const byRank = statusRank(a.status) - statusRank(b.status);
+      if (byRank !== 0) return byRank;
+      if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+      return a.sessionID < b.sessionID ? -1 : a.sessionID > b.sessionID ? 1 : 0;
+    });
+  }
+
+  const rows: SubagentRow[] = [];
+  const emitted = new Set<string>();
+  const walk = (parentID: string, depth: number): void => {
+    for (const entry of children.get(parentID) ?? []) {
+      if (emitted.has(entry.sessionID)) continue;
+      emitted.add(entry.sessionID);
+      rows.push({ entry, depth });
+      walk(entry.sessionID, depth + 1);
+    }
+  };
+  walk(rootSessionID, 0);
+  return rows;
+}
+
+// The header figures, taken from the rendered rows themselves so the summary
+// line can never name a subagent the list does not show. `done` is not in here:
+// it counts runs that are over, whose rows are gone by definition, and it is
+// kept per orchestrator tree in the panel.
+export interface RowCounts {
+  total: number;
+  running: number;
+  retained: number;
+}
+
+export function summariseRows(rows: Iterable<SubagentRow>): RowCounts {
+  let total = 0;
+  let running = 0;
+  let retained = 0;
+  for (const row of rows) {
+    total += 1;
+    if (row.entry.status === "busy" || row.entry.status === "retry") {
+      running += 1;
+    } else if (row.entry.status === "retained") retained += 1;
+  }
+  return { total, running, retained };
+}
+
+// The orchestrator a subagent belongs to: the first session up its parent
+// chain that is nobody's subagent, i.e. the one `lookup` has no entry for. The
+// lookup is given the live rows and the rows that have already gone, so the
+// chain still resolves for a subagent whose parents were torn down before it.
+//
+// This is what keeps the completed counter attached to a tree instead of to
+// the panel process: a run that ends is counted for the orchestrator it ran
+// under, and a panel shows the figure for its own session alone.
+export function rootSessionOf(
+  entry: SubagentEntry,
+  lookup: (sessionID: string) => SubagentEntry | undefined,
+): string {
+  let id = entry.parentID;
+  const walked = new Set<string>([entry.sessionID]);
+  while (typeof id === "string" && id !== "" && !walked.has(id)) {
+    const parent = lookup(id);
+    if (parent === undefined) return id;
+    walked.add(id);
+    id = parent.parentID;
+  }
+  return typeof id === "string" ? id : "";
+}

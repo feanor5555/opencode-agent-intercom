@@ -56,13 +56,16 @@ import {
   type SubagentStatus,
   assembleSubagentEntry,
   decideRow,
+  descendantRows,
   isOrchestratorSession,
   isRetained,
   readSessionChildren,
   reapRows,
   retainedRowNote,
+  rootSessionOf,
+  rowIndent,
   statusMarker,
-  statusRank,
+  summariseRows,
 } from "./subagent-store.ts";
 import { AGENT_NAMES, PROMPT_AGENT_FILES } from "./agent-roles.ts";
 import {
@@ -380,7 +383,28 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const [armedAbort, setArmedAbort] = createSignal<ArmedAbort | undefined>();
   // Cumulative count of subagents that have finished and been removed from the
   // list — keeps "something completed" visible without cluttering the panel.
-  const [completedCount, setCompletedCount] = createSignal(0);
+  //
+  // Kept per orchestrator session rather than per process: a panel shows every
+  // subagent beneath its own session at any depth, so its "done" figure must
+  // name the same tree. A run is booked to the orchestrator at the top of its
+  // parent chain, which is `rootSessionOf`; a second orchestrator the user
+  // navigated into keeps its own tally.
+  const [completedByRoot, setCompletedByRoot] = createSignal<
+    ReadonlyMap<string, number>
+  >(new Map());
+  const completedFor = (rootID: string): number =>
+    completedByRoot().get(rootID) ?? 0;
+  // Book one or more finished runs onto their orchestrators, in one write.
+  const addCompleted = (roots: readonly string[]): void => {
+    if (roots.length === 0) return;
+    setCompletedByRoot((previous) => {
+      const next = new Map(previous);
+      for (const rootID of roots) {
+        next.set(rootID, (next.get(rootID) ?? 0) + 1);
+      }
+      return next;
+    });
+  };
 
   // Runtime settings, shared with the main plugin via the settings file. The
   // inputs edit these and auto-save on change. One signal for the whole
@@ -783,6 +807,22 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   ): boolean =>
     entry !== undefined && !isRetained(entry) && !aborted.has(sessionID);
 
+  // The parent of a session whose row has already gone. A middle subagent can
+  // be torn down while the subagent it spawned is still working, and this is
+  // what carries that descendant's ancestry across the hole so its row keeps
+  // its place on the orchestrator's list.
+  const parentOfGone = (sessionID: string): string | undefined =>
+    finished.get(sessionID)?.parentID;
+
+  // The orchestrator a row belongs to: the first session up its parent chain
+  // that is nobody's subagent. Rows that have already gone are looked up too,
+  // so the chain still resolves for a subagent whose parents ended before it.
+  const orchestratorOf = (
+    entry: SubagentEntry,
+    rows: ReadonlyMap<string, SubagentEntry>,
+  ): string =>
+    rootSessionOf(entry, (sessionID) => rows.get(sessionID) ?? finished.get(sessionID));
+
   // Take one row out of a rows map and remember it as gone, with the selection
   // and the local abort mark cleared. The map is either the panel's own state
   // or the one a poll pass is building.
@@ -835,7 +875,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
 
       const next = new Map(subagents());
       const seen = new Set<string>();
-      let completedDelta = 0;
+      // The orchestrator of every run this pass found to be over, one entry per
+      // run, booked in a single write at the end of the pass.
+      const completedRoots: string[] = [];
       // One clock for the whole pass: a row held in this pass and the window
       // left on a row held in an earlier one are measured against the same
       // moment.
@@ -903,7 +945,16 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
           // transition into the held state — not on every poll that finds the
           // row still held, and not again when the held session finally goes.
           if (decision.kind === "hold" && !isRetained(existing)) {
-            completedDelta += 1;
+            completedRoots.push(
+              orchestratorOf(
+                {
+                  ...base,
+                  sessionID: child.id,
+                  parentID: child.parentID ?? parentID,
+                },
+                next,
+              ),
+            );
           }
 
           next.set(
@@ -926,13 +977,14 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         { seen, polled: polledIDs },
         now,
       )) {
-        if (countableDone(next.get(sessionID), sessionID)) completedDelta += 1;
+        const going = next.get(sessionID);
+        if (going !== undefined && countableDone(going, sessionID)) {
+          completedRoots.push(orchestratorOf(going, next));
+        }
         retireRow(next, sessionID);
       }
 
-      if (completedDelta > 0) {
-        setCompletedCount((count) => count + completedDelta);
-      }
+      addCompleted(completedRoots);
 
       // Refresh context-token counts (throttled per entry).
       for (const entry of next.values()) {
@@ -1251,10 +1303,13 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         api.route.navigate("session", { sessionID: entry.parentID });
       }
       const done = countableDone(entry, sessionID);
+      // Resolved before the row is retired, while its own record is still the
+      // one the chain starts from.
+      const root = orchestratorOf(entry, current);
       const next = new Map(current);
       retireRow(next, sessionID);
       setSubagents(next);
-      if (done) setCompletedCount((count) => count + 1);
+      if (done) addCompleted([root]);
     }
     scheduleRefresh();
   };
@@ -1306,8 +1361,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             setSelectedID={setSelectedID}
             armedAbort={armedAbort}
             onDisarmAbort={disarmAbort}
-            completedCount={completedCount}
+            completedCount={() => completedFor(sessionID ?? "")}
             isPrimary={isPrimarySession}
+            parentOfGone={parentOfGone}
             onOpen={openSubagent}
             onAbort={requestAbort}
             maxSubagents={maxSubagents}
@@ -1370,8 +1426,13 @@ function SubagentPanel(props: {
   // request, and the way to take that arming back.
   armedAbort: () => ArmedAbort | undefined;
   onDisarmAbort: () => void;
+  // The completed runs of this panel's own orchestrator tree, at any depth.
   completedCount: () => number;
   isPrimary: (id: string) => boolean;
+  // The parent of a session whose row has already gone, so a subagent that is
+  // still working keeps its place on the list when the subagent that spawned it
+  // was torn down first.
+  parentOfGone: (id: string) => string | undefined;
   onOpen: (id: string) => void;
   // Asks for the abort of one entry: the first ask arms it, the second aborts.
   onAbort: (id: string) => void;
@@ -1418,27 +1479,23 @@ function SubagentPanel(props: {
   onResetLlmAgent: () => void;
   theme: TuiThemeCurrent;
 }) {
-  // Every subagent of the session this panel is rendered for, whatever its
-  // status. A row is here because its session is still listed as a child of
-  // this one and the plugin has not finished with it — including a subagent
-  // that has spawned a subagent of its own, which is a parent and a subagent
-  // at the same time. `isPrimary` excludes only an orchestrator session, i.e.
-  // one this panel is rendered for that was never spawned as a subagent.
-  const rows = createMemo(() => {
-    const own = [...props.subagents().values()].filter(
-      (entry) =>
-        entry.parentID === props.sessionID &&
-        entry.sessionID !== props.sessionID &&
-        !props.isPrimary(entry.sessionID),
-    );
-    return own.sort((a, b) => {
-      const byRank = statusRank(a.status) - statusRank(b.status);
-      if (byRank !== 0) return byRank;
-      return a.createdAt - b.createdAt;
-    });
-  });
+  // The whole subagent tree beneath the session this panel is rendered for,
+  // whatever the status of each row and however deep it sits. A row is here
+  // because its session is still listed somewhere under this one and the plugin
+  // has not finished with it — including a subagent that has spawned a subagent
+  // of its own, which is a parent and a subagent at the same time, and
+  // including that subagent's own children, whose only reachable panel is this
+  // one: the host renders no sidebar inside a session that has a parent.
+  // `isPrimary` excludes only an orchestrator session, i.e. one a panel is
+  // rendered for that was never spawned as a subagent.
+  const rows = createMemo(() =>
+    descendantRows([...props.subagents().values()], props.sessionID, {
+      isOrchestrator: props.isPrimary,
+      parentOfGone: props.parentOfGone,
+    }),
+  );
 
-  const rowIDs = createMemo(() => rows().map((entry) => entry.sessionID));
+  const rowIDs = createMemo(() => rows().map((row) => row.entry.sessionID));
 
   // If the panel is rendered inside a subagent's own session, offer a way back
   // to the orchestrator that spawned it.
@@ -1449,14 +1506,14 @@ function SubagentPanel(props: {
   // held rows, and "done" is the cumulative count of subagents whose run has
   // completed — the held ones included, their run being over. A waiting row is
   // neither: it is work in flight that opencode has no run fiber for.
+  //
+  // The three figures name the same set of subagents the list shows: the first
+  // two are counted off the rendered rows, and `done` is kept per orchestrator
+  // tree, so a run that ended at any depth beneath this session is in it and a
+  // run under another orchestrator is not.
   const counts = createMemo(() => {
-    let running = 0;
-    let retained = 0;
-    for (const entry of rows()) {
-      if (entry.status === "busy" || entry.status === "retry") running += 1;
-      else if (entry.status === "retained") retained += 1;
-    }
-    return { running, retained, done: props.completedCount() };
+    const summary = summariseRows(rows());
+    return { ...summary, done: props.completedCount() };
   });
 
   // Keep the selection valid as the list changes.
@@ -1547,19 +1604,28 @@ function SubagentPanel(props: {
     syncWidth();
   };
 
-  const Row = (rowProps: { entry: SubagentEntry }) => {
+  const Row = (rowProps: { entry: SubagentEntry; depth: number }) => {
     const selected = createMemo(
       () => props.selectedID() === rowProps.entry.sessionID,
     );
     const age = createMemo(() =>
       formatAge(props.nowMs() - rowProps.entry.createdAt),
     );
+    // One level of indent per generation, so the chain that spawned a row is
+    // visible on the list. The label is composed against what is left of the
+    // panel after the indent, or it would be cut by the box instead of by the
+    // budget it was written to.
+    const indent = createMemo(() => rowIndent(rowProps.depth));
+    const labelWidth = createMemo(() => {
+      const panel = panelWidth();
+      return panel === undefined ? undefined : panel - indent();
+    });
     const label = createMemo(() =>
       composeSubagentLabel(
         rowProps.entry,
         props.llmModels(),
         props.modelChoices(),
-        panelWidth(),
+        labelWidth(),
       ),
     );
     // While this row's abort is armed the label area carries the question
@@ -1572,7 +1638,7 @@ function SubagentPanel(props: {
       armed()
         ? truncate(
             isRetained(rowProps.entry) ? DROP_CONFIRM_TEXT : ABORT_CONFIRM_TEXT,
-            subagentLabelWidth(panelWidth()),
+            subagentLabelWidth(labelWidth()),
           )
         : label(),
     );
@@ -1595,6 +1661,7 @@ function SubagentPanel(props: {
       <box
         flexDirection="column"
         height={2}
+        paddingLeft={indent()}
         backgroundColor={
           selected() ? props.theme.backgroundElement : undefined
         }
@@ -1700,7 +1767,9 @@ function SubagentPanel(props: {
                 </Show>
               </box>
               <box flexDirection="column">
-                <For each={rows()}>{(entry) => <Row entry={entry} />}</For>
+                <For each={rows()}>
+                  {(row) => <Row entry={row.entry} depth={row.depth} />}
+                </For>
               </box>
               <Show when={props.listFocused()}>
                 <text fg={props.theme.textMuted}>

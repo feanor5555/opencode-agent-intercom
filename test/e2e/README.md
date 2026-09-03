@@ -289,7 +289,7 @@ writes no settings key and so has nothing to restore.
 ```bash
 bash test/e2e/nested-task.sh                            # defaults, ~3-5 min
 OUT_DIR=/somewhere/kept bash test/e2e/nested-task.sh    # keep the captures
-NESTED_CALLER=planner NESTED_DENIED_ROLE=researcher \
+NESTED_CALLER=planner NESTED_DENIED_ROLE=grounder \
   bash test/e2e/nested-task.sh                          # other roles
 ```
 
@@ -298,12 +298,12 @@ preflight/setup error. Captures and report land in `out/12-nested.*`.
 
 | criterion | evidence |
 |---|---|
-| grant | `GET /agent` carries no `spawn` deny rule on the five delegating roles and one on the other three |
+| grant | `GET /agent` carries no `spawn` deny rule on the six delegating roles and one on the other three |
 | admitted | `nested spawn: caller blocks until its child ends` with `callerAgent` = the caller's role |
 | survives | orchestrator, blocked caller and child all answer `200` on `GET /session/<id>` in every probe round of the wait |
 | result | the caller's own `spawn` tool result reads `<handle> (researcher) finished and is gone. Its reply:` and holds the marker line the child was told to reply with |
 | not-a-wake | zero `🔔 agent-intercom: your subagent` in the caller's transcript |
-| target | the caller's spawn of a non-researcher returns `Spawn refused: a subagent may spawn a "researcher" and nothing else` |
+| target | the caller's spawn of a non-researcher returns the caller-specific `Spawn refused: a "<caller>" may spawn "researcher" and nothing else — you asked for a "<target>".` |
 | woken | `🔔 agent-intercom: your subagent "<handle>" (<role>) has finished and been destroyed.` in the primary |
 | nested-line | `⤷ nested: 1 run, …(not counted in the figure above).` in that same notice |
 | denied | a role that may not delegate has no child session under it, and the run names which of the three layers refused it |

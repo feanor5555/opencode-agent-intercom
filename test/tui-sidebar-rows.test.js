@@ -519,7 +519,8 @@ test("orchestrator and subagent are decided by one test, taken in both places", 
   // shown in one and skipped in the other.
   only("if (isPrimarySession(child.id)) continue;")
   only("isPrimary={isPrimarySession}")
-  only("!props.isPrimary(entry.sessionID),")
+  // The row list takes the same test, now as the tree walk's own predicate.
+  only("isOrchestrator: props.isPrimary,")
   // A session listed as somebody's child is a subagent from that moment on,
   // which is the rule the server half applies (src/registry.js).
   only("subagentIDs.add(child.id);")

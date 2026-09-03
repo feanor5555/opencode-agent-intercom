@@ -20,7 +20,7 @@
 #   nested-line the caller's completion notice bills the delegation
 #                                                → `⤷ nested: 1 run, …`
 #   target     the same granted role asking for a NON-researcher is refused
-#                                                → `Spawn refused: a subagent may spawn a "researcher" …`
+#                                                → `Spawn refused: a "<caller>" may spawn "researcher" …`
 #   denied     a role that may NOT delegate gets no child at all, and the run
 #              records WHICH of the three layers refused it
 #   gone       both subagent sessions are deleted afterwards, so the child-first
@@ -57,7 +57,7 @@
 #   NESTED_WRONG_TARGET planner                what it asks for first and must
 #                      not get — any spawnable type that is not the researcher
 #   NESTED_DENIED_ROLE designer                a role whose permission map still
-#                      denies `spawn`; `researcher` and `gitter` are the others
+#                      denies `spawn`; `grounder` and `gitter` are the others
 #   NESTED_MARKER      NESTED-RESEARCH-OK      the exact line the researcher is
 #                      told to reply with. The child's answer is proven to be
 #                      the caller's tool result by finding this literal inside
@@ -533,8 +533,8 @@ curl -fsS -m 15 "$BASE/agent" > "$OUT_DIR/$PREFIX.agents.json" 2>/dev/null
 GRANT_VERDICT=$(python3 - "$OUT_DIR/$PREFIX.agents.json" <<'PY' 2>/dev/null || printf 'unreadable|GET /agent could not be read'
 import json, sys
 
-DELEGATING = ["planner", "coder", "debugger", "reviewer", "documenter"]
-NON_DELEGATING = ["researcher", "designer", "gitter"]
+DELEGATING = ["planner", "coder", "debugger", "reviewer", "documenter", "researcher"]
+NON_DELEGATING = ["grounder", "designer", "gitter"]
 
 try:
     data = json.load(open(sys.argv[1]))
@@ -705,10 +705,28 @@ while :; do
     CODE_PRIMARY=$(http_code "$BASE/session/$SID")
     CODE_CALLER=$(http_code "$BASE/session/$CALLER_SID")
     CODE_CHILD=$(http_code "$BASE/session/$CHILD_SID")
-    PROBE_ROUNDS=$((PROBE_ROUNDS + 1))
-    if [ "$CODE_PRIMARY" != 200 ] || [ "$CODE_CALLER" != 200 ] || [ "$CODE_CHILD" != 200 ]; then
-      PROBE_FAILS=$((PROBE_FAILS + 1))
-      PROBE_EVIDENCE="round $PROBE_ROUNDS: primary=$CODE_PRIMARY caller=$CODE_CALLER child=$CODE_CHILD (all three must answer 200 while the child runs)"
+    if [ "$CODE_CHILD" != 200 ]; then
+      # The child is deleted immediately after the waiter resolves. Its ending
+      # line is logged before that teardown, but the slice refresh above can
+      # race the append. Re-read after seeing the 404 so natural child teardown
+      # is the boundary of the liveness window, not a failed probe round.
+      refresh_slice
+      END_LINE=$(grep -E -m1 -- "nested spawn: child ended" "$SLICE_FILE")
+      if [ -n "$END_LINE" ] && [ "$CODE_PRIMARY" = 200 ] && [ "$CODE_CALLER" = 200 ]; then
+        say "[$PREFIX] the child ended $(date +%H:%M:%S)"
+      elif [ -n "$END_LINE" ]; then
+        PROBE_FAILS=$((PROBE_FAILS + 1))
+        PROBE_EVIDENCE="round $((PROBE_ROUNDS + 1)): primary=$CODE_PRIMARY caller=$CODE_CALLER child=$CODE_CHILD after the \"nested spawn: child ended\" line (the parent sessions must stay live through the wait)"
+      else
+        PROBE_FAILS=$((PROBE_FAILS + 1))
+        PROBE_EVIDENCE="child=$CODE_CHILD before the \"nested spawn: child ended\" line (primary=$CODE_PRIMARY caller=$CODE_CALLER)"
+      fi
+    else
+      PROBE_ROUNDS=$((PROBE_ROUNDS + 1))
+      if [ "$CODE_PRIMARY" != 200 ] || [ "$CODE_CALLER" != 200 ]; then
+        PROBE_FAILS=$((PROBE_FAILS + 1))
+        PROBE_EVIDENCE="round $PROBE_ROUNDS: primary=$CODE_PRIMARY caller=$CODE_CALLER child=$CODE_CHILD (all three must answer 200 while the child runs)"
+      fi
     fi
   elif [ "$(http_code "$BASE/session/$CALLER_SID")" != 200 ]; then
     break
@@ -829,7 +847,7 @@ else
 fi
 
 # target — the wrong target, refused, word for word out of src/tools.js.
-TARGET_REFUSAL="Spawn refused: a subagent may spawn a \"researcher\" and nothing else"
+TARGET_REFUSAL="Spawn refused: a \"$CALLER_ROLE\" may spawn \"researcher\" and nothing else — you asked for a \"$WRONG_TARGET\"."
 if [ "$(count_in "$CALLER_FLAT" "$TARGET_REFUSAL")" -gt 0 ]; then
   record "target — the granted caller's spawn of a \"$WRONG_TARGET\" was refused with the refusal the code produces" 1 \
     "$(first_in "$CALLER_FLAT" "$TARGET_REFUSAL")"

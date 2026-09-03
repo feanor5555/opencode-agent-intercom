@@ -15,15 +15,20 @@ in your opencode sidebar.
 ┌─ ▼ Subagents (2) ──────────────────────────┐
 │   coder#1      busy   6.2 K   0:42   [✕]   │
 │   designer#1   idle   2.1 K   1:08   [✕]   │
+│   retained subs [-]   0   [+]              │
+│   retain (min)  [-]  60   [+]              │
 └────────────────────────────────────────────┘
 ┌─ ▼ Limits ─────────────────────────────────┐
 │   max subagents   [-]   3   [+]            │
-│   max Token(k)    [-]  40   [+]            │
 │   thinking        [on]                     │
 │   tool details    [on]                     │
 └────────────────────────────────────────────┘
 ┌─ ▼ LLM params    [<] orchestrator  [>] ────┐
 │   model          [<] gpt-oss-120b [>]  ★   │
+│   effort         [<]  default   [>]   ★    │
+│   max Token(k)   [-]  40   [+]        ★    │
+│   reuse Token(k) [-]  70   [+]        ★    │
+│   result Token   [-] 2000 [+]        ★    │
 │   temperature    [-]  0.70 [+]   ★         │
 │   top_p          [-]  0.90 [+]             │
 │   top_k          [-]    40 [+]   ★         │
@@ -42,7 +47,8 @@ in your opencode sidebar.
 - **Open a subagent's full transcript** in one click. Watch its work.
   Stuck? Hit **✕** to abort. The orchestrator is told *why* and re-plans.
 
-- **Tune the framework live.** `max subagents`, `max Token(k)`, thinking and
+- **Tune the framework live.** `max subagents`, the per-agent-type token
+  ceilings (`max Token(k)`, `reuse Token(k)`, `result Token`), thinking and
   tool-details visibility — change them, the running plugin picks it up in
   ~2 seconds. **No opencode restart.**
 

@@ -238,9 +238,11 @@ maxContext" and are updated to match.
 
 ### 2.7 TUI
 
-**Recommendation: replace the single `max Token(k)` row with a two-row block —
-an agent cycler and the ceiling of the selected agent** — in place, in the
-Subagents section (`tui/src/tui.tsx:1271-1280`):
+**The per-agent ceiling sits behind an agent cycler that walks the full
+role list (`AGENT_NAMES`, orchestrator included), in the LLM params
+section, directly after the `effort` row and before `[reset current
+agent]`, with the Subagents section carrying no agent cycler**
+(`tui/src/tui.tsx:1770-1830`):
 
 ```
   agent          [<]  coder        [>]

@@ -76,16 +76,19 @@ After restarting opencode, two things still have to happen before the
    and the right sidebar (its own column beside the content, not an
    overlay) shows `Subagents (N)` with `● N running · ✓ M done · ◆ K retained`
    counters (`◆ K retained` only when something is held), agent rows with an
-   `x` abort control and an age, plus `max subagents`
-   and a per-agent-type context ceiling: an agent cycler and the selected
-   type's ceiling in k tokens (with `★` marking a type that has its own
-   value and `off` for a ceiling of `0`; stepping a type's own value below
-   zero drops the entry so it falls back to the inherited ceiling again),
-   plus the selected type's reuse ceiling as `reuse Token(k)` (the same
-   own-versus-inherited marker; `0` means never reused), plus the selected
-   type's reply ceiling as `result Token` (whole tokens rather than
-   thousands, stepped in 500s; `0` means that type's reply is never cut),
-   and the orchestrator's system prompt also carries a `Limits` block with headroom per agent type — each entry lists the budget, the fixed overhead (subagent guides, PROJECT.md, the project snapshot prepended to every spawn, AGENTS.md where that type keeps it) and the headroom left for the orchestrator's prompt and the subagent's work, in the form `coder 100.0k (−12.4k fixed → 87.6k)`. The fixed overhead occupies part of every budget before the orchestrator's words do; the limits block names it so the orchestrator can see why its own prompt has less room than the bare budget suggests. The work-package size gate below measures the package against the same budget the headroom was computed from. The same block names `off` for any type whose budget is disabled. The sidebar itself also exposes collapsed `TUI settings` / `LLM params` / `Prompts` sections.
+   `x` abort control and an age, plus `max subagents` and the flat retention
+   rows `retained subs` and `retain (min)`. The sidebar also exposes collapsed
+   `TUI settings` / `LLM params` / `Prompts` sections — the LLM params section
+   carries the per-agent-type context ceiling, the per-agent-type reuse
+   ceiling, and the per-agent-type reply ceiling behind a single agent cycler
+   that walks the full role list (orchestrator included); the three rows are
+   `max Token(k)` / `reuse Token(k)` / `result Token`, directly after the
+   `effort` row and before `[reset current agent]`, with `★` marking a type
+   that has its own value, `off` for a ceiling of `0`, and a value stepped
+   below zero dropping the entry so the type falls back to the inherited
+   ceiling again. `result Token` is stepped in 500 whole tokens rather than
+   thousands. `[reset current agent]` does not touch these three rows.
+   The orchestrator's system prompt also carries a `Limits` block with headroom per agent type — each entry lists the budget, the fixed overhead (subagent guides, PROJECT.md, the project snapshot prepended to every spawn, AGENTS.md where that type keeps it) and the headroom left for the orchestrator's prompt and the subagent's work, in the form `coder 100.0k (−12.4k fixed → 87.6k)`. The fixed overhead occupies part of every budget before the orchestrator's words do; the limits block names it so the orchestrator can see why its own prompt has less room than the bare budget suggests. The work-package size gate below measures the package against the same budget the headroom was computed from. The same block names `off` for any type whose budget is disabled.
    SDK's `layout` field is `"auto" | "stretch"` and marked deprecated with
    "Always uses stretch layout", and `tui.json` has no `sidebar` block,
    no width, no position. The column takes its width from the content
@@ -482,34 +485,37 @@ installed by the command above. Surfaces the live subagent snapshot and
 exposes every runtime knob:
 
 - **Subagent list** — open-session, abort (✕), keyboard navigation.
-- **`max subagents [-N+]`** and a per-agent-type context ceiling —
-  an agent cycler plus the selected type's ceiling in k tokens, with `★`
-  marking a type with its own value and `off` for a ceiling of `0`.
-  Writes `~/.config/opencode/agent-intercom.json` as
-  `"agentContext": { "<agent>": tokens }`, picked up within ~2 s.
-  A type with no entry of its own falls back to the flat legacy
-  `maxContext` key in the same file, then to the env var
-  `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT`, then to a built-in per-type
-  default, then to 100 000. `0` is a real value at every level and means
-  the budget is disabled for that type.
-- **`reuse Token(k)`** — the selected type's reuse ceiling, the maximum
-  context under which a held subagent of that type may be re-prompted. The
-  same agent cycler edits it; the same `★` marks an own value, `0` means
-  that type is never reused. Writes
-  `"reuseContext": { "<agent>": tokens }` and inherits the flat
-  `maxReuseContext` (env `OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT`,
-  default `70000`) wherever the map has no entry.
-- **`result Token`** — the selected type's reply ceiling, the maximum number
-  of tokens of that type's final reply forwarded to the orchestrator.
-  Everything past it is cut out of the wake notice and written to a file the
-  notice names. The same agent cycler edits it; `★` marks an own value, the
-  row shows `off` at `0`. Writes `"resultTokens": { "<agent>": tokens }` and
-  inherits the flat `maxResultTokens` (env
-  `OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS`, default `2000`) wherever the
-  map has no entry. Stepped in 500s (the other two rows step in thousands).
+- **`max subagents [-N+]`** — the concurrent subagent cap; `0` switches
+  the gate off. Writes `"maxSubagents"`.
 - **`retained subs [-N+]`** — how many finished subagents the process holds
   at once; `0` switches retention off and the sidebar then has no held
   rows. Writes `"maxRetainedSubagents"`.
+- **`max Token(k) [-N+]`**, **`reuse Token(k) [-N+]`**, **`result Token
+  [-N+]`** — the per-agent-type context ceiling, reuse ceiling, and reply
+  ceiling. All three rows sit in the LLM params section, directly after
+  the `effort` row and before `[reset current agent]`, and share one
+  agent cycler that walks the full role list (`AGENT_NAMES`,
+  orchestrator included). `★` marks a type that has its own value,
+  `off` for a ceiling of `0`, and a value stepped below zero drops the
+  entry so the type falls back to the inherited ceiling again. `result
+  Token` is stepped in 500 whole tokens; the other two step in
+  thousands.
+  - `max Token(k)` writes `"agentContext": { "<agent>": tokens }`. A type
+    with no entry of its own falls back to the flat `maxContext` key, then
+    to the env var `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT`, then to a
+    built-in per-type default, then to 100 000. `0` is a real value at
+    every level and means the budget is disabled for that type.
+  - `reuse Token(k)` writes `"reuseContext": { "<agent>": tokens }` and
+    inherits the flat `maxReuseContext` (env
+    `OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT`, default `70000`)
+    wherever the map has no entry. `0` means that type is never reused.
+  - `result Token` writes `"resultTokens": { "<agent>": tokens }` and
+    inherits the flat `maxResultTokens` (env
+    `OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS`, default `2000`)
+    wherever the map has no entry. `0` means that type's reply is never
+    cut. Everything past the ceiling is cut out of the wake notice and
+    written to a file the notice names. `[reset current agent]` does not
+    touch any of these three rows.
 - **`retain (min)`** — the retention window in whole minutes, the unit the
   row is shown and stepped in. Writes `"retainedSubagentTtlMs"` in ms; the
   row's floor is one whole minute. A `0` typed by hand into the file

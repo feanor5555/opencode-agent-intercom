@@ -210,8 +210,12 @@ overlay the content). Two conditions must both hold for a user to see it:
 - Header `Subagents (N)`, counters `● N running · ✓ M done`.
 - Agent rows such as `luna#1` with an `x` abort control and an age below
   (e.g. `4.0s`).
-- `max subagents [-] N [+]` and `max Token(k) [-] N [+]` steppers.
+- `max subagents [-] N [+]` stepper and the flat retention rows
+  `retained subs [-] N [+]` and `retain (min) [-] N [+]`.
 - Collapsed sections `[▸] TUI settings`, `[▸] LLM params`, `[▸] Prompts`.
+  The `LLM params` section carries the per-agent-type token ceilings —
+  `max Token(k) [-] N [+]`, `reuse Token(k) [-] N [+]`, `result Token [-] N
+  [+]` — behind one agent cycler that walks the full role list.
 
 **Layout switches by terminal width, and is not configurable.** opencode
 1.18.25 (same logic in 1.18.0, 1.18.4 and 1.17.19) picks one of two layouts by

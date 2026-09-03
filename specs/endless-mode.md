@@ -150,10 +150,12 @@ back to a placeholder block for any missing one; `capChars` bounds each section 
   pairing each key with its own check, so a key added to the panel cannot be left without
   one. `mergeSetting` (`tui/src/settings-file.ts:117`) drops from the write only the keys
   failing THEIR OWN validator — stepping a limit cannot delete the boolean.
-- Row shapes in the panel: the two numeric limits sit under the Subagents section with
-  `[-] value [+]` and `holdRepeat` (`tui/src/tui.tsx:1263-1279`); the two boolean toggles
-  sit under TUI settings as a single `[on] ` / `[off]` cell coloured `success` or
-  `textMuted` (`tui/src/tui.tsx:1282-1300`). Fixed column widths keep the buttons from
+- Row shapes in the panel: the per-agent-type numeric limits sit in the LLM params
+  section under a shared agent cycler with `[-] value [+]` and `holdRepeat`
+  (`tui/src/tui.tsx:1770-1830`); the endless-mode boolean toggle and its threshold row
+  sit in the LLM params section as a single `[on] ` / `[off]` cell coloured `success`
+  or `textMuted` next to a `[-] value [+]` stepper in thousands
+  (`tui/src/tui.tsx:1236-1255,1274-1291`). Fixed column widths keep the buttons from
   shifting (`tui/src/tui.tsx:102-118`).
 - The panel re-reads the file on a 30 s timer and whenever a file-backed section is opened
   (`refreshFileState`, `tui/src/tui.tsx:339-358`, `tui/src/tui.tsx:362-365`).
@@ -494,7 +496,8 @@ removes a task.
 
 ### 3.7 The sidebar row
 
-Under the **Subagents** section, beneath `max Token(k)` — that is where the two limits the
+In the LLM params section, beneath `effort` and above `[reset current agent]`,
+sharing the section's agent cycler — that is where the two limits the
 mode interacts with already sit (`tui/src/tui.tsx:1236-1255`):
 
 ```

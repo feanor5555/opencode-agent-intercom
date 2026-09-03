@@ -27,7 +27,7 @@ import assert from "node:assert/strict"
 import { chmodSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { DEFAULT_AGENT_CONTEXT } from "../tui/src/agent-roles.ts"
+import { AGENT_NAMES, DEFAULT_AGENT_CONTEXT } from "../tui/src/agent-roles.ts"
 import {
   DEFAULT_ENDLESS_CONTEXT,
   DEFAULT_ENDLESS_MODE,
@@ -904,4 +904,51 @@ test("a result write that cannot reach the disk leaves the panel on the file's s
   assert.deepEqual(onDisk(), { maxResultTokens: 3000 })
   assert.deepEqual(merged, state({ maxResultTokens: 3000 }))
   chmodSync(file, 0o644)
+})
+
+// The panel's three ceiling rows now hang off the LLM section's agent cycler,
+// which walks AGENT_NAMES — every installed role, the orchestrator included.
+// AGENT_NAMES is therefore the list the first edit freezes, and it reaches one
+// name the old spawnable-only cycler never offered: `orchestrator`, which has
+// no entry in the built-in per-type budget table. The freeze must give it the
+// value it actually has in effect, not an undefined one.
+test("the freeze covers every agent the cycler offers, orchestrator included", () => {
+  const merged = stepAgentContext("orchestrator", 5000, AGENT_NAMES)
+
+  const frozen = onDisk().agentContext
+  assert.deepEqual(Object.keys(frozen).sort(), [...AGENT_NAMES].sort())
+  for (const [name, value] of Object.entries(frozen)) {
+    assert.equal(typeof value, "number", `${name} froze to a number`)
+    assert.ok(Number.isFinite(value), `${name} froze to a finite value`)
+  }
+  // No built-in budget for the orchestrator: it falls back to the flat default.
+  assert.equal(frozen.orchestrator, DEFAULT_MAX_CONTEXT + 5000)
+  for (const name of AGENT_NAMES) {
+    if (name === "orchestrator") continue
+    assert.equal(frozen[name], DEFAULT_AGENT_CONTEXT[name], `${name} keeps its budget`)
+  }
+  assert.deepEqual(merged, state({ agentContext: frozen }))
+})
+
+test("the reuse and result freezes cover the same cycler list", () => {
+  stepReuseContext("orchestrator", 5000, AGENT_NAMES)
+  const reuse = onDisk().reuseContext
+  assert.deepEqual(Object.keys(reuse).sort(), [...AGENT_NAMES].sort())
+  assert.equal(reuse.orchestrator, DEFAULT_MAX_REUSE_CONTEXT + 5000)
+  for (const name of AGENT_NAMES) {
+    if (name === "orchestrator") continue
+    assert.equal(reuse[name], DEFAULT_MAX_REUSE_CONTEXT, `${name} keeps its reuse ceiling`)
+  }
+
+  stepResultTokens("orchestrator", 500, AGENT_NAMES)
+  const result = onDisk().resultTokens
+  assert.deepEqual(Object.keys(result).sort(), [...AGENT_NAMES].sort())
+  assert.equal(result.orchestrator, DEFAULT_MAX_RESULT_TOKENS + 500)
+  for (const name of AGENT_NAMES) {
+    if (name === "orchestrator") continue
+    assert.equal(result[name], DEFAULT_MAX_RESULT_TOKENS, `${name} keeps its result ceiling`)
+  }
+
+  // The two maps are stepped independently; the context map stays out of it.
+  assert.equal("agentContext" in onDisk(), false)
 })

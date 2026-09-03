@@ -60,12 +60,7 @@ import {
   statusMarker,
   statusRank,
 } from "./subagent-store.ts";
-import {
-  AGENT_NAMES,
-  PROMPT_AGENT_FILES,
-  SPAWNABLE_ROLES,
-  spawnableAgentNames,
-} from "./agent-roles.ts";
+import { AGENT_NAMES, PROMPT_AGENT_FILES } from "./agent-roles.ts";
 import {
   type LimitKey,
   type Settings,
@@ -479,12 +474,6 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // per agent, shown on the effort row when the file holds none. Its own signal
   // rather than a key of OpencodeDefaults, which is typed to numbers.
   const [opencodeEfforts, setOpencodeEfforts] = createSignal<Record<string, string>>({});
-  // The spawnable agents of the same fetch — the plugin's own subagent roles
-  // this instance actually resolved, and nothing else: the spawn gate refuses
-  // every other name, so a ceiling for one would govern nothing. Empty until
-  // the first successful fetch; the context row falls back to SPAWNABLE_ROLES
-  // until then.
-  const [subagentNames, setSubagentNames] = createSignal<string[]>([]);
   const refreshOpencodeDefaults = async (): Promise<void> => {
     try {
       const res = await api.client.app.agents({});
@@ -524,7 +513,6 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         setOpencodeDefaults(map);
         setOpencodeModels(models);
         setOpencodeEfforts(efforts);
-        setSubagentNames(spawnableAgentNames(list));
       }
     } catch {
       // best-effort — leave previous defaults in place
@@ -594,43 +582,26 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     void refreshOpencodeDefaults();
   };
 
-  // The agent whose context ceiling the row above the endless switch edits.
-  // The list is the live one where the fetch has landed and the full role set
-  // until then; it never shrinks to nothing, so the index always resolves. The
-  // modulo keeps a stale index inside a list that shrank between two fetches.
-  const [contextAgentIdx, setContextAgentIdx] = createSignal(0);
-  const contextAgents = (): string[] => {
-    const live = subagentNames();
-    return live.length > 0 ? live : SPAWNABLE_ROLES;
-  };
-  const currentContextAgent = (): string => {
-    const list = contextAgents();
-    return list[contextAgentIdx() % list.length];
-  };
-  const cycleContextAgent = (delta: number): void => {
-    const size = contextAgents().length;
-    setContextAgentIdx((i) => (i + delta + size) % size);
-    refreshFileState();
-  };
-
-  // Step the selected agent's context ceiling and save. The first such step
-  // migrates the file — see stepAgentContext — so the cycler's whole list goes
-  // with it: those are the types whose effective ceiling is frozen.
+  // Step the selected agent's context ceiling and save. The agent is the LLM
+  // section's own selection, and the list frozen on the first such step — see
+  // stepAgentContext — is that cycler's whole list, AGENT_NAMES: exactly the
+  // types the row can be pointed at. Every name in it resolves to a defined
+  // effective value, the built-in table or the flat ceiling behind it.
   const adjustAgentContext = (delta: number): void => {
-    showSettings(stepAgentContext(currentContextAgent(), delta, contextAgents()));
+    showSettings(stepAgentContext(currentLlmAgent(), delta, AGENT_NAMES));
   };
 
   // Step the selected agent's reuse ceiling and save. The same cycler picks the
-  // type for both rows, and the same freeze applies on the first step — see
-  // stepReuseContext.
+  // type for all three ceiling rows, and the same freeze applies on the first
+  // step — see stepReuseContext.
   const adjustReuseContext = (delta: number): void => {
-    showSettings(stepReuseContext(currentContextAgent(), delta, contextAgents()));
+    showSettings(stepReuseContext(currentLlmAgent(), delta, AGENT_NAMES));
   };
 
   // Step the selected agent's result ceiling and save. Third row on the same
   // cycler, same freeze on the first step — see stepResultTokens.
   const adjustResultTokens = (delta: number): void => {
-    showSettings(stepResultTokens(currentContextAgent(), delta, contextAgents()));
+    showSettings(stepResultTokens(currentLlmAgent(), delta, AGENT_NAMES));
   };
 
   // Walk the pick list by one. Position and write are one read-modify-write in
@@ -1281,8 +1252,6 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             onAbort={requestAbort}
             maxSubagents={maxSubagents}
             settings={settings}
-            contextAgent={currentContextAgent}
-            onCycleContextAgent={cycleContextAgent}
             onAdjustContext={adjustAgentContext}
             onAdjustReuse={adjustReuseContext}
             onAdjustResultTokens={adjustResultTokens}
@@ -1350,8 +1319,8 @@ function SubagentPanel(props: {
   // The whole resolved settings state: the context row works its ceiling out of
   // three of its members at once.
   settings: () => Settings;
-  contextAgent: () => string;
-  onCycleContextAgent: (delta: number) => void;
+  // The three per-agent ceiling rows sit in the LLM params body and read the
+  // agent from `llmAgent` below.
   onAdjustContext: (delta: number) => void;
   onAdjustReuse: (delta: number) => void;
   onAdjustResultTokens: (delta: number) => void;
@@ -1739,125 +1708,6 @@ function SubagentPanel(props: {
               {"[+]"}
             </text>
           </box>
-          {/* Context ceiling of one agent type: the [<]/[>] cycler picks the
-              type, the row under it steps that type's own ceiling. ★ marks a
-              type carrying a value of its own; without one the row shows the
-              inherited ceiling, and [-] below zero drops the own value so the
-              inherited one shows again. "off" is a ceiling of 0, i.e. no budget
-              for that type. */}
-          <box flexDirection="row">
-            <text fg={props.theme.textMuted}>{rowLabel("agent")}</text>
-            <text fg={props.theme.accent} onMouseDown={() => props.onCycleContextAgent(-1)}>
-              {"[<]"}
-            </text>
-            <text fg={props.theme.text}>{fitCell(props.contextAgent(), AGENT_NAME_W)}</text>
-            <text fg={props.theme.accent} onMouseDown={() => props.onCycleContextAgent(1)}>
-              {"[>]"}
-            </text>
-          </box>
-          {(() => {
-            const ceiling = createMemo(() =>
-              effectiveAgentContext(props.settings(), props.contextAgent()),
-            );
-            return (
-              <box flexDirection="row">
-                <text fg={props.theme.textMuted}>{rowLabel("max Token(k)")}</text>
-                <text
-                  fg={props.theme.accent}
-                  {...holdRepeat("context-decrease", () => props.onAdjustContext(-CONTEXT_STEP))}
-                >
-                  {"[-]"}
-                </text>
-                <text fg={props.theme.text}>
-                  {numCell(formatContextCeiling(ceiling().value), CEILING_NUM_W)}
-                </text>
-                <text
-                  fg={props.theme.accent}
-                  {...holdRepeat("context-increase", () => props.onAdjustContext(CONTEXT_STEP))}
-                >
-                  {"[+]"}
-                </text>
-                <Show when={ceiling().source === "agent"}>
-                  <text fg={props.theme.success}>{" ★"}</text>
-                </Show>
-              </box>
-            );
-          })()}
-          {/* Reuse ceiling of the same agent type, picked by the same cycler:
-              the context above which a finished subagent of that type is never
-              held and never re-prompted. ★ marks a type carrying a value of its
-              own exactly as on the budget row, and [-] below zero drops that
-              value so the inherited ceiling shows again. A 0 is spelled out,
-              because here it is the strictest value on the row — this type is
-              never reused — and not the "off" the budget row's 0 means. */}
-          {(() => {
-            const ceiling = createMemo(() =>
-              effectiveReuseContext(props.settings(), props.contextAgent()),
-            );
-            return (
-              <box flexDirection="row">
-                <text fg={props.theme.textMuted}>{rowLabel("reuse Token(k)")}</text>
-                <text
-                  fg={props.theme.accent}
-                  {...holdRepeat("reuse-context-decrease", () => props.onAdjustReuse(-CONTEXT_STEP))}
-                >
-                  {"[-]"}
-                </text>
-                <text fg={props.theme.text}>
-                  {numCell(ceiling().value / 1000, CEILING_NUM_W)}
-                </text>
-                <text
-                  fg={props.theme.accent}
-                  {...holdRepeat("reuse-context-increase", () => props.onAdjustReuse(CONTEXT_STEP))}
-                >
-                  {"[+]"}
-                </text>
-                <Show when={ceiling().source === "agent"}>
-                  <text fg={props.theme.success}>{" ★"}</text>
-                </Show>
-                <Show when={ceiling().value === 0}>
-                  <text fg={props.theme.textMuted}>{" never"}</text>
-                </Show>
-              </box>
-            );
-          })()}
-          {/* Result ceiling of the same agent type, picked by the same cycler:
-              how many tokens of that type's final reply reach the orchestrator.
-              Everything past it is cut out of the wake notice and written to a
-              file the notice names. Whole tokens rather than thousands, and its
-              own smaller step, because the value lives in the low thousands. ★
-              marks a type carrying a value of its own as on the two rows above,
-              and [-] below zero drops that value so the inherited ceiling shows
-              again. "off" is a ceiling of 0, i.e. that type's reply is never
-              cut. */}
-          {(() => {
-            const ceiling = createMemo(() =>
-              effectiveResultTokens(props.settings(), props.contextAgent()),
-            );
-            return (
-              <box flexDirection="row">
-                <text fg={props.theme.textMuted}>{rowLabel("result Token")}</text>
-                <text
-                  fg={props.theme.accent}
-                  {...holdRepeat("result-tokens-decrease", () => props.onAdjustResultTokens(-RESULT_TOKEN_STEP))}
-                >
-                  {"[-]"}
-                </text>
-                <text fg={props.theme.text}>
-                  {numCell(formatResultCeiling(ceiling().value), CEILING_NUM_W)}
-                </text>
-                <text
-                  fg={props.theme.accent}
-                  {...holdRepeat("result-tokens-increase", () => props.onAdjustResultTokens(RESULT_TOKEN_STEP))}
-                >
-                  {"[+]"}
-                </text>
-                <Show when={ceiling().source === "agent"}>
-                  <text fg={props.theme.success}>{" ★"}</text>
-                </Show>
-              </box>
-            );
-          })()}
           <box flexDirection="row">
             <text fg={props.theme.textMuted}>{rowLabel("endless mode")}</text>
             <text
@@ -2042,6 +1892,116 @@ function SubagentPanel(props: {
                   </text>
                 </box>
               </>
+            );
+          })()}
+          {/* Context ceiling of the agent the row above picks: the same
+              [<]/[>] cycler that chooses the model and the effort chooses the
+              type whose own ceiling these three rows step. ★ marks a type
+              carrying a value of its own; without one the row shows the
+              inherited ceiling, and [-] below zero drops the own value so the
+              inherited one shows again. "off" is a ceiling of 0, i.e. no budget
+              for that type. */}
+          {(() => {
+            const ceiling = createMemo(() =>
+              effectiveAgentContext(props.settings(), props.llmAgent()),
+            );
+            return (
+              <box flexDirection="row">
+                <text fg={props.theme.textMuted}>{rowLabel("max Token(k)")}</text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat("context-decrease", () => props.onAdjustContext(-CONTEXT_STEP))}
+                >
+                  {"[-]"}
+                </text>
+                <text fg={props.theme.text}>
+                  {numCell(formatContextCeiling(ceiling().value), CEILING_NUM_W)}
+                </text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat("context-increase", () => props.onAdjustContext(CONTEXT_STEP))}
+                >
+                  {"[+]"}
+                </text>
+                <Show when={ceiling().source === "agent"}>
+                  <text fg={props.theme.success}>{" ★"}</text>
+                </Show>
+              </box>
+            );
+          })()}
+          {/* Reuse ceiling of the same agent type, picked by the same cycler:
+              the context above which a finished subagent of that type is never
+              held and never re-prompted. ★ marks a type carrying a value of its
+              own exactly as on the budget row, and [-] below zero drops that
+              value so the inherited ceiling shows again. A 0 is spelled out,
+              because here it is the strictest value on the row — this type is
+              never reused — and not the "off" the budget row's 0 means. */}
+          {(() => {
+            const ceiling = createMemo(() =>
+              effectiveReuseContext(props.settings(), props.llmAgent()),
+            );
+            return (
+              <box flexDirection="row">
+                <text fg={props.theme.textMuted}>{rowLabel("reuse Token(k)")}</text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat("reuse-context-decrease", () => props.onAdjustReuse(-CONTEXT_STEP))}
+                >
+                  {"[-]"}
+                </text>
+                <text fg={props.theme.text}>
+                  {numCell(ceiling().value / 1000, CEILING_NUM_W)}
+                </text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat("reuse-context-increase", () => props.onAdjustReuse(CONTEXT_STEP))}
+                >
+                  {"[+]"}
+                </text>
+                <Show when={ceiling().source === "agent"}>
+                  <text fg={props.theme.success}>{" ★"}</text>
+                </Show>
+                <Show when={ceiling().value === 0}>
+                  <text fg={props.theme.textMuted}>{" never"}</text>
+                </Show>
+              </box>
+            );
+          })()}
+          {/* Result ceiling of the same agent type, picked by the same cycler:
+              how many tokens of that type's final reply reach the orchestrator.
+              Everything past it is cut out of the wake notice and written to a
+              file the notice names. Whole tokens rather than thousands, and its
+              own smaller step, because the value lives in the low thousands. ★
+              marks a type carrying a value of its own as on the two rows above,
+              and [-] below zero drops that value so the inherited ceiling shows
+              again. "off" is a ceiling of 0, i.e. that type's reply is never
+              cut. */}
+          {(() => {
+            const ceiling = createMemo(() =>
+              effectiveResultTokens(props.settings(), props.llmAgent()),
+            );
+            return (
+              <box flexDirection="row">
+                <text fg={props.theme.textMuted}>{rowLabel("result Token")}</text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat("result-tokens-decrease", () => props.onAdjustResultTokens(-RESULT_TOKEN_STEP))}
+                >
+                  {"[-]"}
+                </text>
+                <text fg={props.theme.text}>
+                  {numCell(formatResultCeiling(ceiling().value), CEILING_NUM_W)}
+                </text>
+                <text
+                  fg={props.theme.accent}
+                  {...holdRepeat("result-tokens-increase", () => props.onAdjustResultTokens(RESULT_TOKEN_STEP))}
+                >
+                  {"[+]"}
+                </text>
+                <Show when={ceiling().source === "agent"}>
+                  <text fg={props.theme.success}>{" ★"}</text>
+                </Show>
+              </box>
             );
           })()}
           <box flexDirection="row">

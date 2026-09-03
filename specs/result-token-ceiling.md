@@ -82,10 +82,12 @@ Each claim with the line it was read from.
 - The TUI side of that pattern: `function stepPerAgentCeiling(`
   (`tui/src/settings-file.ts:410`), `export function stepAgentContext(`
   (`:445`), `export function stepReuseContext(` (`:465`), rendered as the
-  `max Token(k)` and `reuse Token(k)` rows behind one agent cycler
-  (`tui/src/tui.tsx:1770-1830`), `const CONTEXT_STEP = 5000;`
-  (`tui/src/tui.tsx:106`), `formatContextCeiling` printing `off` at `0`
-  (`tui/src/tui.tsx:282-284`).
+  `max Token(k)` and `reuse Token(k)` rows in the LLM params section,
+  behind one agent cycler that walks the full role list (`AGENT_NAMES`,
+  orchestrator included), directly after the `effort` row and before
+  `[reset current agent]` (`tui/src/tui.tsx:1770-1830`),
+  `const CONTEXT_STEP = 5000;` (`tui/src/tui.tsx:106`), `formatContextCeiling`
+  printing `off` at `0` (`tui/src/tui.tsx:282-284`).
 - Private, mode-0700 directory already in use for plugin state:
   `export function cacheDir()` → `~/.cache/opencode-agent-intercom`
   (`src/log.js:12-14`), `export function ensureCacheDir()` with `mode: 0o700`
@@ -312,7 +314,7 @@ no legacy key.
 | Flat file key | `"maxResultTokens": N` |
 | Per-type file key | `"resultTokens": { "<agent>": N }` |
 | Resolver | `export function resultCeilingFor(agent)` in `src/settings.js` |
-| TUI row | yes — `result Token`, third row under the agent cycler |
+| TUI row | yes — `result Token`, third row in the LLM params section under the shared agent cycler |
 
 Resolution order in `resultCeilingFor(agent)`:
 
@@ -341,11 +343,15 @@ TUI (`tui/src/`):
   through the shared `stepPerAgentCeiling("resultTokens", "maxResultTokens", …)`
   (`tui/src/settings-file.ts:410`). First edit materialises `resultTokens` and
   drops the flat key, as the other two do.
-- `tui/src/tui.tsx`: a third row under `reuse Token(k)`, label `result Token`,
-  driven by the same agent cycler, `★` for a type carrying its own value,
-  `off` at `0`. Its own step `const RESULT_TOKEN_STEP = 500;` and the raw token
-  count as its cell — the other two rows show thousands, and a 2000-token
-  ceiling stepped in 5000s is not editable.
+- `tui/src/tui.tsx`: a third row in the LLM params section under
+  `reuse Token(k)`, label `result Token`, driven by the same agent cycler
+  (the full role list, orchestrator included), `★` for a type carrying its
+  own value, `off` at `0`. Its own step `const RESULT_TOKEN_STEP = 500;`
+  and the raw token count as its cell — the other two rows show thousands,
+  and a 2000-token ceiling stepped in 5000s is not editable. The row sits
+  directly after the `effort` row and before `[reset current agent]`; the
+  Subagents section has no agent cycler any more, and `[reset current
+  agent]` does not touch this row.
 
 ### 2.7 A higher ceiling for a future agent type
 

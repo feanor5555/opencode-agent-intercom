@@ -1651,7 +1651,9 @@ function evictRetainedOverCapacity(client) {
 // Scope guard: `session.error` may fire for sessions we do not track (e.g.
 // the orchestrator's own primary, or any user session). If `entryForSession`
 // returns nothing, this is not a subagent we spawned — log and return without
-// touching it.
+// touching it. It may equally fire for a subagent of ours that has no run in
+// flight — a retained session the user typed into, or one whose teardown is
+// already under way — and the lifecycle guard leaves those alone.
 //
 // Best-effort: every step is wrapped in try/catch and we never throw out of
 // the event handler, so a failure here cannot poison the rest of the event
@@ -1666,6 +1668,23 @@ async function onSessionError(props, client) {
   const entry = entryForSession(sessionID)
   if (!entry) {
     // Not one of our subagents. Don't touch it.
+    return
+  }
+  // Lifecycle guard, the same one onSessionIdle carries. A retained or closing
+  // entry has no live run for this event to belong to: its session is still
+  // there and can still produce errors — the user typing into a held session,
+  // a reload, a provider failure on a turn this plugin never started — and
+  // there is nothing to tear down or report on. Handling it as a live run is
+  // worse than doing nothing, because `errored` is a one-way latch: it would
+  // stay on the entry through the next reuse and kill THAT run's wake notice
+  // at the `|| e.errored` test, leaving the follow-up answered and undelivered
+  // and its concurrency slot held.
+  if (entryLifecycle(entry) !== LIFECYCLE_RUNNING) {
+    log("session.error on a subagent with no live run — ignored", {
+      handle: entry.handle,
+      sessionID,
+      lifecycle: entryLifecycle(entry),
+    })
     return
   }
   if (entry.timedOut || entry.errored || aborted.has(sessionID)) {

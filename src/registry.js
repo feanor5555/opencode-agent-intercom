@@ -453,6 +453,13 @@ export function retainEntryLocked(sessionID, now = Date.now()) {
 //     it owned run 1;
 //   - `status` to busy and `dispatched` to false, so the idle path of run 2
 //     wakes the parent the way run 1's did;
+//   - `errored` and `timedOut` back to false, for the same reason and with more
+//     force: they are one-way latches read as "this entry is already being torn
+//     down by another path", and every one of those paths — the idle wake, the
+//     watchdog sweep — skips a latched entry outright. A latch left standing
+//     from run 1, or set on the held session between the two runs, would let
+//     run 2 be admitted, prompted and answered and then swallow its wake notice,
+//     stranding the answer and holding the concurrency slot for good;
 //   - `lastActivityAt` to now, so the run is measured from the reuse and the
 //     first watchdog tick after admission cannot reap it on run 1's silence;
 //   - `retainedAt` cleared: the window is over, and a window is per retention
@@ -493,6 +500,8 @@ export function reviveRetainedEntryLocked(
   entry.lifecycle = LIFECYCLE_RUNNING
   entry.status = "busy"
   entry.dispatched = false
+  entry.errored = false
+  entry.timedOut = false
   entry.lastActivityAt = now
   entry.retainedAt = undefined
   entry.runs = (entry.runs ?? 1) + 1
@@ -510,12 +519,18 @@ export function reviveRetainedEntryLocked(
 // fresh one stamped: a failed reuse neither ends the retention window nor
 // extends it.
 //
+// `errored` and `timedOut` are cleared here as well as in the revive: the entry
+// goes back to being a candidate for a later reuse, and a latch surviving on it
+// would let that reuse run and then silently drop its answer.
+//
 // Must be called with the registry mutex held.
 export function restoreRetainedEntryLocked(sessionID, previous) {
   const entry = entryForSession(sessionID)
   if (!entry || !previous) return false
   entry.lifecycle = LIFECYCLE_RETAINED
   entry.dispatched = false
+  entry.errored = false
+  entry.timedOut = false
   entry.retainedAt = previous.retainedAt
   entry.runs = previous.runs
   entry.packageTokens = previous.packageTokens

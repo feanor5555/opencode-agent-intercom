@@ -102,48 +102,90 @@ export async function sweepWatchdog() {
   // so iterating the live Map would skip or revisit entries.
   const entries = [...registry.values()]
   for (const entry of entries) {
-    const lifecycle = entryLifecycle(entry)
-    if (lifecycle === LIFECYCLE_CLOSING) continue
-    if (lifecycle === LIFECYCLE_RETAINED) {
-      if (!isRetainedExpired(entry, ttl, now)) continue
-      await reapRetainedSubagent(entry, ttl, now - (entry.retainedAt ?? 0))
-      continue
-    }
-    if (maxAge <= 0) continue // watchdog disabled
-    if (entry.timedOut) continue
-    if (entry.errored) continue
-    if (aborted.has(entry.sessionID)) continue
-    // session.idle fires just before the entry is removed; if a stray idle
-    // sneaks through the gap, `entry.status === "idle"` covers it.
-    if (entry.status === "idle") continue
-    // A subagent blocked on a child of its own emits no events: every event of
-    // the run belongs to the CHILD's session, so `lastActivityAt` stands still
-    // for as long as the child works, and a child that outlives the inactivity
-    // window would time out its own parent — which then cascades a DELETE over
-    // the very child it was waiting for. Waiting on a live child IS activity.
-    //
-    // The exemption is bounded by that child being watchdogged itself: it only
-    // holds while at least one live child is a tracked entry this same sweep
-    // walks, so the parent can be held open no longer than the child can, and a
-    // waiter left behind by a child that has vanished from the registry frees
-    // the parent to be reaped normally.
-    //
-    // Bumping `lastActivityAt` rather than just skipping is what makes the
-    // exemption safe on the other side: when the child ends, the parent gets
-    // its tool result back and starts an LLM call that may not emit for a few
-    // seconds, and a stale timestamp from before the whole child run would
-    // otherwise have the next sweep reap it instantly.
-    if (isWaitingOnWatchdoggedChild(entry.sessionID)) {
-      entry.lastActivityAt = now
-      continue
-    }
-    const last = entry.lastActivityAt ?? entry.spawnedAt
-    if (now - last <= maxAge) continue
+    try {
+      const lifecycle = entryLifecycle(entry)
+      if (lifecycle === LIFECYCLE_CLOSING) continue
+      if (lifecycle === LIFECYCLE_RETAINED) {
+        if (!isRetainedExpired(entry, ttl, now)) continue
+        await reapRetainedSubagent(entry, ttl, now - (entry.retainedAt ?? 0))
+        continue
+      }
+      if (maxAge <= 0) continue // watchdog disabled
+      if (entry.timedOut) continue
+      if (entry.errored) continue
+      if (aborted.has(entry.sessionID)) continue
+      // session.idle fires just before the entry is removed; if a stray idle
+      // sneaks through the gap, `entry.status === "idle"` covers it.
+      if (entry.status === "idle") continue
+      // A subagent blocked on a child of its own emits no events: every event of
+      // the run belongs to the CHILD's session, so `lastActivityAt` stands still
+      // for as long as the child works, and a child that outlives the inactivity
+      // window would time out its own parent — which then cascades a DELETE over
+      // the very child it was waiting for. Waiting on a live child IS activity.
+      //
+      // The exemption is bounded by that child being watchdogged itself: it only
+      // holds while at least one live child is a tracked entry this same sweep
+      // walks, so the parent can be held open no longer than the child can, and a
+      // waiter left behind by a child that has vanished from the registry frees
+      // the parent to be reaped normally.
+      //
+      // Bumping `lastActivityAt` rather than just skipping is what makes the
+      // exemption safe on the other side: when the child ends, the parent gets
+      // its tool result back and starts an LLM call that may not emit for a few
+      // seconds, and a stale timestamp from before the whole child run would
+      // otherwise have the next sweep reap it instantly.
+      if (isWaitingOnWatchdoggedChild(entry.sessionID)) {
+        entry.lastActivityAt = now
+        continue
+      }
+      const last = entry.lastActivityAt ?? entry.spawnedAt
+      if (now - last <= maxAge) continue
 
-    // Latch FIRST so any racing event handler / onSessionIdle skips this entry.
-    entry.timedOut = true
-    await timeoutSubagent(entry, maxAge, now - last)
+      // Latch FIRST so any racing event handler / onSessionIdle skips this entry.
+      entry.timedOut = true
+      await timeoutSubagent(entry, maxAge, now - last)
+    } catch (err) {
+      // Per-entry best effort, and a latch release. Each branch above marks the
+      // entry BEFORE the I/O that tears it down — `timedOut` in the running
+      // branch, the closing lifecycle in the retained one — so that a racing
+      // handler skips an entry already on its way out. Both marks are read
+      // everywhere as "another path owns this now", and if the teardown that was
+      // to follow throws, no path owns it and none will look at it again: a live
+      // opencode session with no route left to delete it, and, in the running
+      // case, a concurrency slot held for the life of the process. Undo the mark
+      // on an entry that is still registered so the next tick tries again, and go
+      // on to the other entries either way.
+      recoverFailedSweep(entry, err)
+    }
   }
+}
+
+// Undoes the mark one sweep set on an entry whose teardown then threw, so the
+// next tick can try that entry again.
+//
+// Only an entry that is still the registered one for its session is touched: a
+// teardown that got as far as removing the entry and then failed has already
+// taken the entry out of every path this could matter to, and the detached
+// object is nobody's business. `timedOut` goes back to false and a closing
+// lifecycle goes back to retained on its ORIGINAL `retainedAt`, which
+// reapRetainedSubagent never clears — the window it expired on is the window it
+// will expire on again at the next tick, five seconds later.
+//
+// A running entry that is NOT marked has thrown somewhere before the mark, in a
+// read that changed nothing; there is nothing to undo and the entry is left as
+// it stands.
+function recoverFailedSweep(entry, err) {
+  const registered = entryForSession(entry.sessionID) === entry
+  const relatched = registered && (entry.timedOut || entryLifecycle(entry) === LIFECYCLE_CLOSING)
+  log("watchdog: sweep failed for one entry", {
+    handle: entry.handle,
+    sessionID: entry.sessionID,
+    err: errMsg(err),
+    retry: relatched,
+  })
+  if (!registered) return
+  if (entry.timedOut) entry.timedOut = false
+  if (entryLifecycle(entry) === LIFECYCLE_CLOSING) entry.lifecycle = LIFECYCLE_RETAINED
 }
 
 // True when `sessionID` is blocked on at least one live child that is itself a

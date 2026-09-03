@@ -1,5 +1,5 @@
 // Unit tests for the label of a sidebar subagent row
-// (tui/src/subagent-label.ts): agent handle, topic, model in parentheses.
+// (tui/src/subagent-label.ts): agent type, topic, model in parentheses.
 //
 // The topic is the opencode session title, and in a process that can retain a
 // finished subagent that title carries the plugin's own marker prefix. The
@@ -185,7 +185,7 @@ test("subagentModel cuts a long model name to the budget", () => {
   assert.equal(name, "z".repeat(MODEL_MAX_W - 1) + "…")
 })
 
-test("composeSubagentLabel puts agent, topic and model in that order", () => {
+test("composeSubagentLabel renders the agent type, topic and model in that order", () => {
   const entry = {
     handle: "researcher#2",
     agent: "researcher",
@@ -193,26 +193,27 @@ test("composeSubagentLabel puts agent, topic and model in that order", () => {
   }
   assert.equal(
     composeSubagentLabel(entry, MODELS, CHOICES, 60),
-    "researcher#2 · Searching for latest Spring API (Luna)",
+    "researcher · Searching for latest Spring API (Luna)",
   )
+  assert.equal(entry.handle, "researcher#2", "the internal handle is not rendered or changed")
 })
 
 test("composeSubagentLabel drops the model part when none is configured", () => {
   const entry = { handle: "documenter#1", agent: "documenter", title: "write the readme" }
   assert.equal(
     composeSubagentLabel(entry, MODELS, CHOICES),
-    "documenter#1 · write the readme",
+    "documenter · write the readme",
   )
 })
 
 test("composeSubagentLabel drops the topic part when the title carries nothing", () => {
   const entry = { handle: "coder#1", agent: "coder", title: "" }
-  assert.equal(composeSubagentLabel(entry, MODELS, CHOICES), "coder#1 (Claude Opus)")
+  assert.equal(composeSubagentLabel(entry, MODELS, CHOICES), "coder (Claude Opus)")
 })
 
-test("composeSubagentLabel shows the handle alone with neither topic nor model", () => {
+test("composeSubagentLabel shows the agent type alone with neither topic nor model", () => {
   const entry = { handle: "coder#1", agent: "coder", title: "coder:" }
-  assert.equal(composeSubagentLabel(entry, {}, CHOICES), "coder#1")
+  assert.equal(composeSubagentLabel(entry, {}, CHOICES), "coder")
 })
 
 test("truncate leaves nothing for a width of zero or less", () => {
@@ -277,7 +278,7 @@ test("composeSubagentLabel fits the host panel, the case that used to wrap", () 
     { providerID: "anthropic", modelID: "opus", label: "Luna (gpt-5.6-luna)" },
   ]
   const label = composeSubagentLabel(entry, MODELS, choices, HOST_PANEL_W)
-  assert.equal(label, "coder#1 · Searching for the… (Luna)")
+  assert.equal(label, "coder · Searching for the l… (Luna)")
   assert.equal(label.length, HOST_LABEL_W)
 })
 
@@ -310,52 +311,51 @@ test("composeSubagentLabel never exceeds the budget, for any part length", () =>
   }
 })
 
-test("composeSubagentLabel gives the topic what handle and model leave over", () => {
+test("composeSubagentLabel gives the topic what agent type and model leave over", () => {
   const entry = { handle: "coder#1", agent: "coder", title: "t".repeat(100) }
-  // 35 columns: handle 7, " (Claude Opus)" 14, separator 3 — 11 for the topic.
+  // 35 columns: agent type 5, " (Claude Opus)" 14, separator 3 — 13 for the topic.
   const label = composeSubagentLabel(entry, MODELS, CHOICES, HOST_PANEL_W)
-  assert.equal(label, `coder#1 · ${"t".repeat(10)}… (Claude Opus)`)
+  assert.equal(label, `coder · ${"t".repeat(12)}… (Claude Opus)`)
   assert.equal(label.length, HOST_LABEL_W)
 })
 
 test("composeSubagentLabel caps the topic on a panel wide enough for more", () => {
   const entry = { handle: "coder#1", agent: "coder", title: "t".repeat(200) }
   const label = composeSubagentLabel(entry, MODELS, CHOICES, 200)
-  assert.equal(label, `coder#1 · ${"t".repeat(TOPIC_MAX_W - 1)}… (Claude Opus)`)
+  assert.equal(label, `coder · ${"t".repeat(TOPIC_MAX_W - 1)}… (Claude Opus)`)
 })
 
-test("composeSubagentLabel gives the topic the room the dropped model leaves", () => {
+test("composeSubagentLabel gives the topic the room left when the model is dropped", () => {
   const entry = { handle: "coder#1", agent: "coder", title: "rewrite the parser" }
-  // 26 columns of panel leave 19, too few for handle 7 plus " (Claude Opus)" 14,
-  // so the model goes and the topic takes the whole remainder.
-  const label = composeSubagentLabel(entry, MODELS, CHOICES, 26)
-  assert.equal(label, "coder#1 · rewrite …")
-  assert.equal(label.length, subagentLabelWidth(26))
+  // 23 columns of panel leave 16, too few for agent type 5 plus
+  // " (Claude Opus)" 14, so the model goes and the topic takes the remainder.
+  const label = composeSubagentLabel(entry, MODELS, CHOICES, 23)
+  assert.equal(label, "coder · rewrite…")
+  assert.equal(label.length, subagentLabelWidth(23))
 })
 
-test("composeSubagentLabel shows the handle alone where neither part fits", () => {
+test("composeSubagentLabel shows the agent type alone where neither part fits", () => {
   const entry = { handle: "coder#1", agent: "coder", title: "rewrite the parser" }
-  // 17 columns of label: the model needs 21, and what it leaves the topic is
-  // under MIN_TOPIC_W.
-  assert.equal(composeSubagentLabel(entry, MODELS, CHOICES, 24), "coder#1")
+  // Five columns of label leave no room for the model or the topic.
+  assert.equal(composeSubagentLabel(entry, MODELS, CHOICES, ROW_CHROME_W + 5), "coder")
 })
 
 test("composeSubagentLabel keeps the topic where the remainder reaches the minimum", () => {
-  const entry = { handle: "c#1", agent: "documenter", title: "write the readme" }
-  const panel = ROW_CHROME_W + "c#1".length + " · ".length + MIN_TOPIC_W
+  const entry = { handle: "c#1", agent: "c", title: "write the readme" }
+  const panel = ROW_CHROME_W + "c".length + " · ".length + MIN_TOPIC_W
   const label = composeSubagentLabel(entry, MODELS, CHOICES, panel)
-  assert.equal(label, "c#1 · write t…")
+  assert.equal(label, "c · write t…")
   assert.equal(label.length, subagentLabelWidth(panel))
 })
 
-test("composeSubagentLabel drops the model where the handle alone fills the row", () => {
+test("composeSubagentLabel drops the model where the agent type fills the row", () => {
   const entry = { handle: "documenter#12", agent: "coder", title: "x" }
   const label = composeSubagentLabel(entry, MODELS, CHOICES, ROW_CHROME_W + 13)
-  assert.equal(label, "documenter#12")
+  assert.equal(label, "coder")
 })
 
-test("composeSubagentLabel cuts even the handle on a panel that cannot hold it", () => {
-  const entry = { handle: "documenter#12", agent: "coder", title: "x" }
+test("composeSubagentLabel cuts the agent type on a panel that cannot hold it", () => {
+  const entry = { handle: "documenter#12", agent: "documenter", title: "x" }
   const label = composeSubagentLabel(entry, MODELS, CHOICES, ROW_CHROME_W + 5)
   assert.equal(label, "docu…")
 })
@@ -502,7 +502,7 @@ test("composeSubagentLabel puts no emoji and no lone surrogate on the row", () =
     title: "\u{1F680} ship \u{1F468}\u200D\u{1F469}\u200D\u{1F467} it \uD800",
   }
   const label = composeSubagentLabel(entry, MODELS, CHOICES, HOST_PANEL_W)
-  assert.equal(label, "researcher#2 · ship it (Luna)")
+  assert.equal(label, "researcher · ship it (Luna)")
   assert.equal(hasLoneSurrogate(label), false)
   assert.equal(/\p{Extended_Pictographic}/u.test(label), false)
 })
@@ -551,9 +551,9 @@ test("composeSubagentLabel holds the budget for wide, emoji and combining input"
 })
 
 test("composeSubagentLabel clamps a composed label that would overrun", () => {
-  // A wide handle that fills the row, and a model part measured against it:
+  // A wide agent type that fills the row, and a model part measured against it:
   // the final clamp is what keeps the two from standing side by side.
-  const entry = { handle: "漢".repeat(20), agent: "coder", title: "x" }
+  const entry = { handle: "coder#1", agent: "漢".repeat(20), title: "x" }
   const label = composeSubagentLabel(entry, MODELS, CHOICES, HOST_PANEL_W)
   assert.ok(displayWidth(label) <= HOST_LABEL_W, `${displayWidth(label)}: ${label}`)
 })
@@ -568,6 +568,6 @@ test("composeSubagentLabel cuts an over-long title to one line's worth", () => {
   }
   const label = composeSubagentLabel(entry, MODELS, CHOICES, HOST_PANEL_W)
   assert.equal(displayWidth(label), HOST_LABEL_W)
-  assert.equal(label.startsWith("coder#1 · Rewrite "), true, label)
+  assert.equal(label.startsWith("coder · Rewrite "), true, label)
   assert.equal(label.endsWith("… (Claude Opus)"), true, label)
 })

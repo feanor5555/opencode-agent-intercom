@@ -383,6 +383,15 @@ function only(marker) {
   return first
 }
 
+test("the subagent row uses a dot separator before its elapsed age", () => {
+  only('<text fg={props.theme.textMuted}>{` · ${age()}`}</text>')
+  assert.equal(
+    source.includes('<text fg={props.theme.textMuted}>{`↳ ${age()}`}</text>'),
+    false,
+    "the row no longer uses the arrow marker before age",
+  )
+})
+
 test("the panel subscribes to session.deleted and retires the row on it", () => {
   only('api.event.on("session.deleted", onSessionDeleted)')
   const handler = only("const onSessionDeleted = (event: unknown): void => {")

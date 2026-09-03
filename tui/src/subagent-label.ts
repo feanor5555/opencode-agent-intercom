@@ -1,13 +1,13 @@
-// The label of one subagent row in the sidebar: the agent's handle, the topic
+// The label of one subagent row in the sidebar: the agent type, the topic
 // it is working on, then the model it runs on.
 //
-//   researcher#2 · Searching for latest Spring API (Luna)
+//   researcher · Searching for latest Spring API (Luna)
 //
 // The topic is the opencode session title. The spawn tool sets it from its
 // `description` argument, and where the caller gave none it falls back to
 // `${agent}: ${prompt}` — that leading `${agent}: ` is dropped here, because the
 // agent already stands at the front of the label. A session with no title at all
-// shows the handle alone.
+// shows the agent type alone.
 //
 // The model is the user's own per-agent choice from llm-models.json. An agent
 // without an entry there runs on whatever opencode resolved for it, which the
@@ -61,7 +61,7 @@ export const TOPIC_MAX_W = 32;
 // model row cuts them at.
 export const MODEL_MAX_W = 12;
 
-// The separator between handle and topic.
+// The separator between agent type and topic.
 const TOPIC_SEP = " · ";
 
 // The fixed prefix the plugin puts in front of every subagent session title in a
@@ -261,12 +261,13 @@ export function subagentModel(
   return truncate(modelDisplayName(label), maxW);
 }
 
-// Handle, topic and model joined into the row's label, cut to the columns the
-// panel leaves the row. A part that resolves to nothing takes its separator with
-// it. The handle stays whole as long as the budget allows, the model follows
-// where it still fits, and the topic takes what is left over. The composed
-// result is clamped against the budget one last time, so no combination of
-// parts can push the label past the columns the row has.
+// Agent type, topic and model joined into the row's label, cut to the columns
+// the panel leaves the row. A part that resolves to nothing takes its separator
+// with it. The agent type stays whole as long as the budget allows, the model
+// follows where it still fits, and the topic takes what is left over. The handle
+// remains on the entry for addressing and row actions but is not rendered. The
+// composed result is clamped against the budget one last time, so no combination
+// of parts can push the label past the columns the row has.
 export function composeSubagentLabel(
   entry: { handle: string; agent: string; title: string },
   models: LlmModels,
@@ -274,16 +275,16 @@ export function composeSubagentLabel(
   panelWidth?: number,
 ): string {
   const budget = subagentLabelWidth(panelWidth);
-  const handle = truncate(entry.handle, budget);
-  const handleWidth = displayWidth(handle);
+  const agent = truncate(entry.agent, budget);
+  const agentWidth = displayWidth(agent);
 
   const model = subagentModel(entry.agent, models, choices);
   const modelPart = model === "" ? "" : ` (${model})`;
   const withModel =
-    handleWidth + displayWidth(modelPart) <= budget ? modelPart : "";
+    agentWidth + displayWidth(modelPart) <= budget ? modelPart : "";
 
   const topicBudget =
-    budget - handleWidth - displayWidth(withModel) - displayWidth(TOPIC_SEP);
+    budget - agentWidth - displayWidth(withModel) - displayWidth(TOPIC_SEP);
   const topic =
     topicBudget >= MIN_TOPIC_W
       ? subagentTopic(
@@ -293,6 +294,6 @@ export function composeSubagentLabel(
         )
       : "";
 
-  const composed = handle + (topic === "" ? "" : TOPIC_SEP + topic) + withModel;
+  const composed = agent + (topic === "" ? "" : TOPIC_SEP + topic) + withModel;
   return truncate(composed, budget);
 }

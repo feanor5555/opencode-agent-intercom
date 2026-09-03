@@ -1688,7 +1688,7 @@ function SubagentPanel(props: {
           </text>
         </box>
         <box flexDirection="row" paddingLeft={4}>
-          <text fg={props.theme.textMuted}>{`↳ ${age()}`}</text>
+          <text fg={props.theme.textMuted}>{` · ${age()}`}</text>
           <Show when={rowProps.entry.ctxTokens !== undefined}>
             <text fg={props.theme.textMuted}>
               {` · ${formatTokens(rowProps.entry.ctxTokens)} ctx`}

@@ -13,8 +13,8 @@ in your opencode sidebar.
 
 ```
 ┌─ ▼ Subagents (2) ──────────────────────────┐
-│   coder#1      busy   6.2 K   0:42   [✕]   │
-│   designer#1   idle   2.1 K   1:08   [✕]   │
+│   coder        busy   6.2 K   0:42   [✕]   │
+│   designer     idle   2.1 K   1:08   [✕]   │
 │   retained subs [-]   0   [+]              │
 │   retain (min)  [-]  60   [+]              │
 └────────────────────────────────────────────┘

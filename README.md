@@ -98,19 +98,20 @@ The plugin manager (toggle the plugin on/off, install updates) lives at
 `Ctrl+P` → `Plugins` → `Enter`. Inside the panel, `Alt+A` focuses the
 subagent list; `j`/`k` move, `Enter` opens a session, `x` aborts.
 
-Each live row is labelled `handle · topic (Model)` — for example
-`coder#1 · Searching fo… (Luna)` — with the `↳ <age> · <k> ctx` line
-unchanged beneath it. The **topic** is the opencode session title: the
-spawn tool sets it from the `description` argument, and where the caller
-gave none the title falls back to the opening characters of the task
-prompt with a redundant `<agent>: ` prefix stripped before display. The
-**model** is the agent's own entry in `~/.config/opencode/llm-models.json`,
-shortened to its display name before any parenthesis; an agent with no
-configured model renders the row without that parenthesised part at all.
-The parts are sized against the panel's actual laid-out width: the
-handle is kept whole, the model next, and the topic takes the remainder
-and is dropped below a minimum rather than wrapping the row onto a
-second line.
+Each live row is labelled `agent type · topic (Model)` — for example
+`coder · Searching fo… (Luna)` — with the ` · <age> · <k> ctx` line
+beneath it. The **agent type** is the role name; the internal handle (such as
+`coder#1`) remains available for addressing but is not rendered. The **topic**
+is the opencode session title: the spawn tool sets it from the `description`
+argument, and where the caller gave none the title falls back to the opening
+characters of the task prompt with a redundant `<agent>: ` prefix stripped
+before display. The **model** is the agent's own entry in
+`~/.config/opencode/llm-models.json`, shortened to its display name before any
+parenthesis; an agent with no configured model renders the row without that
+parenthesised part at all. The parts are sized against the panel's actual
+laid-out width: the agent type is kept whole where the budget allows, the
+model next, and the topic takes the remainder and is dropped below a minimum rather than wrapping the
+row onto a second line.
 
 ## What this gives you that stock opencode doesn't
 

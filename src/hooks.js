@@ -1632,6 +1632,11 @@ async function onSessionDeleted(props) {
 // The same drop the handoff and the endless cycle run, with a capacity left
 // standing instead of zero — see dropRetainedSubagents in teardown.js for the
 // claim-then-tear-down discipline and for why an eviction is silent.
+//
+// This keeps the set from growing past the capacity. A capacity that FALLS
+// under an already-held set is the watchdog's (trimRetainedToCapacity in
+// watchdog.js): no entry joins the set at that moment, so this call is not
+// reached, and at capacity 0 no entry ever joins it again.
 function evictRetainedOverCapacity(client) {
   return dropRetainedSubagents(client, { keep: retentionCapacity() })
 }

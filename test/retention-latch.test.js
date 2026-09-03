@@ -25,8 +25,18 @@
 
 import test, { beforeEach, after } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  statSync,
+  existsSync,
+  openSync,
+  readSync,
+  closeSync,
+  rmSync,
+} from "node:fs"
+import { tmpdir, homedir } from "node:os"
 import { join } from "node:path"
 
 import plugin from "../src/index.js"
@@ -38,7 +48,7 @@ import {
   LIFECYCLE_RETAINED,
 } from "../src/registry.js"
 import { resetTurnNotices } from "../src/hooks.js"
-import { _stopWatchdogForTests } from "../src/watchdog.js"
+import { sweepWatchdog, _stopWatchdogForTests } from "../src/watchdog.js"
 import { resetProjectContext } from "../src/project.js"
 import { resetPermissionGuardCache } from "../src/config.js"
 import {
@@ -263,8 +273,11 @@ test("switched on without a restart: list and the snapshot stay as they were", a
 // retained section, and that is the same answer the conjunction gives at every
 // other site — `reuse` refuses in the same breath, so a rendered section would
 // hand the orchestrator handles that the tool named beside them turns down.
-// What is held stays held until its window runs out; it is simply no longer
-// offered, which is what "switching it off" has to mean.
+//
+// The entry is not touched by the switch itself: nothing on the read paths
+// evicts, so between the edit and the next watchdog tick a held entry is
+// exactly as it was, only no longer offered. The tick is what ends it — see the
+// capacity section below.
 test("switched off: a retained entry is neither listed nor shown in the snapshot", async () => {
   loadWith({ maxRetainedSubagents: 3, maxSubagents: 4, retainedSubagentTtlMs: 3600000 })
   const { ctx, created } = makeCtx()
@@ -281,7 +294,7 @@ test("switched off: a retained entry is neither listed nor shown in the snapshot
   assert.match(refused.output, /switched off for this installation/)
   assert.match(await refusalText(hooks), /Available orchestration tools: spawn, abort, list\./)
 
-  // The entry itself is untouched — the watchdog's own ceiling ends it.
+  // Untouched by the read paths themselves — no sweep has run yet.
   assert.equal(entryLifecycle(entryForSession(sessionID)), LIFECYCLE_RETAINED)
 })
 
@@ -291,4 +304,119 @@ test("offered and on: the refusal names reuse among the orchestration tools", as
   const hooks = await plugin(ctx)
   assert.ok(hooks.tool.reuse, "the map carries the tool")
   assert.match(await refusalText(hooks), /Available orchestration tools: spawn, abort, list, reuse\./)
+})
+
+// ---- 4. a capacity lowered while the process runs ----------------------------
+//
+// `maxRetainedSubagents` is read live, so lowering it changes the capacity at
+// once — but the eviction on the idle path only runs after one more entry has
+// JOINED the set, and at capacity 0 no entry ever joins it again. Without an
+// enforcement on the clock, whatever was held under the old capacity would be
+// stranded: a session standing open for the whole retention window, addressed
+// by a handle `list` no longer offers and `reuse` refuses on the very capacity
+// that stranded it. The watchdog sweep is where the new number reaches the
+// existing set.
+
+test("capacity lowered to 0 mid-process: the sweep releases the held entry", async () => {
+  loadWith({ maxRetainedSubagents: 3, maxSubagents: 4, retainedSubagentTtlMs: 3600000 })
+  const { ctx, created, deleted } = makeCtx()
+  const hooks = await plugin(ctx)
+  const sessionID = await runOne(hooks, created)
+  assert.equal(entryLifecycle(entryForSession(sessionID)), LIFECYCLE_RETAINED)
+
+  switchTo({ maxRetainedSubagents: 0, maxSubagents: 4, retainedSubagentTtlMs: 3600000 })
+  await sweepWatchdog()
+
+  assert.equal(entryForSession(sessionID), undefined, "the entry is released, not stranded")
+  assert.equal(countRetainedSubagents(), 0)
+  assert.deepEqual(deleted, [sessionID], "and the opencode session goes with it")
+  // Far inside the 1 h window: the TTL reap is not what did this.
+  assert.equal(retentionCapacity(), 0)
+})
+
+test("capacity lowered but not to 0: the sweep drops only the surplus, oldest first", async () => {
+  loadWith({ maxRetainedSubagents: 3, maxSubagents: 4, retainedSubagentTtlMs: 3600000 })
+  const { ctx, created, deleted } = makeCtx()
+  const hooks = await plugin(ctx)
+  const first = await runOne(hooks, created, "planner")
+  entryForSession(first).retainedAt = Date.now() - 60_000
+  const second = await runOne(hooks, created, "researcher")
+  assert.equal(countRetainedSubagents(), 2)
+
+  switchTo({ maxRetainedSubagents: 1, maxSubagents: 4, retainedSubagentTtlMs: 3600000 })
+  await sweepWatchdog()
+
+  assert.deepEqual(deleted, [first], "the oldest retention loses the seat, as capacity always does")
+  assert.equal(entryForSession(first), undefined)
+  assert.equal(entryLifecycle(entryForSession(second)), LIFECYCLE_RETAINED)
+  assert.equal(countRetainedSubagents(), 1)
+})
+
+test("a sweep at an unchanged capacity leaves the held set alone", async () => {
+  loadWith({ maxRetainedSubagents: 3, maxSubagents: 4, retainedSubagentTtlMs: 3600000 })
+  const { ctx, created, deleted } = makeCtx()
+  const hooks = await plugin(ctx)
+  const sessionID = await runOne(hooks, created)
+
+  await sweepWatchdog()
+
+  assert.equal(entryLifecycle(entryForSession(sessionID)), LIFECYCLE_RETAINED)
+  assert.deepEqual(deleted, [], "room to spare is not a reason to drop anything")
+})
+
+// ---- 5. the refusal is on the record ----------------------------------------
+//
+// Every other refusal in reuseHandler writes a debug line, and this one used
+// not to: a reuse turned down here left the log looking as though no reuse had
+// been attempted at all, and the only record of it was inside opencode's own
+// session store.
+
+const debugLogPath = join(homedir(), ".cache", "opencode-agent-intercom", "debug.log")
+
+// What the debug log gained while `run` was executing. Read as a byte range
+// from the recorded offset, not as a slice of the decoded file: the log is
+// append-only and grows to hundreds of MB, and a character offset would sit
+// somewhere else entirely in a file that carries any multi-byte character.
+// Empty where logging is switched off or the file does not exist, which the
+// caller has to allow for.
+async function loggedDuring(run) {
+  const before = existsSync(debugLogPath) ? statSync(debugLogPath).size : 0
+  await run()
+  if (!existsSync(debugLogPath)) return ""
+  const after = statSync(debugLogPath).size
+  if (after <= before) return ""
+  const buf = Buffer.alloc(after - before)
+  const fd = openSync(debugLogPath, "r")
+  try {
+    readSync(fd, buf, 0, buf.length, before)
+  } finally {
+    closeSync(fd)
+  }
+  return buf.toString("utf8")
+}
+
+test("the retention-off refusal writes a debug line, like the other seven", async (t) => {
+  if (process.env.OPENCODE_AGENT_INTERCOM_DEBUG === "0") {
+    t.skip("debug logging is switched off for this run")
+    return
+  }
+  loadWith({ maxRetainedSubagents: 3, maxSubagents: 4, retainedSubagentTtlMs: 3600000 })
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+  await runOne(hooks, created)
+  switchTo({ maxRetainedSubagents: 0, maxSubagents: 4, retainedSubagentTtlMs: 3600000 })
+
+  let refused
+  const written = await loggedDuring(async () => {
+    refused = await hooks.tool.reuse.execute({ subagent: "planner#1", prompt: "q" }, toolCtx)
+  })
+
+  assert.match(refused.output, /switched off for this installation/)
+  assert.match(written, /reuse refused: retention switched off/)
+  // The two facts that tell this refusal apart from the other seven and from
+  // each other: which handle was asked for, and whether retention was ever
+  // offered in this process or only switched off under it.
+  assert.match(written, /"subagent":"planner#1"/)
+  assert.match(written, /"offered":true/)
+  assert.match(written, /"maxRetainedSubagents":0/)
 })

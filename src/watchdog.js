@@ -19,9 +19,10 @@
 // `maxSubagentAgeMs` (default 90 s) gets killed.
 
 import { registry, aborted } from "./state.js"
-import { getSettings } from "./settings.js"
+import { getSettings, retentionCapacity } from "./settings.js"
 import { abortSession, fetchSnapshot } from "./client.js"
 import {
+  countRetainedSubagents,
   entryForSession,
   entryLifecycle,
   isRetainedExpired,
@@ -29,7 +30,7 @@ import {
   LIFECYCLE_RETAINED,
 } from "./registry.js"
 import { liveChildSessionIDs } from "./childwait.js"
-import { teardownSubagent } from "./teardown.js"
+import { teardownSubagent, dropRetainedSubagents } from "./teardown.js"
 import { timeoutNotice } from "./notices.js"
 import { capReplyForAgent } from "./resultfile.js"
 import { log, errMsg } from "./log.js"
@@ -97,6 +98,9 @@ export async function sweepWatchdog() {
   const settings = getSettings()
   const maxAge = settings.maxSubagentAgeMs
   const ttl = settings.retainedSubagentTtlMs
+  // The live capacity, applied to the set already held, before anything else
+  // on this tick. See trimRetainedToCapacity for why it is enforced here.
+  await trimRetainedToCapacity()
   const now = Date.now()
   // Snapshot the entries first — we mutate the registry (removeEntry) below,
   // so iterating the live Map would skip or revisit entries.
@@ -157,6 +161,53 @@ export async function sweepWatchdog() {
       // on to the other entries either way.
       recoverFailedSweep(entry, err)
     }
+  }
+}
+
+// Trims the retained set back to the capacity in effect RIGHT NOW, oldest
+// `retainedAt` first, and does it on the clock rather than on an event.
+//
+// `maxRetainedSubagents` is read live, so a user lowering it in a running
+// instance changes the capacity at once. The only other enforcement of that
+// number — `evictRetainedOverCapacity` in hooks.js — runs on the idle path,
+// after one more entry has JOINED the set. That is enough to keep the set from
+// growing past the capacity and nothing else: it cannot act on a capacity that
+// fell under an already-held set, and at capacity 0 it can never run again at
+// all, because no further entry is ever retained. An entry held under the old,
+// higher capacity would then stay held for the whole retention window as
+// something the orchestrator can no longer use — `list` stops offering it and
+// `reuse` refuses it on the very capacity that stranded it — while its opencode
+// session stands.
+//
+// It belongs on this sweep because this sweep is the only thing that looks at
+// the retained set without a retention having happened, and because it already
+// owns the other rule that ends a retention from outside the entry's own
+// lifecycle: the TTL reap. Both answer the same question once every tick — is
+// this entry still allowed to be held — so they share one clock and one owner.
+// The alternatives each fail on their own terms: `retentionCapacity()`
+// (settings.js) is a synchronous read with no client and no registry, called
+// from `list` rendering and prompt composition, and evicting there would invert
+// the module layering; the settings-file read that notices the new number is in
+// that same module; and hooks.js's own eviction is the site whose trigger is
+// the defect.
+//
+// Cheap on the common tick: a Map scan, and the drop — which takes the registry
+// mutex and deletes sessions — only where the set is really too large. Run
+// BEFORE the per-entry loop takes its snapshot, so its victims are already
+// "closing" and the loop leaves them to the teardown in flight.
+//
+// Silent towards the parent and a real teardown, both through
+// dropRetainedSubagents: the same eviction hooks.js runs, so a subagent dropped
+// on a lowered capacity ends exactly as one dropped by a newer retention does.
+// Best-effort — a failed trim must not cost the tick its timeout and TTL work,
+// and the next tick tries again five seconds later.
+async function trimRetainedToCapacity() {
+  const keep = retentionCapacity()
+  if (countRetainedSubagents() <= keep) return
+  try {
+    await dropRetainedSubagents(watchdogClient, { keep, label: "capacity" })
+  } catch (err) {
+    log("watchdog: capacity trim failed", { keep, err: errMsg(err) })
   }
 }
 

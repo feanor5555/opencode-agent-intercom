@@ -831,6 +831,19 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
   async function reuseHandler(args, toolCtx) {
     const settings = getSettings()
     if (!retentionActive()) {
+      // Logged like every other refusal in this handler. Without it this one
+      // branch is invisible: the call and its refusal exist only inside
+      // opencode's own session store, and a reuse that never worked leaves the
+      // debug log looking as though no reuse was ever attempted. `offered`
+      // separates the two ways of arriving here — a process that never carried
+      // retention at all, and one where the capacity was turned down under a
+      // latched tool map.
+      log("reuse refused: retention switched off", {
+        sessionID: toolCtx.sessionID,
+        subagent: String(args.subagent ?? ""),
+        offered: retentionOffered(),
+        maxRetainedSubagents: settings.maxRetainedSubagents,
+      })
       return {
         output:
           `Reuse refused: holding a finished subagent alive is switched off for this ` +

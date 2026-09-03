@@ -236,8 +236,15 @@ are excluded for a different reason and are not a second switch (§3.7).
   screen and its session is already deleted (§4). That loss is the user's to accept, not
   the plugin's to impose. Flipping the default later is one constant on each half plus
   the parity test.
-- **Scope:** the flag is read at send time and stamped on the part. It governs messages
-  posted after the flip; a message already posted keeps the flag it was posted with.
+- **Scope:** the switch governs the parts already in the transcript, not only the
+  ones posted from here on. The companion TUI writes the settings file; the
+  server-side plugin observes the change, walks every primary it knows about
+  and PATCHes the `synthetic` flag on its own notice parts (those marked
+  `metadata.agentIntercom === true`) through opencode's part route, which the
+  drawn TUI picks up at once. Flipping the switch off hides notices that are
+  already in the transcript; flipping it on brings them back. The part route
+  is annotated experimental in opencode, so a missing or refused route leaves
+  the notices as they were and the visible outcome is unchanged on that flip.
 
 ### 3.4 Which sends are hidden
 
@@ -335,8 +342,12 @@ Stated plainly, because it is real:
   displays it.
 - **The wake is unexplained.** The orchestrator resumes with nothing above it. Whoever reads
   the transcript later sees an answer with no question.
-- **Switching the flag off does not bring old messages back.** The flag is stamped per
-  message at send time. Only messages sent after the flip render.
+- **The switch is retroactive.** Flipping it off hides notices that are already
+  in the transcript by PATCHing their `synthetic` field through opencode's
+  part route, which the drawn TUI picks up at once; flipping it on brings them
+  back the same way. The part route is annotated experimental in opencode, so
+  a missing or refused route leaves the notices exactly as they were posted
+  on that flip — no visible change until a future flip succeeds.
 
 **The sidebar does not close this gap**, and it should not be claimed that it does. It ships
 hidden and needs `session.sidebar.toggle` first (`learnings.md:179-188`); below 121 columns

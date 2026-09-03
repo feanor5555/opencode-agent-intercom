@@ -532,18 +532,25 @@ exposes every runtime knob:
   [on/off]`**, opencode's built-in visibility toggles, plus **`show agentcom
   [on/off]`**, which decides whether the plugin's own notices (subagent
   completion messages, handoff kickoffs, doc-summary prompts) appear in the
-  transcript. With it off, the text part the plugin posts is stamped
-  `synthetic: true`, which opencode's TUI does not render; the model still
-  receives the text unchanged, so the orchestrator keeps being woken and keeps
-  receiving its subagent results. The task prompt sent to a subagent stays
-  visible whatever the switch says — it is the subagent's entire instruction,
-  not chatter — and tool results stay under opencode's own
-  `tool_details_visibility`. Writes
+  transcript. The switch is retroactive: with it off, notice text parts are
+  stamped `synthetic: true`, which opencode's TUI does not render; with it on,
+  the same parts are PATCHed back to `synthetic: false` and reappear. The
+  switch finds its own notices by `metadata.agentIntercom === true` and mutates
+  the `synthetic` field through opencode's part route, which the drawn TUI
+  picks up at once; a missing or refused route leaves the notices as they
+  were. The model still receives the text unchanged either way, so the
+  orchestrator keeps being woken and keeps receiving its subagent results.
+  The task prompt sent to a subagent stays visible whatever the switch says —
+  it is the subagent's entire instruction, not chatter — and tool results stay
+  under opencode's own `tool_details_visibility`. Writes
   `~/.config/opencode/agent-intercom.json` as `"showAgentcom": true|false`,
   picked up within ~2 s; env var `OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM`
   resolves with `1`/`0`. Default `true`. With the switch off, the transcript
   no longer shows why the orchestrator continues — the orchestrator is told
-  to relay the substance itself.
+  to relay the substance itself. The part route the switch relies on is
+  annotated experimental in opencode; a server that does not answer it, or
+  refuses the PATCH, costs the retroactive rewrite on that flip and the
+  notices stay exactly as they were posted.
 - **Per-agent LLM sampling** — temperature, top-p/top-k, max-tokens, plus
   llama.cpp keys (`min_p`, `repeat_penalty`, `chat_template_kwargs`) routed
   through `output.options`. Writes `~/.config/opencode/llm-params.json`.

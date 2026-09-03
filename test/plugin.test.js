@@ -16,6 +16,7 @@ import plugin from "../src/index.js"
 import { resetState, aborted, pendingTaskIds, lastPrimaryTool } from "../src/state.js"
 import { entryForSession, forgetPrimary, trackPrimary, isPrimary } from "../src/registry.js"
 import { getSessionDirectory } from "../src/client.js"
+import { resetAgentcomVisibilityWatch } from "../src/agentcomsync.js"
 import { resetProjectContext } from "../src/project.js"
 import { setSettingsPath, resetSettings, getSearxngUrl, getSettings } from "../src/settings.js"
 import { resetPermissionGuardCache } from "../src/config.js"
@@ -75,6 +76,9 @@ setSettingsPath(settingsFile)
 beforeEach(() => {
   resetState()
   resetTurnNotices()
+  // The factory starts the agentcom visibility loop; stopping it between tests
+  // keeps one test's interval out of the next one.
+  resetAgentcomVisibilityWatch()
   resetProjectContext()
   resetPermissionGuardCache()
   rmSync(settingsFile, { force: true })

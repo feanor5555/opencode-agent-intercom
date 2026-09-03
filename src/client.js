@@ -6,7 +6,7 @@
 
 import { log, errMsg } from "./log.js"
 import { getSettings } from "./settings.js"
-import { intercomTextPart } from "./pluginmsg.js"
+import { INTERCOM_MESSAGE_METADATA_KEY, intercomTextPart } from "./pluginmsg.js"
 
 // Sleeps `ms` milliseconds. Resolved via setTimeout so a value of 0 returns
 // immediately without going through the timer queue.
@@ -35,6 +35,7 @@ function sleep(ms) {
 // whenever `showAgentcom` is off — the setting is read here, per send.
 export async function postNotice(client, sessionID, text) {
   const { postNoticeRetries, postNoticeRetryBackoffMs, showAgentcom } = getSettings()
+  rememberAgentcomSession(sessionID)
   const maxAttempts = Math.max(1, postNoticeRetries + 1)
   let lastErr
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -95,6 +96,11 @@ export async function createChildSession(client, { parentID, title, directory })
 // instruction.
 export async function promptSession(client, { sessionID, agent, prompt, hideable = false }) {
   const hidden = hideable && !getSettings().showAgentcom
+  // Only a hideable send puts the session under the switch. The one call site
+  // that is not hideable — the spawn task prompt — lands in the SUBAGENT's
+  // session and stays visible whatever the switch says, so that session must
+  // never enter the sweep set.
+  if (hideable) rememberAgentcomSession(sessionID)
   await client.session.promptAsync({
     path: { id: sessionID },
     body: { agent, parts: [intercomTextPart(prompt, { hidden })] },
@@ -115,6 +121,30 @@ export async function abortSession(client, sessionID) {
 // is destroyed (wake-hook + deleteSession).
 const sessionDirCache = new Map()
 
+// The sessions this process has posted switch-governed traffic into: every
+// postNotice target and every hideable promptSession target. It is what the
+// visibility sweep walks, beside the tracked primaries — a primary is tracked
+// only once it has called one of the plugin's tools (trackPrimary,
+// src/tools.js), so the fresh orchestrator a handoff creates has received its
+// kickoff long before it appears in that set, and its notices would otherwise
+// stay outside the switch until its first spawn.
+//
+// Bounded by the number of orchestrator sessions one process serves, and
+// dropped with the session's other per-session cache in
+// forgetSessionDirectory.
+const agentcomSessions = new Set()
+
+function rememberAgentcomSession(sessionID) {
+  if (sessionID) agentcomSessions.add(sessionID)
+}
+
+// The sessions the visibility sweep has to consider from this process's own
+// sends. Read by src/agentcomsync.js, which unions it with the tracked
+// primaries.
+export function agentcomSessionIds() {
+  return [...agentcomSessions]
+}
+
 export async function getSessionDirectory(client, sessionID) {
   if (!sessionID) return undefined
   if (sessionDirCache.has(sessionID)) return sessionDirCache.get(sessionID)
@@ -131,6 +161,7 @@ export async function getSessionDirectory(client, sessionID) {
 
 export function forgetSessionDirectory(sessionID) {
   sessionDirCache.delete(sessionID)
+  agentcomSessions.delete(sessionID)
 }
 
 // Best-effort permanent deletion of a session in opencode (DELETE /session/{id}).
@@ -394,6 +425,135 @@ let serverUrl = ""
 
 export function setServerUrl(url) {
   serverUrl = url ? String(url).replace(/\/+$/, "") : ""
+}
+
+// How many of one session's stale notice parts a single visibility sweep
+// rewrites, newest first. A flip costs one PATCH per part whose flag has to
+// change, over the whole session history, so the sweep is bounded: the newest
+// end is what is on or near the screen, and a session holding more stale
+// notices than this keeps the older ones as they are rather than firing an
+// unbounded burst of requests at the server.
+export const MAX_VISIBILITY_PATCHES = 200
+
+// Whether a message part is one of THIS plugin's postings — a text part
+// carrying the marker metadata intercomTextPart stamps (see src/pluginmsg.js),
+// plus the two ids the part route is addressed by. The marker is persisted
+// verbatim and comes back on `session.messages`, so a notice is identifiable
+// with no bookkeeping at send time: `promptAsync` answers 204 with an empty
+// body and never reveals the ids it created.
+export function isIntercomNoticePart(part) {
+  return Boolean(
+    part &&
+      part.type === "text" &&
+      part.metadata &&
+      typeof part.metadata === "object" &&
+      part.metadata[INTERCOM_MESSAGE_METADATA_KEY] === true &&
+      typeof part.id === "string" &&
+      part.id !== "" &&
+      typeof part.messageID === "string" &&
+      part.messageID !== "",
+  )
+}
+
+// PATCHes one part's `synthetic` flag. The body is the WHOLE part with the one
+// field replaced: the route's payload schema is `Part` with
+// `additionalProperties: false`, i.e. a complete valid part, not a diff.
+//
+// Returns "ok", or the kind of failure, so the caller can tell "this one part
+// could not be written" from "this server has no such route".
+async function patchPartSynthetic(part, sessionID, hidden) {
+  const url =
+    `${serverUrl}/session/${encodeURIComponent(part.sessionID ?? sessionID)}` +
+    `/message/${encodeURIComponent(part.messageID)}/part/${encodeURIComponent(part.id)}`
+  try {
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...part,
+        sessionID: part.sessionID ?? sessionID,
+        synthetic: hidden,
+      }),
+    })
+    if (res?.ok) return "ok"
+    log("agentcom visibility patch refused", { status: res?.status, partID: part.id })
+    return "refused"
+  } catch (err) {
+    log("agentcom visibility patch failed", { partID: part.id, err: errMsg(err) })
+    return "unreachable"
+  }
+}
+
+// Makes the `show agentcom` switch retroactive for one session: every part this
+// plugin posted into it gets its `synthetic` flag brought to `hidden`, so a
+// notice already on screen goes away when the switch is turned off and comes
+// back when it is turned on. opencode's transcript renderer skips a synthetic
+// text part and its user->model conversion does not look at the flag at all, so
+// only the rendering changes; the text keeps reaching the model either way.
+// (`ignored` is the inverse flag — it takes the text out of the model payload
+// and leaves it on screen. It is never set here.)
+//
+// The route is `PATCH /session/{sessionID}/message/{messageID}/part/{partID}`.
+// The plugin's v1 client carries no `part` namespace, so this posts to
+// `serverUrl` directly, the way selectTuiSession does for `/tui/select-session`.
+// The mutation publishes `message.part.updated` carrying the whole part, which
+// is what reaches a drawn TUI without a resync — nothing more has to be pushed
+// from here.
+//
+// BEST-EFFORT THROUGHOUT, and deliberately so: the route sits in a group
+// annotated "Experimental HttpApi session routes" at version 0.0.1, so its
+// path, its payload and its existence carry no compatibility promise across
+// opencode releases. Every failure is logged and swallowed, nothing is thrown
+// at the caller, and the outcome of a server that does not answer this route is
+// that the notices stay exactly as they were posted — today's behaviour. The
+// first failure while nothing has been written yet ends the sweep, so a missing
+// route or a dead server costs one request rather than one per part; a failure
+// after a part HAS been written is a per-part problem and the rest still runs.
+//
+// UNVERIFIED, the same gap selectTuiSession's direct post has: the request
+// carries no authorization header. A server that demands one refuses the PATCH,
+// and the notices then stay as they are.
+//
+// Returns { stale, patched, failed, aborted }: how many parts needed the flag
+// changed, how many were changed, how many attempts failed, and whether the
+// sweep gave up early.
+export async function applyAgentcomVisibility(client, sessionID, { hidden } = {}) {
+  const outcome = { stale: 0, patched: 0, failed: 0, aborted: false }
+  if (!sessionID) return outcome
+  if (!serverUrl) {
+    log("agentcom visibility sweep skipped: no server URL")
+    return outcome
+  }
+  const messages = await fetchMessages(client, sessionID)
+  // Newest first: the near end of the history is what the user is looking at,
+  // and it is what the cap must keep when a session holds more than it.
+  const stale = []
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const parts = messages[i]?.parts ?? []
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const part = parts[j]
+      if (!isIntercomNoticePart(part)) continue
+      if (Boolean(part.synthetic) === hidden) continue
+      stale.push(part)
+    }
+  }
+  outcome.stale = stale.length
+  for (const part of stale.slice(0, MAX_VISIBILITY_PATCHES)) {
+    const result = await patchPartSynthetic(part, sessionID, hidden)
+    if (result === "ok") {
+      outcome.patched++
+      continue
+    }
+    outcome.failed++
+    if (outcome.patched === 0) {
+      outcome.aborted = true
+      break
+    }
+  }
+  if (outcome.stale > 0) {
+    log("agentcom visibility sweep", { sessionID, hidden: Boolean(hidden), ...outcome })
+  }
+  return outcome
 }
 
 // Best-effort TUI view switch: point the interactive TUI at `sessionID`

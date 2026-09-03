@@ -64,6 +64,7 @@ import { chatParamsHook } from "./llmparams.js"
 import { chatMessageHook, applyModelChoices, messageAgent } from "./llmmodel.js"
 import { captureSystem, captureMessages, captureParams } from "./reqlog.js"
 import { setServerUrl } from "./client.js"
+import { startAgentcomVisibilityWatch } from "./agentcomsync.js"
 import { sweepOrphanedSubagentSessions } from "./teardown.js"
 import { pruneResultFiles } from "./resultfile.js"
 import { log } from "./log.js"
@@ -88,6 +89,14 @@ export default async (ctx) => {
   // resolved SDK client carries no method for it; `serverUrl` is where it
   // posts to and reaches the plugin only here, in the factory context.
   setServerUrl(serverUrl)
+
+  // The `show agentcom` switch governs the parts already in the transcript, not
+  // only the ones posted from here on: the companion TUI writes the setting
+  // file and this loop observes the change and rewrites the `synthetic` flag on
+  // the notices this plugin posted into its primaries. Idempotent and unref'd,
+  // so the per-session factory call starts exactly one loop per process and it
+  // never holds the process open. Best-effort — see agentcomsync.js.
+  startAgentcomVisibilityWatch(client)
 
   // The reload leak: a subagent session this plugin left behind when it was
   // last unloaded — one being HELD for a follow-up, or one still running when

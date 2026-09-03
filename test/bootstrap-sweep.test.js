@@ -1,22 +1,27 @@
-// The bootstrap sweep against the reload leak.
+// The bootstrap sweep against the leftover subagent session.
 //
-// A retained subagent session outlives its run by design. opencode has no
-// session TTL and no garbage collection, and the plugin gets no shutdown hook,
-// so a plugin reload inside a retention window leaves that opencode session
-// behind with nothing in the world that would ever delete it. The sweep runs
-// once at plugin load and deletes what can only be such a leftover.
+// A plugin process that stops mid-run leaves its subagents' opencode sessions
+// behind — a reload inside a retention window, an instance that died with
+// subagents still running. opencode has no session TTL and no garbage
+// collection, and the plugin gets no shutdown hook, so nothing in the world
+// would ever delete them. The sweep runs once at plugin load and deletes what
+// can only be such a leftover.
 //
 // What is pinned here:
 //   - it deletes a leaked subagent session of this plugin's own;
 //   - it deletes NOTHING it cannot positively attribute. Every criterion is a
 //     positive statement about the session — the plugin's title marker, a
 //     parentID, no children of its own, unknown to this process, idle for
-//     longer than twice the retention window — and each one is pinned by a
-//     session that fails it alone and survives;
+//     longer than the age bound — and each one is pinned by a session that
+//     fails it alone and survives;
 //   - it never touches a primary, the handoff's successor orchestrator
 //     included: that session is a child and carries no marker;
-//   - at the shipped default it makes no call at all, and the session titles it
-//     identifies by are not written either.
+//   - the age bound is twice the retention window, never less than
+//     ORPHAN_SWEEP_MIN_AGE_MS or the watchdog-derived margin, so a short
+//     retention window cannot pull it down onto a subagent that is merely
+//     running;
+//   - it runs at the shipped default too, on titles that carry the marker at
+//     the shipped default.
 //
 // Run: node --test test/bootstrap-sweep.test.js
 
@@ -37,17 +42,24 @@ import {
   setSettingsPath,
   resetSettings,
   dropSettingsCacheKeepingLatch,
+  DEFAULT_RETAINED_SUBAGENT_TTL_MS,
 } from "../src/settings.js"
 import {
   sweepOrphanedSubagentSessions,
   SUBAGENT_SESSION_TITLE_MARKER,
   ORPHAN_SWEEP_TTL_FACTOR,
+  ORPHAN_SWEEP_MIN_AGE_MS,
+  ORPHAN_SWEEP_WATCHDOG_FACTOR,
 } from "../src/teardown.js"
 
 const PRIMARY = "ses_primary"
 const toolCtx = { sessionID: PRIMARY, agent: "orchestrator", messageID: "m1" }
 const TTL = 3600000
 const OLD_ENOUGH = ORPHAN_SWEEP_TTL_FACTOR * TTL + 60000
+// Past the bound the sweep computes with no settings file in place.
+const DEFAULT_OLD_ENOUGH =
+  Math.max(ORPHAN_SWEEP_TTL_FACTOR * DEFAULT_RETAINED_SUBAGENT_TTL_MS, ORPHAN_SWEEP_MIN_AGE_MS) +
+  60000
 
 const fixtureDir = mkdtempSync(join(tmpdir(), "intercom-sweep-"))
 writeFileSync(
@@ -221,30 +233,119 @@ test("a failed list sweeps nothing and does not throw", async () => {
 
 // ---- the default -------------------------------------------------------------
 
-test("retention off: no list call, no delete, at the sweep and at plugin load", async () => {
-  const { client, deleted, listCalls } = makeClient({ sessions: [session("ses_leaked")] })
-  assert.deepEqual(await sweepOrphanedSubagentSessions(client, { now }), [])
-  await plugin(ctxFor(client))
-  assert.deepEqual(listCalls, [], "the shipped default costs not one call")
-  assert.deepEqual(deleted, [])
+test("the shipped default sweeps too: a leftover is listed and deleted", async () => {
+  // No settings file at all, so maxRetainedSubagents is 0. The leftovers this
+  // clears are not held sessions but the ones a process that stopped mid-run
+  // left behind, and those exist at every setting.
+  const { client, deleted, listCalls } = makeClient({
+    sessions: [session("ses_leaked", { time: { created: now, updated: now - DEFAULT_OLD_ENOUGH } })],
+  })
+  assert.deepEqual(await sweepOrphanedSubagentSessions(client, { directory: fixtureDir, now }), [
+    "ses_leaked",
+  ])
+  assert.deepEqual(deleted, ["ses_leaked"])
+  assert.deepEqual(listCalls, [{ query: { directory: fixtureDir } }])
 })
 
-test("retention only switched on live, without a restart: still no sweep", async () => {
-  // The tool map was resolved without `reuse`, so this process retains nothing
-  // and has nothing of its own to clean up either.
-  withSettings({ maxRetainedSubagents: 0 })
-  const { client, listCalls } = makeClient({ sessions: [session("ses_leaked")] })
+test("the shipped default sweeps at plugin load", async () => {
+  const { client, deleted, listCalls } = makeClient({
+    sessions: [session("ses_leaked", { time: { created: now, updated: now - DEFAULT_OLD_ENOUGH } })],
+  })
   await plugin(ctxFor(client))
+  await nextImmediate()
+  assert.deepEqual(listCalls, [{ query: { directory: fixtureDir } }])
+  assert.deepEqual(deleted, ["ses_leaked"])
+})
+
+test("retention only switched on live, without a restart: the sweep runs either way", async () => {
+  // The tool map was resolved without `reuse`, so this process retains nothing.
+  // The sweep no longer reads that latch at all — what it clears was never a
+  // retention phenomenon.
+  withSettings({ maxRetainedSubagents: 0 })
+  const { client, deleted } = makeClient({ sessions: [session("ses_leaked")] })
   // a live edit: the file moves, the load-time latch does not
   writeFileSync(settingsFile, JSON.stringify({ maxRetainedSubagents: 3, retainedSubagentTtlMs: TTL }))
   dropSettingsCacheKeepingLatch()
-  assert.deepEqual(await sweepOrphanedSubagentSessions(client, { now }), [])
-  assert.deepEqual(listCalls, [])
+  assert.deepEqual(await sweepOrphanedSubagentSessions(client, { directory: fixtureDir, now }), [
+    "ses_leaked",
+  ])
+  assert.deepEqual(deleted, ["ses_leaked"])
+})
+
+// ---- the age bound and its floor ---------------------------------------------
+
+test("a retention window too short to bound anything cannot pull the age bound down", async () => {
+  // Twice a one-second window is two seconds. With a one-minute watchdog the
+  // independent floor remains the stronger bound, so a session idle for five
+  // minutes may still be a running one — the floor keeps the sweep off it.
+  withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: 1000, maxSubagentAgeMs: 60000 })
+  const sessions = [
+    session("ses_recent", { time: { created: now, updated: now - 300000 } }),
+    session("ses_at_floor", { time: { created: now, updated: now - ORPHAN_SWEEP_MIN_AGE_MS } }),
+    session("ses_past_floor", {
+      time: { created: now, updated: now - ORPHAN_SWEEP_MIN_AGE_MS - 1000 },
+    }),
+  ]
+  const { client, deleted } = makeClient({ sessions })
+  const swept = await sweepOrphanedSubagentSessions(client, { directory: fixtureDir, now })
+  assert.deepEqual(swept, ["ses_past_floor"], "the floor holds, and the bound is exclusive")
+  assert.deepEqual(deleted, ["ses_past_floor"])
+})
+
+test("the sweep bound follows a longer configured watchdog window", async () => {
+  const watchdogAge = 120000
+  const bound = Math.max(
+    ORPHAN_SWEEP_TTL_FACTOR * 1000,
+    ORPHAN_SWEEP_MIN_AGE_MS,
+    ORPHAN_SWEEP_WATCHDOG_FACTOR * watchdogAge,
+  )
+  withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: 1000, maxSubagentAgeMs: watchdogAge })
+  const sessions = [
+    session("ses_at_watchdog_bound", {
+      time: { created: now, updated: now - bound },
+    }),
+    session("ses_past_watchdog_bound", {
+      time: { created: now, updated: now - bound - 1 },
+    }),
+  ]
+  const { client, deleted } = makeClient({ sessions })
+  assert.deepEqual(
+    await sweepOrphanedSubagentSessions(client, { directory: fixtureDir, now }),
+    ["ses_past_watchdog_bound"],
+  )
+  assert.deepEqual(deleted, ["ses_past_watchdog_bound"])
+})
+
+test("a disabled watchdog leaves foreign sessions standing", async () => {
+  withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: 1000, maxSubagentAgeMs: 0 })
+  const { client, deleted, listCalls } = makeClient({ sessions: [session("ses_live_foreign")] })
+  assert.deepEqual(await sweepOrphanedSubagentSessions(client, { directory: fixtureDir, now }), [])
+  assert.deepEqual(listCalls, [], "no finite age can make a live session safe to delete")
+  assert.deepEqual(deleted, [])
+})
+
+test("a retention window longer than the floor sets the bound itself", async () => {
+  // 2 × TTL is well past ORPHAN_SWEEP_MIN_AGE_MS, so the floor is inert and the
+  // window governs: a session older than the floor but younger than 2 × TTL
+  // survives.
+  withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: TTL })
+  const sessions = [
+    session("ses_past_floor_only", {
+      time: { created: now, updated: now - ORPHAN_SWEEP_MIN_AGE_MS - 1000 },
+    }),
+    session("ses_past_window"),
+  ]
+  const { client, deleted } = makeClient({ sessions })
+  assert.deepEqual(
+    await sweepOrphanedSubagentSessions(client, { directory: fixtureDir, now }),
+    ["ses_past_window"],
+  )
+  assert.deepEqual(deleted, ["ses_past_window"])
 })
 
 // ---- the marker the sweep identifies by --------------------------------------
 
-test("retention off: the spawned session's title is byte-identical to what it was", async () => {
+test("the spawned session's title carries the marker at the shipped default", async () => {
   const created = []
   const { client } = makeClient()
   client.session.create = async (opts) => {
@@ -253,10 +354,11 @@ test("retention off: the spawned session's title is byte-identical to what it wa
   }
   const hooks = await plugin(ctxFor(client))
   await hooks.tool.spawn.execute({ agent: "planner", prompt: "do the thing" }, toolCtx)
-  assert.equal(created[0].title, "planner: do the thing")
+  assert.equal(created[0].title, `${SUBAGENT_SESSION_TITLE_MARKER}planner: do the thing`)
+  assert.equal(created[0].parentID, PRIMARY, "still a child of its orchestrator")
 })
 
-test("retention offered: the spawned session's title carries the marker", async () => {
+test("retention offered: the spawned session's title carries the same marker", async () => {
   withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: TTL })
   const created = []
   const { client } = makeClient()
@@ -271,4 +373,31 @@ test("retention offered: the spawned session's title carries the marker", async 
   )
   assert.equal(created[0].title, `${SUBAGENT_SESSION_TITLE_MARKER}the thing`)
   assert.equal(created[0].parentID, PRIMARY, "still a child of its orchestrator")
+})
+
+test("a session spawned by this process is swept by the next one", async () => {
+  // The end-to-end property the marker exists for, at the shipped default: the
+  // title spawn writes is exactly what the sweep of a LATER process attributes
+  // by. The registry entry is dropped first — a fresh process has none.
+  const created = []
+  const { client } = makeClient()
+  client.session.create = async (opts) => {
+    created.push(opts?.body)
+    return { data: { id: "ses_sub1" } }
+  }
+  const hooks = await plugin(ctxFor(client))
+  await hooks.tool.spawn.execute({ agent: "planner", prompt: "do the thing" }, toolCtx)
+  const leftover = {
+    id: "ses_sub1",
+    parentID: created[0].parentID,
+    title: created[0].title,
+    time: { created: now, updated: now - DEFAULT_OLD_ENOUGH },
+  }
+
+  resetState()
+  const { client: next, deleted } = makeClient({ sessions: [leftover] })
+  assert.deepEqual(await sweepOrphanedSubagentSessions(next, { directory: fixtureDir, now }), [
+    "ses_sub1",
+  ])
+  assert.deepEqual(deleted, ["ses_sub1"])
 })

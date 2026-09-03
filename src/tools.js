@@ -563,16 +563,21 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       reservePendingSpawn(toolCtx.sessionID)
       reservedSpawn = true
 
-      // The title carries the plugin's marker wherever this process can ever
-      // retain a subagent, and only there. It is what the bootstrap sweep
-      // (teardown.js) attributes a leftover session by after a plugin reload
-      // dropped the registry that held the same knowledge; a process that never
-      // retains leaks nothing and its titles stay byte-identical. The tool-call
-      // metadata title below is a UI label, not an identity, and stays clean.
+      // The title carries the plugin's marker on EVERY subagent session this
+      // process creates, whatever the settings say. It is the only thing that
+      // attributes an opencode session to this plugin from the outside: the
+      // registry lives in this process's memory and says nothing to a reader
+      // outside it, and nothing in the session record itself names its creator.
+      // Two readers depend on that attribution and neither has anything to do
+      // with retention — the bootstrap sweep (teardown.js), which identifies a
+      // leftover session after a plugin reload dropped the registry that held
+      // the same knowledge, and the TUI, which shows a subagent row for as long
+      // as its session stands. The tool-call metadata title below is a UI
+      // label, not an identity, and stays clean.
       const title = args.description || `${args.agent}: ${args.prompt.slice(0, 60)}`
       const sessionID = await createChildSession(client, {
         parentID: toolCtx.sessionID,
-        title: retentionOffered() ? SUBAGENT_SESSION_TITLE_MARKER + title : title,
+        title: SUBAGENT_SESSION_TITLE_MARKER + title,
         directory,
       })
       if (!sessionID) return { output: "Failed to create subagent session." }

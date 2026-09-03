@@ -89,13 +89,13 @@ export default async (ctx) => {
   // posts to and reaches the plugin only here, in the factory context.
   setServerUrl(serverUrl)
 
-  // The reload leak: a subagent session that was being HELD for a follow-up
-  // when this plugin was last unloaded is still there, and nothing in opencode
-  // will ever delete it — no session TTL, no garbage collection, and no
-  // shutdown hook the plugin could have used. One pass at load deletes what can
-  // only be such a leftover; it makes no call at all where retention is off,
-  // which is the shipped default. The sweep starts on the next event-loop turn
-  // so its session.list request cannot hold up this factory or server bootstrap.
+  // The reload leak: a subagent session this plugin left behind when it was
+  // last unloaded — one being HELD for a follow-up, or one still running when
+  // the process went — is still there, and nothing in opencode will ever delete
+  // it: no session TTL, no garbage collection, and no shutdown hook the plugin
+  // could have used. One pass at load deletes what can only be such a leftover,
+  // at every setting. The sweep starts on the next event-loop turn so its
+  // session.list request cannot hold up this factory or server bootstrap.
   setImmediate(() => {
     void sweepOrphanedSubagentSessions(client, { directory }).catch((err) => {
       log("bootstrap sweep failed", err?.message ?? String(err))

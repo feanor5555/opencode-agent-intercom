@@ -51,11 +51,14 @@ import {
   isAbortArmed,
 } from "./abort-arming.ts";
 import {
+  type SessionChild,
   type SubagentEntry,
   type SubagentStatus,
-  holdFinishedRow,
+  assembleSubagentEntry,
+  decideRow,
   isRetained,
-  reapRetained,
+  readSessionChildren,
+  reapRows,
   retainedRowNote,
   statusMarker,
   statusRank,
@@ -313,7 +316,9 @@ function formatTokens(tokens: number | undefined): string {
 }
 
 // The colour of a row's dot. A held row is finished but not gone, so it takes
-// neither the green of a completed run nor the colour of a running one.
+// neither the green of a completed run nor the colour of a running one; a
+// waiting row is work in flight that opencode reports no run fiber for, so it
+// is muted rather than green — green would read as done.
 function statusColor(status: SubagentStatus, theme: TuiThemeCurrent) {
   switch (status) {
     case "busy":
@@ -326,7 +331,7 @@ function statusColor(status: SubagentStatus, theme: TuiThemeCurrent) {
     case "error":
       return theme.error;
     default:
-      return theme.success;
+      return theme.textMuted;
   }
 }
 
@@ -704,22 +709,33 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     }
   };
 
-  // Sessions whose children we track. Seeded from the slot context and from
-  // session.created events that carry a parentID.
-  const primaryIDs = new Set<string>();
-  // Sessions the user aborted from this panel — server status alone does not
-  // distinguish "aborted" from "idle", so we remember it locally.
+  // Sessions whose children the poll asks for. Seeded from this panel's own
+  // route/slot session and from nothing else: being somebody's parent is what a
+  // subagent that spawns a subagent does, and it must not promote that subagent
+  // into an orchestrator — that is what used to make a nested parent's row
+  // vanish and freeze.
+  const polledIDs = new Set<string>();
+  // Every session ever listed as another session's child, or created carrying a
+  // parentID. This is the panel's answer to "is this a subagent", and it
+  // mirrors the rule the server half applies (src/registry.js: a session that
+  // has a registry entry is a subagent, and a subagent is never a primary).
+  // It only grows: what has once been spawned as a subagent stays one.
+  const subagentIDs = new Set<string>();
+  // The children the last COMPLETED poll pass listed. Used by the idle handler,
+  // which must not treat a session the server still lists as one that is over.
+  let listed: ReadonlySet<string> = new Set<string>();
+  // Sessions the user aborted from this panel — the server status alone does
+  // not distinguish an abort from any other ending, so we remember it locally.
   const aborted = new Set<string>();
-  // Subagents that have finished and been removed, each with the row it was
-  // when it went — kept so a later poll does not re-add them as fresh entries,
-  // and so a row the plugin turns out to be holding can be taken back exactly
-  // as it stood, under its own handle.
+  // Subagents whose row has gone, each with the row it was when it went — kept
+  // so an optimistic insert does not re-add a session that is over, and so a
+  // row the poll lists again comes back exactly as it stood, under its own
+  // handle rather than a fresh one.
   //
-  // Taking one back is the ordinary course, not an edge case: a run's
-  // `session.idle` reaches the panel before the plugin has decided anything
-  // about it, so the row goes first and the published retention arrives after.
-  // A row whose session is gone stays here for good — nothing publishes a
-  // retention on a session that no longer exists.
+  // A row lands here only where something said the subagent is over: opencode
+  // published `session.deleted` for it, the reap found it gone from a completed
+  // pass, or it was dropped from this panel. The poll no longer files rows here
+  // on a status it happened to observe.
   const finished = new Map<string, SubagentEntry | undefined>();
   const handleCounters = new Map<string, number>();
   let disposed = false;
@@ -733,18 +749,41 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     return `${agent}#${n}`;
   };
 
+  // Whether this session is an orchestrator: one this panel has been rendered
+  // for that was never spawned as a subagent. It is the one test for "never a
+  // row of its own", and both the poll and the row list take it, so the two
+  // cannot drift apart. A subagent the user has navigated into is polled for
+  // its own children and still keeps its row in its parent's list.
+  const isPrimarySession = (sessionID: string): boolean =>
+    polledIDs.has(sessionID) && !subagentIDs.has(sessionID);
+
+  // Whether a row that is going counts as one more completed run. A held row
+  // was counted when its run ended and is not counted again when the session it
+  // was held on finally goes; an abort is not a completed run either.
+  const countableDone = (
+    entry: SubagentEntry | undefined,
+    sessionID: string,
+  ): boolean =>
+    entry !== undefined && !isRetained(entry) && !aborted.has(sessionID);
+
+  // Take one row out of a rows map and remember it as gone, with the selection
+  // and the local abort mark cleared. The map is either the panel's own state
+  // or the one a poll pass is building.
+  const retireRow = (
+    rows: Map<string, SubagentEntry>,
+    sessionID: string,
+  ): void => {
+    finished.set(sessionID, rows.get(sessionID));
+    rows.delete(sessionID);
+    aborted.delete(sessionID);
+    if (selectedID() === sessionID) setSelectedID(undefined);
+  };
+
   // A row built from a poll's child record alone, for a session this panel
-  // holds no memory of. Only the re-adoption path uses it: a subagent whose
-  // published retention the poll found while the panel had nothing of its own
-  // about it, e.g. after the panel was rebuilt inside the plugin's window.
+  // holds no memory of: a subagent spawned before this panel existed, or one
+  // whose row was rebuilt inside the plugin's retention window.
   const rowFromChild = (
-    child: {
-      id: string;
-      parentID?: string;
-      agent?: string;
-      title?: string;
-      time?: { created?: number; updated?: number };
-    },
+    child: SessionChild,
     primaryID: string,
   ): SubagentEntry => {
     const agent = child.agent ?? "subagent";
@@ -754,8 +793,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       agent,
       handle: nextHandle(agent),
       title: child.title ?? "",
-      status: "idle",
-      wasBusy: true,
+      status: "waiting",
+      wasBusy: false,
       createdAt: child.time?.created ?? Date.now(),
       updatedAt: child.time?.updated ?? Date.now(),
       ctxTokens: undefined,
@@ -785,128 +824,83 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       // moment.
       const now = Date.now();
 
-      for (const primaryID of primaryIDs) {
+      for (const parentID of polledIDs) {
         const childRes = await api.client.session.children({
-          sessionID: primaryID,
+          sessionID: parentID,
         });
-        const children = (childRes?.data ?? []) as Array<{
-          id: string;
-          parentID?: string;
-          agent?: string;
-          title?: string;
-          time?: { created?: number; updated?: number };
-        }>;
-        for (const child of children) {
+        const childRead = readSessionChildren(childRes);
+        if (childRead.kind === "missing") {
+          polledIDs.delete(parentID);
+          continue;
+        }
+        if (childRead.kind === "error") {
+          throw new Error("session.children failed");
+        }
+        for (const child of childRead.children) {
           seen.add(child.id);
-          const stampedStatus = statuses[child.id]?.type;
-          // Already finished and removed. It stays gone unless the plugin has
-          // published a retention for it since: the row was dropped when its
-          // run ended, because at that moment nothing said it was being held,
-          // and the stamp on its title is that statement arriving. A session
-          // that is running again is not adopted here — the reuse that started
-          // it is a live run and belongs to the branch below.
-          if (finished.has(child.id)) {
-            const readopted =
-              stampedStatus === "busy" || stampedStatus === "retry"
-                ? undefined
-                : holdFinishedRow(
-                    finished.get(child.id) ?? rowFromChild(child, primaryID),
-                    { aborted: aborted.has(child.id), title: child.title },
-                    now,
-                  );
-            if (!readopted) {
-              next.delete(child.id);
-              continue;
-            }
-            readopted.title = child.title ?? readopted.title;
-            readopted.updatedAt = child.time?.updated ?? readopted.updatedAt;
-            finished.delete(child.id);
-            next.set(child.id, readopted);
-            continue;
-          }
-          // A primary (orchestrator) session is never a subagent row, even if
-          // it shows up as a child of some higher-level session.
-          if (primaryIDs.has(child.id)) continue;
+          // Listed as somebody's child: a subagent, now and for good.
+          subagentIDs.add(child.id);
+          // An orchestrator session is never a subagent row. It can only be one
+          // this panel is rendered for that has never been spawned as a
+          // subagent — being a parent no longer qualifies.
+          if (isPrimarySession(child.id)) continue;
 
+          // The row this session already has, or the one it went with. Either
+          // way it is the row that comes back: a session the poll still lists
+          // is one the plugin has not finished with, so a row filed away by an
+          // event the pass has since disproved is taken back under its own
+          // handle rather than re-created as a fresh subagent.
           const existing = next.get(child.id);
-          const agent = child.agent ?? existing?.agent ?? "subagent";
-          const serverStatus = statuses[child.id]?.type;
-          const running = serverStatus === "busy" || serverStatus === "retry";
-          const wasBusy = (existing?.wasBusy ?? false) || running;
+          const remembered = existing ?? finished.get(child.id);
+          finished.delete(child.id);
+          const base = remembered ?? rowFromChild(child, parentID);
 
-          // A subagent that has run (or was aborted) and is no longer running
-          // is finished. It is held only where the plugin published a retention
-          // on this session's title: it is then idle, alive and re-promptable
-          // until the window that title names. Everywhere else — no stamp, so
-          // no retention, or an abort, which is never held — the row is dropped
-          // exactly as it always was.
-          if (!running && (wasBusy || aborted.has(child.id))) {
-            const held = holdFinishedRow(
-              existing,
-              { aborted: aborted.has(child.id), title: child.title },
-              now,
-            );
-            if (held) {
-              // The run is over either way, so it counts as done once — on the
-              // transition into the held state, not on every poll that finds
-              // the row still held.
-              if (!isRetained(existing)) completedDelta += 1;
-              held.title = child.title ?? held.title;
-              held.updatedAt = child.time?.updated ?? held.updatedAt;
-              next.set(child.id, held);
-              continue;
-            }
-            if (existing && !aborted.has(child.id)) completedDelta += 1;
-            next.delete(child.id);
-            finished.set(child.id, existing);
-            aborted.delete(child.id);
-            continue;
-          }
+          const decision = decideRow({
+            sessionID: child.id,
+            aborted: aborted.has(child.id),
+            title: child.title,
+            serverStatus: statuses[child.id]?.type,
+          });
 
           // Upgrade the placeholder handle once the real agent name is known
           // (session.created often fires before the agent is assigned).
+          const agent = child.agent ?? base.agent;
           const handle =
-            existing && existing.agent !== "subagent"
-              ? existing.handle
-              : existing && agent !== "subagent"
+            base.agent !== "subagent"
+              ? base.handle
+              : agent !== "subagent"
                 ? nextHandle(agent)
-                : (existing?.handle ?? nextHandle(agent));
+                : base.handle;
 
-          const status: SubagentStatus = aborted.has(child.id)
-            ? "aborted"
-            : serverStatus === "retry"
-              ? "retry"
-              : running
-                ? "busy"
-                : "idle";
-          const entry: SubagentEntry = {
-            sessionID: child.id,
-            parentID: child.parentID ?? primaryID,
-            agent,
-            handle,
-            title: child.title ?? existing?.title ?? "",
-            status,
-            wasBusy,
-            createdAt: child.time?.created ?? existing?.createdAt ?? Date.now(),
-            updatedAt: child.time?.updated ?? existing?.updatedAt ?? Date.now(),
-            ctxTokens: existing?.ctxTokens,
-            lastTokenFetch: existing?.lastTokenFetch ?? 0,
-          };
-          next.set(child.id, entry);
+          // A run that has ended in a hold counts as done once, on the
+          // transition into the held state — not on every poll that finds the
+          // row still held, and not again when the held session finally goes.
+          if (decision.kind === "hold" && !isRetained(existing)) {
+            completedDelta += 1;
+          }
+
+          next.set(
+            child.id,
+            assembleSubagentEntry(base, child, parentID, decision, handle),
+          );
         }
       }
-      // Every way a retention ends has the plugin delete the opencode session,
-      // so a held row whose session is no longer among its primary's children
-      // is a retention that is over — and a row that outlives the session it
-      // names is worse than no row. This pass completed, so `seen` is the whole
-      // truth about what the server still lists; a poll that threw never gets
-      // here and never reaps. The dropped rows are not counted as done: they
-      // were counted when their run ended.
-      for (const sessionID of reapRetained(next.values(), { seen }, now)) {
-        finished.set(sessionID, next.get(sessionID));
-        next.delete(sessionID);
-        aborted.delete(sessionID);
-        if (selectedID() === sessionID) setSelectedID(undefined);
+      // This pass completed, so `seen` is the whole truth about what the server
+      // still lists under the sessions it asked about — and a session the
+      // server no longer lists is one the plugin has deleted, which it does at
+      // every ending it controls. A row out of the pass's reach (a child of a
+      // session nobody asked about) was not disproved and stays. `session.
+      // deleted` normally gets there first; this is the backstop for the event
+      // that was missed, and for the held row whose window ran out with the
+      // session still standing.
+      listed = seen;
+      for (const sessionID of reapRows(
+        next.values(),
+        { seen, polled: polledIDs },
+        now,
+      )) {
+        if (countableDone(next.get(sessionID), sessionID)) completedDelta += 1;
+        retireRow(next, sessionID);
       }
 
       if (completedDelta > 0) {
@@ -954,16 +948,21 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     }, REFRESH_DEBOUNCE_MS);
   };
 
-  const trackPrimary = (sessionID: string | undefined): void => {
-    // Hard gate: only real session IDs (ses_*) may enter primary tracking.
-    // Some event payloads carry a parentID that is NOT a session — e.g.
+  // Put one session into the set whose children the poll asks for. Only this
+  // panel's own route/slot session is ever passed in: a session seen as some
+  // other session's parent is a subagent that has spawned, and asking for its
+  // children is the slot's business when the panel is rendered for it. Deleted
+  // sessions leave this set on their event or on the next 404 response.
+  const trackPolled = (sessionID: string | undefined): void => {
+    // Hard gate: only real session IDs (ses_*) may enter the polled set. Some
+    // event payloads carry a parentID that is NOT a session — e.g.
     // message.updated's info.parentID is the previous MESSAGE (msg_*). A
-    // non-session ID in primaryIDs makes the fallback poll call
+    // non-session ID in polledIDs makes the fallback poll call
     // session.children({sessionID: "msg_…"}) forever, which the server
     // rejects with a schema error on every tick.
     if (!sessionID || !sessionID.startsWith("ses_")) return;
-    if (primaryIDs.has(sessionID)) return;
-    primaryIDs.add(sessionID);
+    if (polledIDs.has(sessionID)) return;
+    polledIDs.add(sessionID);
     scheduleRefresh();
   };
 
@@ -971,8 +970,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     api.route.navigate("session", { sessionID: id });
   };
 
-  // Ending a retention from the panel. A held subagent is idle, so there is no
-  // run to abort: what ends the hold is the session going away, which is also
+  // Ending a retention from the panel. A held subagent has finished, so there
+  // is no run to abort: what ends the hold is the session going away, which is also
   // what every plugin-side end of a retention does. The plugin notices on its
   // own — a reuse against a session with no messages left refuses and drops the
   // handle — and the row goes as soon as the poll stops listing the session.
@@ -995,10 +994,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       message: `Dropped ${entry?.handle ?? id} — its session is gone`,
     });
     const next = new Map(subagents());
-    next.delete(id);
+    retireRow(next, id);
     setSubagents(next);
-    finished.set(id, entry);
-    if (selectedID() === id) setSelectedID(undefined);
     scheduleRefresh();
   };
 
@@ -1010,7 +1007,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     }
     aborted.add(id);
     try {
-      await api.client.session.abort({ sessionID: id });
+      await api.client.session.abort(
+        { sessionID: id },
+        { throwOnError: true },
+      );
       api.ui.toast({
         variant: "warning",
         message: `Aborted ${entry?.handle ?? id}`,
@@ -1021,6 +1021,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       // to the parent and frees the slot. Posting our own here would produce a
       // second, contradictory wake notice.
     } catch {
+      // A failed request did not start a teardown, so the local mark must not
+      // turn the next poll into a false aborted row.
+      aborted.delete(id);
       api.ui.toast({ variant: "error", message: `Abort failed for ${id}` });
     }
     scheduleRefresh();
@@ -1094,25 +1097,25 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const pulse = setInterval(() => setPulseOn((p) => !p), PULSE_TICK_MS);
   const poll = setInterval(() => void refresh(), POLL_FALLBACK_MS);
 
-  // Event payloads differ per type; we only opportunistically read parentID
-  // off session.* events, so narrow defensively from unknown.
-  const onSessionEvent = (event: unknown): void => {
-    const info = (event as { properties?: { info?: unknown } }).properties
-      ?.info as { parentID?: string } | undefined;
-    if (info && typeof info.parentID === "string") trackPrimary(info.parentID);
+  // A session changed, errored or changed status. Nothing is read off the
+  // payload: which sessions the poll asks about is the slot's business alone,
+  // and what a session's status is the poll reads for itself. The event is a
+  // trigger and nothing more.
+  const onSessionEvent = (): void => {
     scheduleRefresh();
   };
 
   // message.updated's info is a Message whose parentID points at the previous
-  // MESSAGE in the chain (msg_*), not at a session — it must never feed the
-  // primary tracking. Only use it as a refresh trigger.
+  // MESSAGE in the chain (msg_*), not at a session. Only a refresh trigger.
   const onMessageEvent = (): void => {
     scheduleRefresh();
   };
 
-  // A child session being created is a subagent spawn. Insert it optimistically
-  // as "busy" so even a fast-finishing subagent is marked wasBusy and gets
-  // cleaned up when it goes idle, instead of lingering as a stale entry.
+  // A child session being created is a subagent spawn: the row appears at once,
+  // waiting, which is what it is — the plugin forks the run only after the
+  // session exists, so opencode reports no run in it yet. The parent is NOT
+  // taken as an orchestrator here; a session that spawns is a subagent doing
+  // its work and keeps its own row.
   const onSessionCreated = (event: unknown): void => {
     const info = (event as {
       properties?: {
@@ -1129,12 +1132,12 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       scheduleRefresh();
       return;
     }
-    trackPrimary(info.parentID);
+    subagentIDs.add(info.id);
     const current = subagents();
     if (
       !current.has(info.id) &&
       !finished.has(info.id) &&
-      !primaryIDs.has(info.id)
+      !isPrimarySession(info.id)
     ) {
       const agent = info.agent ?? "subagent";
       const next = new Map(current);
@@ -1144,8 +1147,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         agent,
         handle: nextHandle(agent),
         title: info.title ?? "",
-        status: "busy",
-        wasBusy: true,
+        status: "waiting",
+        wasBusy: false,
         createdAt: info.time?.created ?? Date.now(),
         updatedAt: info.time?.updated ?? Date.now(),
         ctxTokens: undefined,
@@ -1156,26 +1159,52 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     scheduleRefresh();
   };
 
-  // A subagent going idle means its run is done — act on it right away instead
-  // of waiting for the next poll. The row goes, whether or not retention is
-  // switched on: at this moment nothing says this subagent is being held, and
-  // the plugin has not even decided it yet — it decides on the reply and on the
-  // context the run ended at, both of which it is still fetching. A retention
-  // reaches the panel the way every other fact about a session does, on the
-  // next poll, and the row is taken back then under the handle it went with.
-  // Claiming it here would be the panel inventing a state it cannot see.
+  // `session.idle` says one thing and one thing only: opencode has no run fiber
+  // in that session at this moment. It is not the end of a subagent — a nested
+  // spawn, a run not yet forked and a retained session being re-prompted are
+  // all idle — so it no longer takes a row. The row ends where the plugin ends
+  // the subagent, which is `session.deleted`.
+  //
+  // What stays here is the route: if the user is viewing this session and it is
+  // about to be torn down, the view has to be moved off it before the session
+  // goes, otherwise the route points at a missing session and the TUI falls
+  // back to the start page, losing the orchestrator chat. The jump is held back
+  // for a session the last completed poll still listed with no retention stamp
+  // on it: that is a subagent the plugin has not finished with, and yanking the
+  // user out of a session that goes on working is the same mistake as dropping
+  // its row.
   const onSessionIdle = (event: unknown): void => {
     const sessionID = (event as { properties?: { sessionID?: string } })
       .properties?.sessionID;
     const entry = sessionID ? subagents().get(sessionID) : undefined;
-    if (sessionID && entry && entry.wasBusy) {
-      // If the user is currently viewing this subagent, jump back to the
-      // parent before the main plugin deletes the session server-side —
-      // otherwise the route points at a now-missing session and the TUI
-      // falls back to the start page, losing the orchestrator chat. This runs
-      // for a held row too: whether the plugin retains this subagent or deletes
-      // it is decided on its reply and on the context it ended at, neither of
-      // which the panel can see, so the route is put somewhere safe either way.
+    if (sessionID && entry && entry.parentID) {
+      const stillWorking = listed.has(sessionID) && !isRetained(entry);
+      if (
+        !stillWorking &&
+        api.route.current.name === "session" &&
+        (api.route.current.params?.sessionID as string | undefined) ===
+          sessionID
+      ) {
+        api.route.navigate("session", { sessionID: entry.parentID });
+      }
+    }
+    scheduleRefresh();
+  };
+
+  // The plugin deletes a subagent's session at every ending it controls
+  // (teardownSubagent), so this event is the end of the row — the one signal
+  // that means "finished" rather than "not running just now". A row the panel
+  // never had is nothing to do here; a row that is still on screen goes, and
+  // the route follows it out if the user was inside that session.
+  const onSessionDeleted = (event: unknown): void => {
+    const sessionID = (event as { properties?: { info?: { id?: string } } })
+      .properties?.info?.id;
+    // A deleted session cannot produce children again. Remove it before the
+    // next fallback pass, including when no row was present for the event.
+    if (sessionID) polledIDs.delete(sessionID);
+    const current = sessionID ? subagents() : undefined;
+    const entry = sessionID && current ? current.get(sessionID) : undefined;
+    if (sessionID && current && entry) {
       if (
         entry.parentID &&
         api.route.current.name === "session" &&
@@ -1184,18 +1213,11 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       ) {
         api.route.navigate("session", { sessionID: entry.parentID });
       }
-      const next = new Map(subagents());
-      next.delete(sessionID);
+      const done = countableDone(entry, sessionID);
+      const next = new Map(current);
+      retireRow(next, sessionID);
       setSubagents(next);
-      finished.set(sessionID, entry);
-      if (!aborted.has(sessionID)) setCompletedCount((count) => count + 1);
-      aborted.delete(sessionID);
-      if (selectedID() === sessionID) setSelectedID(undefined);
-      // A poll follows, and it is what puts the row back where the plugin
-      // publishes a retention for it. Counted done either way: the run ended
-      // here, and a row taken back later is not counted a second time.
-      scheduleRefresh();
-      return;
+      if (done) setCompletedCount((count) => count + 1);
     }
     scheduleRefresh();
   };
@@ -1204,6 +1226,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     api.event.on("session.created", onSessionCreated),
     api.event.on("session.updated", onSessionEvent),
     api.event.on("session.idle", onSessionIdle),
+    api.event.on("session.deleted", onSessionDeleted),
     api.event.on("session.error", onSessionEvent),
     api.event.on("session.status", onSessionEvent),
     api.event.on("message.updated", onMessageEvent),
@@ -1233,7 +1256,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
           (api.route.current.name === "session"
             ? (api.route.current.params?.sessionID as string | undefined)
             : undefined);
-        trackPrimary(sessionID);
+        trackPolled(sessionID);
         return (
           <SubagentPanel
             sessionID={sessionID ?? ""}
@@ -1247,7 +1270,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             armedAbort={armedAbort}
             onDisarmAbort={disarmAbort}
             completedCount={completedCount}
-            isPrimary={(id: string) => primaryIDs.has(id)}
+            isPrimary={isPrimarySession}
             onOpen={openSubagent}
             onAbort={requestAbort}
             maxSubagents={maxSubagents}
@@ -1358,6 +1381,12 @@ function SubagentPanel(props: {
   onResetLlmAgent: () => void;
   theme: TuiThemeCurrent;
 }) {
+  // Every subagent of the session this panel is rendered for, whatever its
+  // status. A row is here because its session is still listed as a child of
+  // this one and the plugin has not finished with it — including a subagent
+  // that has spawned a subagent of its own, which is a parent and a subagent
+  // at the same time. `isPrimary` excludes only an orchestrator session, i.e.
+  // one this panel is rendered for that was never spawned as a subagent.
   const rows = createMemo(() => {
     const own = [...props.subagents().values()].filter(
       (entry) =>
@@ -1378,10 +1407,11 @@ function SubagentPanel(props: {
   // to the orchestrator that spawned it.
   const currentSub = createMemo(() => props.subagents().get(props.sessionID));
 
-  // A finished subagent is removed from `rows` unless it is being held, so
-  // "running" counts the live list, "retained" the held rows still in it, and
-  // "done" is the cumulative count of subagents whose run has completed — the
-  // held ones included, their run being over.
+  // A subagent is removed from `rows` when the plugin has finished with it, so
+  // "running" counts the rows opencode reports a run fiber for, "retained" the
+  // held rows, and "done" is the cumulative count of subagents whose run has
+  // completed — the held ones included, their run being over. A waiting row is
+  // neither: it is work in flight that opencode has no run fiber for.
   const counts = createMemo(() => {
     let running = 0;
     let retained = 0;

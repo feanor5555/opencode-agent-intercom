@@ -31,7 +31,7 @@ import {
   chargeNestedSpawn,
 } from "../src/registry.js"
 import { resetTurnNotices } from "../src/hooks.js"
-import { teardownSubagent } from "../src/teardown.js"
+import { teardownSubagent, SUBAGENT_SESSION_TITLE_MARKER } from "../src/teardown.js"
 import { _stopWatchdogForTests } from "../src/watchdog.js"
 import { resetProjectContext } from "../src/project.js"
 import { createPermissionGuard, resetPermissionGuardCache } from "../src/config.js"
@@ -668,12 +668,19 @@ test("session.created under a SUBAGENT parent auto-registers the child", async (
   await hooks.event({
     event: {
       type: "session.created",
-      properties: { info: { id: "ses_nested", parentID: "ses_planner", title: "look it up" } },
+      properties: {
+        info: {
+          id: "ses_nested",
+          parentID: "ses_planner",
+          title: `${SUBAGENT_SESSION_TITLE_MARKER}look it up`,
+        },
+      },
     },
   })
   const entry = entryForSession("ses_nested")
   assert.ok(entry, "without this the child is untracked until upsertSession, and the watchdog exemption does not hold")
   assert.equal(entry.parentID, "ses_planner")
+  assert.equal(entry.prompt, "look it up", "the title marker must not become the task text")
 })
 
 test("session.created under a parent the plugin does not know is still ignored", async () => {

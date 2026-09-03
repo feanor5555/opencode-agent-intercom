@@ -58,6 +58,10 @@ writeFileSync(join(fixtureDir, "src", "main.js"), "// fixture")
 const settingsFile = join(fixtureDir, "agent-intercom.json")
 setSettingsPath(settingsFile)
 
+// Retention minutes are floored, so keep fixture creation and rendering at the
+// same instant instead of letting setup time cross a minute boundary.
+const FIXED_NOW = Date.parse("2026-01-01T00:00:00.000Z")
+
 after(() => rmSync(fixtureDir, { recursive: true, force: true }))
 
 function withSettings(values) {
@@ -65,7 +69,8 @@ function withSettings(values) {
   resetSettings()
 }
 
-beforeEach(() => {
+beforeEach((t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: FIXED_NOW })
   _stopWatchdogForTests()
   resetState()
   resetTurnNotices()

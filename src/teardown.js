@@ -23,7 +23,7 @@ import {
   forgetSessionDirectory,
   updateSessionTitle,
 } from "./client.js"
-import { getSettings, retentionActive, retentionOffered } from "./settings.js"
+import { getSettings, retentionOffered } from "./settings.js"
 import { settleChildWaiter, liveChildSessionIDs } from "./childwait.js"
 import { aborted, pendingSessionQuiescence } from "./state.js"
 import { log, errMsg } from "./log.js"
@@ -375,14 +375,16 @@ export async function dropRetainedSubagents(client, { keep = 0, label = "retenti
   return victims
 }
 
-// The fixed prefix every subagent session title carries in a process that can
-// retain one (tools.js spawn, gated on retentionOffered). It is the ONLY thing
-// that attributes an opencode session to this plugin from the outside: the
-// registry lives in the plugin's own process and is empty in a fresh one, and
-// nothing in the session record itself says who created it.
+// The fixed prefix EVERY subagent session title carries (tools.js spawn,
+// unconditionally). It is the ONLY thing that attributes an opencode session to
+// this plugin from the outside: the registry lives in the plugin's own process
+// and is empty in a fresh one, and nothing in the session record itself says
+// who created it.
 //
-// Not written where retention was off at load — a process that never retains
-// leaks nothing, so at the shipped default no title moves a byte.
+// Written whatever the settings say. Retention is one reader of the marker, not
+// its owner: the bootstrap sweep below and the TUI's subagent row both need to
+// tell this plugin's sessions from everything else on the same database, and
+// neither becomes able to do so only because a session may be held.
 export const SUBAGENT_SESSION_TITLE_MARKER = "[agent-intercom] "
 
 // The retention state, published on that same session title.
@@ -438,9 +440,9 @@ export function readRetentionStamp(title) {
 //
 // Best-effort and silent about failure beyond the log: the state is a reading
 // aid, and a title that could not be written costs a reader the row it would
-// have shown, never a wrong one. Skipped entirely where this process cannot
-// retain at all — its titles carry no marker, and at the shipped default
-// (`maxRetainedSubagents = 0`) not one byte of a title moves.
+// have shown, never a wrong one. Published only when retention is offered
+// (`retentionOffered()`); every spawned session carries the marker regardless
+// of whether retention is active.
 export async function publishRetentionState(client, sessionID, { retainedUntil = 0 } = {}) {
   if (!retentionOffered()) return false
   if (!client || !sessionID) return false
@@ -449,15 +451,26 @@ export async function publishRetentionState(client, sessionID, { retainedUntil =
   return updateSessionTitle(client, sessionID, title)
 }
 
-// A retained session outlives only its own window; a plugin reload inside that
-// window outlives it forever. opencode has no session TTL and no garbage
-// collection, and the plugin gets no shutdown hook, so a reload while a
-// subagent is retained leaves that opencode session behind with nothing left in
+// A subagent session outlives the process that made it whenever that process
+// stops without tearing it down: a plugin reload inside a retention window, and
+// equally an opencode instance that died mid-run with subagents still going.
+// opencode has no session TTL and no garbage collection, and the plugin gets no
+// shutdown hook, so either way that session is left behind with nothing left in
 // the world that would ever delete it.
 //
 // This is the counter-move, run once at plugin load: list the project's
 // sessions and delete the ones that can only be this plugin's own leftovers.
 export const ORPHAN_SWEEP_TTL_FACTOR = 2
+
+// The independent floor under the sweep's age bound. The watchdog-derived
+// bound below is normally the stronger protection, but this floor keeps a very
+// short configured inactivity window from making the sweep too eager.
+export const ORPHAN_SWEEP_MIN_AGE_MS = 600000
+
+// Leave a wide margin after the inactivity watchdog would reap a silent
+// subagent. The sweep can see sessions from another opencode process, so its
+// age bound must be later than that process's own watchdog deadline.
+export const ORPHAN_SWEEP_WATCHDOG_FACTOR = 8
 
 // A session is deleted only when EVERY one of these holds. Each is a positive
 // statement about the session, not the absence of a reason to keep it — a
@@ -477,16 +490,28 @@ export const ORPHAN_SWEEP_TTL_FACTOR = 2
 //     registry entry. At bootstrap the registry is empty and every candidate
 //     passes, but the sweep must stay safe wherever it is called from;
 //  5. it has been idle for longer than ORPHAN_SWEEP_TTL_FACTOR × the retention
-//     window. A running subagent is reaped by the inactivity watchdog at 90 s
-//     and a retained one at its TTL, so nothing alive is ever this old; a
-//     second opencode instance's subagent on the same database is either far
-//     younger than this or already an orphan itself.
+//     window, and in no case less than ORPHAN_SWEEP_MIN_AGE_MS or
+//     ORPHAN_SWEEP_WATCHDOG_FACTOR × maxSubagentAgeMs. A running subagent is
+//     reaped by the inactivity watchdog before that latter bound, and a
+//     retained one at its TTL, so nothing alive is ever this old; a second
+//     opencode instance's subagent on the same database is either far younger
+//     than this or already an orphan itself.
 //
-// Gated on retentionActive: a process that does not retain has nothing of its
-// own to clean up, and at the shipped default the list call is never made.
+// The sweep is unavailable when the inactivity watchdog is disabled. Without
+// that watchdog there is no finite age at which an untracked foreign session
+// can be known to be dead, so deleting one would turn an explicit user setting
+// into a live-session kill. A positive watchdog setting still leaves the sweep
+// useful, including for the shipped default. Every spawned session carries the
+// marker (tools.js), so the sweep can attribute them there as well; the cost at
+// load is one session.list call.
 export async function sweepOrphanedSubagentSessions(client, { directory, now = Date.now() } = {}) {
-  if (!retentionActive()) return []
-  const minAgeMs = ORPHAN_SWEEP_TTL_FACTOR * getSettings().retainedSubagentTtlMs
+  const settings = getSettings()
+  if (settings.maxSubagentAgeMs <= 0) return []
+  const minAgeMs = Math.max(
+    ORPHAN_SWEEP_TTL_FACTOR * settings.retainedSubagentTtlMs,
+    ORPHAN_SWEEP_MIN_AGE_MS,
+    ORPHAN_SWEEP_WATCHDOG_FACTOR * settings.maxSubagentAgeMs,
+  )
   const sessions = await listSessions(client, { directory })
   const parents = new Set()
   for (const s of sessions) if (typeof s?.parentID === "string" && s.parentID) parents.add(s.parentID)

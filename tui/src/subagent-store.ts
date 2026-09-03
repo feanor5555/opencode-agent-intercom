@@ -1,18 +1,28 @@
 // The state behind the sidebar's subagent rows: the shape of a row, the status
-// it carries, and the rules that decide when a finished row is held and when it
-// goes.
+// it carries, when a row exists at all, and when it goes.
 //
-// The panel's model has always been "idle means gone": a subagent that stops
-// running is dropped from the list and never re-added, because the plugin
-// deletes its opencode session the moment the run ends. Retention breaks
-// exactly that premise. A retained subagent is idle, its session is alive, and
+// A row lives while its session is listed among its parent's children and
+// carries no retention stamp. That is the whole existence rule, and it is a
+// statement the plugin makes rather than one the panel observes: every ending
+// the plugin controls runs through `teardownSubagent` (src/teardown.js), which
+// deletes the opencode session, so "still listed" IS "the plugin has not
+// finished with it". A session that is listed and unstamped is work in flight,
+// whatever `GET /session/status` says about it.
+//
+// The opencode session status is therefore a display detail and nothing more.
+// It cannot carry a row's lifetime: opencode spells `idle` as ABSENCE from
+// `GET /session/status`, and a subagent is not `busy` between its session
+// being created and its run being forked, nor while it is blocked inside a
+// nested spawn of its own, nor while a retained session is being re-prompted.
+// A row that vanished on any of those would be a subagent that is working with
+// nothing on screen to say so.
+//
+// Retention breaks the existence rule in the one direction the plugin owns: a
+// retained subagent is finished, its session is deliberately kept alive, and
 // the orchestrator can put a follow-up to it with reuse() until its window runs
-// out — so its row stays, marked `retained`, the same word the plugin's `list`
-// tool and its per-turn snapshot block use for the same state.
-//
-// Whether a given finished subagent is really being held is the plugin's
-// decision and no reader of the opencode server can work it out: it is taken on
-// the subagent's reply, on the context the run ended at, on capacity, and on
+// out. Whether a given subagent is really being held is the plugin's decision
+// and no reader of the opencode server can work it out: it is taken on the
+// subagent's reply, on the context the run ended at, on capacity, and on
 // whether retention is in effect in that plugin process at all. So the panel
 // does not infer it. The plugin PUBLISHES it, on the one field of a subagent
 // session it owns — the title, which already carries its marker and which every
@@ -32,21 +42,29 @@
 // the TTL reap, the capacity eviction, the drop at a handoff or at an endless
 // freeze, an abort, a reuse that fails — has the plugin delete the opencode
 // session, so a held row lives exactly as long as its session is still listed
-// among its primary's children. `reapRetained` is where that is enforced, and
-// it is what keeps a row from outliving the session it names.
+// among its parent's children. `reapRows` is where that is enforced, for held
+// and unheld rows alike, and it is what keeps a row from outliving the session
+// it names.
 //
-// With `maxRetainedSubagents` at its default of 0 nothing here is reachable:
-// the plugin stamps no title, `holdFinishedRow` drops on its first term, no row
-// ever carries `retained`, and `reapRetained` has nothing to iterate.
+// With `maxRetainedSubagents` at its default of 0 nothing about retention is
+// reachable: the plugin stamps no title, `decideRow` never returns a hold, no
+// row ever carries `retained`, and `reapRows` reaps on the session's absence
+// alone.
 
 import { readRetentionStamp } from "./subagent-label.ts";
 
-// The status of one row. `retained` is the one status that does not mirror an
-// opencode session status: a retained session's opencode status is `idle`, and
-// stays `idle` for as long as it is held.
+// The status of one row. It says what the row SHOWS, never whether the row
+// exists — that is decided by the session still being listed.
+//
+// `waiting` is a subagent that is listed and unstamped while opencode reports
+// no run in its session: its run has not been forked yet, or it is blocked
+// inside a nested spawn of its own. It is working, and it is not `idle` in any
+// sense the panel may paint as finished. `retained` is the one status that does
+// not mirror an opencode session status at all: a retained session's opencode
+// status is `idle`, and stays `idle` for as long as it is held.
 export type SubagentStatus =
   | "busy"
-  | "idle"
+  | "waiting"
   | "retry"
   | "aborted"
   | "error"
@@ -59,9 +77,11 @@ export interface SubagentEntry {
   handle: string;
   title: string;
   status: SubagentStatus;
-  // True once the subagent has been observed running. A subagent that has run
-  // and is no longer running is finished: it is dropped from the panel, or held
-  // as `retained` where retention is switched on.
+  // True once the subagent has been observed running. Nothing decides on it:
+  // a row's lifetime is the session being listed, and a subagent that has been
+  // seen running is in no different position from one whose run has not been
+  // forked yet. It is kept because it is the one record the panel has of a row
+  // ever having been busy.
   wasBusy: boolean;
   createdAt: number;
   updatedAt: number;
@@ -102,31 +122,122 @@ export function retentionEnabled(settings: RetentionSettings): boolean {
   return settings.maxRetainedSubagents > 0;
 }
 
-// The row that replaces a finished one, or undefined where the row is to be
-// dropped as it always was.
+// One session child as returned by the opencode API. The panel only uses the
+// fields needed to identify and display the row.
+export interface SessionChild {
+  id: string;
+  parentID?: string;
+  agent?: string;
+  title?: string;
+  time?: { created?: number; updated?: number };
+}
+
+// The outcome of one session.children request. A missing parent is different
+// from a failed request: the former can leave the poll set, while the latter
+// must leave the current rows untouched.
+export type SessionChildrenRead =
+  | { kind: "ok"; children: SessionChild[] }
+  | { kind: "missing" }
+  | { kind: "error" };
+
+export function readSessionChildren(result: unknown): SessionChildrenRead {
+  if (typeof result !== "object" || result === null) {
+    return { kind: "error" };
+  }
+  const response = result as {
+    data?: unknown;
+    error?: unknown;
+    response?: { status?: unknown };
+  };
+  if (response.error !== undefined && response.error !== null) {
+    return response.response?.status === 404
+      ? { kind: "missing" }
+      : { kind: "error" };
+  }
+  if (!Array.isArray(response.data)) return { kind: "error" };
+  return { kind: "ok", children: response.data as SessionChild[] };
+}
+
+// One pass's observation of one listed child session: everything the panel
+// knows about it at that moment, and nothing it inferred.
+export interface RowObservation {
+  // The session id, carried so a decision can be traced back to its row.
+  sessionID: string;
+  // Aborted from this panel. The opencode status alone does not distinguish an
+  // abort from any other ending, so the panel remembers its own aborts.
+  aborted: boolean;
+  // The session title exactly as the server lists it, retention stamp and all.
+  title: string | undefined;
+  // What `GET /session/status` said about this session on this pass: "busy",
+  // "retry", or undefined — which is how opencode spells idle, the map holding
+  // only the sessions that have a run fiber alive.
+  serverStatus: string | undefined;
+}
+
+// What one observation makes of a row. Two outcomes and no third: a row that
+// is shown with a status, or a row that is held on the plugin's published
+// window. There is no "retire" outcome, because no single observation ever
+// ends a row — a row ends when its session stops being listed (`reapRows`) or
+// when opencode publishes `session.deleted` for it.
+export type RowDecision =
+  | { kind: "row"; status: SubagentStatus }
+  | { kind: "hold"; retainedUntil: number };
+
+// The decision, in strict precedence:
 //
-// Held only where the plugin published a retention for this very session, on
-// its title, and the panel did not abort it. Everything else is dropped: a
-// title with no stamp is a subagent the plugin is not holding — over its reuse
-// ceiling, a `Blocked:` reply, a nested child, an error ending, or retention
-// simply off — and the row goes at once rather than being claimed as held until
-// a later poll withdraws it. An abort is never held either: the plugin refuses
-// retention for every ending that is not a clean idle, and the session is being
-// deleted.
+//   1. an abort this panel asked for — the session is being torn down and the
+//      row says so until it goes;
+//   2. `busy` / `retry` from opencode — a run fiber is alive in the session and
+//      takes precedence over a retention stamp left by a failed title clear;
+//   3. a retention stamp on the title — the plugin has published that this
+//      subagent is finished and is being held;
+//   4. everything else: waiting. Listed, unstamped, no run fiber — the run has
+//      not been forked yet, or the subagent is blocked in a nested spawn. It
+//      keeps its row.
 //
-// Idempotent on a row that is already held, and on a re-adopted one: the window
-// comes from the stamp on every call, so a poll that revisits a held row reads
-// the same figure rather than restarting a window of its own.
-export function holdFinishedRow(
-  entry: SubagentEntry | undefined,
-  opts: { aborted: boolean; title: string | undefined },
-  now: number = Date.now(),
-): SubagentEntry | undefined {
-  if (!entry) return undefined;
-  if (opts.aborted) return undefined;
-  const retainedUntil = readRetentionStamp(opts.title);
-  if (retainedUntil === undefined) return undefined;
-  return { ...entry, status: "retained", retainedUntil };
+// Steps 2 and 4 pick a status and never a lifetime: whichever of them applies,
+// the answer is a row. A live run outranks a stale retention stamp because reuse
+// makes the session busy before it can replace that stamp.
+export function decideRow(observation: RowObservation): RowDecision {
+  if (observation.aborted) return { kind: "row", status: "aborted" };
+  if (observation.serverStatus === "busy") {
+    return { kind: "row", status: "busy" };
+  }
+  if (observation.serverStatus === "retry") {
+    return { kind: "row", status: "retry" };
+  }
+  const retainedUntil = readRetentionStamp(observation.title);
+  if (retainedUntil !== undefined) return { kind: "hold", retainedUntil };
+  return { kind: "row", status: "waiting" };
+}
+
+// Apply one row decision to the session record from a completed poll. Fields
+// not present in the child response remain from the existing row, while a
+// status decision clears a retention window that no longer applies.
+export function assembleSubagentEntry(
+  base: SubagentEntry,
+  child: SessionChild,
+  parentID: string,
+  decision: RowDecision,
+  handle: string,
+): SubagentEntry {
+  const running =
+    decision.kind === "row" &&
+    (decision.status === "busy" || decision.status === "retry");
+  return {
+    ...base,
+    sessionID: child.id,
+    parentID: child.parentID ?? parentID,
+    agent: child.agent ?? base.agent,
+    handle,
+    title: child.title ?? base.title,
+    status: decision.kind === "hold" ? "retained" : decision.status,
+    retainedUntil:
+      decision.kind === "hold" ? decision.retainedUntil : undefined,
+    wasBusy: base.wasBusy || running,
+    createdAt: child.time?.created ?? base.createdAt,
+    updatedAt: child.time?.updated ?? base.updatedAt,
+  };
 }
 
 // Whether a row is being held.
@@ -174,28 +285,36 @@ export function retentionExpired(
   return (entry.retainedUntil ?? 0) + graceMs < now;
 }
 
-// The held rows a completed poll has disproved, as their session ids.
+// The rows a completed poll has disproved, as their session ids.
 //
-// `seen` is every child the poll actually listed, across every primary it
-// asked; it is only meaningful when the whole poll went through, so this is
-// called on a completed pass and never on a partial one. A held row whose
-// session is no longer among those children is a retention that has ended,
-// whichever way it ended, and the row goes. A held row whose session is still
-// there but whose published window ran out long ago is the second case:
-// something is still holding the session open that is not this retention.
+// `seen` is every child the poll actually listed, across every parent it asked;
+// it is only meaningful when the whole poll went through, so this is called on
+// a completed pass and never on a partial one. `polled` is the set of sessions
+// the pass asked for children of, and it is what makes an absence evidence: a
+// row whose parent was never asked about was not disproved by the pass, it was
+// simply out of its reach, so it stays. That is the nested case — a child of a
+// subagent the panel is not currently rendering for is listed by nobody in the
+// pass, and reaping it would delete a row for work that is running.
 //
-// Rows that are not held are left alone: they are the panel's live work, and
-// the poll that lists them is the same one that keeps them up to date.
-export function reapRetained(
+// Within that reach the rule is the existence rule and holds for every row,
+// held or not: a session no longer listed among its parent's children is one
+// the plugin has finished with — `teardownSubagent` deletes the session at
+// every ending the plugin controls — and the row goes. `session.deleted` says
+// the same thing sooner, and this is the pass that catches what the event
+// missed.
+//
+// The second case is a held row alone: its session is still listed, but its
+// published window ran out longer ago than the grace allows, so nothing is
+// holding it any more.
+export function reapRows(
   rows: Iterable<SubagentEntry>,
-  opts: { seen: ReadonlySet<string> },
+  opts: { seen: ReadonlySet<string>; polled: ReadonlySet<string> },
   now: number = Date.now(),
 ): string[] {
   const gone: string[] = [];
   for (const entry of rows) {
-    if (!isRetained(entry)) continue;
     if (!opts.seen.has(entry.sessionID)) {
-      gone.push(entry.sessionID);
+      if (opts.polled.has(entry.parentID)) gone.push(entry.sessionID);
       continue;
     }
     if (retentionExpired(entry, now)) gone.push(entry.sessionID);
@@ -204,7 +323,9 @@ export function reapRetained(
 }
 
 // The dot in front of a row. A held row is neither running nor gone, so it
-// carries neither the pulsing dot of a run nor the tick of a finished one.
+// carries neither the pulsing dot of a run nor the tick of a finished one; a
+// waiting row carries no tick either, because it is not finished — it is a run
+// that has not been forked yet or a subagent blocked in a spawn of its own.
 export function statusMarker(status: SubagentStatus): string {
   switch (status) {
     case "busy":
@@ -218,12 +339,12 @@ export function statusMarker(status: SubagentStatus): string {
     case "error":
       return "✕";
     default:
-      return "✓";
+      return "◌";
   }
 }
 
-// Where a row sorts: running work first, then what is still settling, then the
-// held rows, which are finished and are the only rows that stay. Rows of equal
+// Where a row sorts: running work first, then what is waiting or settling, then
+// the held rows, which are the only finished rows on the list. Rows of equal
 // rank keep their spawn order.
 export function statusRank(status: SubagentStatus): number {
   if (status === "busy" || status === "retry") return 0;

@@ -3,14 +3,15 @@
 // as `retained`, and when a held row goes again.
 //
 // The one rule the whole file turns on: a row is held because the PLUGIN says
-// so, never because the panel worked it out. The plugin publishes the state on
+// so, never because the panel worked it out. When a row EXISTS at all is a
+// different rule and is pinned in test/tui-sidebar-rows.test.js. The plugin publishes the state on
 // the subagent session's title — `[retained:<epoch ms the window ends>]` after
-// its own marker — and `holdFinishedRow` reads that and nothing else. So:
+// its own marker — and `decideRow` combines it with the local abort mark and
+// the server's live status. So:
 //
 //   - retention off (maxRetainedSubagents = 0, the shipped default) — no
-//     session is ever stamped, so the panel behaves exactly as it did before
-//     retention existed: a finished subagent disappears the moment its run
-//     ends;
+//     session is ever stamped, so no row is ever held and every row ends the
+//     ordinary way, with its session;
 //   - a retention the plugin REFUSED — over the reuse ceiling, a `Blocked:`
 //     reply, a nested child, an error ending, or retention switched on in the
 //     settings file after the plugin process latched it off — carries no stamp
@@ -37,11 +38,13 @@ import {
 } from "../tui/src/abort-arming.ts"
 import {
   RETENTION_EXPIRY_GRACE_MS,
-  holdFinishedRow,
+  assembleSubagentEntry,
+  decideRow,
   isRetained,
-  reapRetained,
+  reapRows,
   retainedMinutesLeft,
   retainedMsLeft,
+  readSessionChildren,
   retainedRowNote,
   retentionEnabled,
   retentionExpired,
@@ -72,7 +75,7 @@ function row(over = {}) {
     agent: "researcher",
     handle: "researcher#1",
     title: HELD_TITLE,
-    status: "idle",
+    status: "waiting",
     wasBusy: true,
     createdAt: NOW - 30000,
     updatedAt: NOW,
@@ -82,12 +85,95 @@ function row(over = {}) {
   }
 }
 
+// What the poll observes about one listed child session.
+function seenAs(over = {}) {
+  return { sessionID: "ses_child", aborted: false, title: HELD_TITLE, serverStatus: undefined, ...over }
+}
+
 // A row already held on the published window, as a poll would have left it.
 function heldRow(over = {}) {
-  const held = holdFinishedRow(row(over), { aborted: false, title: HELD_TITLE }, NOW)
-  assert.ok(held, "fixture: the stamped title must hold")
-  return held
+  const decision = decideRow(seenAs())
+  assert.equal(decision.kind, "hold", "fixture: the stamped title must hold")
+  return {
+    ...assembleSubagentEntry(
+      row(),
+      { id: "ses_child", parentID: "ses_primary", title: HELD_TITLE },
+      "ses_primary",
+      decision,
+      "researcher#1",
+    ),
+    ...over,
+  }
 }
+
+// The two poll sets, for the reap: everything below holds rows whose parent is
+// the one session the pass asked about.
+const POLLED = new Set(["ses_primary"])
+
+// -------------------------------------------------------- poll result and row
+
+test("session.children responses preserve the difference between missing and failed", () => {
+  assert.deepEqual(readSessionChildren({ data: [] }), {
+    kind: "ok",
+    children: [],
+  })
+  assert.deepEqual(
+    readSessionChildren({ error: { name: "NotFoundError" }, response: { status: 404 } }),
+    { kind: "missing" },
+  )
+  assert.deepEqual(
+    readSessionChildren({ error: { name: "ServerError" }, response: { status: 503 } }),
+    { kind: "error" },
+  )
+  assert.deepEqual(readSessionChildren({ data: undefined, error: undefined }), {
+    kind: "error",
+  })
+})
+
+test("row assembly applies the decision and keeps existing row state", () => {
+  const base = row({
+    status: "retained",
+    retainedUntil: UNTIL,
+    ctxTokens: 12000,
+  })
+  const child = {
+    id: "ses_child",
+    parentID: "ses_nested",
+    agent: "coder",
+    title: "updated title",
+    time: { created: NOW - 1000, updated: NOW + 1000 },
+  }
+  const running = assembleSubagentEntry(
+    base,
+    child,
+    "ses_primary",
+    { kind: "row", status: "busy" },
+    "coder#2",
+  )
+  assert.deepEqual(running, {
+    ...base,
+    sessionID: "ses_child",
+    parentID: "ses_nested",
+    agent: "coder",
+    handle: "coder#2",
+    title: "updated title",
+    status: "busy",
+    retainedUntil: undefined,
+    wasBusy: true,
+    createdAt: NOW - 1000,
+    updatedAt: NOW + 1000,
+  })
+  const held = assembleSubagentEntry(
+    running,
+    { ...child, title: HELD_TITLE },
+    "ses_primary",
+    { kind: "hold", retainedUntil: UNTIL },
+    "coder#2",
+  )
+  assert.equal(held.status, "retained")
+  assert.equal(held.retainedUntil, UNTIL)
+  assert.equal(held.ctxTokens, 12000)
+})
 
 // ---------------------------------------------------------------- retention off
 
@@ -96,15 +182,20 @@ test("retention off: the feature is not enabled at the shipped default", () => {
   assert.equal(retentionEnabled(RETENTION_ON), true)
 })
 
-test("retention off: a finished subagent is dropped, exactly as before", () => {
-  // Nothing retains, so nothing stamps a title, so nothing is held.
-  const held = holdFinishedRow(row({ title: PLAIN_TITLE }), { aborted: false, title: PLAIN_TITLE }, NOW)
-  assert.equal(held, undefined)
+test("retention off: an unstamped subagent is a row, never a hold", () => {
+  // Nothing retains, so nothing stamps a title, so nothing is held — and the
+  // row stays, because the session is still listed. What ends it is the
+  // session going away, not this decision.
+  assert.deepEqual(decideRow(seenAs({ title: PLAIN_TITLE })), {
+    kind: "row",
+    status: "waiting",
+  })
 })
 
-test("retention off: no row is ever held, so no row is ever reaped", () => {
-  const rows = [row({ status: "idle" }), row({ sessionID: "ses_other", status: "busy" })]
-  assert.deepEqual(reapRetained(rows, { seen: new Set() }, NOW), [])
+test("retention off: rows the poll still lists are left alone", () => {
+  const rows = [row({ status: "waiting" }), row({ sessionID: "ses_other", status: "busy" })]
+  const seen = new Set(["ses_child", "ses_other"])
+  assert.deepEqual(reapRows(rows, { seen, polled: POLLED }, NOW), [])
 })
 
 // ------------------------------------------- the refusals the panel is told of
@@ -112,13 +203,13 @@ test("retention off: no row is ever held, so no row is ever reaped", () => {
 test("a refused retention is never held, whatever the settings file says", () => {
   // Every plugin-side refusal looks the same from here, and that is the point:
   // over the reuse ceiling, a `Blocked:` reply, a nested child, an error
-  // ending, or a process that latched retention off at load. The session is
-  // being deleted and its title was never stamped — so the row goes at once
-  // instead of being claimed as held until a later poll withdraws the claim.
+  // ending, or a process that latched retention off at load. Without a stamp
+  // the row is never painted as held — it stays an ordinary row until the
+  // plugin deletes the session.
   for (const title of [PLAIN_TITLE, "researcher: plain", "", undefined]) {
     assert.equal(
-      holdFinishedRow(row({ title: PLAIN_TITLE }), { aborted: false, title }, NOW),
-      undefined,
+      decideRow(seenAs({ title })).kind,
+      "row",
       `an unstamped title must not hold: ${JSON.stringify(title)}`,
     )
   }
@@ -128,49 +219,61 @@ test("a stamp on a title that is not this plugin's is not a retention", () => {
   // The marker is what attributes a session to this plugin. Without it the
   // text is a user's own title that happens to read like a stamp.
   assert.equal(
-    holdFinishedRow(row(), { aborted: false, title: `[retained:${UNTIL}] hand-typed` }, NOW),
-    undefined,
+    decideRow(seenAs({ title: `[retained:${UNTIL}] hand-typed` })).kind,
+    "row",
   )
 })
 
 // ----------------------------------------------------------------- retention on
 
 test("retention on: a subagent the plugin published is held on its window", () => {
-  const held = holdFinishedRow(row(), { aborted: false, title: HELD_TITLE }, NOW)
-  assert.ok(held)
+  const decision = decideRow(seenAs())
+  assert.deepEqual(decision, { kind: "hold", retainedUntil: UNTIL })
+  // The row the panel builds from it keeps everything it already carried.
+  const held = heldRow()
   assert.equal(held.status, "retained")
   assert.equal(isRetained(held), true)
   assert.equal(held.retainedUntil, UNTIL, "the plugin's window, not one measured here")
-  // Everything the row already carried survives the transition.
   assert.equal(held.handle, "researcher#1")
   assert.equal(held.agent, "researcher")
   assert.equal(held.wasBusy, true)
   assert.equal(held.ctxTokens, 12000)
 })
 
-test("retention on: holding a held row again does not move its window", () => {
-  const held = heldRow()
-  const again = holdFinishedRow(held, { aborted: false, title: HELD_TITLE }, NOW + 120000)
-  assert.ok(again)
-  assert.equal(again.retainedUntil, UNTIL, "the window is read, never restarted")
+test("retention on: deciding a held row again does not move its window", () => {
+  // The window is read off the title on every pass, so a poll that revisits a
+  // held row names the same moment rather than starting a window of its own.
+  assert.deepEqual(decideRow(seenAs()), decideRow(seenAs()))
+  assert.equal(heldRow().retainedUntil, UNTIL)
+})
+
+test("retention on: a live run outranks a stale retention stamp", () => {
+  assert.deepEqual(decideRow(seenAs({ serverStatus: "busy" })), {
+    kind: "row",
+    status: "busy",
+  })
+  assert.deepEqual(decideRow(seenAs({ serverStatus: "retry" })), {
+    kind: "row",
+    status: "retry",
+  })
+  assert.deepEqual(decideRow(seenAs({ serverStatus: undefined })), {
+    kind: "hold",
+    retainedUntil: UNTIL,
+  })
 })
 
 test("retention on: an aborted subagent is never held", () => {
-  assert.equal(holdFinishedRow(row(), { aborted: true, title: HELD_TITLE }, NOW), undefined)
-})
-
-test("a row the panel has nothing of is not held on its own", () => {
-  // Re-adopting a published retention builds the row first and holds that; the
-  // bare undefined stays a refusal, so no caller can conjure a row out of a
-  // title alone.
-  assert.equal(holdFinishedRow(undefined, { aborted: false, title: HELD_TITLE }, NOW), undefined)
+  assert.deepEqual(decideRow(seenAs({ aborted: true })), {
+    kind: "row",
+    status: "aborted",
+  })
 })
 
 // ------------------------------------------------- the held row goes again
 
 test("a held row whose session is still listed stays", () => {
   assert.deepEqual(
-    reapRetained([heldRow()], { seen: new Set(["ses_child"]) }, NOW + 60000),
+    reapRows([heldRow()], { seen: new Set(["ses_child"]), polled: POLLED }, NOW + 60000),
     [],
   )
 })
@@ -181,7 +284,11 @@ test("a held row whose session is gone is reaped — whatever ended the retentio
   // delete the session, and the session's absence from the poll is the one
   // signal the panel acts on.
   assert.deepEqual(
-    reapRetained([heldRow()], { seen: new Set(["ses_someone_else"]) }, NOW + 60000),
+    reapRows(
+      [heldRow()],
+      { seen: new Set(["ses_someone_else"]), polled: POLLED },
+      NOW + 60000,
+    ),
     ["ses_child"],
   )
 })
@@ -191,22 +298,22 @@ test("a held row is reaped once its published window is past the grace", () => {
   const seen = new Set(["ses_child"])
   const justInside = UNTIL + RETENTION_EXPIRY_GRACE_MS
   assert.equal(retentionExpired(held, justInside), false)
-  assert.deepEqual(reapRetained([held], { seen }, justInside), [])
+  assert.deepEqual(reapRows([held], { seen, polled: POLLED }, justInside), [])
   const past = justInside + 1
   assert.equal(retentionExpired(held, past), true)
-  assert.deepEqual(reapRetained([held], { seen }, past), ["ses_child"])
+  assert.deepEqual(reapRows([held], { seen, polled: POLLED }, past), ["ses_child"])
 })
 
 test("retentionExpired says nothing about a row that is not held", () => {
-  assert.equal(retentionExpired(row({ status: "idle" }), NOW + TTL_MS * 10), false)
+  assert.equal(retentionExpired(row({ status: "waiting" }), NOW + TTL_MS * 10), false)
 })
 
-test("several held rows are reaped in one pass", () => {
+test("several rows the pass no longer lists are reaped at once", () => {
   const a = heldRow()
   const b = heldRow({ sessionID: "ses_b", handle: "coder#1" })
   const live = row({ sessionID: "ses_live", status: "busy" })
   assert.deepEqual(
-    reapRetained([a, b, live], { seen: new Set(["ses_live"]) }, NOW + 1000),
+    reapRows([a, b, live], { seen: new Set(["ses_live"]), polled: POLLED }, NOW + 1000),
     ["ses_child", "ses_b"],
   )
 })
@@ -240,7 +347,7 @@ test("a held row carries its own marker, distinct from every other status", () =
   const markers = {
     busy: statusMarker("busy"),
     retry: statusMarker("retry"),
-    idle: statusMarker("idle"),
+    waiting: statusMarker("waiting"),
     aborted: statusMarker("aborted"),
     error: statusMarker("error"),
     retained: statusMarker("retained"),
@@ -253,9 +360,9 @@ test("a held row carries its own marker, distinct from every other status", () =
 })
 
 test("held rows sort below running work and below what is still settling", () => {
-  assert.ok(statusRank("busy") < statusRank("idle"))
+  assert.ok(statusRank("busy") < statusRank("waiting"))
   assert.ok(statusRank("retry") < statusRank("retained"))
-  assert.ok(statusRank("idle") < statusRank("retained"))
+  assert.ok(statusRank("waiting") < statusRank("retained"))
   assert.ok(statusRank("aborted") < statusRank("retained"))
 })
 

@@ -107,6 +107,7 @@ import {
   teardownSubagent,
   dropRetainedSubagents,
   signalSessionIdle,
+  SUBAGENT_SESSION_TITLE_MARKER,
 } from "./teardown.js"
 import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
 import { completionNotice, errorNotice, denialLoopNotice, isBlockedResult } from "./notices.js"
@@ -1305,7 +1306,11 @@ function onSessionCreated({ info }) {
   if (!info?.id || !info.parentID) return
   if (!isPrimary(info.parentID) && !entryForSession(info.parentID)) return
   const existed = Boolean(entryForSession(info.id))
-  const entry = upsertSession(info.id, { prompt: info.title ?? "", parentID: info.parentID })
+  const title = typeof info.title === "string" ? info.title : ""
+  const prompt = title.startsWith(SUBAGENT_SESSION_TITLE_MARKER)
+    ? title.slice(SUBAGENT_SESSION_TITLE_MARKER.length)
+    : title
+  const entry = upsertSession(info.id, { prompt, parentID: info.parentID })
   if (!existed) log("auto-registered subagent", { handle: entry.handle, sessionID: info.id })
 }
 

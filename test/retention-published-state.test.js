@@ -281,7 +281,7 @@ test("a refused retention publishes nothing: a nested child", async () => {
   assert.equal(readRetentionStamp(titleOf(titles, "ses_nested")), undefined)
 })
 
-test("at the shipped default nothing is retained and no title is ever written", async () => {
+test("at the shipped default nothing is retained and no stamp is ever published", async () => {
   const { ctx, created, deleted, titles } = makeCtx({ messages: assistantReply("THE RESULT") })
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
@@ -293,7 +293,11 @@ test("at the shipped default nothing is retained and no title is ever written", 
   assert.equal(countRetainedSubagents(), 0)
   const written = titles.filter((t) => t.sessionID === sessionID)
   assert.equal(written.length, 1, "the create, and nothing after it")
-  assert.equal(written[0].title, "planner: x", "not even the marker at the default")
+  // The marker goes on unconditionally — it is what attributes the session to
+  // this plugin from outside, and nothing about it says the session is held.
+  // The retention stamp is the part that stays away at the default.
+  assert.equal(written[0].title, `${SUBAGENT_SESSION_TITLE_MARKER}planner: x`)
+  assert.equal(readRetentionStamp(written[0].title), undefined, "no stamp at the default")
 })
 
 // ---- the reuse ends a retention, and says so --------------------------------

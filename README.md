@@ -243,9 +243,13 @@ decision, never through the one that stopped).
 
 At every opencode restart the plugin also runs a one-shot **bootstrap sweep**
 of its own opencode sessions — anything left over from an earlier process
-whose title is this plugin's marker and that has been idle for longer than
-twice the retention window is deleted, so a retention that survived a
-process crash or a manual restart does not leak into the new instance.
+whose title carries this plugin's marker, that is not its parent's parent,
+that this process knows nothing about, and that has been idle for longer
+than `ORPHAN_SWEEP_TTL_FACTOR * retainedSubagentTtlMs` (with a ten-minute
+floor) is deleted. The marker identifies the session as one this plugin
+created; sessions that cannot be attributed with certainty are left standing.
+The sweep runs at the shipped default too, so a leaked session from a crashed
+plugin or opencode process does not linger.
 
 When a subagent hits a problem its spawn prompt did not cover — a blocker, a
 missing precondition, an ambiguity, a tool that keeps failing, a decision

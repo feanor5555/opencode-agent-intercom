@@ -97,10 +97,15 @@ return {
 }
 ```
 
-(`src/tools.js:623-635`). `nestedSpawnOutput` (`src/tools.js:210-249`) renders every
+(`src/tools.js:623-635`). `nestedSpawnOutput` (`src/tools.js:254-301`) renders every
 ending — `completed`, `error`, `aborted`, `timeout`, `expired`, `ended`, `abandoned`
 — because the caller asked a question inside a tool call and has to be told either
-the answer or why there is none.
+the answer or why there is none. An ending that is not `completed` but still carries
+`result` — today `timeout`, whose text the watchdog rescues off the session before it
+deletes it — renders that text as a fragment of an unfinished run: the cause sentence
+stays in front of it and "this is not the answer you asked for" behind it, so a
+half-run cannot be read as a finished reply. Without `result` the wording is the bare
+"You have no result from it" as before.
 
 A parent blocked inside its `spawn` tool call never goes idle: the session falling
 quiet around a tool call that has not returned is not the one-shot reply the idle
@@ -141,8 +146,9 @@ settle closes both.
 
 The seven exports of `src/childwait.js`:
 
-- `CHILD_OUTCOMES` (`src/childwait.js:39-46`) — the seven statuses, frozen, every
-  value one a parent can act on.
+- `CHILD_OUTCOMES` (`src/childwait.js:40-55`) — the seven statuses, frozen, every
+  value one a parent can act on. Two carry text: `completed` a reply, `timeout`
+  whatever was rescued before the teardown.
 - `CHILD_WAITER_TIMEOUT_FACTOR = 4` (`src/childwait.js:57-64`) and
   `childWaiterTimeoutMs(maxAgeMs)` (`src/childwait.js:68-72`) — the waiter's own
   ceiling, as a multiple of `maxSubagentAgeMs`. `maxSubagentAgeMs = 0` disables the
@@ -171,7 +177,7 @@ module's header promises:
 | `src/hooks.js:929` (`onSessionIdle`) | `hasLiveChildren(sessionID)` | An idle parent with live children holds; no premature (empty) result to the grandparent, no free slot, no cascading `DELETE` over the live child. When the child settles the tool call returns, the session speaks again, and a second idle finds no live children and runs the normal path. |
 | `src/tools.js:678-684` (`abortHandler`) | `settleChildWaiter(entry.sessionID, { status: "aborted", … })` | A `subagent.abort` settles the waiter explicitly — this handler ends a child WITHOUT going through `teardownSubagent`, so leaving the waiter alone would leave a blocked caller blocked until the waiter's own ceiling fired. |
 | `src/teardown.js:88` (`endLiveChildrenOf`) | `liveChildSessionIDs(sessionID)` | Before a parent's `DELETE`, walk the live children and end each first. The recursion through `teardownSubagent` is bounded by `seen` (`src/teardown.js:84-86`): depth is structurally one, but a `parentID` cycle from a reparent race must not spin here. |
-| `src/watchdog.js:116` (`isWaitingOnWatchdoggedChild`) | `liveChildSessionIDs(sessionID)` | The watchdog exemption. A parent blocked on a tracked child — one the same watchdog will reap if it hangs — is itself exempt from the inactivity sweep. The exemption is bounded to tracked children on purpose; an exemption that also covered an untracked child would be one nothing could ever lift. |
+| `src/watchdog.js:153` (`isWaitingOnWatchdoggedChild`) | `liveChildSessionIDs(sessionID)` | The watchdog exemption. A parent blocked on a tracked child — one the same watchdog will reap if it hangs — is itself exempt from the inactivity sweep. The exemption is bounded to tracked children on purpose; an exemption that also covered an untracked child would be one nothing could ever lift. |
 | `src/hooks.js:975-991` (`onSessionIdle`, completion) | `settleChildWaiter(sessionID, { status: "completed", result, ctxTokens })` | The only ending path that has a result rather than just a cause. `teardownSubagent`'s later settle attempt is then a no-op. |
 
 A primary has no registry entry, but its `spawn` tool call never enters the blocking

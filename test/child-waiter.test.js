@@ -410,6 +410,43 @@ test("the inactivity watchdog settles the waiter of the child it reaps", async (
   assert.equal(hasLiveChildren(PARENT), false)
 })
 
+// The reap reads the session one last time before its teardown deletes it. A
+// blocked parent never sees the wake notice that text also rides in — it is
+// inside a tool call, not waiting to be woken — so the outcome is the only
+// channel it has, and the text has to be on it.
+test("the inactivity watchdog hands the rescued text to the waiter as `result`", async () => {
+  const { ctx, created } = makeCtx({
+    messages: assistantReply("Done: mapped the call sites; the migration is not written."),
+  })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  const childID = created[0]
+
+  const promise = registerChildWaiter(childID, PARENT, { timeoutMs: 0 })
+  await timeoutSubagent(entryForSession(childID), 90000, 91000)
+
+  const outcome = await promise
+  assert.equal(outcome.status, "timeout")
+  assert.equal(outcome.result, "Done: mapped the call sites; the migration is not written.")
+})
+
+// The rescue is best-effort: a session with no usable assistant text leaves
+// `result` empty rather than absent, and the renderings fall back on it being
+// falsy, not on the key being missing.
+test("a timed-out child with nothing to rescue settles with an empty `result`", async () => {
+  const { ctx, created } = makeCtx({ messages: [] })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  const childID = created[0]
+
+  const promise = registerChildWaiter(childID, PARENT, { timeoutMs: 0 })
+  await timeoutSubagent(entryForSession(childID), 90000, 91000)
+
+  const outcome = await promise
+  assert.equal(outcome.status, "timeout")
+  assert.equal(outcome.result, "")
+})
+
 test("the abort tool settles the waiter of the subagent it stops", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)

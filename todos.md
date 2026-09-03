@@ -11,3 +11,8 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
+
+- `specs/nested-delegation.md` is broadly stale on line references (~50, the `src/childwait.js` ones short by about 11); sweep the whole file against the current source.
+- The header comment of `test/child-waiter.test.js` claims nothing registers a child waiter in production; `registerChildWaiter` in `src/tools.js` does. Correct the comment.
+- Establish whether a message part streamed just before `abortSession` is persisted by the time `session.messages` is read, which bounds how much of a timed-out subagent's text `timeoutSubagent` can rescue.
+- Last commit: d8be38a fix: keep a busy subagent alive and hand back its work on timeout

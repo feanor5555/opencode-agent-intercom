@@ -32,7 +32,7 @@ import {
 } from "../src/registry.js"
 import { resetTurnNotices } from "../src/hooks.js"
 import { teardownSubagent, SUBAGENT_SESSION_TITLE_MARKER } from "../src/teardown.js"
-import { _stopWatchdogForTests } from "../src/watchdog.js"
+import { sweepWatchdog, _stopWatchdogForTests } from "../src/watchdog.js"
 import { resetProjectContext } from "../src/project.js"
 import { createPermissionGuard, resetPermissionGuardCache } from "../src/config.js"
 import { setSettingsPath, resetSettings, getSettings } from "../src/settings.js"
@@ -588,6 +588,81 @@ test("every ending of the child renders as a tool result the caller can read", a
     assert.match(res.output, /You have no result from it/)
     assert.equal(res.metadata.status, outcome.status)
   }
+})
+
+// The watchdog rescues a reaped child's text off the session before it deletes
+// it; the outcome is the only channel a blocked caller has for it, because the
+// wake notice that also carries it goes to a session waiting to be woken and
+// this caller is sitting inside a tool call.
+test("a timed-out child's rescued text reaches the blocked caller as a partial", async () => {
+  const { ctx, created } = makeCtx({ agentConfig: configAllowingSpawn("planner") })
+  const hooks = await plugin(ctx)
+  const callerCtx = subagentCaller("ses_planner", "planner")
+
+  const pending = hooks.tool.spawn.execute({ agent: "researcher", prompt: "q" }, callerCtx)
+  const childID = await until(() => created[0], "the child session")
+  await until(() => hasLiveChildren("ses_planner"), "the block")
+  settleChildWaiter(childID, {
+    status: "timeout",
+    detail: "no activity for 90000 ms",
+    result: "Done: found the two call sites; the third file is unread.",
+  })
+
+  const res = await pending
+  // The cause stays in front of the text and the framing behind it, so the
+  // fragment cannot be read as the answer that was asked for.
+  assert.match(res.output, /was timed out for inactivity — no activity for 90000 ms\./)
+  assert.match(res.output, /this is not the answer you asked for/)
+  assert.match(res.output, /Done: found the two call sites; the third file is unread\./)
+  assert.match(res.output, /the same ground is not covered twice/)
+  assert.match(res.output, /open that reply with "Blocked:"/)
+  assert.doesNotMatch(res.output, /You have no result from it/)
+  assert.equal(res.metadata.status, "timeout")
+})
+
+// The old shape: an outcome that names a status and carries no `result`. Every
+// caller that predates the field renders exactly what it rendered before.
+test("a timeout outcome with an empty result keeps the bare no-result wording", async () => {
+  const { ctx, created } = makeCtx({ agentConfig: configAllowingSpawn("planner") })
+  const hooks = await plugin(ctx)
+  const callerCtx = subagentCaller("ses_planner", "planner")
+
+  const pending = hooks.tool.spawn.execute({ agent: "researcher", prompt: "q" }, callerCtx)
+  const childID = await until(() => created[0], "the child session")
+  await until(() => hasLiveChildren("ses_planner"), "the block")
+  settleChildWaiter(childID, { status: "timeout", detail: "no activity for 90000 ms", result: "" })
+
+  const res = await pending
+  assert.match(res.output, /was timed out for inactivity — no activity for 90000 ms\./)
+  assert.match(res.output, /You have no result from it/)
+  assert.doesNotMatch(res.output, /this is not the answer you asked for/)
+})
+
+// The whole path in one run: the real inactivity sweep reaps the child a
+// subagent is blocked on, and what the child had produced comes back as that
+// subagent's tool result. The caller itself is exempt from the same sweep for
+// as long as it waits (isWaitingOnWatchdoggedChild), so the sweep that kills
+// the child does not also kill the session about to read its text.
+test("the real inactivity sweep hands a reaped child's work to its blocked caller", async () => {
+  const { ctx, created } = makeCtx({
+    messages: assistantReply("Done: the schema is migrated; the backfill is not run."),
+    agentConfig: configAllowingSpawn("planner"),
+  })
+  const hooks = await plugin(ctx)
+  const callerCtx = subagentCaller("ses_planner", "planner")
+
+  const pending = hooks.tool.spawn.execute({ agent: "researcher", prompt: "q" }, callerCtx)
+  const childID = await until(() => created[0], "the child session")
+  await until(() => hasLiveChildren("ses_planner"), "the block")
+  entryForSession(childID).lastActivityAt = Date.now() - 600_000
+  await sweepWatchdog()
+
+  const res = await pending
+  assert.equal(res.metadata.status, "timeout")
+  assert.match(res.output, /was timed out for inactivity/)
+  assert.match(res.output, /Done: the schema is migrated; the backfill is not run\./)
+  // The caller survived the same sweep: its own entry is still there.
+  assert.ok(entryForSession("ses_planner"), "the waiting caller must not be reaped with its child")
 })
 
 test("a child that is never prompted leaves no waiter behind", async () => {

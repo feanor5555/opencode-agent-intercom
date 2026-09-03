@@ -43,7 +43,10 @@ import { log } from "./log.js"
 //   completed — the child went idle with a reply; `result` carries it
 //   error     — the child's LLM call failed; `detail` carries the message
 //   aborted   — the child was aborted (user, or its parent's abort tool)
-//   timeout   — the inactivity watchdog reaped the child
+//   timeout   — the inactivity watchdog reaped the child; `result` carries the
+//               text rescued off the session before the teardown deleted it,
+//               already through the reply token ceiling, and is absent or
+//               empty when nothing could be read
 //   expired   — the waiter's OWN ceiling fired; the child may still be running
 //   ended     — the child was torn down by a path that named no outcome
 //   abandoned — resetState() cleared the process state out from under it

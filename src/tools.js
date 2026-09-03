@@ -276,11 +276,28 @@ function nestedSpawnOutput(outcome, handle, agent) {
       abandoned: "was dropped when the plugin's state was reset",
     }[outcome.status] ?? "ended without a result"
   const why = outcome.detail ? ` — ${outcome.detail}` : ""
-  return (
-    `${who} ${cause}${why}. You have no result from it. Carry on with what you can do ` +
-    `yourself and state plainly in your final reply what is still missing, so the orchestrator ` +
-    `can get it — open that reply with "Blocked:" where the missing material stops the task.`
-  )
+  const carryOn =
+    `Carry on with what you can do yourself and state plainly in your final reply what is ` +
+    `still missing, so the orchestrator can get it — open that reply with "Blocked:" where ` +
+    `the missing material stops the task.`
+  // An ending that is not `completed` can still carry text: the watchdog reads
+  // the session one last time before it deletes it, so a child reaped on the
+  // inactivity clock hands over the steps it did finish. That text is a
+  // FRAGMENT of an unfinished run, not an answer, and it is framed as one —
+  // the cause sentence stays in front of it and the "not the answer you asked
+  // for" line stays behind it, so a half-run cannot be read as a finished
+  // reply. Today only `timeout` populates `result`; an outcome without it
+  // renders exactly the wording it rendered before, which is every other
+  // status and a timeout whose session could not be read.
+  if (outcome.result) {
+    return (
+      `${who} ${cause}${why}. It never finished, so this is not the answer you asked for — ` +
+      `but this much it had produced before it was cut off, and it is the only account of ` +
+      `the work it managed:\n\n${outcome.result}\n\n` +
+      `Use it so the same ground is not covered twice; it cannot be asked again. ${carryOn}`
+    )
+  }
+  return `${who} ${cause}${why}. You have no result from it. ${carryOn}`
 }
 
 const z = tool.schema

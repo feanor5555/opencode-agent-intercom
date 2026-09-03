@@ -212,7 +212,15 @@ export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
     }).text
   }
   // 3. Wake the parent with a timeout notice + free the slot — same teardown
-  //    as onSessionIdle / onSessionError. markAborted keeps the abort marker in
+  //    as onSessionIdle / onSessionError.
+  //
+  //    The rescued text rides on BOTH channels, because a timed-out child has
+  //    two kinds of parent: one woken by the notice, and one blocked inside its
+  //    own nested `spawn` tool call, which is settled from `outcome` and never
+  //    sees a notice at all. `result` is empty when nothing could be read, and
+  //    both renderings then fall back to their bare timeout wording.
+  //
+  //    markAborted keeps the abort marker in
   //    place across removeEntry(clearAborted:false) + deleteSession so the guard
   //    never falls back to primary-classification mid-teardown; see
   //    teardownSubagent. No toast on this path (watchdog is silent in the TUI).
@@ -223,6 +231,7 @@ export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
       status: "timeout",
       handle,
       agent,
+      result: rescued,
       detail: `no activity for ${silentMs} ms (inactivity limit ${maxAgeMs} ms)`,
     },
     notice: watchdogClient ? timeoutNotice(entry, maxAgeMs, silentMs, rescued) : null,

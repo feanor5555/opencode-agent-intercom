@@ -250,9 +250,10 @@ export async function fetchMessages(client, sessionID) {
 //
 // `result` is the reply WHOLE and is never shortened here. The reply token
 // ceiling is applied where the text crosses into another agent's context —
-// resultfile.js `capReplyForAgent`, called from the two wake paths in hooks.js
-// — so a caller that only parses the reply (the handoff's open-points fetch)
-// gets all of it, and this function keeps to being a read.
+// resultfile.js `capReplyForAgent`, called from the wake paths in hooks.js and
+// from the watchdog's timeout path — so a caller that only parses the reply
+// (the handoff's open-points fetch) gets all of it, and this function keeps to
+// being a read.
 export async function fetchSnapshot(client, sessionID) {
   try {
     const resp = unwrap(

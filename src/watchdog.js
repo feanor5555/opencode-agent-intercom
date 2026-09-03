@@ -20,7 +20,7 @@
 
 import { registry, aborted } from "./state.js"
 import { getSettings } from "./settings.js"
-import { abortSession } from "./client.js"
+import { abortSession, fetchSnapshot } from "./client.js"
 import {
   entryForSession,
   entryLifecycle,
@@ -31,6 +31,7 @@ import {
 import { liveChildSessionIDs } from "./childwait.js"
 import { teardownSubagent } from "./teardown.js"
 import { timeoutNotice } from "./notices.js"
+import { capReplyForAgent } from "./resultfile.js"
 import { log, errMsg } from "./log.js"
 
 // How often the sweep runs. 5 s is a good balance: cheap (just a Map scan
@@ -157,9 +158,10 @@ export function isWaitingOnWatchdoggedChild(sessionID) {
 }
 
 // Performs the actual timeout for one entry: abort the opencode session,
-// post a wake notice to the parent, and free the slot by running the same
-// cleanup path as onSessionIdle (removeEntry + deleteSession +
-// forgetSessionDirectory). Best-effort; failures are logged, never thrown.
+// recover the text it had produced so far, post a wake notice carrying that
+// text to the parent, and free the slot by running the same cleanup path as
+// onSessionIdle (removeEntry + deleteSession + forgetSessionDirectory).
+// Best-effort; failures are logged, never thrown.
 export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
   const sessionID = entry.sessionID
   const handle = entry.handle
@@ -179,7 +181,37 @@ export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
   } catch (err) {
     log("watchdog: abort failed", { handle, sessionID, err: errMsg(err) })
   }
-  // 2. Wake the parent with a timeout notice + free the slot — same teardown
+  // 2. Read the session ONE more time, purely to recover what the subagent
+  //    already produced. This is the last moment it can be read: the teardown
+  //    below deletes it. A run reaped on the inactivity clock is not an empty
+  //    one — it is typically several finished steps deep — and without this
+  //    read every one of them died with the session and the orchestrator's
+  //    whole inheritance was the sentence "timed out".
+  //
+  //    Mirrors onSessionError, including its best-effort construction:
+  //    fetchSnapshot swallows its own failures and answers `{}`, so an
+  //    unreadable session leaves the text empty and the notice simply omits
+  //    the block. Ordered AFTER the abort so the step that was streaming has
+  //    been stopped and its parts stand still while we read them.
+  //
+  //    The same reply ceiling the idle and error paths apply — this text is
+  //    about to be pushed into the orchestrator's context — and the overflow
+  //    file under the results cache is written HERE, while the session it
+  //    belongs to still exists. `retained: false`: a timed-out subagent is
+  //    never held. Skipped without a client, like the notice below.
+  let rescued = ""
+  if (watchdogClient) {
+    const { result: lastText } = await fetchSnapshot(watchdogClient, sessionID)
+    rescued = capReplyForAgent(lastText, {
+      handle,
+      agent,
+      sessionID,
+      taskId: entry.taskId,
+      runs: entry.runs ?? 1,
+      retained: false,
+    }).text
+  }
+  // 3. Wake the parent with a timeout notice + free the slot — same teardown
   //    as onSessionIdle / onSessionError. markAborted keeps the abort marker in
   //    place across removeEntry(clearAborted:false) + deleteSession so the guard
   //    never falls back to primary-classification mid-teardown; see
@@ -193,7 +225,7 @@ export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
       agent,
       detail: `no activity for ${silentMs} ms (inactivity limit ${maxAgeMs} ms)`,
     },
-    notice: watchdogClient ? timeoutNotice(entry, maxAgeMs, silentMs) : null,
+    notice: watchdogClient ? timeoutNotice(entry, maxAgeMs, silentMs, rescued) : null,
     markAborted: true,
     label: "watchdog",
   })

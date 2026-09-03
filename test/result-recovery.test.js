@@ -11,6 +11,11 @@
 //      at CTX_STOP_RESERVE (0.9) of the context budget, while the tool
 //      lockdown in `guardToolExecute` still fires at the budget itself, so the
 //      subagent is told to write while its tools still work.
+//   4. watchdog.js `timeoutSubagent` — the inactivity reap reads the session
+//      one last time before its teardown deletes it, puts that text through
+//      the reply ceiling (so the overflow file exists) and hands it to the
+//      orchestrator in the timeout notice, instead of reporting the timeout
+//      alone.
 //
 // Run: node --test test/result-recovery.test.js
 
@@ -22,11 +27,11 @@ import { join } from "node:path"
 
 import plugin from "../src/index.js"
 import { finalResult, fetchSnapshot } from "../src/client.js"
-import { completionNotice, errorNotice } from "../src/notices.js"
+import { completionNotice, errorNotice, timeoutNotice } from "../src/notices.js"
 import { resetState } from "../src/state.js"
-import { trackPrimary, upsertSession } from "../src/registry.js"
+import { trackPrimary, upsertSession, entryForSession } from "../src/registry.js"
 import { resetTurnNotices } from "../src/hooks.js"
-import { _stopWatchdogForTests } from "../src/watchdog.js"
+import { sweepWatchdog, _stopWatchdogForTests } from "../src/watchdog.js"
 import { resetProjectContext } from "../src/project.js"
 import { resetPermissionGuardCache } from "../src/config.js"
 import { setSettingsPath, resetSettings } from "../src/settings.js"
@@ -298,6 +303,94 @@ test("session.error on a session with no assistant text reports the failure alon
   const notice = posted.map((p) => p.text).join("\n")
   assert.match(notice, /failed: UnknownError: boom/)
   assert.doesNotMatch(notice, /Its last text before it stopped/)
+})
+
+// ---- 4. the watchdog timeout carries the recovered text ----------------------
+
+const reapedEntry = {
+  handle: "coder#1",
+  agent: "coder",
+  sessionID: "ses_sub1",
+  parentID: PRIMARY,
+}
+
+test("timeoutNotice without recovered text is byte-identical to the timeout line alone", () => {
+  assert.equal(
+    timeoutNotice(reapedEntry, 90000, 91000),
+    '🔔 agent-intercom: subagent "coder#1" (coder, session ses_sub1) timed out after 91s of ' +
+      "inactivity (limit 90s) — slot freed. You may re-dispatch with spawn() if the work is " +
+      "still needed.",
+  )
+})
+
+test("timeoutNotice with recovered text keeps the timeout wording AND reports the text", () => {
+  const notice = timeoutNotice(
+    reapedEntry,
+    90000,
+    91000,
+    "Done: rewrote the parser; the CLI flags are still open.",
+  )
+  assert.match(notice, /timed out after 91s of inactivity \(limit 90s\) — slot freed\./)
+  assert.match(notice, /You may re-dispatch with spawn\(\) if the work is still needed\./)
+  assert.match(notice, /Done: rewrote the parser; the CLI flags are still open\./)
+  assert.match(notice, /do not have the same ground covered twice/)
+})
+
+// Spawns a coder, back-dates it past the inactivity window and lets the real
+// sweep reap it. Returns everything the parent was told.
+async function reapedNotice({ resultParts, ctxTokens = 5000 }) {
+  const posted = []
+  const { ctx, created } = makeCtx({
+    ctxTokens,
+    resultParts,
+    onPrompt: (id, text) => posted.push({ id, text }),
+  })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
+  const sessionID = created[created.length - 1]
+  posted.length = 0
+  entryForSession(sessionID).lastActivityAt = Date.now() - 600_000
+  await sweepWatchdog()
+  return { notice: posted.map((p) => p.text).join("\n"), sessionID }
+}
+
+test("the inactivity watchdog posts the recovered text to the parent", async () => {
+  const { notice } = await reapedNotice({
+    resultParts: [textPart("Done: mapped the call sites; the migration is not written.")],
+  })
+  assert.match(notice, /timed out after \d+s of inactivity/)
+  assert.match(notice, /Done: mapped the call sites; the migration is not written\./)
+})
+
+// The reap is where the recovered text is longest — the subagent was cut off
+// mid-run after several finished steps — so it carries the same reply ceiling
+// as the idle and error paths: cut in the notice, whole in the overflow file,
+// written while the session still exists.
+test("the inactivity watchdog carries a capped last text and files the rest", async () => {
+  const huge = "Done: " + "R".repeat(9000) + "TAIL_MARKER"
+  const home = mkdtempSync(join(tmpdir(), "intercom-recovery-home-"))
+  const realHome = process.env.HOME
+  process.env.HOME = home
+  try {
+    const { notice } = await reapedNotice({ resultParts: [textPart(huge)] })
+    assert.match(notice, /timed out after \d+s of inactivity/)
+    assert.match(notice, /\[cut at 2000 tokens — \d+ more tokens of this reply are not shown here/)
+    assert.doesNotMatch(notice, /TAIL_MARKER/)
+    const path = /^(\/\S+\.md)$/m.exec(notice)?.[1]
+    assert.ok(path, `no overflow file path in the timeout notice: ${notice}`)
+    assert.ok(readFileSync(path, "utf8").endsWith(huge), "the file must hold the reply whole")
+    // A timed-out subagent is never held, so the marker must not offer `reuse`.
+    assert.doesNotMatch(notice, /reuse\(/)
+  } finally {
+    process.env.HOME = realHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("a timed-out session with no assistant text reports the timeout alone", async () => {
+  const { notice } = await reapedNotice({ resultParts: [toolPart("read")] })
+  assert.match(notice, /timed out after \d+s of inactivity/)
+  assert.doesNotMatch(notice, /the only account of the work it managed/)
 })
 
 // ---- 3. the STOP reserve below the tool lockdown ------------------------------

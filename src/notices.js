@@ -235,13 +235,29 @@ function slotsNoticeAfterFinish(primaryID) {
 // Wake-notice sent to the parent when the watchdog times out a subagent.
 // Sibling of completionNotice — keeps the same emoji + phrasing vocabulary so
 // the orchestrator's pattern-matching notices stay consistent.
-export function timeoutNotice(entry, maxAgeMs, silentMs) {
+//
+// `result` is the last usable assistant text the session still held, read off
+// a snapshot taken in timeoutSubagent before the teardown deleted the session
+// and put through the reply token ceiling there. It is the same block
+// errorNotice carries and it is here for the same reason: a subagent reaped on
+// the inactivity clock has usually done real work — several finished steps —
+// and without this the entire run reaches the orchestrator as a bare timeout,
+// so the only thing it can do is have the same ground covered again. Appended
+// only when there IS text; the timeout wording above it is unchanged either
+// way, so a notice for a session that produced nothing reads exactly as it did
+// before.
+export function timeoutNotice(entry, maxAgeMs, silentMs, result) {
   const silentSec = Math.round(silentMs / 1000)
   const maxSec = Math.round(maxAgeMs / 1000)
+  const recovered = result
+    ? `\nWhat it produced before it was cut off — this is the only account of the work it ` +
+      `managed, read it before you re-dispatch and do not have the same ground covered twice:\n${result}\n`
+    : ""
   return (
     `🔔 agent-intercom: subagent "${entry.handle}" (${entry.agent}, session ${entry.sessionID}) ` +
     `timed out after ${silentSec}s of inactivity (limit ${maxSec}s) — slot freed. ` +
-    `You may re-dispatch with spawn() if the work is still needed.`
+    `You may re-dispatch with spawn() if the work is still needed.` +
+    recovered
   )
 }
 

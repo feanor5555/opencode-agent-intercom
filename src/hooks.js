@@ -1198,6 +1198,33 @@ function rescanPromptFilesForPrimary(sessionID) {
 // NOT from the factory closure, which only reflects where opencode serve was
 // started and is wrong for sessions created with ?directory=other-project.
 //
+// The session id an event belongs to, resolved from the four payload shapes
+// the opencode SDK puts one in. Every event this plugin sees carries the id in
+// exactly one of them:
+//
+//   properties.sessionID       — the session.* family (created aside) and
+//                                message.removed: the id sits at top level.
+//   properties.part.sessionID  — message.part.updated / message.part.removed,
+//                                whose properties are `{ part, delta? }` and
+//                                carry no top-level id at all.
+//   properties.info.sessionID  — message.updated, whose `info` is a Message.
+//   properties.info.id         — session.created / session.updated, whose
+//                                `info` is a Session, so its `id` IS the
+//                                session id.
+//
+// The order is load-bearing at the last two. A Message carries BOTH
+// `sessionID` and `id`, and its `id` is the MESSAGE id (`msg_…`), which
+// addresses no session — reading `info.sessionID` first is what keeps a `msg_`
+// id out of the lookup.
+//
+// message.part.updated is the one that matters most: while a subagent streams
+// a single long step it is the ONLY event that session emits, so a resolver
+// that misses it leaves a working subagent looking silent to the inactivity
+// watchdog, which then kills it mid-work.
+export function eventSessionID(props) {
+  return props?.sessionID ?? props?.part?.sessionID ?? props?.info?.sessionID ?? props?.info?.id
+}
+
 // The first call also arms the inactivity watchdog (see sweepWatchdog).
 export function createEventHandler(client) {
   ensureWatchdogStarted(client)
@@ -1207,11 +1234,10 @@ export function createEventHandler(client) {
       // Bump the entry's lastActivityAt on EVERY event for a tracked session,
       // before dispatch — this is the dead-man's-switch signal for the
       // watchdog. A subagent that keeps emitting events is alive; one that
-      // goes silent gets timed out. We touch by every sessionID we can find
-      // on the event payload (status/idle use `sessionID` at top level;
-      // session.created nests it under `info.id`). Done unconditionally:
+      // goes silent gets timed out. The id is resolved from every payload
+      // shape the SDK puts one in (see eventSessionID). Done unconditionally:
       // touching a non-tracked session is a cheap Map miss.
-      const sid = props?.sessionID ?? props?.info?.id
+      const sid = eventSessionID(props)
       if (sid) {
         const e = entryForSession(sid)
         if (e) e.lastActivityAt = Date.now()

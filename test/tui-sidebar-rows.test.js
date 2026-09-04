@@ -503,8 +503,10 @@ test("the polled set has one way in and loses every session that ends", () => {
 })
 
 test("deleted sessions leave the polled set", () => {
+  // Before the row is looked at, so it holds for a deletion the panel has no
+  // row for as well.
   const handler = only("const onSessionDeleted = (event: unknown): void => {")
-  const end = source.indexOf("    const current = sessionID ? subagents() : undefined;", handler)
+  const end = source.indexOf("    const current = subagents();", handler)
   assert.notEqual(end, -1)
   const body = source.slice(handler, end)
   assert.match(body, /polledIDs\.delete\(sessionID\)/)

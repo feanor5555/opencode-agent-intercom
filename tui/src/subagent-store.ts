@@ -359,29 +359,38 @@ export interface RouteEscapeQuery {
   // session route.
   routeName: string;
   routeSessionID?: string;
-  // The row that is being retired, and the parent it hung under.
+  // The session whose row is ending, and the parent it hung under.
   sessionID: string;
   parentID?: string;
-  // Whether a session's row has already been retired, and the parent that row
-  // carried. Together they carry the walk across a chain that ended from the
-  // top down.
-  isGone: (sessionID: string) => boolean;
+  // Whether the server is known to still hold this session. This is the one
+  // test the target has to pass — "the panel has no row for it" is not the same
+  // question and does not answer it.
+  isAlive: (sessionID: string) => boolean;
+  // The parent a session's retired row carried, which is what carries the walk
+  // across a chain that ended from the top down.
   parentOfGone: (sessionID: string) => string | undefined;
+  // The orchestrator chat to land on when no ancestor is alive. It is held to
+  // `isAlive` like any other target.
+  orchestratorID?: string;
 }
 
-// The session the view has to be moved to because the row for `sessionID` is
-// being retired, or `undefined` to leave the view where it is.
+// The session the view has to be moved to because the session `sessionID` is
+// ending, or `undefined` to leave the view where it is.
 //
-// A retired row means the plugin has finished with that subagent and its
-// session is gone or about to go. A route still naming it points at a session
-// the server does not have, and the TUI answers that by falling back to its
-// start page — the user loses the orchestrator chat. So the view escapes to the
-// nearest ancestor that is still there: the parent, or, when the parent's own
-// row has already been retired in the same pass, the first session up the chain
-// that has not. The orchestrator never holds a row, so the walk terminates on
-// it. `undefined` comes back when the user is elsewhere (the common case,
-// nothing to do), when the route is not a session route, or when the chain
-// leads nowhere — a jump to a session that is equally gone is not an escape.
+// A row that is retired means the plugin has finished with that subagent and
+// its session is gone or about to go. A route still naming it points at a
+// session the server does not have, and the TUI answers that by falling back to
+// its start page — the user loses the orchestrator chat. So the view escapes up
+// the parent chain to the first ancestor the server still holds, and to the
+// orchestrator when the chain yields none.
+//
+// Every returned target has passed `isAlive`. An ancestor that is merely
+// unknown — one this panel never held a row for, or one whose row it retired —
+// is walked past rather than jumped to: jumping to a session that is equally
+// gone is not an escape, it is the same start page one link further up.
+// `undefined` comes back when the user is elsewhere (the common case, nothing
+// to do), when the route is not a session route, and when neither the chain nor
+// the orchestrator yields a session known to be alive.
 export function routeEscapeTarget(query: RouteEscapeQuery): string | undefined {
   if (query.routeName !== "session") return undefined;
   if (query.routeSessionID !== query.sessionID) return undefined;
@@ -390,14 +399,16 @@ export function routeEscapeTarget(query: RouteEscapeQuery): string | undefined {
   while (
     typeof candidate === "string" &&
     candidate !== "" &&
-    !walked.has(candidate) &&
-    query.isGone(candidate)
+    !walked.has(candidate)
   ) {
+    if (query.isAlive(candidate)) return candidate;
     walked.add(candidate);
     candidate = query.parentOfGone(candidate);
   }
-  if (typeof candidate !== "string" || candidate === "") return undefined;
-  return walked.has(candidate) ? undefined : candidate;
+  const fallback = query.orchestratorID;
+  if (typeof fallback !== "string" || fallback === "") return undefined;
+  if (walked.has(fallback)) return undefined;
+  return query.isAlive(fallback) ? fallback : undefined;
 }
 
 // The dot in front of a row. A held row is neither running nor gone, so it

@@ -1,16 +1,25 @@
-// The route escape that runs when a subagent row is retired
+// The route escape that runs when a subagent session ends
 // (tui/src/subagent-store.ts: routeEscapeTarget, wired in tui/src/tui.tsx:
-// retireRow).
+// escapeRoute, called from retireRow and from the deletion handler).
 //
-// The rule the whole file turns on: a row that goes takes the view with it.
+// The rule the whole file turns on: a session that ends takes the view with it.
 // The plugin deletes a subagent's session at every ending it controls, and the
 // TUI answers a route naming a session the server no longer has with its start
-// page — the orchestrator chat gone from under the user. Three paths retire a
-// row and any of them can be the one that gets there first (`session.deleted`,
-// the poll's reap, dropping a held row from the panel); the ones that follow
-// find no row and do nothing. So the escape belongs to the retiring itself, at
-// the one funnel every path goes through, not to whichever call site happens
-// to win.
+// page — the orchestrator chat gone from under the user.
+//
+// Two things that has to survive:
+//
+//   * whichever path owns the ending. Three paths retire a row
+//     (`session.deleted`, the poll's reap, dropping a held row from the panel)
+//     and the ones that follow find no row; and a deletion can arrive for a
+//     session that has no row at all, which is the case a reap that ran before
+//     the view moved into the session leaves behind. Every one of them reaches
+//     the same escape.
+//   * the target. It must be a session the SERVER still holds. "This panel
+//     retired no row for it" is a different question: `finished` is pruned on
+//     every pass that relists a session, so a relisted-then-deleted ancestor
+//     reads as row-less and jumping to it lands on the same start page one
+//     link further up.
 //
 // Run: node --test test/tui-route-escape.test.js
 
@@ -25,15 +34,16 @@ const CHILD = "ses_child"
 const PARENT = "ses_parent"
 const ROOT = "ses_orchestrator"
 
-// A chain child -> parent -> orchestrator, with `gone` naming the rows that
-// have already been retired. The orchestrator holds no row and is never gone.
-function chain(gone = []) {
+// A chain child -> parent -> orchestrator. `alive` names the sessions the
+// server still holds; every other session in the chain is one the walk has to
+// pass over. The orchestrator is supplied separately, as the panel supplies it.
+function chain(alive = [PARENT, ROOT]) {
   const parents = new Map([
     [CHILD, PARENT],
     [PARENT, ROOT],
   ])
   return {
-    isGone: (id) => gone.includes(id),
+    isAlive: (id) => alive.includes(id),
     parentOfGone: (id) => parents.get(id),
   }
 }
@@ -44,6 +54,7 @@ function query(over = {}) {
     routeSessionID: CHILD,
     sessionID: CHILD,
     parentID: PARENT,
+    orchestratorID: ROOT,
     ...chain(),
     ...over,
   }
@@ -60,22 +71,17 @@ test("a route that names no session is left alone", () => {
   assert.equal(routeEscapeTarget(query({ routeName: "plugin" })), undefined)
 })
 
-test("a row with no parent has nowhere to escape to", () => {
-  assert.equal(routeEscapeTarget(query({ parentID: undefined })), undefined)
-  assert.equal(routeEscapeTarget(query({ parentID: "" })), undefined)
-})
-
 // ------------------------------------------------- when it moves
 
-test("the view inside a retiring row moves to its parent", () => {
+test("the view inside an ending session moves to its parent", () => {
   assert.equal(routeEscapeTarget(query()), PARENT)
 })
 
-test("a parent already retired is skipped — the view lands on the orchestrator", () => {
+test("a parent the server no longer has is skipped — the view lands on the orchestrator", () => {
   // The poll's reap retires a whole chain in one pass and the order inside that
   // pass is not fixed. When the parent went first, escaping to it would strand
   // the route on a second session the server no longer has.
-  assert.equal(routeEscapeTarget(query({ ...chain([PARENT]) })), ROOT)
+  assert.equal(routeEscapeTarget(query({ ...chain([ROOT]) })), ROOT)
 })
 
 test("the escape is repeated as each ancestor goes in turn", () => {
@@ -84,29 +90,107 @@ test("the escape is repeated as each ancestor goes in turn", () => {
   assert.equal(routeEscapeTarget(query()), PARENT)
   assert.equal(
     routeEscapeTarget(
-      query({ routeSessionID: PARENT, sessionID: PARENT, parentID: ROOT, ...chain([CHILD]) }),
+      query({
+        routeSessionID: PARENT,
+        sessionID: PARENT,
+        parentID: ROOT,
+        ...chain([ROOT]),
+      }),
     ),
     ROOT,
   )
 })
 
-// ------------------------------------------------- when the chain leads nowhere
+// -------------------------------- the target has to be one the server has
 
-test("a chain whose gone parent has no remembered parent yields no jump", () => {
+test("an ancestor with no row of its own is not jumped to unverified", () => {
+  // The hole this test exists for: liveness used to be read off "this panel
+  // retired no row for it". `finished` is pruned on every pass that relists a
+  // session, so an ancestor that was relisted and then deleted — with no row
+  // present to record the deletion — read as alive and was jumped to.
+  assert.equal(
+    routeEscapeTarget(query({ ...chain([]), orchestratorID: undefined })),
+    undefined,
+    "no session in the chain is known alive and there is no orchestrator to fall back to",
+  )
+  assert.equal(
+    routeEscapeTarget(query({ ...chain([]) })),
+    undefined,
+    "the orchestrator itself has to pass the same test",
+  )
+})
+
+test("a chain with no live ancestor falls back to the orchestrator", () => {
+  assert.equal(routeEscapeTarget(query({ ...chain([ROOT]), parentID: PARENT })), ROOT)
+})
+
+test("the orchestrator catches a chain that leads nowhere", () => {
+  // The gone parent remembers no parent of its own, so the walk runs out. The
+  // view still has somewhere to be.
   assert.equal(
     routeEscapeTarget(
-      query({ isGone: (id) => id === PARENT, parentOfGone: () => undefined }),
+      query({ isAlive: (id) => id === ROOT, parentOfGone: () => undefined }),
+    ),
+    ROOT,
+  )
+  assert.equal(
+    routeEscapeTarget(
+      query({
+        isAlive: (id) => id === ROOT,
+        parentOfGone: () => undefined,
+        orchestratorID: undefined,
+      }),
     ),
     undefined,
   )
 })
 
-test("a parent chain that loops terminates without a jump", () => {
+test("a session with no parent at all still escapes to the orchestrator", () => {
+  assert.equal(routeEscapeTarget(query({ parentID: undefined })), ROOT)
+  assert.equal(routeEscapeTarget(query({ parentID: "" })), ROOT)
+  assert.equal(
+    routeEscapeTarget(query({ parentID: undefined, orchestratorID: undefined })),
+    undefined,
+  )
+})
+
+test("a parent chain that loops terminates on the orchestrator", () => {
   assert.equal(
     routeEscapeTarget(
-      query({ isGone: () => true, parentOfGone: (id) => (id === PARENT ? CHILD : PARENT) }),
+      query({
+        isAlive: (id) => id === ROOT,
+        parentOfGone: (id) => (id === PARENT ? CHILD : PARENT),
+      }),
+    ),
+    ROOT,
+  )
+})
+
+test("a loop with no orchestrator terminates without a jump", () => {
+  assert.equal(
+    routeEscapeTarget(
+      query({
+        isAlive: () => false,
+        parentOfGone: (id) => (id === PARENT ? CHILD : PARENT),
+        orchestratorID: undefined,
+      }),
     ),
     undefined,
+  )
+})
+
+test("the escape never lands on the session that is ending", () => {
+  // A stale orchestrator id that names the very session being torn down would
+  // be the start page under another name.
+  assert.equal(
+    routeEscapeTarget(query({ orchestratorID: CHILD, ...chain([CHILD, ROOT]) })),
+    ROOT,
+    "the live ancestor wins",
+  )
+  assert.equal(
+    routeEscapeTarget(query({ orchestratorID: CHILD, ...chain([CHILD]) })),
+    undefined,
+    "and the ending session is refused as a fallback",
   )
 })
 
@@ -138,17 +222,50 @@ function bodyOf(marker) {
   return source.slice(start, end)
 }
 
-test("retireRow is what escapes the route, off the row it is retiring", () => {
-  const body = bodyOf("const retireRow = (")
+test("escapeRoute is the one place the view is moved off an ending session", () => {
+  const body = bodyOf("const escapeRoute = (")
   assert.match(body, /routeEscapeTarget\(\{/)
   assert.match(body, /const route = api\.route\.current;/)
   assert.match(body, /routeName: route\.name/)
   assert.match(body, /route\.name === "session"/)
   assert.match(body, /route\.params\?\.sessionID as string \| undefined/)
-  assert.match(body, /parentID: entry\?\.parentID/)
-  assert.match(body, /isGone: \(id\) => finished\.has\(id\)/)
+  assert.match(body, /const knownParent = parentID \?\? parentOfGone\(sessionID\);/)
+  assert.match(body, /parentID: knownParent,/)
+  assert.match(body, /isAlive: isLiveSession/)
   assert.match(body, /parentOfGone,/)
+  assert.match(body, /orchestratorID: orchestratorSessionID\(\)/)
   assert.match(body, /api\.route\.navigate\("session", \{ sessionID: escapeTo \}\)/)
+  assert.equal(
+    body.includes("finished.has("),
+    false,
+    "liveness is the server's answer, not the panel's row bookkeeping",
+  )
+})
+
+test("liveness is the server's answer, and a deletion outranks a pass in flight", () => {
+  const start = only("const isLiveSession = (sessionID: string): boolean =>")
+  const body = source.slice(start, source.indexOf(";", source.indexOf("isPrimarySession", start)))
+  assert.match(body, /!deletedSessions\.has\(sessionID\)/)
+  assert.match(body, /listed\.has\(sessionID\) \|\| isPrimarySession\(sessionID\)/)
+  only("const deletedSessions = new Set<string>()")
+  // The deletion handler is what fills it, before it works out any escape.
+  const deleted = bodyOf("const onSessionDeleted = (event: unknown): void => {")
+  assert.match(deleted, /deletedSessions\.add\(sessionID\)/)
+  assert.ok(
+    deleted.indexOf("deletedSessions.add(sessionID)") < deleted.indexOf("const entry ="),
+    "the session is marked deleted before the row is looked up and the escape is worked out",
+  )
+})
+
+test("the orchestrator fallback is the first polled session that was never a subagent", () => {
+  const body = bodyOf("const orchestratorSessionID = (): string | undefined => {")
+  assert.match(body, /for \(const sessionID of polledIDs\)/)
+  assert.match(body, /if \(isPrimarySession\(sessionID\)\) return sessionID;/)
+})
+
+test("retireRow escapes the route off the row it is retiring", () => {
+  const body = bodyOf("const retireRow = (")
+  assert.match(body, /escapeRoute\(sessionID, entry\?\.parentID, entry !== undefined\)/)
 })
 
 test("every path that retires a row goes through retireRow", () => {
@@ -163,18 +280,28 @@ test("every path that retires a row goes through retireRow", () => {
   }
 })
 
-test("no retiring call site carries a route escape of its own", () => {
+test("a deletion for a session with no row still moves the view", () => {
+  // The hole: the reap's escape fires only for the route as it stood at reap
+  // time, so a view that arrived on the session afterwards was never moved,
+  // and the deletion handler returned without doing anything at all.
+  const body = bodyOf("const onSessionDeleted = (event: unknown): void => {")
+  assert.match(body, /\} else \{\s*\n\s*escapeRoute\(sessionID, parentOfGone\(sessionID\), false\);/)
+  assert.match(body, /retireRow\(next, sessionID\)/, "a row that is there is still retired")
+})
+
+test("no retiring call site carries a route jump of its own", () => {
   // A duplicated escape is an escape the other paths bypass, which is the
   // defect this file exists for.
   for (const marker of [
     "const refresh = async (): Promise<void> => {",
     "const onSessionDeleted = (event: unknown): void => {",
     "const dropRetained = async (id: string): Promise<void> => {",
+    "const retireRow = (",
   ]) {
     assert.equal(
       bodyOf(marker).includes("api.route.navigate("),
       false,
-      `${marker} must leave the route to retireRow`,
+      `${marker} must leave the route to escapeRoute`,
     )
   }
 })
@@ -184,7 +311,7 @@ test("the only other route jumps are opening a row and the idle pre-escape", () 
   assert.equal(
     jumps.length,
     3,
-    "exactly three: openSubagent, onSessionIdle's pre-escape, retireRow's escape",
+    "exactly three: openSubagent, onSessionIdle's pre-escape, escapeRoute's escape",
   )
   assert.match(bodyOf("const openSubagent = (id: string): void => {"), /api\.route\.navigate\(/)
   // session.idle is not an ending, so it retires nothing; it moves the view off
@@ -192,4 +319,41 @@ test("the only other route jumps are opening a row and the idle pre-escape", () 
   const idle = bodyOf("const onSessionIdle = (event: unknown): void => {")
   assert.match(idle, /api\.route\.navigate\("session", \{ sessionID: entry\.parentID \}\)/)
   assert.equal(idle.includes("retireRow"), false)
+})
+
+// ------------------------------------------------- the debug line
+
+test("the escape writes one debug line carrying what it decided on", () => {
+  // The run this repair came from could not be told apart from the other
+  // candidate afterwards, because the TUI logged nothing at all. These are the
+  // fields that settle it on the next occurrence.
+  const body = bodyOf("const escapeRoute = (")
+  assert.match(body, /debugLog\("tui route escape", \{/)
+  for (const field of [
+    /sessionID,/,
+    /rowPresent,/,
+    /route: route\.name,/,
+    /routeSessionID: routeSessionID \?\? null,/,
+    /parentID: knownParent \?\? null,/,
+    /target: escapeTo \?\? null,/,
+  ]) {
+    assert.match(body, field)
+  }
+  assert.ok(
+    body.indexOf("debugLog(") < body.indexOf("api.route.navigate("),
+    "the line is written whether or not a jump follows",
+  )
+  only('import { debugLog } from "./debug-log.ts";')
+})
+
+test("both callers of the escape are distinguishable in the log", () => {
+  // `rowPresent` is the whole point: it says which of the two paths fired.
+  assert.match(
+    bodyOf("const retireRow = ("),
+    /escapeRoute\(sessionID, entry\?\.parentID, entry !== undefined\)/,
+  )
+  assert.match(
+    bodyOf("const onSessionDeleted = (event: unknown): void => {"),
+    /escapeRoute\(sessionID, parentOfGone\(sessionID\), false\)/,
+  )
 })

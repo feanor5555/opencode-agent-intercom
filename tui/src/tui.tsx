@@ -35,6 +35,7 @@ import {
   sameModel,
   setLlmModel,
 } from "./llm-models-file.ts";
+import { debugLog } from "./debug-log.ts";
 import { holdRepeat, stopHoldRepeat } from "./hold-repeat.ts";
 import {
   composeSubagentLabel,
@@ -760,8 +761,19 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // It only grows: what has once been spawned as a subagent stays one.
   const subagentIDs = new Set<string>();
   // The children the last COMPLETED poll pass listed. Used by the idle handler,
-  // which must not treat a session the server still lists as one that is over.
+  // which must not treat a session the server still lists as one that is over,
+  // and by the liveness test the route escape asks.
   let listed: ReadonlySet<string> = new Set<string>();
+  // Every session opencode has published `session.deleted` for. Session ids are
+  // unique per creation, so a deleted one never comes back and nothing is ever
+  // taken out again; the set grows with the number of subagents a run tore
+  // down, the same order as `finished`.
+  //
+  // It exists because `listed` alone cannot answer "does the server still have
+  // this session": a pass in flight when the deletion lands carries the session
+  // in its `seen` set and publishes it as listed afterwards. The deletion event
+  // is the younger truth and outranks the pass.
+  const deletedSessions = new Set<string>();
   // Sessions the user aborted from this panel — the server status alone does
   // not distinguish an abort from any other ending, so we remember it locally.
   const aborted = new Set<string>();
@@ -824,45 +836,101 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   ): string =>
     rootSessionOf(entry, (sessionID) => rows.get(sessionID) ?? finished.get(sessionID));
 
+  // Whether the server is known to still hold a session. Two things say so and
+  // nothing else does: the last completed poll pass listed it as somebody's
+  // child, or it is an orchestrator this panel polls — orchestrators are
+  // nobody's child and so never appear in a listing, and a polled id leaves the
+  // set on its deletion event and on the first 404 for it. A published
+  // `session.deleted` overrides both, because it is younger than any pass that
+  // may still be in flight.
+  //
+  // "The panel holds no row for it" is deliberately NOT part of this: a row is
+  // this panel's bookkeeping, and `finished` is pruned on every pass that
+  // relists a session, so a row's absence says nothing about the server.
+  const isLiveSession = (sessionID: string): boolean =>
+    !deletedSessions.has(sessionID) &&
+    (listed.has(sessionID) || isPrimarySession(sessionID));
+
+  // The orchestrator chat this panel belongs to: the first polled session that
+  // was never a subagent. `polledIDs` keeps insertion order and is seeded from
+  // the panel's own route/slot session before any child is discovered, so a
+  // second orchestrator the user later navigated into cannot displace it. This
+  // is the guaranteed terminus of a route escape — the session the user had
+  // before they went into a subagent at all.
+  const orchestratorSessionID = (): string | undefined => {
+    for (const sessionID of polledIDs) {
+      if (isPrimarySession(sessionID)) return sessionID;
+    }
+    return undefined;
+  };
+
+  // Move the view off a session that is ending, if it is the session the view
+  // is on. `parentID` is the parent the ending session hung under as far as the
+  // caller knows it; where the caller has no row left to read it from, the row
+  // this panel retired earlier still remembers it.
+  //
+  // Called from `retireRow` for every row that is retired, and from
+  // `onSessionDeleted` for a deletion the panel holds no row for — the case a
+  // reap that ran before the route arrived on the session leaves behind, where
+  // nothing else would ever move the view.
+  const escapeRoute = (
+    sessionID: string,
+    parentID: string | undefined,
+    rowPresent: boolean,
+  ): void => {
+    // `params` belongs to the session variant of the route union alone, so the
+    // name is what narrows it.
+    const route = api.route.current;
+    const routeSessionID =
+      route.name === "session"
+        ? (route.params?.sessionID as string | undefined)
+        : undefined;
+    const knownParent = parentID ?? parentOfGone(sessionID);
+    const escapeTo = routeEscapeTarget({
+      routeName: route.name,
+      routeSessionID,
+      sessionID,
+      parentID: knownParent,
+      isAlive: isLiveSession,
+      parentOfGone,
+      orchestratorID: orchestratorSessionID(),
+    });
+    debugLog("tui route escape", {
+      sessionID,
+      rowPresent,
+      route: route.name,
+      routeSessionID: routeSessionID ?? null,
+      parentID: knownParent ?? null,
+      target: escapeTo ?? null,
+    });
+    if (escapeTo !== undefined) {
+      api.route.navigate("session", { sessionID: escapeTo });
+    }
+  };
+
   // Take one row out of a rows map and remember it as gone, with the selection
   // and the local abort mark cleared and the view moved off the session if the
   // user is sitting in it. The map is either the panel's own state or the one a
   // poll pass is building.
   //
-  // The route escape lives HERE and nowhere else. Three paths retire a row —
-  // the `session.deleted` event, the poll's reap and dropping a held row from
-  // the panel — and whichever of them gets there first owns the ending: the
-  // ones that follow find no entry and do nothing. An escape at one of those
-  // call sites is therefore an escape that the other two bypass, and a bypassed
-  // escape leaves the route naming a session the server no longer has, which
-  // the TUI answers with its start page — the orchestrator chat gone from
-  // under the user. Retiring the row and moving off it are one act.
+  // Three paths retire a row — the `session.deleted` event, the poll's reap and
+  // dropping a held row from the panel — and whichever of them gets there first
+  // owns the ending: the ones that follow find no entry here. So the escape
+  // rides on the retiring itself rather than on a call site the other two
+  // bypass, and a deletion that finds no row at all reaches `escapeRoute`
+  // directly from `onSessionDeleted`. A bypassed escape leaves the route naming
+  // a session the server no longer has, which the TUI answers with its start
+  // page — the orchestrator chat gone from under the user.
   const retireRow = (
     rows: Map<string, SubagentEntry>,
     sessionID: string,
   ): void => {
     const entry = rows.get(sessionID);
-    // `params` belongs to the session variant of the route union alone, so the
-    // name is what narrows it.
-    const route = api.route.current;
-    const escapeTo = routeEscapeTarget({
-      routeName: route.name,
-      routeSessionID:
-        route.name === "session"
-          ? (route.params?.sessionID as string | undefined)
-          : undefined,
-      sessionID,
-      parentID: entry?.parentID,
-      isGone: (id) => finished.has(id),
-      parentOfGone,
-    });
+    escapeRoute(sessionID, entry?.parentID, entry !== undefined);
     finished.set(sessionID, entry);
     rows.delete(sessionID);
     aborted.delete(sessionID);
     if (selectedID() === sessionID) setSelectedID(undefined);
-    if (escapeTo !== undefined) {
-      api.route.navigate("session", { sessionID: escapeTo });
-    }
   };
 
   // A row built from a poll's child record alone, for a session this panel
@@ -1308,22 +1376,36 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
 
   // The plugin deletes a subagent's session at every ending it controls
   // (teardownSubagent), so this event is the end of the row — the one signal
-  // that means "finished" rather than "not running just now". A row the panel
-  // never had is nothing to do here — the row was already retired by the poll's
-  // reap, which took the route out with it. A row that is still on screen goes
-  // through `retireRow`, and the route escape comes with it from there.
+  // that means "finished" rather than "not running just now". A row still on
+  // screen goes through `retireRow`, and the route escape comes with it from
+  // there.
+  //
+  // A deletion the panel holds NO row for still moves the view. The row may
+  // have been retired by the poll's reap before the user navigated into the
+  // session, and the reap's escape only fires for the route as it stood at reap
+  // time; the panel may also never have held a row for it at all. Either way
+  // the deletion is the moment the route becomes a route to nothing, and this
+  // is the only handler that sees it.
   const onSessionDeleted = (event: unknown): void => {
     const sessionID = (event as { properties?: { info?: { id?: string } } })
       .properties?.info?.id;
+    if (!sessionID) {
+      scheduleRefresh();
+      return;
+    }
     // A deleted session cannot produce children again. Remove it before the
     // next fallback pass, including when no row was present for the event, and
     // whether it got into the set as this panel's own session or as a subagent
     // the poll discovered — that is what keeps the set from growing without
     // bound as subagents come and go.
-    if (sessionID) polledIDs.delete(sessionID);
-    const current = sessionID ? subagents() : undefined;
-    const entry = sessionID && current ? current.get(sessionID) : undefined;
-    if (sessionID && current && entry) {
+    polledIDs.delete(sessionID);
+    // Recorded before the escape is worked out: this session is exactly what
+    // the escape must not land on, and it outranks any pass that still lists
+    // it.
+    deletedSessions.add(sessionID);
+    const current = subagents();
+    const entry = current.get(sessionID);
+    if (entry) {
       const done = countableDone(entry, sessionID);
       // Resolved before the row is retired, while its own record is still the
       // one the chain starts from.
@@ -1332,6 +1414,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       retireRow(next, sessionID);
       setSubagents(next);
       if (done) addCompleted([root]);
+    } else {
+      escapeRoute(sessionID, parentOfGone(sessionID), false);
     }
     scheduleRefresh();
   };

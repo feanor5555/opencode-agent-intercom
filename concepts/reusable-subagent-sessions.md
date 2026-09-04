@@ -272,6 +272,33 @@ Capacity is not a term of either phase. A retention that overshoots
 `maxRetainedSubagents` is resolved afterwards, by evicting the OLDEST retained
 entries (§3.4) rather than by refusing the newest — the entry the orchestrator
 was just told about is the one most likely to be asked a follow-up question.
+The eviction runs through `evictRetainedOverCapacity` (`hooks.js:1627-1642`),
+which calls `dropRetainedSubagents(client, { keep: retentionCapacity() })`
+(`teardown.js:366-379`): `keep` is the live value of
+`maxRetainedSubagents` from `retentionCapacity()` (`settings.js:600-602`), the
+victims are claimed under the registry mutex and moved to `LIFECYCLE_CLOSING`
+before any I/O, and each is then handed to `teardownSubagent` with
+`notice: null` and `markAborted: false` — the same teardown every ending path
+uses, and silent towards the parent for the same reason §3.4 gives for the
+TTL reap.
+
+That covers a capacity that the set crosses on the way up. A capacity that is
+LOWERED while the set is already held is a different case — no entry joins at
+that moment, so `evictRetainedOverCapacity` is not reached, and at capacity 0
+no entry ever joins the set again, so the idle path can never fire. The set
+would otherwise hold entries the orchestrator can no longer use: `list`
+stops offering them and `reuse` refuses them on the very capacity that
+stranded them, while the opencode session stands for the whole retention
+window. That gap is closed on the same 5 s watchdog tick, by
+`trimRetainedToCapacity` (`watchdog.js:204-214`): it reads `retentionCapacity`
+live, so a settings edit takes effect at the next tick, and drops the
+over-capacity tail — oldest `retainedAt` first — through the same
+`dropRetainedSubagents(..., { keep, label: "capacity" })` the idle eviction
+runs. The teardown is identical to the capacity eviction above; the parent is
+silent; the victims become `LIFECYCLE_CLOSING` under the registry mutex before
+the per-entry loop of `sweepWatchdog` takes its snapshot, so the reap and the
+trim never race on the same entry. A failed trim is logged and retried on the
+next tick — it must not cost the tick its timeout and TTL work.
 
 Anything else deletes, and the whole feature reduces to today's behaviour when
 `maxRetainedSubagents` is 0 — which is its default: phase 1's first condition

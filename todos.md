@@ -14,5 +14,6 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 - The nested-spawn guard in `reapRows` (`tui/src/tui.tsx`) contradicts its own comment: `onSessionCreated` marks the parent polled in the same block that creates the row, so a nested row is reapable from birth. Correcting it changes `SubagentEntry`.
 
 - Establish whether a message part streamed just before `abortSession` is persisted by the time `session.messages` is read, which bounds how much of a timed-out subagent's text `timeoutSubagent` can rescue.
-- `concepts/reusable-subagent-sessions.md` (around line 272) describes retention capacity only as eviction after a retention; the watchdog sweep now also trims the held set to a lowered capacity. Complete that section.
 - A retained entry whose session is deleted from outside is dropped silently and the orchestrator is never told (`src/hooks.js:1613-1625`). Give that drop a notice path to the parent.
+
+Last commit: 2d99a3e docs: correct the line references and the child-waiter comment

@@ -44,6 +44,7 @@ import {
   dropSettingsCacheKeepingLatch,
   DEFAULT_RETAINED_SUBAGENT_TTL_MS,
 } from "../src/settings.js"
+import { getSessionDirectory, forgetSessionDirectory } from "../src/client.js"
 import {
   sweepOrphanedSubagentSessions,
   SUBAGENT_SESSION_TITLE_MARKER,
@@ -103,9 +104,14 @@ function session(id, over = {}) {
   }
 }
 
-function makeClient({ sessions = [], failList = false } = {}) {
+// `deleteStatus` makes `session.delete` answer the error envelope the opencode
+// SDK client RESOLVES with on a refused request (it is built without
+// `throwOnError`, so a failure does not reject) — the shape client.js's
+// deleteSession reads to answer a truthful `false`.
+function makeClient({ sessions = [], failList = false, deleteStatus } = {}) {
   const deleted = []
   const listCalls = []
+  const getCalls = []
   const client = {
     session: {
       list: async (opts) => {
@@ -118,16 +124,25 @@ function makeClient({ sessions = [], failList = false } = {}) {
       abort: async () => ({ data: true }),
       delete: async (opts) => {
         deleted.push(opts?.path?.id)
+        if (deleteStatus) {
+          return {
+            error: { name: "InternalError", message: "delete refused" },
+            response: { status: deleteStatus },
+          }
+        }
         return { data: true }
       },
       status: async () => ({ data: {} }),
-      get: async () => ({ data: { directory: fixtureDir } }),
+      get: async (opts) => {
+        getCalls.push(opts?.path?.id)
+        return { data: { directory: fixtureDir } }
+      },
       messages: async () => ({ data: [] }),
     },
     tui: { showToast: async () => ({ data: true }) },
     config: { get: async () => ({ data: { agent: {} } }) },
   }
-  return { client, deleted, listCalls }
+  return { client, deleted, listCalls, getCalls }
 }
 
 const ctxFor = (client) => ({ client, directory: fixtureDir, worktree: fixtureDir, project: {} })
@@ -229,6 +244,57 @@ test("a failed list sweeps nothing and does not throw", async () => {
   const { client, deleted } = makeClient({ sessions: [session("ses_leaked")], failList: true })
   assert.deepEqual(await sweepOrphanedSubagentSessions(client, { now }), [])
   assert.deepEqual(deleted, [])
+})
+
+// ---- a delete the server refused ---------------------------------------------
+
+test("a refused delete is not counted as deleted", async () => {
+  // The SDK client resolves an error envelope instead of rejecting, so the
+  // sweep's gate is only truthful because deleteSession reads that envelope.
+  // The session still exists; reporting it as swept would tell the caller a
+  // leftover is gone that is standing there for the next sweep to find.
+  withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: TTL })
+  const { client, deleted } = makeClient({
+    sessions: [session("ses_refused")],
+    deleteStatus: 500,
+  })
+  assert.deepEqual(await sweepOrphanedSubagentSessions(client, { now }), [])
+  assert.deepEqual(deleted, ["ses_refused"], "the delete was attempted, and refused")
+})
+
+test("a refused delete keeps the session's directory cache entry", async () => {
+  // forgetSessionDirectory is the drop that belongs to a session that is GONE.
+  // A session the server refused to delete is not gone, and a later read of its
+  // directory must still be served from the cache rather than re-fetched — the
+  // second getSessionDirectory below makes no session.get call.
+  withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: TTL })
+  const { client, getCalls } = makeClient({
+    sessions: [session("ses_cachekeep")],
+    deleteStatus: 503,
+  })
+  assert.equal(await getSessionDirectory(client, "ses_cachekeep"), fixtureDir)
+  assert.deepEqual(getCalls, ["ses_cachekeep"])
+
+  await sweepOrphanedSubagentSessions(client, { now })
+
+  assert.equal(await getSessionDirectory(client, "ses_cachekeep"), fixtureDir)
+  assert.deepEqual(getCalls, ["ses_cachekeep"], "still cached: the session was never deleted")
+  forgetSessionDirectory("ses_cachekeep")
+})
+
+test("a confirmed delete does drop the directory cache entry", async () => {
+  // The counterpart, so the test above pins the refusal and not merely a cache
+  // that is never dropped at all.
+  withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: TTL })
+  const { client, getCalls } = makeClient({ sessions: [session("ses_cachedrop")] })
+  assert.equal(await getSessionDirectory(client, "ses_cachedrop"), fixtureDir)
+  assert.deepEqual(getCalls, ["ses_cachedrop"])
+
+  assert.deepEqual(await sweepOrphanedSubagentSessions(client, { now }), ["ses_cachedrop"])
+
+  assert.equal(await getSessionDirectory(client, "ses_cachedrop"), fixtureDir)
+  assert.deepEqual(getCalls, ["ses_cachedrop", "ses_cachedrop"], "re-fetched, the cache was dropped")
+  forgetSessionDirectory("ses_cachedrop")
 })
 
 // ---- the default -------------------------------------------------------------

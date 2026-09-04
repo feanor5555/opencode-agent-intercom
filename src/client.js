@@ -260,7 +260,14 @@ export function unwrap(resp) {
 // response was seen, so nothing is known about whether a session was created,
 // and the callers of this one treat an exception as the abort of the whole
 // sequence they are in the middle of.
-export async function createChildSession(client, { parentID, title, directory }) {
+//
+// `onRefused` is handed the Error behind a refused create, with its `status`
+// and `kind`. It exists because `undefined` alone cannot tell a caller WHY:
+// the spawn tool reports the failure to the orchestrator in its own output, and
+// a refusal the server decided on ("that parent is gone") reads differently to
+// the orchestrator than a server that is down. Optional — a caller that only
+// needs the branch passes nothing.
+export async function createChildSession(client, { parentID, title, directory, onRefused }) {
   const op = "createChildSession (session.create)"
   const outcome = await attempt(op, () =>
     client.session.create({ body: { parentID, title }, query: { directory } }),
@@ -268,6 +275,7 @@ export async function createChildSession(client, { parentID, title, directory })
   if (!outcome.ok) {
     if (outcome.error?.kind === "indeterminate") throw outcome.error
     logFailure(op, outcome.error, { parentID })
+    onRefused?.(outcome.error)
     return undefined
   }
   return outcome.data?.id

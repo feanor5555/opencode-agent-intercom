@@ -114,6 +114,18 @@ function makeCtx({ messages = [] } = {}) {
       get: async () => ({ data: { directory: fixtureDir } }),
       messages: async () => {
         if (state.fail) throw new Error("connection reset")
+        // The other failure route, and the one this client actually takes: it
+        // is built without `throwOnError`, so a refused request RESOLVES with
+        // an error envelope carrying the status.
+        if (state.failStatus) {
+          return {
+            error: {
+              name: state.failStatus === 404 ? "NotFoundError" : "InternalError",
+              message: "messages refused",
+            },
+            response: { status: state.failStatus },
+          }
+        }
         return { data: state.messages }
       },
     },
@@ -268,6 +280,45 @@ test("a fetch that fails refuses the reuse and leaves the session held", async (
     LIFECYCLE_RETAINED,
     "and the stale figure is never substituted for the one it could not read",
   )
+})
+
+test("a REFUSED read (500) refuses the reuse and leaves the session held", async () => {
+  // The failure this client really produces: session.messages resolves an error
+  // envelope rather than throwing. Read naively, an empty unwrap looks exactly
+  // like a session with no messages — "gone" — and a transient server error
+  // would destroy a retained handle for good. Only a 404 means gone.
+  withSettings({ maxRetainedSubagents: 3, maxSubagents: 4 })
+  const { ctx, created, state } = makeCtx({ messages: assistantReply("R", 20000) })
+  const hooks = await plugin(ctx)
+  const { sessionID, handle } = await retainOne(hooks, created)
+
+  state.failStatus = 500
+  const res = await hooks.tool.reuse.execute({ subagent: handle, prompt: "which one?" }, toolCtx)
+
+  assert.match(res.output, /Reuse refused/)
+  assert.match(res.output, /still held/)
+  assert.doesNotMatch(res.output, /no longer exists/, "a 500 is not a deleted session")
+  assert.equal(
+    entryLifecycle(entryForSession(sessionID)),
+    LIFECYCLE_RETAINED,
+    "a server error must not cost the orchestrator the handle",
+  )
+  assert.equal(countRetainedSubagents(), 1)
+})
+
+test("a REFUSED read (404) is the one that drops the entry", async () => {
+  // The counterpart: the session really is gone, so the handle goes with it.
+  withSettings({ maxRetainedSubagents: 3, maxSubagents: 4 })
+  const { ctx, created, state } = makeCtx({ messages: assistantReply("R", 20000) })
+  const hooks = await plugin(ctx)
+  const { sessionID, handle } = await retainOne(hooks, created)
+
+  state.failStatus = 404
+  const res = await hooks.tool.reuse.execute({ subagent: handle, prompt: "which one?" }, toolCtx)
+
+  assert.match(res.output, /no longer exists/)
+  assert.equal(entryForSession(sessionID), undefined)
+  assert.equal(countRetainedSubagents(), 0)
 })
 
 test("a session with no messages left refuses the reuse and drops the entry", async () => {

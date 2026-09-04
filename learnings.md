@@ -384,3 +384,39 @@ The XDG resolution, the global file list (`opencode.jsonc`, `opencode.json`,
 were all read from the opencode v1.18.23 source (config.ts, config/plugin.ts,
 config/tui.ts, plugin/shared.ts, core/global.ts) and corroborated against the
 current docs at `opencode.ai/docs/config/` and `opencode.ai/docs/plugins/`.
+
+## The SDK client carries no `throwOnError`: a failed request resolves
+
+The client opencode hands a plugin is built without `throwOnError`. A failed
+request does NOT reject — it resolves with an envelope
+`{ error, request, response }` carrying the HTTP status, e.g.
+`response.status: 404` with `error.name: "NotFoundError"` for a session that is
+gone. A wrapper that only awaits the SDK promise therefore cannot tell a
+delivered request from a refused one and reports the refusal as done: a delete
+that did not happen returns `true`, a prompt that never reached the session
+returns normally, and a read that failed unwraps to `undefined` and looks like
+an empty result.
+
+Every SDK call in this plugin goes through `attempt(op, call)` in
+`src/client.js`, which folds both failure routes — the thrown transport error
+and the resolved envelope — into `{ ok, data | error }`. `requestFailure`
+reads the envelope and tags the error with `status`, `errorName`, `terminal`
+(any 4xx or a NotFoundError) and `kind` (`"refused"` where the server answered
+with a status, `"indeterminate"` where no response was seen). `withRetry` is
+the retry loop built on it; the `kind` split is what makes a retry safe for a
+non-idempotent write.
+
+**A bare `await client.*` in `src/client.js` is a defect by construction.**
+The two `fetch`-based paths in that module (`patchPartSynthetic`,
+`selectTuiSession`) read their own responses and are not SDK calls.
+
+Three contracts sit on top, and no fourth: a required write throws once its
+retry policy is spent (`postNotice`, `promptSession`), a reported write returns
+a truthful `false` and logs once (`deleteSession`, `archiveSession`,
+`updateSessionTitle`, `abortSession`), a best-effort read returns its empty
+value and logs once (`getSessionDirectory`, `listSessions`, `fetchMessages`,
+`fetchSnapshot`). `fetchSnapshot` is the one read whose caller branches on WHY
+it is empty: a 404 answers `{ messageCount: 0 }` (the session is gone), every
+other failure answers `{}` (unreadable), so `snapshotOutcome` can tell "gone"
+from "unavailable" and `reuse` does not destroy a retained handle over a
+transient server error.

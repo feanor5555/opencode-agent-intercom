@@ -728,6 +728,35 @@ test("(e) createSession throws — drain aborted, nothing reparented, nothing de
   assert.ok(!names.includes("forgetPrimary"))
 })
 
+test("(e) createSession answers undefined — the handoff fails before it binds the drain to nothing", async () => {
+  // The creator does not throw on a REFUSED create: the server answered, and
+  // client.js's createChildSession reports that as undefined. Without the
+  // explicit check in step 2 the undefined would be keyed into the drain and
+  // the kickoff sent to nothing, and the sequence would walk past its point of
+  // no return with no successor session at all.
+  const deps = makeDeps()
+  deps.createSession = async (opts) => {
+    deps._log.push(["createSession", opts])
+    return undefined
+  }
+
+  await assert.rejects(
+    () => performPrimaryHandoff(deps),
+    /successor session was not created/,
+  )
+
+  const names = order(deps._log)
+  assert.ok(names.includes("createSession"), "the create was attempted")
+  assert.ok(!names.includes("bindDrainTarget"), "nothing to bind the drain to")
+  assert.ok(!names.includes("promptAsync"), "no kickoff into an undefined session")
+  assert.ok(!names.includes("reparent"), "no subagent is moved onto a session that does not exist")
+  assert.ok(!names.includes("deleteSession"), "there is no orphan to delete")
+  assert.ok(names.includes("abortDrain"), "the buffer goes back to the OLD primary")
+  assert.ok(!names.includes("flushDrain"))
+  assert.ok(!names.includes("archiveSession"), "the old primary survives a failed handoff")
+  assert.ok(!names.includes("forgetPrimary"), "old primary stays tracked for the retry")
+})
+
 test("post-kickoff failures do NOT revert: a failing old-session archive still finishes the handoff", async () => {
   // Once the kickoff is delivered the new session is live — reverting past
   // that point (deleting #2) would be strictly worse than a zombie old

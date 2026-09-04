@@ -11,7 +11,7 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- `promptSession`, `deleteSession`, `abortSession`, `updateSessionTitle` and `archiveSession` in `src/client.js` still read a resolved failure envelope as success, so a 4xx/5xx on the spawn task prompt, the handoff kickoff, the DOC_SUMMARY prompt or a teardown call passes silently. The concept for the uniform repair is `concepts/client-failure-contract.md`; carrying it out changes the failure contract of `spawn`, the handoff and teardown and touches their suites.
 - The test "a parent deleted with its children is not woken for them" in `test/retention-drop-notice.test.js` feeds the parent's `session.deleted` first, an order that never occurs on a real server; it pins the already-seen fast path and the real-order case now stands beside it. Decide whether the artificial-order case stays.
+- `client.tui.showToast` in `src/client.js` is still on a bare `await` and reads a refused request as success. `concepts/client-failure-contract.md` takes no decision on the `tui` namespace; decide whether that call joins the reported-write contract.
 
-Last commit: ee55aa7 fix: read a subagent's last text after the flush, not before it
+Last commit: d2302d6 feat: give every client wrapper a truthful failure contract

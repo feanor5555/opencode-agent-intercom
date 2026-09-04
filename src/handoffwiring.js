@@ -131,7 +131,13 @@ export function maybeRunPendingHandoff(client, sessionID) {
 // between the pure handoff sequence (handoff.js) and the live client /
 // registry / project plumbing. Async for one reason: the agent the replacement
 // primary runs as may have to be confirmed against the resolved agent list.
-async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, resolvedAgentName) {
+//
+// Exported so the wiring itself can be pinned against the doubles handoff.js is
+// tested with: handoff.js's failure paths are written for a `promptAsync` that
+// REJECTS on a refused kickoff and a `createSession` that answers undefined on
+// a refused create, and only a test that builds these real deps over a fake
+// client can show the production bridge behaves that way.
+export async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, resolvedAgentName) {
   // Resolve once for the whole handoff, so the name the deps carry and every
   // prompt it routes cannot diverge. Endless mode supplies the name it already
   // resolved for its open-points turn; the plain path resolves it here.

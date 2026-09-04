@@ -402,11 +402,13 @@ export async function teardownSubagent(
         log(`${tag}session quiescence timed out; deleting`, { handle, sessionID })
       }
     }
-    try {
-      const ok = await deleteSession(client, sessionID)
-      if (ok) log(`${tag}deleted opencode session`, { handle, sessionID })
-    } catch (err) {
-      log(`${tag}deleteSession failed`, { handle, sessionID, err: errMsg(err) })
+    // A reported write: deleteSession never throws and answers whether the
+    // delete took effect, logging the status itself where it did not. Only the
+    // confirmation is logged here; the teardown proceeds either way, and a
+    // session left standing is collected by sweepOrphanedSubagentSessions at
+    // the next plugin load.
+    if (await deleteSession(client, sessionID)) {
+      log(`${tag}deleted opencode session`, { handle, sessionID })
     }
     forgetSessionDirectory(sessionID)
   } finally {
@@ -603,6 +605,10 @@ export async function sweepOrphanedSubagentSessions(client, { directory, now = D
       title: s.title,
       idleMs: now - idleSince,
     })
+    // The gate reads a truthful boolean: a delete the server refused leaves the
+    // session standing, so it is neither counted as deleted nor dropped from
+    // the directory cache. It stays a leftover and the next sweep finds it
+    // again — this run reports only what it really removed.
     if (await deleteSession(client, sessionID)) {
       forgetSessionDirectory(sessionID)
       deleted.push(sessionID)

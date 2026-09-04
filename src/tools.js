@@ -592,12 +592,27 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       // as its session stands. The tool-call metadata title below is a UI
       // label, not an identity, and stays clean.
       const title = args.description || `${args.agent}: ${args.prompt.slice(0, 60)}`
+      // The reason a create was refused is carried out of the wrapper here and
+      // into the output below: `undefined` alone tells the orchestrator only
+      // that nothing was created, and it has to decide between re-spawning now
+      // and reporting to the user. A status says which of the two — a 4xx it
+      // will meet again on the next attempt, a 5xx it may not.
+      let createFailure
       const sessionID = await createChildSession(client, {
         parentID: toolCtx.sessionID,
         title: SUBAGENT_SESSION_TITLE_MARKER + title,
         directory,
+        onRefused: (err) => {
+          createFailure = err
+        },
       })
-      if (!sessionID) return { output: "Failed to create subagent session." }
+      if (!sessionID) {
+        return {
+          output: createFailure
+            ? `Failed to create subagent session: ${errMsg(createFailure)}`
+            : "Failed to create subagent session.",
+        }
+      }
 
       // The waiter goes up here — after the child's id exists, BEFORE the child
       // is prompted — and at no later point. A child cannot end before it has

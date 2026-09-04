@@ -116,11 +116,11 @@ import { hasOpenPointsHeading } from "./openpoints.js"
 // @property {() => string | Promise<string>} getLastUserGoal
 // @property {(s: PrimarySummary) => string} formatPrimarySummary
 // @property {(directory: string, md: string) => void} writePrimarySummary
-// @property {(opts: { agent: string }) => Promise<string>} createSession
+// @property {(opts: { agent: string }) => Promise<string | undefined>} createSession  undefined where the server refused the create; step 2 turns that into a pre-kickoff failure
 // @property {(sessionID: string, message: string) => Promise<void>} promptAsync
 // @property {(fromID: string, toID: string) => Promise<number>} reparent
-// @property {(sessionID: string) => Promise<void>} deleteSession  used ONLY for the orphaned NEW session on the failure path (a root session with no children)
-// @property {(sessionID: string) => Promise<void>} archiveSession  retires the OLD primary in step 8 without opencode's recursive child-delete cascade
+// @property {(sessionID: string) => Promise<boolean>} deleteSession  used ONLY for the orphaned NEW session on the failure path (a root session with no children); reports whether the delete took effect, and the sequence proceeds either way
+// @property {(sessionID: string) => Promise<boolean>} archiveSession  retires the OLD primary in step 8 without opencode's recursive child-delete cascade; reports whether the archive took effect, and the sequence proceeds either way
 // @property {(sessionID: string) => void} forgetPrimary
 // @property {() => Promise<unknown>} [dropRetainedSubagents]  tear down every retained subagent before the sequence starts
 // @property {() => Promise<string>} promptOldPrimaryForDocSummaries
@@ -195,6 +195,14 @@ async function performPrimaryHandoffInner(deps) {
     // subagent finishing between reparent and kickoff is buffered too (its
     // result must not reach #2 before the kickoff message).
     newID = await deps.createSession({ agent: deps.orchestratorAgentName })
+    // The creator answers undefined where the server refused the request (it
+    // throws only where no response was seen at all). A handoff with no
+    // successor session has nothing left to do: without this throw the
+    // undefined walks into bindDrainTarget and promptAsync, the drain is keyed
+    // under it, and the kickoff is sent to nothing. Failing here lands in the
+    // same pre-kickoff catch as every other step-1..6 failure, which reverts
+    // and hands the buffer back to the old primary.
+    if (!newID) throw new Error("primary handoff: the successor session was not created")
     deps.bindDrainTarget(newID)
 
     // 3. Ask the OLD primary (#1) — which still has PROJECT.md / TODO.md /

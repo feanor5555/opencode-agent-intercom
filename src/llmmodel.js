@@ -90,14 +90,16 @@ export function resolveModelForAgent(agent) {
 
 // The reasoning-effort ladder steps that mean an override. `default` is stored
 // as the absence of a `variant` key, so it is not a member here.
-const EFFORT_VALUES = new Set(["low", "medium", "high"])
+const EFFORT_VALUES = new Set(["low", "medium", "high", "xhigh"])
 
 // For an agent name, return the reasoning effort stored beside its model pair
-// — `"low"`, `"medium"` or `"high"` — or null where the entry carries no
-// `variant`, or one outside that set. The closed set is what keeps a
+// — `"low"`, `"medium"`, `"high"` or `"xhigh"` — or null where the entry
+// carries no `variant`, or one outside that set. The closed set is what keeps a
 // hand-edited file from putting an arbitrary string into a provider request:
 // `chatParamsHook` merges the result through `src/reasoningeffort.js`, which
-// only knows these three.
+// only knows these four. `xhigh` is not offered by every model; the panel keeps
+// it off the ladder of a model that does not name it, and a model that is sent
+// it anyway rejects it as it would any effort it does not take.
 //
 // Independent of the model pair: an entry whose pair is unusable can still
 // carry an effort, and it then applies to whatever model opencode resolved.

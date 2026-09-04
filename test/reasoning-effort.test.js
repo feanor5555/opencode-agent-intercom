@@ -41,6 +41,26 @@ test("the anthropic family takes effort", () => {
   }
 })
 
+test("xhigh passes through for the families that pass a string through", () => {
+  // The step is not in every model's vocabulary — the panel keeps it off the
+  // ladder of a model whose `variants` do not name it — but where the family
+  // carries a plain effort string, this module hands it over as any other step.
+  for (const npm of [
+    "@ai-sdk/openai",
+    "@ai-sdk/openai-compatible",
+    "@ai-sdk/azure",
+    "@ai-sdk/xai",
+  ]) {
+    assert.deepEqual(effortOptions("xhigh", model(npm)), { reasoningEffort: "xhigh" }, npm)
+  }
+  for (const npm of ["@ai-sdk/anthropic", "@ai-sdk/google-vertex-anthropic"]) {
+    assert.deepEqual(effortOptions("xhigh", model(npm)), { effort: "xhigh" }, npm)
+  }
+  assert.deepEqual(effortOptions("xhigh", model("@openrouter/ai-sdk-provider")), {
+    reasoning: { effort: "xhigh" },
+  })
+})
+
 test("the google family takes a thinkingConfig block", () => {
   for (const npm of ["@ai-sdk/google", "@ai-sdk/google-vertex"]) {
     assert.deepEqual(
@@ -51,6 +71,15 @@ test("the google family takes a thinkingConfig block", () => {
   }
 })
 
+test("the google family writes nothing for xhigh", () => {
+  // `thinkingConfig.thinkingLevel` has low/medium/high and no step above them;
+  // sending "xhigh" there would be a value the provider rejects, so the family
+  // stays silent for it exactly as for a value it does not know.
+  for (const npm of ["@ai-sdk/google", "@ai-sdk/google-vertex"]) {
+    assert.equal(effortOptions("xhigh", model(npm)), null, npm)
+  }
+})
+
 test("openrouter takes a nested reasoning block", () => {
   assert.deepEqual(effortOptions("low", model("@openrouter/ai-sdk-provider")), {
     reasoning: { effort: "low" },
@@ -58,7 +87,7 @@ test("openrouter takes a nested reasoning block", () => {
 })
 
 test("every ladder step reaches the patch unchanged", () => {
-  for (const effort of ["low", "medium", "high"]) {
+  for (const effort of ["low", "medium", "high", "xhigh"]) {
     assert.deepEqual(effortOptions(effort, model("@ai-sdk/openai")), { reasoningEffort: effort })
   }
 })
@@ -83,7 +112,7 @@ test("a model that does not declare reasoning writes nothing", () => {
 })
 
 test("an effort outside the ladder writes nothing", () => {
-  for (const effort of ["default", "none", "minimal", "HIGH", "", 3, null, undefined]) {
+  for (const effort of ["default", "none", "minimal", "HIGH", "XHIGH", "xxhigh", "", 3, null, undefined]) {
     assert.equal(effortOptions(effort, model("@ai-sdk/openai")), null, String(effort))
   }
 })

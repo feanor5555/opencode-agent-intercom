@@ -576,22 +576,30 @@ exposes every runtime knob:
   own file, because the sampling params file is a number-valued map whose
   unknown keys are forwarded to the provider.
   An `effort [<value>]` row sits directly under the model row and sets
-  the reasoning effort for that agent over a fixed ladder
-  `default → low → medium → high`. `default` is the absence of a stored
-  value; `low`/`medium`/`high` write the entry's optional `variant` key.
-  The row is inert and muted where the resolved model has no reasoning
-  capability, where the model is not on the pick list, or where no model
-  is resolved. Setting an effort pins the model at the same time
+  the reasoning effort for that agent over a per-model ladder
+  `default → low → medium → high → xhigh`. The ladder offered for the
+  selected model is built from the key list of that model's `variants`
+  map as `client.config.providers()` reports it: each of `low`,
+  `medium`, `high`, `xhigh` is offered only when the model names it as a
+  key. A model that reports no `variants` map at all is taken to offer
+  `low`/`medium`/`high`; a model that reports an empty `variants` map,
+  or one without `capabilities.reasoning === true`, makes the row
+  inert. `default` is the absence of a stored value; any other step
+  writes the entry's optional `variant` key. The row is inert and muted
+  where the resolved model has no reasoning capability, where the model
+  is not on the pick list, or where no model is resolved. Setting an
+  effort pins the model at the same time
   (`{providerID, modelID, variant}`); changing the model clears the
   effort. The effort is applied per request through the `chat.params`
   hook, which translates the value into the provider family's own option
   key — `reasoningEffort` for `@ai-sdk/openai` / `@ai-sdk/openai-compatible`
   / `@ai-sdk/azure` / `@ai-sdk/xai`; `effort` for `@ai-sdk/anthropic` /
-  `@ai-sdk/google-vertex-anthropic`; `thinkingConfig.thinkingLevel`
-  (with `includeThoughts: true`) for `@ai-sdk/google` /
-  `@ai-sdk/google-vertex`; `reasoning.effort` for
-  `@openrouter/ai-sdk-provider`; nothing for any other family. Keys
-  already set in `llm-params.json` win over the ladder.
+  `@ai-sdk/google-vertex-anthropic`; `reasoning.effort` for
+  `@openrouter/ai-sdk-provider`. The `thinkingConfig.thinkingLevel`
+  family of `@ai-sdk/google` / `@ai-sdk/google-vertex` takes only
+  `low`/`medium`/`high` (with `includeThoughts: true`) and emits nothing
+  for `xhigh`; nothing is written for any other family. Keys already
+  set in `llm-params.json` win over the ladder.
   The choice is applied by two hooks that share the same stored pair. The
   `config` hook writes it into `config.agent[<name>].model` (the
   `providerID/modelID` form opencode resolves an agent's model from), so

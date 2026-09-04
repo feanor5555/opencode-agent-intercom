@@ -16,6 +16,7 @@ import {
   EFFORT_LADDER,
   cycleLlmModel,
   cycleLlmVariant,
+  effortLadderFor,
   formatLlmEffort,
   readLlmModels,
   setLlmModel,
@@ -221,8 +222,41 @@ test("dropping an agent that has nothing on disk leaves the file untouched", () 
 
 const OPUS = { providerID: "anthropic", modelID: "opus" }
 
+// The two ladders the panel builds from a model's variant names: one for a
+// model that takes the three common steps, one for a model that also names
+// xhigh. Passed to cycleLlmVariant exactly as the panel passes them.
+const THREE_STEP = effortLadderFor(["low", "medium", "high"])
+const FOUR_STEP = effortLadderFor(["low", "medium", "high", "xhigh"])
+
 test("the ladder is the one the effort row cycles, default first", () => {
-  assert.deepEqual([...EFFORT_LADDER], ["default", "low", "medium", "high"])
+  assert.deepEqual([...EFFORT_LADDER], ["default", "low", "medium", "high", "xhigh"])
+})
+
+test("a model's ladder is default plus the steps its variants name", () => {
+  assert.deepEqual(THREE_STEP, ["default", "low", "medium", "high"])
+  assert.deepEqual(FOUR_STEP, ["default", "low", "medium", "high", "xhigh"])
+  // Order is the ladder's, not the order the model happens to list them in,
+  // and a variant name that is not a ladder step is no step of the cycle.
+  assert.deepEqual(effortLadderFor(["xhigh", "high", "thinking", "none", "low"]), [
+    "default",
+    "low",
+    "high",
+    "xhigh",
+  ])
+})
+
+test("a model that names no variant at all has nothing to cycle", () => {
+  // The empty map is what a model without reasoning reports: only "default"
+  // is left, so the row has no step to take.
+  assert.deepEqual(effortLadderFor([]), ["default"])
+})
+
+test("a model that reports no variant map at all keeps the assumed steps", () => {
+  // Unknown, not empty: the three steps every provider family the plugin maps
+  // takes. xhigh is not assumed — it is offered only where a model names it.
+  for (const missing of [null, undefined]) {
+    assert.deepEqual(effortLadderFor(missing), ["default", "low", "medium", "high"])
+  }
 })
 
 test("an effort chosen in the panel is shown as it stands", () => {
@@ -230,8 +264,10 @@ test("an effort chosen in the panel is shown as it stands", () => {
 })
 
 test("an effort opencode resolved is marked as the inherited default", () => {
-  // opencode's vocabulary is wider than the ladder — an unmarked "xhigh" would
-  // read as a step the row had cycled to.
+  // opencode's vocabulary is wider than the ladder — an unmarked "minimal"
+  // would read as a step the row had cycled to. So would a step the ladder has
+  // but this model does not offer.
+  assert.equal(formatLlmEffort("minimal", "opencode"), "(minimal)")
   assert.equal(formatLlmEffort("xhigh", "opencode"), "(xhigh)")
 })
 
@@ -250,6 +286,14 @@ test("a stored effort rides through the read beside its pair", () => {
   writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "high" } }))
 
   assert.deepEqual(readLlmModels(), { coder: { ...OPUS, variant: "high" } })
+})
+
+test("a stored xhigh rides through the read like any other step", () => {
+  // The read is model-blind: which models offer the step is the ladder's
+  // business, not the file's.
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "xhigh" } }))
+
+  assert.deepEqual(readLlmModels(), { coder: { ...OPUS, variant: "xhigh" } })
 })
 
 test("a nonsense variant in the file is dropped by the read", () => {
@@ -296,14 +340,50 @@ test("the effort steps from the value the file holds, not from the panel's copy"
   assert.deepEqual(onDisk(), merged)
 })
 
-test("stepping past the top of the ladder wraps to default", () => {
+test("stepping past the top of a model's ladder wraps to default", () => {
   writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "high" } }))
 
-  const merged = cycleLlmVariant("coder", 1, OPUS)
+  const merged = cycleLlmVariant("coder", 1, OPUS, THREE_STEP)
 
   assert.deepEqual(merged, { coder: OPUS })
   assert.equal("variant" in merged.coder, false)
   assert.deepEqual(onDisk(), merged)
+})
+
+test("xhigh is in the cycle only for a model whose variants name it", () => {
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "high" } }))
+  const above = cycleLlmVariant("coder", 1, OPUS, FOUR_STEP)
+  assert.deepEqual(above, { coder: { ...OPUS, variant: "xhigh" } })
+  assert.deepEqual(onDisk(), above)
+
+  // One more step off the top of that ladder is "default" again.
+  assert.deepEqual(cycleLlmVariant("coder", 1, OPUS, FOUR_STEP), { coder: OPUS })
+})
+
+test("a stored step the model's ladder lacks is stepped from as default", () => {
+  // The model was changed by hand to one without xhigh while xhigh stood in
+  // the file: the next step lands inside the ladder rather than nowhere.
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "xhigh" } }))
+
+  const up = cycleLlmVariant("coder", 1, OPUS, THREE_STEP)
+  assert.deepEqual(up, { coder: { ...OPUS, variant: "low" } })
+  assert.deepEqual(onDisk(), up)
+
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "xhigh" } }))
+  const down = cycleLlmVariant("coder", -1, OPUS, THREE_STEP)
+  assert.deepEqual(down, { coder: { ...OPUS, variant: "high" } })
+})
+
+test("a ladder with nothing but default leaves the file untouched", () => {
+  // A model that names no variant: the panel keeps the row inert, and the
+  // cycler has no step to write even when called.
+  writeFileSync(file, JSON.stringify({ coder: OPUS }))
+  const before = readFileSync(file, "utf8")
+
+  const merged = cycleLlmVariant("coder", 1, OPUS, effortLadderFor([]))
+
+  assert.deepEqual(merged, { coder: OPUS })
+  assert.equal(readFileSync(file, "utf8"), before)
 })
 
 test("landing on default deletes only the variant and keeps the pair", () => {
@@ -324,13 +404,17 @@ test("landing on default deletes only the variant and keeps the pair", () => {
   assert.deepEqual(onDisk(), merged)
 })
 
-test("stepping back from default lands on the top of the ladder", () => {
+test("stepping back from default lands on the top of the model's ladder", () => {
   writeFileSync(file, JSON.stringify({ coder: OPUS }))
 
-  const merged = cycleLlmVariant("coder", -1, OPUS)
-
+  const merged = cycleLlmVariant("coder", -1, OPUS, THREE_STEP)
   assert.deepEqual(merged, { coder: { ...OPUS, variant: "high" } })
   assert.deepEqual(onDisk(), merged)
+
+  writeFileSync(file, JSON.stringify({ coder: OPUS }))
+  assert.deepEqual(cycleLlmVariant("coder", -1, OPUS, FOUR_STEP), {
+    coder: { ...OPUS, variant: "xhigh" },
+  })
 })
 
 test("an effort on an agent with no entry materialises the resolved pair", () => {
@@ -349,9 +433,9 @@ test("landing on default for an agent with no entry leaves the file untouched", 
   writeFileSync(file, JSON.stringify({ reviewer: { providerID: "openai", modelID: "gpt-5" } }))
   const before = readFileSync(file, "utf8")
 
-  // Four steps from "default" come back to it, and the agent has no entry to
-  // strip a key from, so nothing is materialised.
-  const merged = cycleLlmVariant("coder", 4, OPUS)
+  // Four steps from "default" come back to it on a three-step ladder, and the
+  // agent has no entry to strip a key from, so nothing is materialised.
+  const merged = cycleLlmVariant("coder", 4, OPUS, THREE_STEP)
 
   assert.equal("coder" in merged, false)
   assert.equal(readFileSync(file, "utf8"), before)

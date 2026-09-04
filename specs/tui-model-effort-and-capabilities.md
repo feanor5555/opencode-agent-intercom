@@ -32,13 +32,32 @@ interface ModelChoice extends ModelRef {
 Nothing else is kept. `cost`, `limit`, `toolcall`, `attachment`, `status`,
 `release_date`, `options` and `headers` stay dropped.
 
-`variants` is not read. The installed SDK's generated `Model` type carries no
-`variants` property — neither in `node_modules/@opencode-ai/sdk/dist/gen/types.gen.d.ts`
-(1.18.23, the version `src/` runs against) nor in
-`tui/node_modules/@opencode-ai/sdk/dist/gen/types.gen.d.ts` (1.14.48, the version
-`tui/src/` compiles against); in both, the only `variant` in the file is the toast
-`variant: "info" | "success" | "warning" | "error"`. The effort value set is
-therefore a fixed ladder (§3), not a per-model enumeration.
+`variants` is read. The cast gains one nested block:
+
+```ts
+models?: Record<string, {
+  id?: string; providerID?: string; name?: string;
+  capabilities?: { reasoning?: boolean; input?: { image?: boolean } };
+  variants?: Record<string, unknown>;
+}>;
+```
+
+`ModelChoice` (`tui/src/tui.tsx:157-162`) gains one nullable field, filled by
+`variantNames` (`tui/src/tui.tsx:167-169`) — the keys of the model's `variants`
+map, or null where the provider list reports no such map (an unknown list, not
+an empty one):
+
+```ts
+interface ModelChoice extends ModelRef {
+  label: string;
+  vision: boolean;    // m.capabilities?.input?.image === true
+  reasoning: boolean; // m.capabilities?.reasoning === true
+  variants: string[] | null; // Object.keys(m.variants) or null
+}
+```
+
+Nothing else is kept. `cost`, `limit`, `toolcall`, `attachment`, `status`,
+`release_date`, `options` and `headers` stay dropped.
 
 Sorting (`tui/src/tui.tsx:468-471`) and the 60 s poll (`tui/src/tui.tsx:478`) are
 unchanged.
@@ -95,17 +114,29 @@ A new row directly under the model row and above `[reset current agent]`
 `[<]`/`[>]` with `holdRepeat`, value in `fitCell(..., MODEL_NAME_W)` so the agent,
 model and effort rows line their buttons up.
 
-**Value set — one fixed ladder for every model:**
+**Value set — a per-model ladder built from the model's `variants` map:**
 
-```
-default → low → medium → high → (wraps to default)
-```
+The row's widest ladder, used when no model is resolved, is
+`default → low → medium → high → xhigh` — `default` is the absence of a stored
+value and stands in front of the four override steps in cycle order. For a
+resolved model, the row offers `default` plus every override step the model
+declares as a key in its `variants` map:
 
-`default` means no override: the entry carries no `variant` and the model's own
-default effort stands. The ladder is family-independent by construction — every
-family in the table of §5 accepts `low`, `medium` and `high`. There is no numeric
-budget-token control and no per-model value discovery; a model whose provider
-wants a token budget or an exotic effort name is served by hand-editing
+- a model that reports no `variants` key at all (null) falls back to the
+  assumed steps `low`/`medium`/`high` — the steps every mapped provider family
+  takes, so the row still cycles on a model the provider list describes
+  without enumerating effort values;
+- a model that reports a `variants` map with at least one of `low`, `medium`,
+  `high`, `xhigh` as a key offers exactly that subset, in cycle order;
+- a model whose `variants` map is empty, or whose
+  `capabilities.reasoning !== true`, makes the row inert.
+
+`effortLadderFor(supported)` (`tui/src/llm-models-file.ts:52-60`) is what
+produces this. The ladder a model carries is then `["default", ...steps]`,
+prepended with `default` so it can always be cycled to. `default` means no
+override: the entry carries no `variant` and the model's own default effort
+stands. There is no numeric budget-token control; a model whose provider wants
+a token budget or an exotic effort name is served by hand-editing
 `llm-params.json`, whose unknown keys already ride through into `output.options`
 (`src/llmparams.js:85-89`).
 
@@ -118,10 +149,13 @@ wants a token budget or an exotic effort name is served by hand-editing
 **When the model cannot do it:** the resolved model is in the pick list with
 `reasoning === false` → the cell shows `n/a`, and `[<]`/`[>]` render in
 `theme.textMuted`; their handlers remain wired, but the action's `live` gate
-makes them inert. The resolved model is not in the pick list, or there is none
-→ the cell shows the stored `variant` where one is stored and `n/a` otherwise,
-with the same always-wired, in-action guard. A stale or hand-written choice
-stays visible rather than turning silently into `default`.
+makes them inert. The resolved model is in the pick list with
+`reasoning === true` but its `variants` map is empty → the same `n/a` and
+inert buttons, since `effortLadderFor([])` returns just `["default"]` and the
+cycle has nothing to step to. The resolved model is not in the pick list, or
+there is none → the cell shows the stored `variant` where one is stored and
+`n/a` otherwise, with the same always-wired, in-action guard. A stale or
+hand-written choice stays visible rather than turning silently into `default`.
 
 **The inherited effort** comes from a new signal
 `opencodeEfforts: Record<string, string>`, filled in `refreshOpencodeDefaults`
@@ -147,16 +181,24 @@ added anywhere for this.
 shape as its neighbours:
 
 ```ts
-export const EFFORT_LADDER = ["default", "low", "medium", "high"] as const;
-export function cycleLlmVariant(agent: string, delta: number, model: ModelRef): LlmModels;
+export const EFFORT_LADDER = ["default", "low", "medium", "high", "xhigh"] as const;
+export function effortLadderFor(supported: readonly string[] | null | undefined): EffortValue[];
+export function cycleLlmVariant(agent: string, delta: number, model: ModelRef, ladder?: readonly EffortValue[]): LlmModels;
 ```
 
-It steps from the position the file holds at this moment, so an outside edit is
-stepped from rather than overwritten. Landing on `default` deletes only the
-`variant` key and leaves `{ providerID, modelID }` in place; landing anywhere else
-writes `models[agent] = { ...model, variant }`, materialising the pair from the
+`EFFORT_LADDER` is the widest ladder — `default` plus the four override steps —
+and is what the row walks for an agent with no resolved model. `effortLadderFor`
+takes the key list of the resolved model's `variants` map (or null) and returns
+`["default", ...steps]` filtered to those steps the model declares; null falls
+back to the assumed `low`/`medium`/`high`. `cycleLlmVariant` takes the ladder
+explicitly so the caller — `cycleEffort` (`tui/src/tui.tsx:676-682`) — passes
+the one `effortLadderFor` produced for the resolved model. It steps from the
+position the file holds at this moment, so an outside edit is stepped from
+rather than overwritten. Landing on `default` deletes only the `variant` key
+and leaves `{ providerID, modelID }` in place; landing anywhere else writes
+`models[agent] = { ...model, variant }`, materialising the pair from the
 resolved model where the agent had no entry. `resetLlmAgent`
-(`tui/src/tui.tsx:539-545`) needs no change: it drops the whole entry.
+(`tui/src/tui.tsx:697-703`) needs no change: it drops the whole entry.
 
 ## 4. Persistence
 
@@ -186,11 +228,13 @@ keeps returning the bare pair, and a sibling reads the effort off the same
 mtime-keyed cache (`:54-68`):
 
 ```js
-export function resolveEffortForAgent(agent)   // -> "low" | "medium" | "high" | null
+export function resolveEffortForAgent(agent)   // -> "low" | "medium" | "high" | "xhigh" | null
 ```
 
-It returns null for anything not in that set, so a hand-edited file cannot put an
-arbitrary string into a request.
+It returns null for anything not in that set, so a hand-edited file cannot put
+an arbitrary string into a request. `xhigh` is not offered by every model; the
+panel keeps it off the ladder of a model that does not name it, and a model
+that is sent it anyway rejects it as it would any effort it does not take.
 
 ## 5. How the effort reaches the model call
 
@@ -218,17 +262,24 @@ native variant, and not through the message:
 export function effortOptions(effort, model)   // -> object | null
 ```
 
-Returns null unless `effort` is `low`/`medium`/`high` **and**
+Returns null unless `effort` is `low`/`medium`/`high`/`xhigh` **and**
 `model?.capabilities?.reasoning === true`. The family key is `model?.api?.npm` —
 the AI-SDK package name, present on `Model.api` in the SDK type, and stable where
 a custom `providerID` is not:
 
+One ladder (`low`/`medium`/`high`/`xhigh`) serves every family that accepts a
+string value: no per-model value discovery, no numeric token budget. The
+google/vertex `thinkingConfig.thinkingLevel` family is the exception — its
+vocabulary is `low`/`medium`/`high` only, so `xhigh` emits nothing for it,
+exactly as for a value it does not know. A model whose provider wants either
+is served by hand-editing `llm-params.json`, whose unknown keys already ride
+through into `output.options` (`src/llmparams.js:85-89`).
+
 | `model.api.npm` | patch merged into `output.options` |
 |---|---|
-| `@ai-sdk/openai`, `@ai-sdk/openai-compatible`, `@ai-sdk/azure` | `{ reasoningEffort: <effort> }` |
-| `@ai-sdk/xai` | `{ reasoningEffort: <effort> }` |
+| `@ai-sdk/openai`, `@ai-sdk/openai-compatible`, `@ai-sdk/azure`, `@ai-sdk/xai` | `{ reasoningEffort: <effort> }` |
 | `@ai-sdk/anthropic`, `@ai-sdk/google-vertex-anthropic` | `{ effort: <effort> }` |
-| `@ai-sdk/google`, `@ai-sdk/google-vertex` | `{ thinkingConfig: { thinkingLevel: <effort>, includeThoughts: true } }` |
+| `@ai-sdk/google`, `@ai-sdk/google-vertex` | `{ thinkingConfig: { thinkingLevel: <effort>, includeThoughts: true } }` for `low`/`medium`/`high`; nothing for `xhigh` |
 | `@openrouter/ai-sdk-provider` | `{ reasoning: { effort: <effort> } }` |
 | anything else | `null` — nothing is written |
 

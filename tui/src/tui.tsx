@@ -28,6 +28,7 @@ import {
   type ModelRef,
   EFFORT_LADDER,
   cycleLlmModel,
+  effortLadderFor,
   formatLlmEffort,
   cycleLlmVariant,
   isModelRef,
@@ -146,13 +147,25 @@ const fitCell = (s: string, w: number): string =>
   ` ${truncate(s, w).padEnd(w)} `;
 
 // One entry of the flat pick list built from `client.config.providers()`:
-// the model reference, the label the row shows for it, and the two
-// capabilities the model row badges — everything else the provider list
-// carries is dropped.
+// the model reference, the label the row shows for it, the two capabilities
+// the model row badges, and the names of the variants the model declares —
+// everything else the provider list carries is dropped.
+//
+// `variants` holds the key list of the model's `variants` map, i.e. the effort
+// steps that model takes; null where the provider list reports no such map,
+// which the effort ladder reads as "unknown" rather than as "none".
 interface ModelChoice extends ModelRef {
   label: string;
   vision: boolean;
   reasoning: boolean;
+  variants: string[] | null;
+}
+
+// The variant names a model record declares, for `ModelChoice.variants`: the
+// keys of its `variants` map. Null for a record that carries no map, or one
+// that is not an object — an unknown list, not an empty one.
+function variantNames(v: unknown): string[] | null {
+  return v !== null && typeof v === "object" && !Array.isArray(v) ? Object.keys(v) : null;
 }
 
 // Normalise what an agent record carries as its model. The runtime `Agent` type
@@ -260,8 +273,9 @@ function modelBadges(
 //   2. the effort opencode resolved       — shown in parentheses and muted
 //   3. "default"
 // The row goes inert where the ladder cannot be offered: a resolved model
-// known to have no reasoning, an unknown model, or none. A stored effort stays
-// visible in the unknown case rather than turning silently into "default".
+// known to have no reasoning, one that declares no effort step of its own, an
+// unknown model, or none. A stored effort stays visible in the unknown case
+// rather than turning silently into "default".
 function resolveLlmEffort(
   models: LlmModels,
   efforts: Record<string, string>,
@@ -271,7 +285,8 @@ function resolveLlmEffort(
 ): { text: string; source: "agent" | "opencode" | null; live: boolean } {
   const stored = models[agent]?.variant;
   const hit = model === null ? undefined : choices.find((c) => sameModel(c, model));
-  if (hit === undefined || !hit.reasoning) {
+  const steps = hit === undefined ? 0 : effortLadderFor(hit.variants).length - 1;
+  if (hit === undefined || !hit.reasoning || steps === 0) {
     if (hit === undefined && stored !== undefined) {
       return { text: stored, source: "agent", live: false };
     }
@@ -576,6 +591,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             providerID?: string;
             name?: string;
             capabilities?: { reasoning?: boolean; input?: { image?: boolean } };
+            variants?: Record<string, unknown>;
           }
         >;
       }>;
@@ -594,6 +610,11 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             // capability" rather than as unknown.
             vision: m?.capabilities?.input?.image === true,
             reasoning: m?.capabilities?.reasoning === true,
+            // The keys are the variant names the model takes; a model that
+            // declares no map at all stays null, so the effort ladder falls
+            // back to the steps every mapped family takes instead of reading
+            // the silence as "no step at all".
+            variants: variantNames(m?.variants),
           });
         }
       }
@@ -644,17 +665,20 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     setLlmModels(cycleLlmModel(currentLlmAgent(), delta, modelChoices()));
   };
 
-  // Walk the effort ladder by one for the selected agent. The model the effort
-  // was chosen for is written with it, so an agent still on opencode's own
-  // model gains the full entry — and its ★ on the model row — in the same step.
-  // Position and write are one read-modify-write in the store, as on the model
-  // row. Without a resolved model there is nothing to pin the effort to; the
-  // row's buttons are inert in that state anyway.
+  // Walk the effort ladder by one for the selected agent. The ladder is the one
+  // that model offers — the steps its own `variants` name — so a step the model
+  // does not take never enters the cycle. The model the effort was chosen for is
+  // written with it, so an agent still on opencode's own model gains the full
+  // entry — and its ★ on the model row — in the same step. Position and write
+  // are one read-modify-write in the store, as on the model row. Without a
+  // resolved model there is nothing to pin the effort to; the row's buttons are
+  // inert in that state anyway.
   const cycleEffort = (delta: number): void => {
     const agent = currentLlmAgent();
     const model = resolveLlmModel(llmModels(), opencodeModels(), agent).value;
     if (model === null) return;
-    setLlmModels(cycleLlmVariant(agent, delta, model));
+    const hit = modelChoices().find((c) => sameModel(c, model));
+    setLlmModels(cycleLlmVariant(agent, delta, model, effortLadderFor(hit?.variants ?? null)));
   };
 
   const adjustLlmParam = (def: LlmParamDef, delta: number): void => {

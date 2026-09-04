@@ -350,8 +350,8 @@ test("a malformed displaced value is not put back as a half pair", () => {
 // An entry may carry one optional key, `variant`, holding the reasoning effort
 // the TUI's effort row set. Neither hook above may notice it: it travels
 // through `chat.params` instead. What matters here is that the pair comes out
-// of the same entry untouched, and that only the three ladder values are ever
-// handed on — a hand-edited file must not be able to name a fourth.
+// of the same entry untouched, and that only the four ladder values are ever
+// handed on — a hand-edited file must not be able to name a fifth.
 
 test("the pair is returned unchanged when a variant sits beside it", () => {
   writeModels({ coder: { providerID: "anthropic", modelID: "claude-sonnet-4-5", variant: "high" } })
@@ -376,10 +376,19 @@ test("a variant does not reach config.agent[name].model either", () => {
 })
 
 test("each ladder value is read back as it stands", () => {
-  for (const variant of ["low", "medium", "high"]) {
+  for (const variant of ["low", "medium", "high", "xhigh"]) {
     writeModels({ coder: { providerID: "anthropic", modelID: "claude-x", variant } })
     assert.equal(resolveEffortForAgent("coder"), variant)
   }
+})
+
+test("xhigh survives the round trip beside its pair", () => {
+  // The panel offers the step only on a model whose `variants` name it, but the
+  // reader is model-blind: a stored xhigh has to come back out as it went in,
+  // or the choice would be silently dropped on the way to `chat.params`.
+  writeModels({ coder: { providerID: "xai", modelID: "grok-4.6", variant: "xhigh" } })
+  assert.equal(resolveEffortForAgent("coder"), "xhigh")
+  assert.deepEqual(resolveModelForAgent("coder"), { providerID: "xai", modelID: "grok-4.6" })
 })
 
 test("an entry without a variant has no effort", () => {
@@ -390,7 +399,7 @@ test("an entry without a variant has no effort", () => {
 test("a variant outside the ladder is not handed on", () => {
   // `default` is stored as the absence of the key; anything else is a
   // hand-edit and reads as no effort at all.
-  for (const variant of ["default", "ultra", "", "HIGH", " high", 3, null, {}, ["high"]]) {
+  for (const variant of ["default", "ultra", "", "HIGH", " high", "xxhigh", "XHIGH", 3, null, {}, ["high"]]) {
     writeModels({ coder: { providerID: "anthropic", modelID: "claude-x", variant } })
     assert.equal(resolveEffortForAgent("coder"), null, `variant ${JSON.stringify(variant)}`)
   }

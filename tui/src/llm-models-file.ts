@@ -26,13 +26,38 @@ export interface ModelRef {
   modelID: string;
 }
 
-// The reasoning-effort values the effort row cycles, in cycle order.
+// The reasoning-effort steps that mean an override, in cycle order. A model
+// offers a subset of them: which ones is `effortLadderFor`.
+const EFFORT_STEPS = ["low", "medium", "high", "xhigh"] as const;
+
+// The steps a model is taken to offer where it reports no variant list at all.
+// Every provider family the plugin maps takes low/medium/high; `xhigh` is
+// narrower than that and is offered only against a model that names it.
+const ASSUMED_STEPS = ["low", "medium", "high"] as const;
+
+// Every value the effort row can cycle to, in cycle order, across all models.
 // "default" means no override: the entry then carries no `variant` and the
-// model's own default effort stands. One ladder for every model — every
-// provider family the plugin maps takes low/medium/high.
-export const EFFORT_LADDER = ["default", "low", "medium", "high"] as const;
+// model's own default effort stands. It is also the widest ladder — the one a
+// cycle walks where the caller names none.
+export const EFFORT_LADDER = ["default", ...EFFORT_STEPS] as const;
 
 export type EffortValue = (typeof EFFORT_LADDER)[number];
+
+// The ladder the effort row cycles for one model: "default" plus the steps
+// that model supports. `supported` is the key list of the model's `variants`
+// map as the provider list reports it — an empty list is a model that takes no
+// effort at all and leaves a ladder with nothing but "default" to land on,
+// while null/undefined is a model that reports no such map and falls back to
+// the assumed steps.
+export function effortLadderFor(
+  supported: readonly string[] | null | undefined,
+): EffortValue[] {
+  const steps =
+    supported == null
+      ? [...ASSUMED_STEPS]
+      : EFFORT_STEPS.filter((s) => supported.includes(s));
+  return ["default", ...steps];
+}
 
 // Text of the effort cell. An effort opencode resolved for the agent — the one
 // standing where this panel has stored none — is shown in parentheses, so it
@@ -167,22 +192,29 @@ export function cycleLlmModel(
   });
 }
 
-// Walks EFFORT_LADDER by one from the position the file holds for that agent at
+// Walks `ladder` by one from the position the file holds for that agent at
 // this moment, so an effort set outside the panel is stepped from rather than
-// overwritten. Landing on "default" deletes only the `variant` key and leaves
-// the pair in place; landing anywhere else stores `model` with the new effort,
+// overwritten. `ladder` is what the chosen model offers (`effortLadderFor`);
+// without one the widest ladder is walked. A stored effort the ladder does not
+// carry counts as "default", so the next step lands inside the ladder — the
+// same reading cycleLlmModel gives a choice that has left the pick list.
+// Landing on "default" deletes only the `variant` key and leaves the pair in
+// place; landing anywhere else stores `model` with the new effort,
 // materialising the pair where the agent had no entry — the effort then names
 // the model it was chosen for. Returns the merged state for the signal.
 export function cycleLlmVariant(
   agent: string,
   delta: number,
   model: ModelRef,
+  ladder: readonly EffortValue[] = EFFORT_LADDER,
 ): LlmModels {
+  if (ladder.length === 0) return readLlmModels();
   return applyLlmModels((models) => {
     const own = models[agent];
-    const at = isStoredVariant(own?.variant) ? EFFORT_LADDER.indexOf(own.variant) : 0;
-    const size = EFFORT_LADDER.length;
-    const variant = EFFORT_LADDER[(at + delta + size) % size];
+    const found = isStoredVariant(own?.variant) ? ladder.indexOf(own.variant) : -1;
+    const at = found < 0 ? 0 : found;
+    const size = ladder.length;
+    const variant = ladder[(at + delta + size) % size];
     if (variant === "default") {
       if (own === undefined || own.variant === undefined) return false;
       delete own.variant;

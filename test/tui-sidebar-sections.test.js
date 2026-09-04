@@ -107,6 +107,35 @@ test("the sidebar carries exactly one agent cycler, in the LLM params body", () 
   }
 })
 
+// The effort row's ladder is per model: the pick list carries the variant
+// names each model declares, and both the row's live/inert state and the
+// cycler's ladder are derived from them, so a step like `xhigh` is offered
+// only where the model names it.
+test("the effort row cycles the ladder of the model under the cursor", () => {
+  // The pick list keeps the variant names, from the model record's own map.
+  assert.ok(
+    source.includes("variants: string[] | null;"),
+    "ModelChoice carries the variant names",
+  )
+  assert.ok(
+    source.includes("variants: variantNames(m?.variants),"),
+    "refreshModelChoices fills them from the provider list's model record",
+  )
+
+  // The row's own state and the write both come from that list, not from a
+  // ladder fixed for every model.
+  assert.ok(
+    source.includes("effortLadderFor(hit.variants).length - 1"),
+    "resolveLlmEffort sizes the row's ladder from the model's variants",
+  )
+  assert.ok(
+    source.includes(
+      "cycleLlmVariant(agent, delta, model, effortLadderFor(hit?.variants ?? null))",
+    ),
+    "the effort cycler hands cycleLlmVariant the model's own ladder",
+  )
+})
+
 test("the flat retention rows stay in the Subagents body", () => {
   for (const label of ["retained subs", "retain (min)"]) {
     const at = row(label)

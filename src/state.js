@@ -241,6 +241,16 @@ export const pendingChildResults = new Map()
 // resetState can release a waiter without importing teardown.js.
 export const pendingSessionQuiescence = new Map()
 
+// sessionID -> the epoch ms at which that session's `session.idle` event was
+// seen. The counterpart to the map above, for the case it cannot cover: an
+// idle that arrives BEFORE anybody armed a wait for it. opencode publishes
+// `session.idle` for an aborted session from inside the abort request itself,
+// so every path that awaits its own abort call has already let that event go by
+// when it comes to wait for it. Read and written only by teardown.js
+// (waitForSessionQuiescence / signalSessionIdle), which also bounds this map by
+// age and by size; kept here so resetState can clear it between tests.
+export const quiescedSessions = new Map()
+
 // sessionID -> drain object { oldID, newID, notices: [] }. A drain is opened
 // at the START of an orchestrator handoff (beginHandoffDrain) and keyed under
 // the OLD primary's id; once the new session exists it is ALSO keyed under
@@ -311,6 +321,7 @@ export function resetState() {
     record.settle("abandoned")
   }
   pendingSessionQuiescence.clear()
+  quiescedSessions.clear()
   lastPrimaryTool.clear()
   sessionAgent.clear()
   defaultAgentByDirectory.clear()

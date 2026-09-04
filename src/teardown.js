@@ -25,7 +25,7 @@ import {
 } from "./client.js"
 import { getSettings, retentionOffered } from "./settings.js"
 import { settleChildWaiter, liveChildSessionIDs } from "./childwait.js"
-import { aborted, pendingSessionQuiescence } from "./state.js"
+import { aborted, pendingSessionQuiescence, quiescedSessions } from "./state.js"
 import { log, errMsg } from "./log.js"
 
 // Maximum time an abort/error teardown waits for opencode to emit the idle event
@@ -33,9 +33,58 @@ import { log, errMsg } from "./log.js"
 // opencode does not emit that event after an abort.
 export const SESSION_QUIESCE_TIMEOUT_MS = 1000
 
+// How long a session.idle already seen answers a wait armed after it.
+//
+// opencode publishes session.idle for an aborted session INSIDE the abort
+// request: its runner interrupts the run fiber, waits out that fiber's
+// finalizers — the cleanup that flushes the in-flight parts — and only then
+// sets the session status to idle, all before the HTTP call returns. So every
+// path that awaits its own abort call (the inactivity watchdog, the `abort`
+// tool) arms its quiescence wait for an event that has already gone by, and
+// without a record of it that wait has nothing left to resolve and burns its
+// full SESSION_QUIESCE_TIMEOUT_MS on a session that is already still.
+//
+// The record therefore says "this session went idle just now", and only just
+// now: a wait armed more than QUIESCE_MARK_TTL_MS after the idle ignores it,
+// because a session that went quiet that long ago may have been prompted since
+// — a reuse, or a user typing into a retained session — and the quiet the
+// record reports is then not the quiet the wait is asking about. Ignoring one
+// costs exactly the wait it would have skipped, i.e. what every wait costs
+// today.
+export const QUIESCE_MARK_TTL_MS = SESSION_QUIESCE_TIMEOUT_MS
+
+// How many such records are kept. They live for a second at most, so the cap is
+// only there to keep a burst of endings from growing the map without bound.
+export const QUIESCE_MARK_MEMORY = 256
+
+// Records that this session has just gone idle, and drops the records that are
+// expired or over the cap. A Map iterates in insertion order and every write
+// re-inserts, so the oldest record is always the first one walked.
+function noteSessionQuiesced(sessionID, now) {
+  quiescedSessions.delete(sessionID)
+  quiescedSessions.set(sessionID, now)
+  for (const [id, at] of quiescedSessions) {
+    if (quiescedSessions.size <= QUIESCE_MARK_MEMORY && now - at <= QUIESCE_MARK_TTL_MS) break
+    quiescedSessions.delete(id)
+  }
+}
+
+// Consumes this session's record and answers whether it is fresh enough to
+// stand in for the idle event a wait would otherwise sit out. Consumed either
+// way: a record too old to answer this wait is too old to answer a later one.
+function takeSessionQuiescedMark(sessionID, now) {
+  const at = quiescedSessions.get(sessionID)
+  if (at === undefined) return false
+  quiescedSessions.delete(sessionID)
+  return now - at <= QUIESCE_MARK_TTL_MS
+}
+
 // Registers a wait before an abort/error teardown yields to any network I/O.
 // The matching session.idle event resolves it early; the bounded fallback keeps
-// a session from being retained forever when opencode emits no idle event.
+// a session from being retained forever when opencode emits no idle event. A
+// session that went idle just before the wait was armed resolves it at once —
+// see QUIESCE_MARK_TTL_MS for why that case is the normal one on every path
+// that awaits its own abort call.
 export function waitForSessionQuiescence(
   sessionID,
   timeoutMs = SESSION_QUIESCE_TIMEOUT_MS,
@@ -43,6 +92,10 @@ export function waitForSessionQuiescence(
   if (!sessionID) return Promise.resolve("timeout")
   const existing = pendingSessionQuiescence.get(sessionID)
   if (existing) return existing.promise
+  if (takeSessionQuiescedMark(sessionID, Date.now())) {
+    log("session had already gone idle when the quiescence wait was armed", { sessionID })
+    return Promise.resolve("idle")
+  }
 
   let resolve
   const promise = new Promise((r) => {
@@ -82,8 +135,14 @@ export function waitForSessionQuiescence(
 // Resolves the pending wait for exactly this session. The event handler calls
 // this before its normal idle bookkeeping, because an aborted entry is already
 // absent from the registry by the time the event arrives.
+//
+// The idle is recorded whether or not anything is waiting on it: on the abort
+// paths this event arrives BEFORE the wait for it is armed, and the record is
+// what that wait reads instead of sitting out its timeout. Returns whether a
+// pending wait was resolved, which the record does not change.
 export function signalSessionIdle(sessionID) {
   if (!sessionID) return false
+  noteSessionQuiesced(sessionID, Date.now())
   const record = pendingSessionQuiescence.get(sessionID)
   if (!record) return false
   pendingSessionQuiescence.delete(sessionID)
@@ -226,6 +285,15 @@ export async function endLiveChildrenOf(client, sessionID, { label = "", seen } 
 // needs. Only the idle path passes it, and only after the retention decision
 // has been taken on the delivered result; every other ending path deletes.
 //
+// `quiesced` says the caller has ALREADY waited this session's post-abort
+// cleanup out and needs no second wait here. Passed by the error path, which
+// has to wait before its own rescue read — opencode publishes `session.error`
+// from inside the run fiber's interrupt handler, ahead of the finalizer that
+// flushes the in-flight text, so a snapshot taken on that event loses the
+// paragraph the subagent was in the middle of. That wait has already run to
+// its end (idle or timeout) by the time it gets here, and re-arming would
+// wait for a second idle event that is never coming.
+//
 // `label` prefixes the debug logs so each caller stays greppable. `notice`/
 // `toast` are optional; the idle path posts its own completion notice inline
 // (it needs the fetched snapshot + task outcome), the errored/timeout paths let
@@ -262,6 +330,7 @@ export async function teardownSubagent(
     markAborted = false,
     entryRemoved = false,
     retain = false,
+    quiesced = false,
     label = "",
     outcome = null,
     seen = undefined,
@@ -269,8 +338,10 @@ export async function teardownSubagent(
 ) {
   const tag = label ? `${label}: ` : ""
   // Register before the first await. An abort can emit session.idle while the
-  // notice, child teardown, or abort request is still in flight.
-  const quiescence = markAborted ? waitForSessionQuiescence(sessionID) : null
+  // notice, child teardown, or abort request is still in flight — and can
+  // equally have emitted it before this call, which waitForSessionQuiescence
+  // answers from its record of that event rather than by waiting again.
+  const quiescence = markAborted && !quiesced ? waitForSessionQuiescence(sessionID) : null
   reservePendingDelivery()
   if (markAborted) aborted.add(sessionID)
   try {

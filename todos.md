@@ -12,7 +12,5 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 ## Pending
 
 - Establish in which order opencode emits `session.deleted` for a parent and for the subagent sessions the cascade takes with it. `onSessionDeleted` in `src/hooks.js` suppresses the retention-lost notice when this process has already seen the parent's own deletion; if the child's event comes first the guard misses and the notice post fails into its retry backoff (~3 s at the default `postNoticeRetries: 3`).
-- The rescue read in `onSessionError` (`src/hooks.js:1718`) runs on the SSE `Event.Error`, which opencode publishes inside `onInterrupt` and therefore before the `ensuring(cleanup)` finalizer flushes the in-flight text part — so that path loses the subagent's last partial paragraph. It has to await `session.idle` / `SESSION_QUIESCE_TIMEOUT_MS` before the `fetchSnapshot`, not only before the delete.
-- On the watchdog path `session.idle` is already published inside the abort request, so the quiescence wait armed afterwards at `src/teardown.js:273` usually burns its full 1000 ms for nothing.
 
-Last commit: 2d99a3e docs: correct the line references and the child-waiter comment
+Last commit: 1a6be4b feat: tell the orchestrator when a held session is deleted from outside

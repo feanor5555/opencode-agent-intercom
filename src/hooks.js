@@ -107,6 +107,7 @@ import {
   teardownSubagent,
   dropRetainedSubagents,
   signalSessionIdle,
+  waitForSessionQuiescence,
   SUBAGENT_SESSION_TITLE_MARKER,
 } from "./teardown.js"
 import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
@@ -1808,6 +1809,27 @@ async function onSessionError(props, client) {
   // orchestrator had no choice but to re-dispatch the whole task blind.
   // Best-effort by construction: fetchSnapshot swallows its own failures and
   // returns {}, and the notice simply omits the block when nothing came back.
+  //
+  // The read waits for the session to go quiet FIRST, and that ordering is
+  // what makes it worth doing. opencode publishes `session.error` from inside
+  // its run fiber's interrupt handler, ahead of the finalizer that flushes the
+  // in-flight text part; while a run is streaming, only that part's empty
+  // opening row is in the database and the text itself is in opencode's
+  // memory. A snapshot taken on receipt of this event therefore sees nothing
+  // of the paragraph the subagent was in the middle of and falls back to
+  // whatever it had completed before — which on the motivating case, a
+  // context-length death, is exactly the part worth having. The flush reports
+  // itself as `session.idle`; the delete below already waits for it, and this
+  // is the same wait, moved in front of the read. Bounded by
+  // SESSION_QUIESCE_TIMEOUT_MS like every other use of it, so a session that
+  // never reports idle delays this notice by that much and no more.
+  const quiesceReason = await waitForSessionQuiescence(sessionID)
+  if (quiesceReason === "timeout") {
+    log("session.error: session quiescence timed out; reading anyway", {
+      handle: entry.handle,
+      sessionID,
+    })
+  }
   const { result: lastText } = await fetchSnapshot(client, sessionID)
   // The same reply ceiling the idle path applies, for the same reason: this
   // text is about to be pushed into the orchestrator's context, and a session
@@ -1840,6 +1862,9 @@ async function onSessionError(props, client) {
       variant: wasAborted ? "warning" : "error",
     },
     markAborted: true,
+    // The wait above already ran to its end for this session; the teardown
+    // must not arm a second one for an idle event that has already come.
+    quiesced: true,
     label: "session.error",
   })
 }

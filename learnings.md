@@ -422,3 +422,32 @@ it is empty: a 404 answers `{ messageCount: 0 }` (the session is gone), every
 other failure answers `{}` (unreadable), so `snapshotOutcome` can tell "gone"
 from "unavailable" and `reuse` does not destroy a retained handle over a
 transient server error.
+
+## The prompt-box variant label is clobbered on session entry, and that is fine
+
+The TUI's prompt-box footer (`· <model> · <variant>`) is rendered from
+opencode's own per-model store `~/.local/state/opencode/model.json` via
+`u.model.variant.current()`, gated by a non-empty variants list. The plugin
+seeds that store, which is why the label is correct on the start screen.
+Entering a session clobbers it: an effect fires on `sessionID` change, reads
+the last user message, and calls `u.model.variant.set(message.model.variant)`;
+`set` writes the literal `"default"` for an undefined argument and persists
+the file. opencode 1.18.28 drops `model.variant` when persisting a user
+message — reproduced with an explicit `"variant":"high"` in the request
+body, still absent; records up to 1.18.25 still carry it. So the store
+entry flips from the chosen step to `"default"` about 100 ms after the
+first user message, and the label disappears.
+
+What this does NOT mean: the effort still reaches the provider. The TUI
+sends `variant: current()`, which is `undefined` for a stored `"default"`,
+and a request without a variant is exactly the case where
+`SessionPrompt.createUserMessage` falls back to the agent's own variant —
+which the plugin writes as `config.agent[<name>].variant`. Measured params
+for an orchestrator turn on `xai/grok-4.6`:
+`"options":{…,"reasoningEffort":"high"}`. The session row stores
+`"variant":"high"`.
+
+Do not try to hold that label from `src/` — it would mean racing opencode's
+own writer for a cosmetic value. The authoritative display of the chosen
+step is the plugin's own sidebar `effort` row, fed from
+`~/.config/opencode/llm-models.json`, which cannot be clobbered.

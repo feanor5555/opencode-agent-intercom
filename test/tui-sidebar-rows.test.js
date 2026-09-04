@@ -449,7 +449,9 @@ test("a failed abort clears the local aborted mark", () => {
 test("a row is filed away as gone in one place only", () => {
   // Every end of a row goes through retireRow, so none of them can drift from
   // the others — and the poll no longer files a row on a status it observed.
-  only("finished.set(sessionID, rows.get(sessionID))")
+  // The route escape rides on the same single place; see
+  // test/tui-route-escape.test.js.
+  only("finished.set(sessionID, entry)")
 })
 
 test("every session discovered as a subagent is polled for its own children", () => {

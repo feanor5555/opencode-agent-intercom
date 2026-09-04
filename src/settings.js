@@ -224,6 +224,12 @@ const TTL_MS = 2000
 let settingsPath = join(homedir(), ".config", "opencode", "agent-intercom.json")
 let cache = null
 let cachedAt = 0
+// The masked resolved object as it was last written to the debug log, so a
+// resolve that produces the same values again writes nothing. It deliberately
+// survives every cache drop, including the test-only ones: what is worth a line
+// is a CHANGE in the settings in effect, and dropping the cache changes
+// nothing by itself.
+let loggedSettings = null
 
 // Reads a non-negative integer env var, falling back to `def` when unset/invalid.
 function envNum(name, def) {
@@ -449,7 +455,19 @@ export function getSettings() {
   cache = resolved
   cachedAt = now
   // exaApiKey is a secret: log only whether one is in effect, never its value.
-  log("settings resolved", { ...resolved, exaApiKey: resolved.exaApiKey ? "<set>" : "" })
+  const masked = { ...resolved, exaApiKey: resolved.exaApiKey ? "<set>" : "" }
+  // The resolved object is rebuilt key by key in a fixed order on every call,
+  // so its JSON text is a sound identity for "the same settings again".
+  const signature = JSON.stringify(masked)
+  // One line per change of the settings in effect, never one per resolve. The
+  // cache lives TTL_MS only, so every hot path past that window resolves again,
+  // and each resolve is a line nobody can read anything out of: a heartbeat
+  // that grows debug.log without bound. The first resolve of a process still
+  // logs, so the log always opens with the settings that were in effect.
+  if (signature !== loggedSettings) {
+    loggedSettings = signature
+    log("settings resolved", masked)
+  }
   return cache
 }
 
@@ -641,7 +659,19 @@ export function primaryContextThreshold({ endlessPaused = false } = {}) {
   return endlessModeInEffect({ endlessPaused }) ? s.endlessContext : s.maxPrimaryContext
 }
 
-function dropSettingsCache() {
+// The shared settings file this process resolves from. The agentcom watch
+// (src/agentcomsync.js) needs it to watch the directory it sits in, and a test
+// that moved the path with setSettingsPath has to get the moved one.
+export function settingsFilePath() {
+  return settingsPath
+}
+
+// Drop the resolved cache so the next getSettings() reads the file again. The
+// retention latch is untouched — it is taken once at plugin load and is not a
+// resolved value. The agentcom watch (src/agentcomsync.js) calls this the
+// moment fs.watch reports the settings file changed: that change is younger
+// than the TTL, and a cached answer would still be the value before the write.
+export function invalidateSettingsCache() {
   cache = null
   cachedAt = 0
 }
@@ -656,15 +686,16 @@ export function setSettingsPath(p) {
 // The retention latch goes with it: it is taken at plugin load, and a test that
 // swaps the settings under a fresh plugin has to get a fresh answer.
 export function resetSettings() {
-  dropSettingsCache()
+  invalidateSettingsCache()
   retentionLatch = null
 }
 
-// Test-only: invalidate the cache and LEAVE the retention latch standing, so a
-// test can move `maxRetainedSubagents` under a process that has already decided
-// at load whether it offers the `reuse` tool at all. That combination — offered
-// at load, switched off now, and its mirror image — is the whole point of
-// retentionCapacity, and resetSettings cannot express it.
+// Test-only name for invalidateSettingsCache, kept because what it records is
+// the intent at the call site: invalidate the cache and LEAVE the retention
+// latch standing, so a test can move `maxRetainedSubagents` under a process
+// that has already decided at load whether it offers the `reuse` tool at all.
+// That combination — offered at load, switched off now, and its mirror image —
+// is the whole point of retentionCapacity, and resetSettings cannot express it.
 export function dropSettingsCacheKeepingLatch() {
-  dropSettingsCache()
+  invalidateSettingsCache()
 }

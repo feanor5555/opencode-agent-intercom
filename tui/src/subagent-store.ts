@@ -354,6 +354,52 @@ export function reapRows(
   return gone;
 }
 
+export interface RouteEscapeQuery {
+  // The route the TUI is on right now, and the session it names when it is a
+  // session route.
+  routeName: string;
+  routeSessionID?: string;
+  // The row that is being retired, and the parent it hung under.
+  sessionID: string;
+  parentID?: string;
+  // Whether a session's row has already been retired, and the parent that row
+  // carried. Together they carry the walk across a chain that ended from the
+  // top down.
+  isGone: (sessionID: string) => boolean;
+  parentOfGone: (sessionID: string) => string | undefined;
+}
+
+// The session the view has to be moved to because the row for `sessionID` is
+// being retired, or `undefined` to leave the view where it is.
+//
+// A retired row means the plugin has finished with that subagent and its
+// session is gone or about to go. A route still naming it points at a session
+// the server does not have, and the TUI answers that by falling back to its
+// start page — the user loses the orchestrator chat. So the view escapes to the
+// nearest ancestor that is still there: the parent, or, when the parent's own
+// row has already been retired in the same pass, the first session up the chain
+// that has not. The orchestrator never holds a row, so the walk terminates on
+// it. `undefined` comes back when the user is elsewhere (the common case,
+// nothing to do), when the route is not a session route, or when the chain
+// leads nowhere — a jump to a session that is equally gone is not an escape.
+export function routeEscapeTarget(query: RouteEscapeQuery): string | undefined {
+  if (query.routeName !== "session") return undefined;
+  if (query.routeSessionID !== query.sessionID) return undefined;
+  let candidate = query.parentID;
+  const walked = new Set<string>([query.sessionID]);
+  while (
+    typeof candidate === "string" &&
+    candidate !== "" &&
+    !walked.has(candidate) &&
+    query.isGone(candidate)
+  ) {
+    walked.add(candidate);
+    candidate = query.parentOfGone(candidate);
+  }
+  if (typeof candidate !== "string" || candidate === "") return undefined;
+  return walked.has(candidate) ? undefined : candidate;
+}
+
 // The dot in front of a row. A held row is neither running nor gone, so it
 // carries neither the pulsing dot of a run nor the tick of a finished one; a
 // waiting row carries no tick either, because it is not finished — it is a run

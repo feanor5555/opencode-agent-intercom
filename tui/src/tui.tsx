@@ -63,6 +63,7 @@ import {
   reapRows,
   retainedRowNote,
   rootSessionOf,
+  routeEscapeTarget,
   rowIndent,
   statusMarker,
   summariseRows,
@@ -824,16 +825,44 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     rootSessionOf(entry, (sessionID) => rows.get(sessionID) ?? finished.get(sessionID));
 
   // Take one row out of a rows map and remember it as gone, with the selection
-  // and the local abort mark cleared. The map is either the panel's own state
-  // or the one a poll pass is building.
+  // and the local abort mark cleared and the view moved off the session if the
+  // user is sitting in it. The map is either the panel's own state or the one a
+  // poll pass is building.
+  //
+  // The route escape lives HERE and nowhere else. Three paths retire a row —
+  // the `session.deleted` event, the poll's reap and dropping a held row from
+  // the panel — and whichever of them gets there first owns the ending: the
+  // ones that follow find no entry and do nothing. An escape at one of those
+  // call sites is therefore an escape that the other two bypass, and a bypassed
+  // escape leaves the route naming a session the server no longer has, which
+  // the TUI answers with its start page — the orchestrator chat gone from
+  // under the user. Retiring the row and moving off it are one act.
   const retireRow = (
     rows: Map<string, SubagentEntry>,
     sessionID: string,
   ): void => {
-    finished.set(sessionID, rows.get(sessionID));
+    const entry = rows.get(sessionID);
+    // `params` belongs to the session variant of the route union alone, so the
+    // name is what narrows it.
+    const route = api.route.current;
+    const escapeTo = routeEscapeTarget({
+      routeName: route.name,
+      routeSessionID:
+        route.name === "session"
+          ? (route.params?.sessionID as string | undefined)
+          : undefined,
+      sessionID,
+      parentID: entry?.parentID,
+      isGone: (id) => finished.has(id),
+      parentOfGone,
+    });
+    finished.set(sessionID, entry);
     rows.delete(sessionID);
     aborted.delete(sessionID);
     if (selectedID() === sessionID) setSelectedID(undefined);
+    if (escapeTo !== undefined) {
+      api.route.navigate("session", { sessionID: escapeTo });
+    }
   };
 
   // A row built from a poll's child record alone, for a session this panel
@@ -1280,8 +1309,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // The plugin deletes a subagent's session at every ending it controls
   // (teardownSubagent), so this event is the end of the row — the one signal
   // that means "finished" rather than "not running just now". A row the panel
-  // never had is nothing to do here; a row that is still on screen goes, and
-  // the route follows it out if the user was inside that session.
+  // never had is nothing to do here — the row was already retired by the poll's
+  // reap, which took the route out with it. A row that is still on screen goes
+  // through `retireRow`, and the route escape comes with it from there.
   const onSessionDeleted = (event: unknown): void => {
     const sessionID = (event as { properties?: { info?: { id?: string } } })
       .properties?.info?.id;
@@ -1294,14 +1324,6 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     const current = sessionID ? subagents() : undefined;
     const entry = sessionID && current ? current.get(sessionID) : undefined;
     if (sessionID && current && entry) {
-      if (
-        entry.parentID &&
-        api.route.current.name === "session" &&
-        (api.route.current.params?.sessionID as string | undefined) ===
-          sessionID
-      ) {
-        api.route.navigate("session", { sessionID: entry.parentID });
-      }
       const done = countableDone(entry, sessionID);
       // Resolved before the row is retired, while its own record is still the
       // one the chain starts from.

@@ -14,7 +14,7 @@ import {
   resetSettings,
   setSettingsPath,
 } from "../src/settings.js"
-import { postNotice, noticePostFailure } from "../src/client.js"
+import { postNotice, requestFailure } from "../src/client.js"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -237,24 +237,90 @@ test("postNotice treats a successful envelope as delivered", async () => {
   }
 })
 
-test("noticePostFailure reads the envelope and nothing else", () => {
-  assert.equal(noticePostFailure(undefined), undefined)
-  assert.equal(noticePostFailure({ data: undefined }), undefined)
+test("requestFailure reads the envelope and nothing else", () => {
+  const op = "postNotice (session.promptAsync)"
+  assert.equal(requestFailure(undefined, op), undefined)
+  assert.equal(requestFailure({ data: undefined }, op), undefined)
   assert.equal(
-    noticePostFailure({ data: undefined, response: { status: 204 } }),
+    requestFailure({ data: undefined, response: { status: 204 } }, op),
     undefined,
     "a 204 carries a response object and is the normal success",
   )
-  assert.equal(noticePostFailure({ data: undefined, error: null }), undefined, "a null error is no error")
+  assert.equal(
+    requestFailure({ data: undefined, error: null }, op),
+    undefined,
+    "a null error is no error",
+  )
 
-  const byError = noticePostFailure({ error: { name: "NotFoundError" }, response: { status: 404 } })
+  const byError = requestFailure({ error: { name: "NotFoundError" }, response: { status: 404 } }, op)
   assert.ok(byError instanceof Error)
   assert.equal(byError.terminal, true)
+  assert.equal(byError.kind, "refused", "the server answered, so the write did not take effect")
 
   // A status alone is enough: an envelope may carry the failure without a
   // parsed `error` body.
-  const byStatus = noticePostFailure({ response: { status: 502 } })
+  const byStatus = requestFailure({ response: { status: 502 } }, op)
   assert.ok(byStatus instanceof Error)
   assert.equal(byStatus.status, 502)
   assert.equal(byStatus.terminal, false)
+  assert.equal(byStatus.kind, "refused")
+})
+
+test("requestFailure names the operation in the message", () => {
+  const err = requestFailure(
+    { error: { name: "InternalError", data: { message: "boom" } }, response: { status: 500 } },
+    "deleteSession (session.delete)",
+  )
+  assert.equal(err.message, "deleteSession (session.delete) failed (HTTP 500): boom")
+  assert.equal(err.op, "deleteSession (session.delete)")
+
+  // No label given: the generic one, so a message is never left half-built.
+  assert.match(requestFailure({ response: { status: 500 } }).message, /^request failed \(HTTP 500\)$/)
+})
+
+test("requestFailure: every 4xx is terminal, not only 404", () => {
+  // A request the server refused on its content is refused again on a retry.
+  for (const status of [400, 401, 403, 404, 409, 422, 499]) {
+    const err = requestFailure({ response: { status } }, "op")
+    assert.equal(err.terminal, true, `HTTP ${status} is terminal`)
+    assert.equal(err.kind, "refused")
+  }
+  for (const status of [500, 502, 503, 504]) {
+    const err = requestFailure({ response: { status } }, "op")
+    assert.equal(err.terminal, false, `HTTP ${status} is worth another attempt`)
+    assert.equal(err.kind, "refused")
+  }
+  // A NotFoundError without a status stays terminal, as it always was.
+  const named = requestFailure({ error: { name: "NotFoundError" } }, "op")
+  assert.equal(named.terminal, true)
+})
+
+test("requestFailure: an envelope with no status at all is indeterminate", () => {
+  // No response was seen, so nothing is known about whether the write landed.
+  const err = requestFailure({ error: { message: "socket hang up" } }, "op")
+  assert.equal(err.kind, "indeterminate")
+  assert.equal(err.status, undefined)
+  assert.equal(err.message, "op failed: socket hang up")
+})
+
+test("postNotice does not retry a 400 either — a refused body stays refused", () => {
+  process.env[RETRIES_ENV] = "3"
+  process.env[BACKOFF_ENV] = "1"
+  resetSettings()
+
+  const client = makeFakeClient(async () => errorEnvelope(400, "BadRequestError", "invalid part"))
+
+  return assert
+    .rejects(
+      () => postNotice(client, "sess-400", "wake up"),
+      (err) => {
+        assert.equal(err.status, 400)
+        assert.equal(err.terminal, true)
+        assert.equal(err.kind, "refused")
+        return true
+      },
+    )
+    .then(() => {
+      assert.equal(client.calls.length, 1, "no budget is spent on a request the server refused")
+    })
 })

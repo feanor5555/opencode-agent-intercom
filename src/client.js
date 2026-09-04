@@ -1,8 +1,21 @@
 // Thin wrappers over the opencode SDK client.
 //
-// Write helpers (create/prompt/abort) delegate plainly and let the caller
-// handle failures. Read helpers (status/activity) are best-effort: they catch
-// internally and return undefined, since a missing reading is not an error.
+// Every wrapper runs its SDK call through `attempt` (or `withRetry`, which is
+// built on it), because this client reports a failed request by RESOLVING with
+// an error envelope rather than rejecting — see requestFailure below. Three
+// contracts, and no fourth:
+//
+//   Required write — postNotice, promptSession: throws once its retry policy
+//     is spent. The caller has a failure path and must reach it.
+//   Reported write — deleteSession, archiveSession, updateSessionTitle,
+//     abortSession: returns false, logs once, never retries. The caller reads
+//     a truthful boolean and proceeds either way.
+//   Best-effort read — getSessionDirectory, listSessions, fetchMessages,
+//     fetchSnapshot: returns the empty value (undefined / [] / [] / {}), logs
+//     once. Each reader has a degraded answer designed for it.
+//
+// createChildSession stands beside them as a creator: it answers undefined for
+// a session that was not created, and logs why.
 
 import { log, errMsg } from "./log.js"
 import { getSettings } from "./settings.js"
@@ -28,14 +41,31 @@ function sleep(ms) {
 // successful promptAsync answers 204 with one.
 //
 // The same reading the TUI's readSessionChildren does (tui/src/subagent-store.ts):
-// an `error` that is neither undefined nor null is the failure, and status 404
-// is the one that means "the target is gone" rather than "the request did not
-// get through".
+// an `error` that is neither undefined nor null is the failure, and a status
+// >= 400 is one too, even where no `error` body was parsed.
 //
-// `terminal` marks a failure that retrying cannot repair. A deleted session
-// stays deleted, so spending the whole retry budget on it only delays the
-// caller's cleanup path by seconds.
-export function noticePostFailure(result) {
+// `op` labels the operation for the message and the log. It names both the
+// wrapper the caller called and the SDK route that refused, e.g.
+// "deleteSession (session.delete)", so a log line says at once which contract
+// was in force and which request carried it.
+//
+// The Error carries three fields:
+//
+//   status    — the HTTP status, or undefined where the envelope has none.
+//   errorName — `error.name`, e.g. "NotFoundError".
+//   terminal  — a failure retrying cannot repair: ANY 4xx (the server refused
+//               the request on its content, and the same content will be
+//               refused again) and every NotFoundError. Spending a retry
+//               budget on one only delays the caller's cleanup path.
+//   kind      — the axis the retry policy turns on:
+//               "refused"       — the server answered with a status. The write
+//                                 did NOT take effect, so a retry cannot
+//                                 duplicate it.
+//               "indeterminate" — no response was seen (a thrown transport
+//                                 error, or an envelope carrying no status at
+//                                 all). The write may or may not have taken
+//                                 effect, so a retry may duplicate it.
+export function requestFailure(result, op = "request") {
   if (!result || typeof result !== "object") return undefined
   const status = typeof result.response?.status === "number" ? result.response.status : undefined
   const failed = (result.error !== undefined && result.error !== null) || (status !== undefined && status >= 400)
@@ -47,13 +77,123 @@ export function noticePostFailure(result) {
     (typeof result.error === "string" ? result.error : undefined) ??
     name
   const err = new Error(
-    `session.promptAsync failed${status === undefined ? "" : ` (HTTP ${status})`}` +
+    `${op} failed${status === undefined ? "" : ` (HTTP ${status})`}` +
       `${detail ? `: ${detail}` : ""}`,
   )
   err.status = status
   err.errorName = name
-  err.terminal = status === 404 || name === "NotFoundError"
+  err.terminal = (status !== undefined && status >= 400 && status < 500) || name === "NotFoundError"
+  err.kind = status === undefined ? "indeterminate" : "refused"
+  err.op = op
   return err
+}
+
+// Runs one SDK call and folds BOTH failure routes into one value:
+// `{ ok: true, data }` or `{ ok: false, error }`. Never throws.
+//
+// The two routes are the thrown exception (transport-level — the socket died,
+// an AbortSignal fired, the client rejected before it sent) and the resolved
+// error envelope (HTTP-level — see requestFailure above). Only the first kind
+// rejects on this client, so a wrapper that awaits an SDK call bare cannot see
+// the second one at all and reports a refused request as done.
+//
+// Every wrapper in this module is written on this primitive and on nothing
+// else: a bare `await client.*` here is a defect by construction.
+//
+// `data` is unwrapped, so a caller reads the payload and never the envelope.
+export async function attempt(op, call) {
+  try {
+    const result = await call()
+    const failure = requestFailure(result, op)
+    if (failure) return { ok: false, error: failure }
+    return { ok: true, data: unwrap(result) }
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(errMsg(err))
+    // A throw means no response was seen. The message is left as the thrower
+    // wrote it — callers of postNotice match on it.
+    if (error.kind === undefined) error.kind = "indeterminate"
+    if (error.terminal === undefined) error.terminal = false
+    if (error.op === undefined) error.op = op
+    return { ok: false, error }
+  }
+}
+
+// Logs one failed request, once, at the wrapper that owns the contract.
+function logFailure(op, error, fields = {}) {
+  log(`${op} failed`, {
+    ...fields,
+    status: error?.status,
+    kind: error?.kind,
+    err: errMsg(error),
+  })
+}
+
+// Runs `call` under a retry+linear-backoff policy and returns its unwrapped
+// data, or throws the LAST failure once the budget is spent.
+//
+//   retries     — RE-tries only: 3 means 1 initial attempt + up to 3 retries.
+//                 0 disables retrying (a single attempt).
+//   backoffMs   — the base delay; the wait is `attempt * backoffMs` plus a
+//                 0–25 % jitter, so retries from several processes do not
+//                 synchronise into a thundering herd when opencode comes back
+//                 up under load.
+//   retryKinds  — which failure kinds are worth another attempt. This is where
+//                 an idempotency decision is written down: a non-idempotent
+//                 write must not retry an "indeterminate" failure, because the
+//                 first delivery may already have taken effect.
+//   shouldRetry — an extra predicate over the error, for a policy narrower
+//                 than a kind (promptSession retries a refused 5xx only).
+//   context     — fields added to every log line of this call.
+//
+// A `terminal` failure breaks out at once whatever the policy says: the
+// request can never succeed, and the caller's failure path is the answer to it.
+export async function withRetry(op, call, {
+  retries = 0,
+  backoffMs = 0,
+  retryKinds = ["refused", "indeterminate"],
+  shouldRetry,
+  context = {},
+} = {}) {
+  const maxAttempts = Math.max(1, retries + 1)
+  let lastErr
+  for (let n = 1; n <= maxAttempts; n++) {
+    const outcome = await attempt(op, call)
+    if (outcome.ok) return outcome.data
+    const failure = outcome.error
+    lastErr = failure
+    if (failure.terminal) {
+      log(`${op}: not retrying, the request was refused for good`, {
+        ...context,
+        attempt: n,
+        status: failure.status,
+        kind: failure.kind,
+        err: errMsg(failure),
+      })
+      break
+    }
+    if (!retryKinds.includes(failure.kind) || (shouldRetry && !shouldRetry(failure))) {
+      log(`${op}: not retrying, the failure is outside the retry policy`, {
+        ...context,
+        attempt: n,
+        status: failure.status,
+        kind: failure.kind,
+        err: errMsg(failure),
+      })
+      break
+    }
+    if (n >= maxAttempts) break
+    const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(backoffMs / 4)))
+    const delay = (n * backoffMs) + jitter
+    log(`${op}: retrying after failure`, {
+      ...context,
+      attempt: n,
+      maxAttempts,
+      delayMs: delay,
+      err: errMsg(failure),
+    })
+    await sleep(delay)
+  }
+  throw lastErr
 }
 
 // Wakes a session with a plain-text notice — non-blocking (204). Used to push a
@@ -67,34 +207,27 @@ export function noticePostFailure(result) {
 // try/catch in hooks.js still runs its cleanup path (free slot, log,
 // showToast variant), unchanged.
 //
-// A failure reaches this loop two ways and both are handled the same: a thrown
-// exception (transport-level — the socket died, the client rejected before it
-// sent) and an error ENVELOPE the call resolved with (HTTP-level — see
-// noticePostFailure above). Only the first kind rejects on this client, so
-// without the envelope check the loop would be dead for every HTTP failure and
-// the caller would log a wake that was never delivered.
+// BOTH failure kinds are retried here, and that asymmetry against
+// promptSession is deliberate: a duplicate wake notice costs the primary a
+// repeated paragraph, a lost one costs it the result of a whole subagent run.
 //
-// A terminal failure — the target session is gone — breaks out at once instead
-// of retrying: the notice can never land, and the caller's catch is where the
-// answer to that is.
+// A terminal failure — the target session is gone, or the body was refused —
+// breaks out at once instead of retrying: the notice can never land, and the
+// caller's catch is where the answer to that is.
 //
 // `postNoticeRetries` counts RE-tries only: postNoticeRetries=3 means
 // 1 initial attempt + up to 3 retries = up to 4 total attempts. A value of 0
 // disables retries (single attempt, same as the pre-retry behavior).
-// `postNoticeRetryBackoffMs` is the base delay; we add a small jitter (0–25%
-// of the base) to avoid synchronised thundering-herd retries if opencode
-// comes back up under load.
+// `postNoticeRetryBackoffMs` is the base delay.
 // Every caller of postNotice targets a primary, so the notice is hidden
 // whenever `showAgentcom` is off — the setting is read here, per send.
 export async function postNotice(client, sessionID, text) {
   const { postNoticeRetries, postNoticeRetryBackoffMs, showAgentcom } = getSettings()
   rememberAgentcomSession(sessionID)
-  const maxAttempts = Math.max(1, postNoticeRetries + 1)
-  let lastErr
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    let failure
-    try {
-      const result = await client.session.promptAsync({
+  await withRetry(
+    "postNotice (session.promptAsync)",
+    () =>
+      client.session.promptAsync({
         path: { id: sessionID },
         // intercomTextPart marks the message as plugin-generated
         // (metadata: { agentIntercom: true }) so history scans like the
@@ -102,34 +235,14 @@ export async function postNotice(client, sessionID, text) {
         // when the notice is hidden — see src/pluginmsg.js. The text reaches
         // the model either way; the post is the wake and is never dropped.
         body: { parts: [intercomTextPart(text, { hidden: !showAgentcom })] },
-      })
-      failure = noticePostFailure(result)
-      if (!failure) return
-    } catch (err) {
-      failure = err
-    }
-    lastErr = failure
-    if (failure?.terminal) {
-      log("postNotice: not retrying, the target session is gone", {
-        sessionID,
-        attempt,
-        status: failure.status,
-        err: errMsg(failure),
-      })
-      break
-    }
-    if (attempt >= maxAttempts) break
-    const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(postNoticeRetryBackoffMs / 4)))
-    const delay = (attempt * postNoticeRetryBackoffMs) + jitter
-    log("postNotice: retrying after failure", {
-      attempt,
-      maxAttempts,
-      delayMs: delay,
-      err: errMsg(failure),
-    })
-    await sleep(delay)
-  }
-  throw lastErr
+      }),
+    {
+      retries: postNoticeRetries,
+      backoffMs: postNoticeRetryBackoffMs,
+      retryKinds: ["refused", "indeterminate"],
+      context: { sessionID },
+    },
+  )
 }
 
 // The SDK client wraps responses as { data, error, response }. Older shapes
@@ -139,12 +252,25 @@ export function unwrap(resp) {
   return resp
 }
 
-// Creates a child session and returns its sessionID (undefined on failure).
+// Creates a child session and returns its sessionID, or undefined where the
+// server refused the request — the caller's `if (!sessionID)` branch is the
+// answer to that, and the log line names the status it was refused with.
+//
+// A THROWN failure still propagates, unlike in every other wrapper here: no
+// response was seen, so nothing is known about whether a session was created,
+// and the callers of this one treat an exception as the abort of the whole
+// sequence they are in the middle of.
 export async function createChildSession(client, { parentID, title, directory }) {
-  const created = unwrap(
-    await client.session.create({ body: { parentID, title }, query: { directory } }),
+  const op = "createChildSession (session.create)"
+  const outcome = await attempt(op, () =>
+    client.session.create({ body: { parentID, title }, query: { directory } }),
   )
-  return created?.id
+  if (!outcome.ok) {
+    if (outcome.error?.kind === "indeterminate") throw outcome.error
+    logFailure(op, outcome.error, { parentID })
+    return undefined
+  }
+  return outcome.data?.id
 }
 
 // Fires a non-blocking prompt into a session — returns immediately (204).
@@ -159,22 +285,61 @@ export async function createChildSession(client, { parentID, title, directory })
 // someone decides otherwise. The spawn task prompt is one such site on
 // purpose: it lands in the SUBAGENT's session and is that session's entire
 // instruction.
+// A REQUIRED write: it THROWS where the prompt did not reach the session, and
+// every call site has the failure path that belongs to — the spawn tears the
+// child down and reports to the orchestrator, the reuse restores the retained
+// entry, the handoff reverts before its point of no return. A prompt that was
+// refused and reported as sent leaves a session that will never answer and a
+// waiter that will never be woken.
+//
+// The retry policy is deliberately narrower than postNotice's: promptAsync is
+// NOT idempotent — a second delivery starts a second turn in the child, and a
+// second kickoff hands the fresh orchestrator its instructions twice. So only
+// a "refused" failure with status >= 500 is retried: the server answered, so
+// the prompt provably did not run, and a 5xx is the transient case. A refused
+// 4xx is terminal (the session is gone, or the body was rejected) and an
+// "indeterminate" throw is ambiguous — there the duplicate-prompt risk
+// outweighs the retry, and it throws on the first failure.
 export async function promptSession(client, { sessionID, agent, prompt, hideable = false }) {
-  const hidden = hideable && !getSettings().showAgentcom
+  const { showAgentcom, postNoticeRetries, postNoticeRetryBackoffMs } = getSettings()
+  const hidden = hideable && !showAgentcom
   // Only a hideable send puts the session under the switch. The one call site
   // that is not hideable — the spawn task prompt — lands in the SUBAGENT's
   // session and stays visible whatever the switch says, so that session must
   // never enter the sweep set.
   if (hideable) rememberAgentcomSession(sessionID)
-  await client.session.promptAsync({
-    path: { id: sessionID },
-    body: { agent, parts: [intercomTextPart(prompt, { hidden })] },
-  })
+  await withRetry(
+    "promptSession (session.promptAsync)",
+    () =>
+      client.session.promptAsync({
+        path: { id: sessionID },
+        body: { agent, parts: [intercomTextPart(prompt, { hidden })] },
+      }),
+    {
+      retries: postNoticeRetries,
+      backoffMs: postNoticeRetryBackoffMs,
+      retryKinds: ["refused"],
+      shouldRetry: (err) => typeof err.status === "number" && err.status >= 500,
+      context: { sessionID },
+    },
+  )
 }
 
-// Sends opencode's cooperative abort signal. Returns whether it was confirmed.
+// Sends opencode's cooperative abort signal. A REPORTED write: it returns
+// whether the abort was CONFIRMED, and never throws.
+//
+// `false` covers two different things on purpose, and the callers treat them
+// alike: a request that failed (logged here with its status), and a request
+// the server answered with a falsy body — "not confirmed". Every caller
+// proceeds regardless, so the distinction would buy them nothing.
 export async function abortSession(client, sessionID) {
-  return Boolean(unwrap(await client.session.abort({ path: { id: sessionID } })))
+  const op = "abortSession (session.abort)"
+  const outcome = await attempt(op, () => client.session.abort({ path: { id: sessionID } }))
+  if (!outcome.ok) {
+    logFailure(op, outcome.error, { sessionID })
+    return false
+  }
+  return Boolean(outcome.data)
 }
 
 // Per-session directory cache. `toolCtx.directory` and the plugin-factory
@@ -210,18 +375,20 @@ export function agentcomSessionIds() {
   return [...agentcomSessions]
 }
 
+// Best-effort read: undefined on any failure, and nothing is cached then, so a
+// later call asks again rather than serving a reading that was never made.
 export async function getSessionDirectory(client, sessionID) {
   if (!sessionID) return undefined
   if (sessionDirCache.has(sessionID)) return sessionDirCache.get(sessionID)
-  try {
-    const data = unwrap(await client.session.get({ path: { id: sessionID } }))
-    const dir = data?.directory
-    if (dir) sessionDirCache.set(sessionID, dir)
-    return dir
-  } catch (err) {
-    log("session.get failed", errMsg(err))
+  const op = "getSessionDirectory (session.get)"
+  const outcome = await attempt(op, () => client.session.get({ path: { id: sessionID } }))
+  if (!outcome.ok) {
+    logFailure(op, outcome.error, { sessionID })
     return undefined
   }
+  const dir = outcome.data?.directory
+  if (dir) sessionDirCache.set(sessionID, dir)
+  return dir
 }
 
 export function forgetSessionDirectory(sessionID) {
@@ -229,10 +396,17 @@ export function forgetSessionDirectory(sessionID) {
   agentcomSessions.delete(sessionID)
 }
 
-// Best-effort permanent deletion of a session in opencode (DELETE /session/{id}).
-// We call this after our own registry reap, to keep the opencode server's
-// session list from accumulating forever. Errors are swallowed and logged — a
-// missed delete is not worth crashing the event handler over.
+// Permanent deletion of a session in opencode (DELETE /session/{id}), as a
+// REPORTED write: `true` only where the server confirmed it, `false` with one
+// log line otherwise, and it never throws — a missed delete is not worth
+// crashing the event handler over. We call this after our own registry reap,
+// to keep the opencode server's session list from accumulating forever.
+//
+// No retry, on purpose. A session whose DELETE was refused is collected at the
+// next plugin load by sweepOrphanedSubagentSessions (teardown.js), whose
+// criteria admit exactly it; a retry loop on the teardown hot path buys
+// nothing that reconciliation does not already give and delays a wake that has
+// already been delivered.
 //
 // NEVER use this on a session that may still have LIVE children: opencode's
 // DELETE cascades recursively over child sessions (source-verified + live on
@@ -249,29 +423,31 @@ export function forgetSessionDirectory(sessionID) {
 // does the same before its own delete. Abort/error paths also wait for the
 // session's own idle event (or their bounded fallback) before deleting.
 export async function deleteSession(client, sessionID) {
-  try {
-    await client.session.delete({ path: { id: sessionID } })
-    return true
-  } catch (err) {
-    log("session.delete failed", errMsg(err))
+  const op = "deleteSession (session.delete)"
+  const outcome = await attempt(op, () => client.session.delete({ path: { id: sessionID } }))
+  if (!outcome.ok) {
+    logFailure(op, outcome.error, { sessionID })
     return false
   }
+  return true
 }
 
-// Best-effort rename of a session (PATCH /session/{id} with `title`). The
+// Rename of a session (PATCH /session/{id} with `title`), a REPORTED write. The
 // title is the one field of a subagent session this plugin owns from the
 // outside, and it is what carries the retention state to any reader of the
 // opencode session list — the sidebar included (publishRetentionState in
 // teardown.js). Returns whether the write went through; a failure is logged and
 // costs the reader nothing but the state it would have shown.
 export async function updateSessionTitle(client, sessionID, title) {
-  try {
-    await client.session.update({ path: { id: sessionID }, body: { title } })
-    return true
-  } catch (err) {
-    log("session.update (title) failed", { sessionID, err: errMsg(err) })
+  const op = "updateSessionTitle (session.update)"
+  const outcome = await attempt(op, () =>
+    client.session.update({ path: { id: sessionID }, body: { title } }),
+  )
+  if (!outcome.ok) {
+    logFailure(op, outcome.error, { sessionID })
     return false
   }
+  return true
 }
 
 // Every session opencode holds, optionally narrowed to one project directory.
@@ -279,18 +455,21 @@ export async function updateSessionTitle(client, sessionID, title) {
 // sweeps on this list does nothing rather than something wrong when the call
 // does not come back.
 export async function listSessions(client, { directory } = {}) {
-  try {
-    const data = unwrap(
-      await client.session.list(directory ? { query: { directory } } : undefined),
-    )
-    return Array.isArray(data) ? data : []
-  } catch (err) {
-    log("session.list failed", errMsg(err))
+  const op = "listSessions (session.list)"
+  const outcome = await attempt(op, () =>
+    client.session.list(directory ? { query: { directory } } : undefined),
+  )
+  if (!outcome.ok) {
+    logFailure(op, outcome.error, { directory })
     return []
   }
+  return Array.isArray(outcome.data) ? outcome.data : []
 }
 
-// Best-effort ARCHIVE of a session (PATCH /session/{id} with `time.archived`).
+// ARCHIVE of a session (PATCH /session/{id} with `time.archived`), as a
+// REPORTED write: `true` only where the server confirmed it, `false` with one
+// log line otherwise, and it never throws.
+//
 // Used in place of deleteSession for the OLD primary in the orchestrator
 // handoff: archiving retires the session WITHOUT triggering opencode's
 // recursive child-delete cascade, so any subagent still reparented under the
@@ -304,16 +483,18 @@ export async function listSessions(client, { directory } = {}) {
 // live-verified). The generated hey-api client serialises the body verbatim,
 // so the extra field passes through at runtime despite the narrower type.
 export async function archiveSession(client, sessionID) {
-  try {
-    await client.session.update({
+  const op = "archiveSession (session.update)"
+  const outcome = await attempt(op, () =>
+    client.session.update({
       path: { id: sessionID },
       body: { time: { archived: Date.now() } },
-    })
-    return true
-  } catch (err) {
-    log("session.update (archive) failed", errMsg(err))
+    }),
+  )
+  if (!outcome.ok) {
+    logFailure(op, outcome.error, { sessionID })
     return false
   }
+  return true
 }
 
 // Cap on the snapshot HTTP fetch so a stuck opencode server never blocks a
@@ -325,18 +506,18 @@ const SNAPSHOT_TIMEOUT_MS = 5000
 // alike (e.g. the handoff's last-user-goal lookup degrades to an empty goal).
 // Same timeout discipline as fetchSnapshot.
 export async function fetchMessages(client, sessionID) {
-  try {
-    const resp = unwrap(
-      await client.session.messages({
-        path: { id: sessionID },
-        signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
-      }),
-    )
-    return Array.isArray(resp) ? resp : []
-  } catch (err) {
-    log("session.messages failed", errMsg(err))
+  const op = "fetchMessages (session.messages)"
+  const outcome = await attempt(op, () =>
+    client.session.messages({
+      path: { id: sessionID },
+      signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
+    }),
+  )
+  if (!outcome.ok) {
+    logFailure(op, outcome.error, { sessionID })
     return []
   }
+  return Array.isArray(outcome.data) ? outcome.data : []
 }
 
 // Best-effort snapshot of a session: a short description of its last activity,
@@ -350,28 +531,37 @@ export async function fetchMessages(client, sessionID) {
 // from the watchdog's timeout path — so a caller that only parses the reply
 // (the handoff's open-points fetch) gets all of it, and this function keeps to
 // being a read.
+//
+// The only read whose caller branches on WHY it is empty, so its failure is
+// split in two (see snapshotOutcome):
+//   status 404      — the session is genuinely gone. `{ messageCount: 0 }`,
+//                     which classifies as "gone".
+//   every other one — a 500, a timeout, a transport error. Nothing was
+//                     established about the session, so `{}`, which classifies
+//                     as "unavailable". A caller must not destroy a retained
+//                     handle over a transient server error.
 export async function fetchSnapshot(client, sessionID) {
-  try {
-    const resp = unwrap(
-      await client.session.messages({
-        path: { id: sessionID },
-        signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
-      }),
-    )
-    const messages = Array.isArray(resp) ? resp : []
-    return {
-      // How many messages the session answered with. It is what tells a
-      // successful fetch of an EMPTY session apart from a failed fetch: both
-      // leave every other field undefined, and only the failure returns {}.
-      // See snapshotOutcome.
-      messageCount: messages.length,
-      lastActivity: latestActivity(messages),
-      ctxTokens: latestContextTokens(messages),
-      result: finalResult(messages),
-    }
-  } catch (err) {
-    log("session.messages failed", errMsg(err))
-    return {}
+  const op = "fetchSnapshot (session.messages)"
+  const outcome = await attempt(op, () =>
+    client.session.messages({
+      path: { id: sessionID },
+      signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
+    }),
+  )
+  if (!outcome.ok) {
+    logFailure(op, outcome.error, { sessionID })
+    return outcome.error?.status === 404 ? { messageCount: 0 } : {}
+  }
+  const messages = Array.isArray(outcome.data) ? outcome.data : []
+  return {
+    // How many messages the session answered with. It is what tells a session
+    // that is GONE apart from one that could not be READ: both leave every
+    // other field undefined, and only the unreadable one returns {}.
+    // See snapshotOutcome.
+    messageCount: messages.length,
+    lastActivity: latestActivity(messages),
+    ctxTokens: latestContextTokens(messages),
+    result: finalResult(messages),
   }
 }
 
@@ -383,15 +573,17 @@ export async function fetchSnapshot(client, sessionID) {
 //                   truth about it right now; an individual field may still be
 //                   undefined (a step whose tokens are all zero yields no
 //                   ctxTokens), which is the reading caller's business.
-//   "unavailable" — the fetch failed: a timeout, a transport error, anything
-//                   that produced {}. Nothing was established about the
-//                   session; it is very probably still there.
-//   "gone"        — the fetch SUCCEEDED and the session has no messages at
-//                   all. A session this plugin created was prompted before it
-//                   was ever registered, so it always has messages; an empty
-//                   list means the session was deleted underneath the plugin
-//                   (an `opencode session delete`, a database reset) and its
-//                   id now addresses nothing.
+//   "unavailable" — the fetch could not be made: a timeout, a transport
+//                   error, a 5xx — anything that produced {}. Nothing was
+//                   established about the session; it is very probably still
+//                   there.
+//   "gone"        — the session's id addresses nothing. Either the fetch
+//                   SUCCEEDED and the session has no messages at all (a
+//                   session this plugin created was prompted before it was
+//                   ever registered, so it always has messages; an empty list
+//                   means it was deleted underneath the plugin — an
+//                   `opencode session delete`, a database reset), or the
+//                   server answered the read with a 404.
 export function snapshotOutcome(snapshot) {
   if (!snapshot || typeof snapshot.messageCount !== "number") return "unavailable"
   return snapshot.messageCount > 0 ? "ok" : "gone"

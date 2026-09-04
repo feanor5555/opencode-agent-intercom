@@ -264,7 +264,7 @@ test("a running subagent's session.deleted wakes nobody", async () => {
   assert.ok(entryForSession(sessionID), "and the entry is untouched")
 })
 
-test("a parent deleted with its children is not woken for them", async () => {
+test("the already-seen parent deletion fast path is pinned with a hand-fed order", async () => {
   withSettings({ maxRetainedSubagents: 3 })
   const { ctx, created, notices } = makeCtx({ messages: assistantReply("THE RESULT") })
   const hooks = await plugin(ctx)
@@ -272,8 +272,7 @@ test("a parent deleted with its children is not woken for them", async () => {
   const sessionID = created[0]
   await idle(hooks, sessionID)
 
-  // The cascade: opencode deletes the primary and publishes the event for it
-  // and for every session under it.
+  // Pin the already-seen fast path with a hand-fed parent-first order, not the real cascade order.
   await sessionDeleted(hooks, PRIMARY)
   await sessionDeleted(hooks, sessionID)
 

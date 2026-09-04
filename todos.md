@@ -11,7 +11,4 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- The test "a parent deleted with its children is not woken for them" in `test/retention-drop-notice.test.js` feeds the parent's `session.deleted` first, an order that never occurs on a real server; it pins the already-seen fast path and the real-order case now stands beside it. Decide whether the artificial-order case stays.
-- `client.tui.showToast` in `src/client.js` is still on a bare `await` and reads a refused request as success. `concepts/client-failure-contract.md` takes no decision on the `tui` namespace; decide whether that call joins the reported-write contract.
-
-Last commit: 46fab32 fix: let a refused request reach the caller that has to act on it
+Last commit: 6e72f40 refactor: return the create failure instead of writing it out

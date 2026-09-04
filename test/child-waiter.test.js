@@ -3,7 +3,7 @@
 // path has to keep — a child's run cannot end without settling the session
 // blocked on it.
 //
-// Nothing registers a waiter in production yet: the spawn path is a later step.
+// The spawn path registers waiters in production via registerChildWaiter in src/tools.js.
 // These tests therefore register waiters directly and drive the real ending
 // paths (session.idle, session.error, the abort tool, the inactivity watchdog,
 // teardownSubagent itself) against them.

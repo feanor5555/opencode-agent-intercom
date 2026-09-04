@@ -80,12 +80,12 @@ caller carries on:
   the refusal text says so (`src/tools.js:471-477`).
 
 On a pass, `childResult = registerChildWaiter(sessionID, toolCtx.sessionID)`
-(`src/tools.js:525`) — the child waiter is the parent's block. The spawn slot is
-released before the wait (`src/tools.js:597-602`) so the slot is owned by the child's
+(`src/tools.js:614`) — the child waiter is the parent's block. The spawn slot is
+released before the wait (`src/tools.js:611-616`) so the slot is owned by the child's
 registry entry from there on; holding the reservation through the child's whole run
 would count it twice against the cap the orchestrator is shown.
 
-The handler `await`s the result (`src/tools.js:618-621`) and the child's ending IS the
+The handler `await`s the result (`src/tools.js:632-635`) and the child's ending IS the
 tool result:
 
 ```
@@ -97,7 +97,7 @@ return {
 }
 ```
 
-(`src/tools.js:623-635`). `nestedSpawnOutput` (`src/tools.js:254-301`) renders every
+(`src/tools.js:637-649`). `nestedSpawnOutput` (`src/tools.js:254-301`) renders every
 ending — `completed`, `error`, `aborted`, `timeout`, `expired`, `ended`, `abandoned`
 — because the caller asked a question inside a tool call and has to be told either
 the answer or why there is none. An ending that is not `completed` but still carries
@@ -150,24 +150,24 @@ The seven exports of `src/childwait.js`:
   value one a parent can act on. Two carry text: `completed` a reply, `timeout`
   whatever was rescued before the teardown.
 - `CHILD_WAITER_TIMEOUT_FACTOR = 4` (`src/childwait.js:57-64`) and
-  `childWaiterTimeoutMs(maxAgeMs)` (`src/childwait.js:68-72`) — the waiter's own
+  `childWaiterTimeoutMs(maxAgeMs)` (`src/childwait.js:74-82`) — the waiter's own
   ceiling, as a multiple of `maxSubagentAgeMs`. `maxSubagentAgeMs = 0` disables the
   inactivity watchdog and disables this ceiling with it; the two are one decision.
 - `registerChildWaiter(childSessionID, parentSessionID, { timeoutMs })`
-  (`src/childwait.js:88-152`) — registers and returns the promise the parent blocks
+  (`src/childwait.js:84-159`) — registers and returns the promise the parent blocks
   on. Resolves, never rejects; `record.settle` is the only place the promise is
   resolved.
-- `settleChildWaiter(childSessionID, outcome)` (`src/childwait.js:159-181`) — every
+- `settleChildWaiter(childSessionID, outcome)` (`src/childwait.js:161-183`) — every
   ending path calls this unconditionally; the return value is the answer to "was
   this child being waited on?", which decides whether the result still needs to go
   to the parent as a wake notice.
-- `hasChildWaiter(childSessionID)` (`src/childwait.js:184-186`).
-- `liveChildSessionIDs(parentSessionID)` (`src/childwait.js:192-202`) — linear scan
+- `hasChildWaiter(childSessionID)` (`src/childwait.js:185-188`).
+- `liveChildSessionIDs(parentSessionID)` (`src/childwait.js:190-203`) — linear scan
   over the map; a parent has at most one live child under the blocking shape, the
   map holds one record per waited child across the whole process, single digits at
   the very most.
-- `hasLiveChildren(parentSessionID)` (`src/childwait.js:207-213`) and
-  `waitingParentOf(childSessionID)` (`src/childwait.js:218-219`).
+- `hasLiveChildren(parentSessionID)` (`src/childwait.js:205-215`) and
+  `waitingParentOf(childSessionID)` (`src/childwait.js:217-222`).
 
 Five sites consult the waiter or the live-children predicate, exactly the five the
 module's header promises:

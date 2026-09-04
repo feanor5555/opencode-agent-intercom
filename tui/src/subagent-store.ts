@@ -354,6 +354,51 @@ export function reapRows(
   return gone;
 }
 
+// What the panel knows about whether the SERVER still holds a session. The
+// route escape asks it about every candidate target, because a jump to a
+// session the server no longer has lands on the TUI's start page — the defect
+// the escape exists to prevent.
+export interface SessionLivenessQuery {
+  // opencode published `session.deleted` for this session. The youngest signal
+  // there is and it outranks every other: a poll pass that was in flight when
+  // the deletion landed still carries the session in its listing.
+  deleted: boolean;
+  // The last COMPLETED poll pass listed this session as somebody's child.
+  listed: boolean;
+  // This session is an orchestrator the panel polls. Orchestrators are nobody's
+  // child, so no listing ever names them.
+  isOrchestrator: boolean;
+  // The number of poll passes that had been STARTED at the moment the server
+  // first said this session exists — a `session.created` event, or a child
+  // listing. `undefined` means the server never mentioned it.
+  knownAtPass?: number;
+  // The index of the last poll pass that ran to completion, 0 before any has.
+  // `listed` is that pass's result.
+  completedPass: number;
+}
+
+// Whether the server is known to still hold this session.
+//
+// A listing is a snapshot, and a snapshot answers only for what it could have
+// seen. A pass that started before the panel learned a session exists never had
+// the chance to list it, so its silence about that session says nothing about
+// the server. Reading that silence as "gone" is what made a subagent spawned
+// since the last pass unreachable for the escape and put the view on the
+// orchestrator instead of on the parent it belongs in. Such a session counts as
+// alive until a pass that started after it was learned of has completed and had
+// its chance; from then on the listing is the answer. A deletion event outranks
+// both, and an orchestrator — which no listing ever names — is alive for as
+// long as the panel polls it.
+//
+// "The panel holds no row for it" is deliberately NOT part of this: a row is the
+// panel's own bookkeeping and says nothing about the server.
+export function isSessionLive(query: SessionLivenessQuery): boolean {
+  if (query.deleted) return false;
+  if (query.listed || query.isOrchestrator) return true;
+  if (query.knownAtPass === undefined) return false;
+  return query.completedPass <= query.knownAtPass;
+}
+
 export interface RouteEscapeQuery {
   // The route the TUI is on right now, and the session it names when it is a
   // session route.

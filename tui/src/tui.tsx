@@ -60,6 +60,7 @@ import {
   descendantRows,
   isOrchestratorSession,
   isRetained,
+  isSessionLive,
   readSessionChildren,
   reapRows,
   retainedRowNote,
@@ -764,6 +765,18 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // which must not treat a session the server still lists as one that is over,
   // and by the liveness test the route escape asks.
   let listed: ReadonlySet<string> = new Set<string>();
+  // Poll passes, counted so a listing is only read for what it could answer. A
+  // pass takes its index when it starts; `completedPass` is the index of the
+  // last one that ran to completion, which is the pass `listed` came from.
+  let startedPasses = 0;
+  let completedPass = 0;
+  // Every session the SERVER has said exists — a `session.created` event, or a
+  // child listing — against the number of passes started at that moment. A pass
+  // older than that entry never had the chance to list the session, so its
+  // silence about it proves nothing, and that is what keeps a subagent spawned
+  // since the last completed pass from reading as gone. An entry leaves on the
+  // session's deletion event, which bounds the map as it bounds `polledIDs`.
+  const knownAtPass = new Map<string, number>();
   // Every session opencode has published `session.deleted` for. Session ids are
   // unique per creation, so a deleted one never comes back and nothing is ever
   // taken out again; the set grows with the number of subagents a run tore
@@ -836,20 +849,29 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   ): string =>
     rootSessionOf(entry, (sessionID) => rows.get(sessionID) ?? finished.get(sessionID));
 
-  // Whether the server is known to still hold a session. Two things say so and
-  // nothing else does: the last completed poll pass listed it as somebody's
-  // child, or it is an orchestrator this panel polls — orchestrators are
-  // nobody's child and so never appear in a listing, and a polled id leaves the
-  // set on its deletion event and on the first 404 for it. A published
-  // `session.deleted` overrides both, because it is younger than any pass that
-  // may still be in flight.
-  //
-  // "The panel holds no row for it" is deliberately NOT part of this: a row is
-  // this panel's bookkeeping, and `finished` is pruned on every pass that
-  // relists a session, so a row's absence says nothing about the server.
+  // Record that the server has said this session exists, against the pass count
+  // standing right now. Only real session ids get in, the same gate `trackPolled`
+  // applies: some event payloads carry a parentID that is not a session.
+  const noteSessionExists = (sessionID: string | undefined): void => {
+    if (!sessionID || !sessionID.startsWith("ses_")) return;
+    if (knownAtPass.has(sessionID)) return;
+    knownAtPass.set(sessionID, startedPasses);
+  };
+
+  // Whether the server is known to still hold a session. The decision itself is
+  // `isSessionLive`; this supplies what the panel knows. A published
+  // `session.deleted` outranks everything, because it is younger than any pass
+  // that may still be in flight, and a session the server named but no completed
+  // pass has had the chance to list yet is alive — the poll snapshot's age is
+  // not evidence about the server.
   const isLiveSession = (sessionID: string): boolean =>
-    !deletedSessions.has(sessionID) &&
-    (listed.has(sessionID) || isPrimarySession(sessionID));
+    isSessionLive({
+      deleted: deletedSessions.has(sessionID),
+      listed: listed.has(sessionID),
+      isOrchestrator: isPrimarySession(sessionID),
+      knownAtPass: knownAtPass.get(sessionID),
+      completedPass,
+    });
 
   // The orchestrator chat this panel belongs to: the first polled session that
   // was never a subagent. `polledIDs` keeps insertion order and is seeded from
@@ -869,14 +891,17 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // caller knows it; where the caller has no row left to read it from, the row
   // this panel retired earlier still remembers it.
   //
-  // Called from `retireRow` for every row that is retired, and from
+  // Called from `retireRow` for every row that is retired, from
   // `onSessionDeleted` for a deletion the panel holds no row for — the case a
   // reap that ran before the route arrived on the session leaves behind, where
-  // nothing else would ever move the view.
+  // nothing else would ever move the view — and from `onSessionIdle` for a
+  // subagent that has stopped running before its session is torn down. `cause`
+  // is the caller, so the debug line says which of the three fired.
   const escapeRoute = (
     sessionID: string,
     parentID: string | undefined,
     rowPresent: boolean,
+    cause: "retire" | "deleted" | "idle",
   ): void => {
     // `params` belongs to the session variant of the route union alone, so the
     // name is what narrows it.
@@ -897,6 +922,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     });
     debugLog("tui route escape", {
       sessionID,
+      cause,
       rowPresent,
       route: route.name,
       routeSessionID: routeSessionID ?? null,
@@ -926,7 +952,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     sessionID: string,
   ): void => {
     const entry = rows.get(sessionID);
-    escapeRoute(sessionID, entry?.parentID, entry !== undefined);
+    escapeRoute(sessionID, entry?.parentID, entry !== undefined, "retire");
     finished.set(sessionID, entry);
     rows.delete(sessionID);
     aborted.delete(sessionID);
@@ -963,6 +989,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       return;
     }
     refreshInFlight = true;
+    // This pass's index, taken before anything is asked of the server: a session
+    // the panel learns of from here on was not in this pass's reach and its
+    // absence from the listing must not be read as gone.
+    const passIndex = ++startedPasses;
     try {
       const statusRes = await api.client.session.status({});
       const statuses = (statusRes?.data ?? {}) as Record<
@@ -997,6 +1027,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         }
         for (const child of childRead.children) {
           seen.add(child.id);
+          // The server listed it, so the server has it.
+          noteSessionExists(child.id);
           // Listed as somebody's child: a subagent, now and for good. This
           // happens BEFORE the session enters the polled set, so it can never
           // be read as an orchestrator in between.
@@ -1069,6 +1101,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       // that was missed, and for the held row whose window ran out with the
       // session still standing.
       listed = seen;
+      completedPass = passIndex;
       for (const sessionID of reapRows(
         next.values(),
         { seen, polled: polledIDs },
@@ -1309,6 +1342,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       return;
     }
     subagentIDs.add(info.id);
+    // The event is the server saying both of these sessions exist, ahead of any
+    // pass that could list them.
+    noteSessionExists(info.id);
+    noteSessionExists(info.parentID);
     // The session that spawned this one has a child to be listed from now on,
     // so it joins the polled set at once rather than waiting for a pass to
     // discover it. It is not made an orchestrator by that: the spawning session
@@ -1351,25 +1388,24 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // What stays here is the route: if the user is viewing this session and it is
   // about to be torn down, the view has to be moved off it before the session
   // goes, otherwise the route points at a missing session and the TUI falls
-  // back to the start page, losing the orchestrator chat. The jump is held back
+  // back to the start page, losing the orchestrator chat. The move is held back
   // for a session the last completed poll still listed with no retention stamp
   // on it: that is a subagent the plugin has not finished with, and yanking the
   // user out of a session that goes on working is the same mistake as dropping
   // its row.
+  //
+  // The move itself is `escapeRoute` and nothing of its own: the parent has to
+  // pass the same liveness test as any other escape target, or the view is
+  // carried from a session that is ending onto one the server no longer has —
+  // the start page one link further up. Where the parent is gone the walk goes
+  // on up the chain and, failing that, to the orchestrator.
   const onSessionIdle = (event: unknown): void => {
     const sessionID = (event as { properties?: { sessionID?: string } })
       .properties?.sessionID;
     const entry = sessionID ? subagents().get(sessionID) : undefined;
     if (sessionID && entry && entry.parentID) {
       const stillWorking = listed.has(sessionID) && !isRetained(entry);
-      if (
-        !stillWorking &&
-        api.route.current.name === "session" &&
-        (api.route.current.params?.sessionID as string | undefined) ===
-          sessionID
-      ) {
-        api.route.navigate("session", { sessionID: entry.parentID });
-      }
+      if (!stillWorking) escapeRoute(sessionID, entry.parentID, true, "idle");
     }
     scheduleRefresh();
   };
@@ -1399,6 +1435,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     // the poll discovered — that is what keeps the set from growing without
     // bound as subagents come and go.
     polledIDs.delete(sessionID);
+    knownAtPass.delete(sessionID);
     // Recorded before the escape is worked out: this session is exactly what
     // the escape must not land on, and it outranks any pass that still lists
     // it.
@@ -1415,7 +1452,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       setSubagents(next);
       if (done) addCompleted([root]);
     } else {
-      escapeRoute(sessionID, parentOfGone(sessionID), false);
+      escapeRoute(sessionID, parentOfGone(sessionID), false, "deleted");
     }
     scheduleRefresh();
   };

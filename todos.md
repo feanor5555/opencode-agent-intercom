@@ -11,9 +11,7 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- `onSessionIdle` in `tui/src/tui.tsx` still jumps to `entry.parentID` without checking that the server still has that session; put it through the same liveness test the route escape now uses.
 - The nested-spawn guard in `reapRows` (`tui/src/tui.tsx`) contradicts its own comment: `onSessionCreated` marks the parent polled in the same block that creates the row, so a nested row is reapable from birth. Correcting it changes `SubagentEntry`.
-- A nested parent spawned since the last completed poll pass reads as not alive, so the view lands on the orchestrator instead of on that parent.
 
 - `specs/nested-delegation.md` is broadly stale on line references (~50, the `src/childwait.js` ones short by about 11); sweep the whole file against the current source.
 - The header comment of `test/child-waiter.test.js` claims nothing registers a child waiter in production; `registerChildWaiter` in `src/tools.js` does. Correct the comment.

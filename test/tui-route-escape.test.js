@@ -14,12 +14,16 @@
 //     and the ones that follow find no row; and a deletion can arrive for a
 //     session that has no row at all, which is the case a reap that ran before
 //     the view moved into the session leaves behind. Every one of them reaches
-//     the same escape.
+//     the same escape, and so does `session.idle`, which moves the view off a
+//     subagent that has stopped running before its session is torn down.
 //   * the target. It must be a session the SERVER still holds. "This panel
 //     retired no row for it" is a different question: `finished` is pruned on
 //     every pass that relists a session, so a relisted-then-deleted ancestor
 //     reads as row-less and jumping to it lands on the same start page one
-//     link further up.
+//     link further up. Nor is the age of the poll snapshot an answer: a session
+//     spawned since the last completed pass appears in no listing and is not
+//     gone, so `isSessionLive` counts the passes and reads a listing only for
+//     what that pass could have seen.
 //
 // Run: node --test test/tui-route-escape.test.js
 
@@ -28,7 +32,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 
-import { routeEscapeTarget } from "../tui/src/subagent-store.ts"
+import { isSessionLive, routeEscapeTarget } from "../tui/src/subagent-store.ts"
 
 const CHILD = "ses_child"
 const PARENT = "ses_parent"
@@ -194,6 +198,107 @@ test("the escape never lands on the session that is ending", () => {
   )
 })
 
+// --------------------------------------------- what counts as still alive
+
+// `isSessionLive` is the test every escape target has to pass. The panel's
+// three sources of truth about the server: the deletion event, the last
+// completed poll pass's listing, and the fact of being an orchestrator this
+// panel polls — plus the pass counter that says whether the listing could have
+// answered for this session at all.
+
+function liveness(over = {}) {
+  return {
+    deleted: false,
+    listed: false,
+    isOrchestrator: false,
+    knownAtPass: undefined,
+    completedPass: 0,
+    ...over,
+  }
+}
+
+test("a session the last completed pass listed is alive", () => {
+  assert.equal(isSessionLive(liveness({ listed: true, completedPass: 4 })), true)
+})
+
+test("an orchestrator this panel polls is alive though no listing names it", () => {
+  assert.equal(isSessionLive(liveness({ isOrchestrator: true, completedPass: 4 })), true)
+})
+
+test("a deletion event outranks a listing and the orchestrator test alike", () => {
+  // The pass that was in flight when the deletion landed still carries the
+  // session; the event is the younger truth.
+  assert.equal(
+    isSessionLive(liveness({ deleted: true, listed: true, completedPass: 4 })),
+    false,
+  )
+  assert.equal(
+    isSessionLive(liveness({ deleted: true, isOrchestrator: true, knownAtPass: 4, completedPass: 4 })),
+    false,
+  )
+})
+
+test("a session the server never mentioned is not alive", () => {
+  assert.equal(isSessionLive(liveness({ completedPass: 4 })), false)
+})
+
+test("a session spawned since the last completed pass is alive, not gone", () => {
+  // The defect: a nested parent spawned after the last pass appears in no
+  // listing, read as gone, and the view escaped past it to the orchestrator.
+  // The pass could not have listed it, so its silence is not evidence.
+  assert.equal(isSessionLive(liveness({ knownAtPass: 4, completedPass: 4 })), true)
+  assert.equal(
+    isSessionLive(liveness({ knownAtPass: 4, completedPass: 3 })),
+    true,
+    "a pass that completed before the panel even learned of it says nothing either",
+  )
+  assert.equal(
+    isSessionLive(liveness({ knownAtPass: 0, completedPass: 0 })),
+    true,
+    "and before any pass has completed there is no listing to be judged by",
+  )
+})
+
+test("once a pass has had its chance, the listing is the answer", () => {
+  // Pass 5 started after the panel knew of the session, so pass 5 would have
+  // listed it if the server still had it.
+  assert.equal(isSessionLive(liveness({ knownAtPass: 4, completedPass: 5 })), false)
+  assert.equal(
+    isSessionLive(liveness({ knownAtPass: 4, completedPass: 5, listed: true })),
+    true,
+    "and it did list it",
+  )
+})
+
+test("the escape lands on a freshly spawned nested parent rather than the orchestrator", () => {
+  // The two halves together: the walk asks `isSessionLive`, and the parent is
+  // a session the server has published a creation for that no completed pass
+  // has had the chance to list.
+  const knownAtPass = new Map([[PARENT, 7]])
+  const isAlive = (id) =>
+    isSessionLive({
+      deleted: false,
+      listed: false,
+      isOrchestrator: id === ROOT,
+      knownAtPass: knownAtPass.get(id),
+      completedPass: 7,
+    })
+  assert.equal(routeEscapeTarget(query({ isAlive })), PARENT)
+  const stale = (id) =>
+    isSessionLive({
+      deleted: false,
+      listed: false,
+      isOrchestrator: id === ROOT,
+      knownAtPass: knownAtPass.get(id),
+      completedPass: 8,
+    })
+  assert.equal(
+    routeEscapeTarget(query({ isAlive: stale })),
+    ROOT,
+    "a pass that has since had its chance and did not list it makes it gone",
+  )
+})
+
 // ------------------------------------------------- how the panel is wired
 
 // The panel is @opentui/solid JSX with no render seam a unit test can drive, so
@@ -244,9 +349,13 @@ test("escapeRoute is the one place the view is moved off an ending session", () 
 
 test("liveness is the server's answer, and a deletion outranks a pass in flight", () => {
   const start = only("const isLiveSession = (sessionID: string): boolean =>")
-  const body = source.slice(start, source.indexOf(";", source.indexOf("isPrimarySession", start)))
-  assert.match(body, /!deletedSessions\.has\(sessionID\)/)
-  assert.match(body, /listed\.has\(sessionID\) \|\| isPrimarySession\(sessionID\)/)
+  const body = source.slice(start, source.indexOf("\n    });", start))
+  assert.match(body, /isSessionLive\(\{/)
+  assert.match(body, /deleted: deletedSessions\.has\(sessionID\)/)
+  assert.match(body, /listed: listed\.has\(sessionID\)/)
+  assert.match(body, /isOrchestrator: isPrimarySession\(sessionID\)/)
+  assert.match(body, /knownAtPass: knownAtPass\.get\(sessionID\)/)
+  assert.match(body, /completedPass,/)
   only("const deletedSessions = new Set<string>()")
   // The deletion handler is what fills it, before it works out any escape.
   const deleted = bodyOf("const onSessionDeleted = (event: unknown): void => {")
@@ -257,6 +366,34 @@ test("liveness is the server's answer, and a deletion outranks a pass in flight"
   )
 })
 
+test("the poll counts its passes, so a listing is read only for what it saw", () => {
+  // The counter is what separates "the server does not have it" from "no
+  // completed pass has had the chance to list it yet".
+  only("let startedPasses = 0;")
+  only("let completedPass = 0;")
+  only("const knownAtPass = new Map<string, number>();")
+  const body = bodyOf("const refresh = async (): Promise<void> => {")
+  assert.match(body, /const passIndex = \+\+startedPasses;/)
+  assert.ok(
+    body.indexOf("const passIndex = ++startedPasses;") < body.indexOf("api.client.session.status"),
+    "the index is taken before the pass asks the server anything",
+  )
+  assert.match(body, /listed = seen;\n\s*completedPass = passIndex;/)
+  assert.match(body, /noteSessionExists\(child\.id\);/, "a listed child is a session the server has")
+})
+
+test("a creation event is the server saying the session exists, ahead of any pass", () => {
+  const note = bodyOf("const noteSessionExists = (sessionID: string | undefined): void => {")
+  assert.match(note, /sessionID\.startsWith\("ses_"\)/, "the same id gate trackPolled applies")
+  assert.match(note, /knownAtPass\.set\(sessionID, startedPasses\)/)
+  assert.match(note, /if \(knownAtPass\.has\(sessionID\)\) return;/, "the first mention wins")
+  const created = bodyOf("const onSessionCreated = (event: unknown): void => {")
+  assert.match(created, /noteSessionExists\(info\.id\);/)
+  assert.match(created, /noteSessionExists\(info\.parentID\);/, "the spawning session exists too")
+  const deleted = bodyOf("const onSessionDeleted = (event: unknown): void => {")
+  assert.match(deleted, /knownAtPass\.delete\(sessionID\);/, "and the record goes when the session does")
+})
+
 test("the orchestrator fallback is the first polled session that was never a subagent", () => {
   const body = bodyOf("const orchestratorSessionID = (): string | undefined => {")
   assert.match(body, /for \(const sessionID of polledIDs\)/)
@@ -265,7 +402,7 @@ test("the orchestrator fallback is the first polled session that was never a sub
 
 test("retireRow escapes the route off the row it is retiring", () => {
   const body = bodyOf("const retireRow = (")
-  assert.match(body, /escapeRoute\(sessionID, entry\?\.parentID, entry !== undefined\)/)
+  assert.match(body, /escapeRoute\(sessionID, entry\?\.parentID, entry !== undefined, "retire"\)/)
 })
 
 test("every path that retires a row goes through retireRow", () => {
@@ -285,7 +422,7 @@ test("a deletion for a session with no row still moves the view", () => {
   // time, so a view that arrived on the session afterwards was never moved,
   // and the deletion handler returned without doing anything at all.
   const body = bodyOf("const onSessionDeleted = (event: unknown): void => {")
-  assert.match(body, /\} else \{\s*\n\s*escapeRoute\(sessionID, parentOfGone\(sessionID\), false\);/)
+  assert.match(body, /\} else \{\s*\n\s*escapeRoute\(sessionID, parentOfGone\(sessionID\), false, "deleted"\);/)
   assert.match(body, /retireRow\(next, sessionID\)/, "a row that is there is still retired")
 })
 
@@ -306,19 +443,25 @@ test("no retiring call site carries a route jump of its own", () => {
   }
 })
 
-test("the only other route jumps are opening a row and the idle pre-escape", () => {
+test("the only route jumps are opening a row and the escape itself", () => {
   const jumps = source.match(/api\.route\.navigate\(/g) ?? []
-  assert.equal(
-    jumps.length,
-    3,
-    "exactly three: openSubagent, onSessionIdle's pre-escape, escapeRoute's escape",
-  )
+  assert.equal(jumps.length, 2, "exactly two: openSubagent and escapeRoute's escape")
   assert.match(bodyOf("const openSubagent = (id: string): void => {"), /api\.route\.navigate\(/)
+})
+
+test("the idle pre-escape goes through the same escape as an ending row", () => {
   // session.idle is not an ending, so it retires nothing; it moves the view off
-  // a subagent that has stopped running before the session is torn down.
+  // a subagent that has stopped running before its session is torn down. That
+  // move used to jump straight at `entry.parentID`, which puts the view on a
+  // parent the server may no longer have — the start page one link further up.
   const idle = bodyOf("const onSessionIdle = (event: unknown): void => {")
-  assert.match(idle, /api\.route\.navigate\("session", \{ sessionID: entry\.parentID \}\)/)
+  assert.match(idle, /escapeRoute\(sessionID, entry\.parentID, true, "idle"\)/)
+  assert.equal(idle.includes("api.route.navigate("), false, "no jump of its own")
   assert.equal(idle.includes("retireRow"), false)
+  // The one thing the idle path decides for itself: a subagent the poll still
+  // lists and that carries no retention stamp is working, and is left alone.
+  assert.match(idle, /const stillWorking = listed\.has\(sessionID\) && !isRetained\(entry\);/)
+  assert.match(idle, /if \(!stillWorking\) escapeRoute\(/)
 })
 
 // ------------------------------------------------- the debug line
@@ -331,6 +474,7 @@ test("the escape writes one debug line carrying what it decided on", () => {
   assert.match(body, /debugLog\("tui route escape", \{/)
   for (const field of [
     /sessionID,/,
+    /cause,/,
     /rowPresent,/,
     /route: route\.name,/,
     /routeSessionID: routeSessionID \?\? null,/,
@@ -346,14 +490,22 @@ test("the escape writes one debug line carrying what it decided on", () => {
   only('import { debugLog } from "./debug-log.ts";')
 })
 
-test("both callers of the escape are distinguishable in the log", () => {
-  // `rowPresent` is the whole point: it says which of the two paths fired.
-  assert.match(
-    bodyOf("const retireRow = ("),
-    /escapeRoute\(sessionID, entry\?\.parentID, entry !== undefined\)/,
-  )
-  assert.match(
-    bodyOf("const onSessionDeleted = (event: unknown): void => {"),
-    /escapeRoute\(sessionID, parentOfGone\(sessionID\), false\)/,
-  )
+test("all three callers of the escape are distinguishable in the log", () => {
+  // `cause` is the whole point: it says which of the three paths fired, and
+  // `rowPresent` whether a row was there to read the parent from.
+  for (const [marker, call] of [
+    ["const retireRow = (", /escapeRoute\(sessionID, entry\?\.parentID, entry !== undefined, "retire"\)/],
+    [
+      "const onSessionDeleted = (event: unknown): void => {",
+      /escapeRoute\(sessionID, parentOfGone\(sessionID\), false, "deleted"\)/,
+    ],
+    [
+      "const onSessionIdle = (event: unknown): void => {",
+      /escapeRoute\(sessionID, entry\.parentID, true, "idle"\)/,
+    ],
+  ]) {
+    assert.match(bodyOf(marker), call)
+  }
+  const calls = source.match(/escapeRoute\(sessionID/g) ?? []
+  assert.equal(calls.length, 3, "and no fourth caller slipped past the log")
 })

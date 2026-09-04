@@ -410,9 +410,12 @@ test("session.idle no longer takes a row away", () => {
       `onSessionIdle must not ${forbidden}: the idle event is not the end of a subagent`,
     )
   }
-  // What it keeps is the route jump, and that jump is held back for a session
-  // the last completed pass still listed with no retention stamp on it.
-  assert.match(body, /api\.route\.navigate\("session", \{ sessionID: entry\.parentID \}\)/)
+  // What it keeps is the move of the view, held back for a session the last
+  // completed pass still listed with no retention stamp on it. The move itself
+  // is the shared escape, so the parent is held to the same liveness test as
+  // any other target (test/tui-route-escape.test.js).
+  assert.match(body, /escapeRoute\(sessionID, entry\.parentID, true, "idle"\)/)
+  assert.equal(body.includes("api.route.navigate("), false)
   assert.match(body, /const stillWorking = listed\.has\(sessionID\) && !isRetained\(entry\)/)
   assert.match(body, /if \(\s*!stillWorking/)
 })

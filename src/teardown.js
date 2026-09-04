@@ -25,7 +25,12 @@ import {
 } from "./client.js"
 import { getSettings, retentionOffered } from "./settings.js"
 import { settleChildWaiter, liveChildSessionIDs } from "./childwait.js"
-import { aborted, pendingSessionQuiescence, quiescedSessions } from "./state.js"
+import {
+  aborted,
+  pendingSessionQuiescence,
+  quiescedSessions,
+  trimByAgeAndSize,
+} from "./state.js"
 import { log, errMsg } from "./log.js"
 
 // Maximum time an abort/error teardown waits for opencode to emit the idle event
@@ -58,15 +63,17 @@ export const QUIESCE_MARK_TTL_MS = SESSION_QUIESCE_TIMEOUT_MS
 export const QUIESCE_MARK_MEMORY = 256
 
 // Records that this session has just gone idle, and drops the records that are
-// expired or over the cap. A Map iterates in insertion order and every write
-// re-inserts, so the oldest record is always the first one walked.
+// expired or over the cap. The record is re-inserted rather than overwritten so
+// that the map's iteration order stays its age order, which is what
+// `trimByAgeAndSize` — the eviction rule shared with the deleted-session
+// memory — walks.
 function noteSessionQuiesced(sessionID, now) {
   quiescedSessions.delete(sessionID)
   quiescedSessions.set(sessionID, now)
-  for (const [id, at] of quiescedSessions) {
-    if (quiescedSessions.size <= QUIESCE_MARK_MEMORY && now - at <= QUIESCE_MARK_TTL_MS) break
-    quiescedSessions.delete(id)
-  }
+  trimByAgeAndSize(quiescedSessions, now, {
+    max: QUIESCE_MARK_MEMORY,
+    ttlMs: QUIESCE_MARK_TTL_MS,
+  })
 }
 
 // Consumes this session's record and answers whether it is fresh enough to

@@ -775,7 +775,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // older than that entry never had the chance to list the session, so its
   // silence about it proves nothing, and that is what keeps a subagent spawned
   // since the last completed pass from reading as gone. An entry leaves on the
-  // session's deletion event, which bounds the map as it bounds `polledIDs`.
+  // session's deletion event and on the retiring of the row that carried it,
+  // which together bound the map: the reap exists for the deletion event that
+  // was missed, so the deletion event alone would leave an entry standing for
+  // the life of the process for every row the backstop fired for.
   const knownAtPass = new Map<string, number>();
   // Every session opencode has published `session.deleted` for. Session ids are
   // unique per creation, so a deleted one never comes back and nothing is ever
@@ -964,6 +967,12 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     finished.set(sessionID, entry);
     rows.delete(sessionID);
     aborted.delete(sessionID);
+    // Read by the escape a line above, and of no use afterwards: this session
+    // is one the escape must not land on. Where the session in fact survives —
+    // a held row dropped from the panel — it is `listed`, which the liveness
+    // test answers `true` on before it ever reads this map, and a session that
+    // gets a row again is recorded afresh by `noteSessionExists`.
+    knownAtPass.delete(sessionID);
     if (selectedID() === sessionID) setSelectedID(undefined);
   };
 

@@ -19,7 +19,8 @@
 //     subagent that will never answer;
 //   - spawn: a refused session CREATE names its status in the tool output;
 //   - reuse: a refused follow-up puts the entry back to retained on its
-//     ORIGINAL window and republishes that window on the title;
+//     ORIGINAL window and republishes that window on the title, and publishes
+//     no window at all where the entry recorded none;
 //   - the handoff wiring: the deps it hands performPrimaryHandoff behave the
 //     way handoff.js's failure-path tests (test/handoff.test.js) drive their
 //     doubles — promptAsync REJECTS, createSession answers undefined,
@@ -52,6 +53,7 @@ import { resetPermissionGuardCache } from "../src/config.js"
 import { setSettingsPath, resetSettings } from "../src/settings.js"
 import { hasLiveChildren } from "../src/childwait.js"
 import { buildPrimaryHandoffDeps } from "../src/handoffwiring.js"
+import { readRetentionStamp } from "../src/teardown.js"
 
 const PRIMARY = "ses_primary"
 const toolCtx = { sessionID: PRIMARY, agent: "orchestrator", messageID: "m1" }
@@ -223,9 +225,9 @@ test("spawn (nested): a refused task prompt settles the caller's waiter", async 
 // ---- spawn: the create itself (concept §4.10, step 5) ------------------------
 
 test("spawn: a refused session create names its status in the tool output", async () => {
-  // createChildSession keeps answering undefined for a REFUSED create; the
-  // reason travels beside it so the orchestrator can tell a refusal it will
-  // meet again from a server that was briefly down.
+  // createChildSession answers `{ error }` and no sessionID for a REFUSED
+  // create; the reason travels on that same value so the orchestrator can tell
+  // a refusal it will meet again from a server that was briefly down.
   const { ctx, state } = makeCtx()
   const hooks = await plugin(ctx)
 
@@ -271,6 +273,36 @@ test("reuse: a refused follow-up puts the entry back to retained on its original
   assert.deepEqual(titles[titles.length - 1], titleAtRetention)
 })
 
+test("reuse: a revert with no recorded window publishes no window, not one from 1970", async () => {
+  // The revert republishes the ORIGINAL window. Where the entry carries no
+  // `retainedAt`, `retainedAt + ttl` is a moment in 1970: a stamp every reader
+  // reaps at once while the registry says retained — exactly the divergence
+  // publishing the state is there to prevent. Absent means "no window".
+  withSettings({ maxRetainedSubagents: 3, maxSubagents: 4 })
+  const { ctx, created, titles, state } = makeCtx({ messages: assistantReply("R", 20000) })
+  const hooks = await plugin(ctx)
+
+  await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
+  const sessionID = created[created.length - 1]
+  await idle(hooks, sessionID)
+  const retained = entryForSession(sessionID)
+  assert.equal(entryLifecycle(retained), LIFECYCLE_RETAINED, "the fixture must actually retain")
+  const handle = retained.handle
+  retained.retainedAt = undefined
+
+  state.promptStatus = 404
+  const res = await hooks.tool.reuse.execute({ subagent: handle, prompt: "and then?" }, toolCtx)
+  assert.match(res.output, /^reuse failed: /)
+
+  const lastTitle = titles[titles.length - 1].title
+  assert.equal(
+    readRetentionStamp(lastTitle),
+    undefined,
+    "no window is published where none was recorded",
+  )
+  assert.doesNotMatch(lastTitle, /\[retained:/)
+})
+
 // ---- the handoff wiring (concept §4.3, §4.7) ---------------------------------
 
 test("the handoff wiring hands handoff.js a promptAsync that REJECTS on a refused kickoff", async () => {
@@ -288,6 +320,8 @@ test("the handoff wiring hands handoff.js a promptAsync that REJECTS on a refuse
 })
 
 test("the handoff wiring hands handoff.js a createSession that answers undefined on a refusal", async () => {
+  // The bridge takes the id off `{ sessionID }`, so a refused create reaches
+  // handoff.js as the `undefined` its own guard is written for.
   const { client, state } = makeCtx()
   const deps = await buildPrimaryHandoffDeps(client, PRIMARY, fixtureDir, "orchestrator")
 

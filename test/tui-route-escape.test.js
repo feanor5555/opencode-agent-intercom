@@ -392,6 +392,16 @@ test("a creation event is the server saying the session exists, ahead of any pas
   assert.match(created, /noteSessionExists\(info\.parentID\);/, "the spawning session exists too")
   const deleted = bodyOf("const onSessionDeleted = (event: unknown): void => {")
   assert.match(deleted, /knownAtPass\.delete\(sessionID\);/, "and the record goes when the session does")
+  // The reap is the backstop for the deletion event that was MISSED, so the
+  // deletion handler alone does not bound the map: every row the backstop
+  // fires for would leave its record standing for the life of the process.
+  // Retiring the row is what all three ending paths pass through.
+  const retire = bodyOf("const retireRow = (")
+  assert.match(retire, /knownAtPass\.delete\(sessionID\);/, "a retired row's record goes too")
+  assert.ok(
+    retire.indexOf("escapeRoute(sessionID") < retire.indexOf("knownAtPass.delete(sessionID)"),
+    "the escape reads the record before it is dropped",
+  )
 })
 
 test("the orchestrator fallback is the first polled session that was never a subagent", () => {

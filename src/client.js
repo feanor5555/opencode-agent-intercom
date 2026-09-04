@@ -14,8 +14,9 @@
 //     fetchSnapshot: returns the empty value (undefined / [] / [] / {}), logs
 //     once. Each reader has a degraded answer designed for it.
 //
-// createChildSession stands beside them as a creator: it answers undefined for
-// a session that was not created, and logs why.
+// createChildSession stands beside them as a creator: it answers
+// `{ sessionID }` or `{ error }`, so a caller that has to report WHY nothing
+// was created reads the reason off the same value, and logs why.
 
 import { log, errMsg } from "./log.js"
 import { getSettings } from "./settings.js"
@@ -135,7 +136,9 @@ function logFailure(op, error, fields = {}) {
 // data, or throws the LAST failure once the budget is spent.
 //
 //   retries     — RE-tries only: 3 means 1 initial attempt + up to 3 retries.
-//                 0 disables retrying (a single attempt).
+//                 0 disables retrying (a single attempt). Anything that is not
+//                 a positive integer reads as 0, so the one attempt is always
+//                 made and what this function throws is always the failure.
 //   backoffMs   — the base delay; the wait is `attempt * backoffMs` plus a
 //                 0–25 % jitter, so retries from several processes do not
 //                 synchronise into a thundering herd when opencode comes back
@@ -157,7 +160,12 @@ export async function withRetry(op, call, {
   shouldRetry,
   context = {},
 } = {}) {
-  const maxAttempts = Math.max(1, retries + 1)
+  // The budget is settled here rather than at the call sites: a non-integer
+  // `retries` makes `maxAttempts` NaN, `1 <= NaN` is false, the loop body never
+  // runs and the function throws the undefined `lastErr` — a spawn failure with
+  // no message at all at the callers that catch it.
+  const budget = Number.isInteger(retries) && retries > 0 ? retries : 0
+  const maxAttempts = budget + 1
   let lastErr
   for (let n = 1; n <= maxAttempts; n++) {
     const outcome = await attempt(op, call)
@@ -255,22 +263,23 @@ export function unwrap(resp) {
   return resp
 }
 
-// Creates a child session and returns its sessionID, or undefined where the
-// server refused the request — the caller's `if (!sessionID)` branch is the
-// answer to that, and the log line names the status it was refused with.
+// Creates a child session. Answers `{ sessionID }` where the server created
+// one and `{ error }` where it refused — the caller's `if (!sessionID)` branch
+// is the answer to the refusal, and the log line names the status it was
+// refused with.
+//
+// The failure is a VALUE, like the `{ ok, error }` of `attempt` and unlike an
+// out-parameter, because `undefined` alone cannot tell a caller WHY: the spawn
+// tool reports the failure to the orchestrator in its own output, and a refusal
+// the server decided on ("that parent is gone") reads differently to the
+// orchestrator than a server that is down. A caller that only needs the branch
+// reads `sessionID` and ignores `error`.
 //
 // A THROWN failure still propagates, unlike in every other wrapper here: no
 // response was seen, so nothing is known about whether a session was created,
 // and the callers of this one treat an exception as the abort of the whole
-// sequence they are in the middle of.
-//
-// `onRefused` is handed the Error behind a refused create, with its `status`
-// and `kind`. It exists because `undefined` alone cannot tell a caller WHY:
-// the spawn tool reports the failure to the orchestrator in its own output, and
-// a refusal the server decided on ("that parent is gone") reads differently to
-// the orchestrator than a server that is down. Optional — a caller that only
-// needs the branch passes nothing.
-export async function createChildSession(client, { parentID, title, directory, onRefused }) {
+// sequence they are in the middle of. Nothing is returned on that path.
+export async function createChildSession(client, { parentID, title, directory }) {
   const op = "createChildSession (session.create)"
   const outcome = await attempt(op, () =>
     client.session.create({ body: { parentID, title }, query: { directory } }),
@@ -278,10 +287,9 @@ export async function createChildSession(client, { parentID, title, directory, o
   if (!outcome.ok) {
     if (outcome.error?.kind === "indeterminate") throw outcome.error
     logFailure(op, outcome.error, { parentID })
-    onRefused?.(outcome.error)
-    return undefined
+    return { error: outcome.error }
   }
-  return outcome.data?.id
+  return { sessionID: outcome.data?.id }
 }
 
 // Fires a non-blocking prompt into a session — returns immediately (204).

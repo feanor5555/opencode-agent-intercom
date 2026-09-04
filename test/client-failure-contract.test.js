@@ -231,6 +231,30 @@ test("withRetry: retries counts RE-tries, and the last error is what is thrown",
   assert.equal(calls, 3, "1 initial attempt + 2 retries")
 })
 
+test("withRetry: a budget that is not a whole number still makes the one attempt", async () => {
+  // `Math.max(1, NaN + 1)` is NaN, the loop never runs and the function throws
+  // the undefined `lastErr` — a failure with no message at any caller that
+  // catches it. The guarantee belongs in the primitive, not at the call sites:
+  // withRetry is exported and `retries` is a free parameter.
+  for (const retries of [NaN, undefined, "2", -1, 1.5, null]) {
+    let calls = 0
+    await assert.rejects(
+      () =>
+        withRetry(
+          "op",
+          async () => {
+            calls++
+            return envelope(500, "InternalError", "boom")
+          },
+          { retries, backoffMs: 1 },
+        ),
+      (err) => err instanceof Error && err.status === 500,
+      `retries: ${String(retries)} throws the failure, not undefined`,
+    )
+    assert.equal(calls, 1, `retries: ${String(retries)} makes exactly one attempt`)
+  }
+})
+
 // ---- promptSession: the required write ---------------------------------------
 
 test("promptSession: a refused 5xx is retried and the prompt still lands", async () => {
@@ -446,22 +470,35 @@ test("fetchSnapshot: a session that answered is read as it always was", async ()
 
 // ---- createChildSession ------------------------------------------------------
 
-test("createChildSession: undefined on a refused create, the id on a successful one", async () => {
+test("createChildSession: the reason on a refused create, the id on a successful one", async () => {
   const refused = fakeClient("session", "create", async () => envelope(400, "BadRequestError", "no such parent"))
-  assert.equal(await createChildSession(refused, { parentID: "ses_p", title: "t" }), undefined)
+  const failed = await createChildSession(refused, { parentID: "ses_p", title: "t" })
+  assert.equal(failed.sessionID, undefined)
+  // The failure is a VALUE on the answer, not a callback the caller had to pass
+  // in: the spawn tool reports the status to the orchestrator out of it.
+  assert.equal(failed.error.status, 400)
+  assert.equal(failed.error.kind, "refused")
 
   const ok = fakeClient("session", "create", async () => ({ data: { id: "ses_child" } }))
-  assert.equal(await createChildSession(ok, { parentID: "ses_p", title: "t" }), "ses_child")
+  const made = await createChildSession(ok, { parentID: "ses_p", title: "t" })
+  assert.equal(made.sessionID, "ses_child")
+  assert.equal(made.error, undefined)
 })
 
 test("createChildSession: a thrown transport error still propagates to the caller", async () => {
   // Nothing was established about whether a session exists, and the callers
   // treat an exception as the abort of the sequence they are in the middle of.
+  // So the indeterminate path returns NOTHING — no `{ error }` a caller could
+  // mistake for "the server said no" — it throws.
   const thrown = fakeClient("session", "create", async () => {
     throw new Error("socket hang up")
   })
+  let answered = "not called"
   await assert.rejects(
-    () => createChildSession(thrown, { parentID: "ses_p", title: "t" }),
+    async () => {
+      answered = await createChildSession(thrown, { parentID: "ses_p", title: "t" })
+    },
     /socket hang up/,
   )
+  assert.equal(answered, "not called", "an indeterminate create returns no value at all")
 })

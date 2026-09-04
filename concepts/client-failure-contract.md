@@ -26,7 +26,7 @@ Every other write in the module awaits the promise and reports success unconditi
 | `deleteSession` | `src/client.js:253-254` `await client.session.delete(...)` / `return true` | `true` — "deleted" |
 | `updateSessionTitle` | `src/client.js:269-270` `await client.session.update(...)` / `return true` | `true` — "written" |
 | `archiveSession` | `src/client.js:308-312` `await client.session.update({ ... time: { archived: Date.now() } })` / `return true` | `true` — "archived" |
-| `createChildSession` | `src/client.js:144-147` `unwrap(await client.session.create(...))` then `created?.id` | `undefined` — right outcome, no reason |
+| `createChildSession` | `src/client.js:282-296` returns `{ sessionID }` or `{ error }`, throws on `kind: "indeterminate"` | `{ error }` — refused with status; throws — no response seen |
 
 The reads have a second, subtler form of the same defect. `fetchSnapshot` unwraps to `undefined`
 on an envelope, so `messages = []` and it returns `src/client.js:367`
@@ -97,8 +97,9 @@ needs a different one.
 | **Reported write** | `deleteSession`, `archiveSession`, `updateSessionTitle`, `abortSession` | returns `false`, logs once, no retry |
 | **Best-effort read** | `getSessionDirectory`, `listSessions`, `fetchMessages`, `fetchSnapshot` | returns the empty value, logs once |
 
-`postNotice` keeps its own shape — a required write with a retry policy of its own — and
-`createChildSession` stays a `undefined`-returning creator (§4.5).
+`postNotice` keeps its own shape — a required write with a retry policy of its own, and
+`createChildSession` answers `{ sessionID }` or `{ error }` and throws on `kind: "indeterminate"`
+(§4.10).
 
 ## 3. Retry policy per call, and why
 
@@ -258,17 +259,18 @@ answers "gone" only where the session really is gone and "unavailable" for a 500
 anything on a bad read — it does nothing rather than something wrong. Unchanged, now for a reason
 rather than by luck.
 
-### 4.10 `createChildSession` — `src/tools.js:595`, `src/handoffwiring.js:171`
+### 4.10 `createChildSession` — `src/tools.js:600`, `src/handoffwiring.js:178-185`
 
-**Keeps returning `undefined`**, and gains a log line naming the status. `src/tools.js:596`
-`if (!sessionID) return { output: "Failed to create subagent session." }` is the correct branch and
-stays; the output gains the reason so the orchestrator can tell a refusal from a server outage.
+Answers `{ sessionID }` on success, `{ error }` on a refused create (carrying `status`,
+`errorName`, `terminal`, `terminal` reason), and **throws** the error on a transport failure
+(`kind: "indeterminate"`). `src/tools.js:600` destructures `{ sessionID, error: createFailure }`
+and renders the status in its output; the spawn's existing catch path is unchanged because the
+indeterminate throw propagates into it the same way a refused `promptSession` throw would.
 
-`src/handoff.js:197` `newID = await deps.createSession(...)` does **not** check for `undefined` and
-would carry it into `bindDrainTarget` and `promptAsync`. Add an explicit throw there: it lands in
-the same pre-kickoff catch as every other step-1..6 failure, which is where a handoff that has no
-successor session belongs. Pinned already in spirit by `test/handoff.test.js:713`
-("createSession throws — drain aborted, nothing reparented, nothing deleted").
+`src/handoffwiring.js:178-185` takes `.sessionID` so a refused create resolves to `undefined`
+into `src/handoff.js:197`, which already throws on `!newID` and lands in the pre-kickoff revert
+catch — the existing test pin `test/handoff.test.js:713` ("createSession throws — drain aborted,
+nothing reparented, nothing deleted") covers it.
 
 ## 5. What is a breaking change
 

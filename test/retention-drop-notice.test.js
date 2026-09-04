@@ -91,7 +91,7 @@ beforeEach(() => {
 })
 
 test("resetState clears deleted-session cascade memory", () => {
-  deletedSessions.add(PRIMARY)
+  deletedSessions.set(PRIMARY, Date.now())
   resetState()
   assert.equal(deletedSessions.has(PRIMARY), false)
 })

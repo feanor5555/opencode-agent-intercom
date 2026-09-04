@@ -46,7 +46,7 @@ file off. Then the same thing happens again.
   archive-not-delete rule is load-bearing: "opencode's session delete cascades
   recursively over child sessions" (`src/handoff.js:297-301`, `src/client.js:134-137`).
 - The three session operations it needs already exist and are already used against a
-  live opencode: `createChildSession` (`src/client.js:72`) with `parentID` **omitted**
+  live opencode: `createChildSession` (`src/client.js:282`) with `parentID` **omitted**
   so the new orchestrator is a root session (`src/handoffwiring.js:110-125`),
   `promptSession` (`src/client.js:88`), `archiveSession` (`src/client.js:158`, a `PATCH`
   with `time: { archived }`, "source- and live-verified" on opencode 1.17.15,

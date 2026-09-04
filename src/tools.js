@@ -597,14 +597,10 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       // that nothing was created, and it has to decide between re-spawning now
       // and reporting to the user. A status says which of the two — a 4xx it
       // will meet again on the next attempt, a 5xx it may not.
-      let createFailure
-      const sessionID = await createChildSession(client, {
+      const { sessionID, error: createFailure } = await createChildSession(client, {
         parentID: toolCtx.sessionID,
         title: SUBAGENT_SESSION_TITLE_MARKER + title,
         directory,
-        onRefused: (err) => {
-          createFailure = err
-        },
       })
       if (!sessionID) {
         return {
@@ -1054,9 +1050,19 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
         await registryMutex.runExclusive(() =>
           restoreRetainedEntryLocked(sessionID, revived.previous),
         )
-        await publishRetentionState(client, sessionID, {
-          retainedUntil: (revived.previous.retainedAt ?? 0) + settings.retainedSubagentTtlMs,
-        })
+        // No recorded window means there is nothing to restore, and the state
+        // published has to say that rather than derive a window from 0: that
+        // stamp names a moment in 1970, which every reader reaps at once while
+        // the registry still says retained — the divergence
+        // `publishRetentionState` exists to prevent.
+        const previousRetainedAt = revived.previous.retainedAt
+        await publishRetentionState(
+          client,
+          sessionID,
+          previousRetainedAt
+            ? { retainedUntil: previousRetainedAt + settings.retainedSubagentTtlMs }
+            : undefined,
+        )
         throw err
       }
       const run = revived.entry.runs

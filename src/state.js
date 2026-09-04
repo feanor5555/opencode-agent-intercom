@@ -247,15 +247,35 @@ export const pendingSessionQuiescence = new Map()
 // `session.idle` for an aborted session from inside the abort request itself,
 // so every path that awaits its own abort call has already let that event go by
 // when it comes to wait for it. Read and written only by teardown.js
-// (waitForSessionQuiescence / signalSessionIdle), which also bounds this map by
-// age and by size; kept here so resetState can clear it between tests.
+// (waitForSessionQuiescence / signalSessionIdle), which bounds this map through
+// `trimByAgeAndSize`; kept here so resetState can clear it between tests.
 export const quiescedSessions = new Map()
 
-// Session ids whose `session.deleted` event was seen, newest last. The event is
-// the only signal that separates a cascade from a lone delete, and the guard in
-// hooks.js reads this set after its grace period. Kept here so resetState can
-// clear it between tests.
-export const deletedSessions = new Set()
+// sessionID -> the epoch ms at which that session's `session.deleted` event was
+// seen, newest last. The event is the only signal that separates a cascade from
+// a lone delete, and the guard in hooks.js reads this map after its grace
+// period — a `has`, the time is what bounds the map. Written only by hooks.js,
+// which owns the size policy; kept here so resetState can clear it between
+// tests.
+export const deletedSessions = new Map()
+
+// Drops the oldest records of an insertion-ordered `Map<key, epochMs>` until it
+// holds at most `max` entries and nothing older than `ttlMs`. Both stores that
+// keep a short-lived per-session memory — deleted sessions, quiesced sessions —
+// are bounded through this one helper, so the eviction rule has one place to be
+// fixed in.
+//
+// The walk starts at the oldest record and stops at the first one that is
+// within both bounds: every record after it is younger still. A writer that
+// re-inserts an existing key deletes it first, so the iteration order stays the
+// age order. Deleting from a Map while iterating it is well-defined.
+// `ttlMs: Infinity` — the default — bounds by size alone.
+export function trimByAgeAndSize(store, now, { max, ttlMs = Infinity }) {
+  for (const [key, at] of store) {
+    if (store.size <= max && now - at <= ttlMs) break
+    store.delete(key)
+  }
+}
 
 // sessionID -> drain object { oldID, newID, notices: [] }. A drain is opened
 // at the START of an orchestrator handoff (beginHandoffDrain) and keyed under

@@ -30,7 +30,7 @@
 // message prefix. Prefix stability is the only lever that path has, and it is
 // the same lever.
 
-import { aborted, deletedSessions, registry, lastPrimaryTool } from "./state.js"
+import { aborted, deletedSessions, registry, lastPrimaryTool, trimByAgeAndSize } from "./state.js"
 import {
   entryForSession,
   upsertSession,
@@ -1695,7 +1695,7 @@ async function noticeRetentionLost(client, dropped) {
 // first, the deleted session's own event LAST (read off session.ts `remove`,
 // confirmed in the 1.18.27 binary and on a live `opencode serve`). So at the
 // moment a held child's event is handled, `deletedSessions` CANNOT yet hold the
-// parent — its event has not been published. Reading the set at that instant
+// parent — its event has not been published. Reading the map at that instant
 // says "the parent is alive" for every cascade, whatever the reader does first:
 // the plugin's handler is started synchronously inside the publish and its
 // promise is voided, so awaiting more promises only yields the microtask queue
@@ -1709,7 +1709,7 @@ async function noticeRetentionLost(client, dropped) {
 // The only signal that separates a cascade from a lone delete is the parent's
 // own event, which is guaranteed to come and guaranteed to come later. So the
 // wait crosses a MACROTASK boundary (setTimeout — another await would not do)
-// and the set is read again afterwards.
+// and the map is read again afterwards.
 //
 // Sized from the measured cascade: ~3 ms per session, 28 ms for a parent with
 // eight empty children. 400 ms sits an order of magnitude clear of that and
@@ -1742,18 +1742,21 @@ async function parentDeletedWithinGrace(parentID) {
 }
 
 // Bounded, because a long-lived instance deletes a session per finished
-// subagent and the set would otherwise grow for the life of the process. A Set
-// iterates in insertion order, so the oldest id is the one that goes; the
-// window only has to outlive one delete cascade. The set itself lives in
-// state.js so resetState can clear it between tests.
+// subagent and the map would otherwise grow for the life of the process. The
+// window only has to outlive one delete cascade, so size alone bounds it and no
+// record is ever too old to keep. The map itself lives in state.js so
+// resetState can clear it between tests; `trimByAgeAndSize` there is the one
+// eviction rule both short-lived per-session memories share.
 const DELETED_SESSION_MEMORY = 256
 
 function rememberDeletedSession(sessionID) {
-  deletedSessions.add(sessionID)
-  while (deletedSessions.size > DELETED_SESSION_MEMORY) {
-    const oldest = deletedSessions.values().next().value
-    deletedSessions.delete(oldest)
-  }
+  const now = Date.now()
+  // Re-inserted, so the record's place in the iteration is its age: a session
+  // id is unique per creation, so a second event for one is opencode repeating
+  // itself and the later moment is the truthful one.
+  deletedSessions.delete(sessionID)
+  deletedSessions.set(sessionID, now)
+  trimByAgeAndSize(deletedSessions, now, { max: DELETED_SESSION_MEMORY })
 }
 
 // Trims the retained set back to `maxRetainedSubagents` after one more entry

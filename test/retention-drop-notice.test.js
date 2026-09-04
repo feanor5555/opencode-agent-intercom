@@ -16,7 +16,9 @@
 //   - a running subagent's `session.deleted` wakes nobody: the watchdog owns
 //     that ending;
 //   - the cascade case, a parent deleted with its children, wakes nobody: the
-//     session the notice would go to is gone too.
+//     session the notice would go to is gone too — and it holds in the order
+//     opencode really publishes a cascade in, the child's `session.deleted`
+//     first and the parent's own LAST.
 //
 // Run: node --test test/retention-drop-notice.test.js
 
@@ -34,7 +36,12 @@ import {
   entryLifecycle,
   LIFECYCLE_RUNNING,
 } from "../src/registry.js"
-import { resetTurnNotices, _resetDeletedSessionsForTests } from "../src/hooks.js"
+import {
+  resetTurnNotices,
+  _resetDeletedSessionsForTests,
+  _setRetentionDropNoticeGraceForTests,
+  RETENTION_DROP_NOTICE_GRACE_MS,
+} from "../src/hooks.js"
 import { retentionLostNotice } from "../src/notices.js"
 import { _stopWatchdogForTests } from "../src/watchdog.js"
 import { resetProjectContext } from "../src/project.js"
@@ -56,6 +63,7 @@ const settingsFile = join(fixtureDir, "agent-intercom.json")
 setSettingsPath(settingsFile)
 
 after(() => {
+  _setRetentionDropNoticeGraceForTests()
   _stopWatchdogForTests()
   rmSync(fixtureDir, { recursive: true, force: true })
 })
@@ -65,7 +73,15 @@ function withSettings(values) {
   resetSettings()
 }
 
+// The drop notice defers past a macrotask before it decides whether the parent
+// went too (see the cascade tests at the foot of this file). The shipped grace
+// is a few hundred ms; every case here would otherwise pay it, so the seam
+// shortens it to a span still comfortably longer than the ticks these tests
+// interleave.
+const TEST_GRACE_MS = 60
+
 beforeEach(() => {
+  _setRetentionDropNoticeGraceForTests(TEST_GRACE_MS)
   _stopWatchdogForTests()
   resetState()
   resetTurnNotices()
@@ -263,4 +279,115 @@ test("a parent deleted with its children is not woken for them", async () => {
     [],
     "there is no session left to post the notice into",
   )
+})
+
+// ---- the cascade in the order opencode really publishes it ------------------
+//
+// opencode's `Session.remove` recurses over the children BEFORE it publishes
+// its own `Deleted`, so a cascade arrives depth-first post-order: every
+// descendant first, the deleted session's own event last. The test above feeds
+// the parent's event first, which is the one order that never occurs on a real
+// server; these feed the real one.
+//
+// The plugin's handler is started synchronously inside opencode's publish and
+// its promise is voided, so when a held child's event is handled the parent's
+// event has not been published yet and no amount of awaiting inside the handler
+// can make it appear. The decision therefore has to be deferred past a
+// macrotask boundary and taken on a second reading.
+
+// Lets the event loop turn: pending microtasks drain and one macrotask passes.
+function tick(ms = 0) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+test("the real cascade order — child first, parent last — still wakes nobody", async () => {
+  withSettings({ maxRetainedSubagents: 3 })
+  const { ctx, created, notices } = makeCtx({ messages: assistantReply("THE RESULT") })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
+  const sessionID = created[0]
+  await idle(hooks, sessionID)
+  assert.equal(countRetainedSubagents(), 1, "held to begin with")
+
+  // The held child's event comes first and is NOT awaited — that is how
+  // opencode calls it, and the cascade continues while the handler is still in
+  // flight.
+  const child = sessionDeleted(hooks, sessionID)
+
+  // A macrotask passes before the parent's own event. Every microtask the
+  // handler could have awaited has drained by now, so a guard that only
+  // deferred within the microtask queue has already made its decision here.
+  await tick(5)
+  assert.equal(
+    entryForSession(sessionID),
+    undefined,
+    "the entry left the registry before the wait — `list` and `reuse` are straight throughout it",
+  )
+  assert.equal(countRetainedSubagents(), 0)
+
+  // Now the parent's own event, last, as the server publishes it.
+  await sessionDeleted(hooks, PRIMARY)
+  await child
+
+  assert.deepEqual(
+    lostNotices(notices),
+    [],
+    "the parent went too; there is no session left to post the notice into",
+  )
+})
+
+test("a grandchild whose whole branch is already gone is decided at once", async () => {
+  withSettings({ maxRetainedSubagents: 3 })
+  const { ctx, created, notices } = makeCtx({ messages: assistantReply("THE RESULT") })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
+  const sessionID = created[0]
+  await idle(hooks, sessionID)
+
+  // The parent's event has already been seen — the far side of a cascade, where
+  // the branch above this row was published first. No waiting is warranted.
+  await sessionDeleted(hooks, PRIMARY)
+  const started = Date.now()
+  await sessionDeleted(hooks, sessionID)
+
+  assert.ok(
+    Date.now() - started < TEST_GRACE_MS,
+    "a decision already settled is not slept on",
+  )
+  assert.deepEqual(lostNotices(notices), [])
+})
+
+test("a lone delete still wakes the parent once the grace has passed", async () => {
+  withSettings({ maxRetainedSubagents: 3 })
+  const { ctx, created, notices } = makeCtx({ messages: assistantReply("THE RESULT") })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
+  const sessionID = created[0]
+  await idle(hooks, sessionID)
+
+  const child = sessionDeleted(hooks, sessionID)
+  // Nothing else is deleted: no cascade, the parent is alive, and the notice
+  // must arrive — deferred, not dropped.
+  await tick(5)
+  assert.deepEqual(lostNotices(notices), [], "not yet: the guard is still waiting out the grace")
+  await child
+
+  const lost = lostNotices(notices)
+  assert.equal(lost.length, 1, "and then it goes")
+  assert.equal(lost[0].sessionID, PRIMARY)
+})
+
+test("the shipped grace clears the measured cascade by an order of magnitude", () => {
+  // The measured span of a real cascade is ~3 ms per session, 28 ms for a
+  // parent with eight children. The default must sit well clear of that, and
+  // stay small enough that a notice into a live primary is not noticeably late.
+  assert.ok(
+    RETENTION_DROP_NOTICE_GRACE_MS >= 200 && RETENTION_DROP_NOTICE_GRACE_MS <= 1000,
+    `a few hundred ms, got ${RETENTION_DROP_NOTICE_GRACE_MS}`,
+  )
+  // The seam restores exactly that value, so a suite that shortens it cannot
+  // leave a different one behind for the next.
+  _setRetentionDropNoticeGraceForTests(1)
+  _setRetentionDropNoticeGraceForTests()
+  _setRetentionDropNoticeGraceForTests(TEST_GRACE_MS)
 })

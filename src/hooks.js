@@ -1665,10 +1665,8 @@ async function noticeRetentionLost(client, dropped) {
   // The cascade case: deleting a primary deletes its subagent sessions too, so
   // the session this notice would wake can be as gone as the one it reports
   // on. Posting into it would spend the post's whole retry budget on a session
-  // nobody will ever read. Guarded by what this process has seen, which covers
-  // the parent's own event arriving first; if the child's comes first the post
-  // simply fails and lands in the catch below.
-  if (deletedSessions.has(dropped.parentID)) {
+  // nobody will ever read.
+  if (await parentDeletedWithinGrace(dropped.parentID)) {
     log("retention-drop notice skipped: the parent session is gone too", {
       handle: dropped.handle,
       parentID: dropped.parentID,
@@ -1688,6 +1686,59 @@ async function noticeRetentionLost(client, dropped) {
       err: errMsg(err),
     })
   }
+}
+
+// How long the guard above waits for the parent's own `session.deleted` before
+// it settles on "the parent is still there".
+//
+// opencode publishes a delete cascade depth-first POST-ORDER: every descendant
+// first, the deleted session's own event LAST (read off session.ts `remove`,
+// confirmed in the 1.18.27 binary and on a live `opencode serve`). So at the
+// moment a held child's event is handled, `deletedSessions` CANNOT yet hold the
+// parent — its event has not been published. Reading the set at that instant
+// says "the parent is alive" for every cascade, whatever the reader does first:
+// the plugin's handler is started synchronously inside the publish and its
+// promise is voided, so awaiting more promises only yields the microtask queue
+// while the parent's publish waits for a later run of opencode's event fiber.
+// (Measured: the immediate read held for a parent with 1 or 2 children and
+// missed for the earlier ones of 4 or 8, and missed for every direct child once
+// a grandchild was in the tree.) An instantaneous existence probe against the
+// server is the same race and not a fix — the parent genuinely still exists at
+// that moment, and `GET /session/{parentID}` answered 200 for 3 of 8 children.
+//
+// The only signal that separates a cascade from a lone delete is the parent's
+// own event, which is guaranteed to come and guaranteed to come later. So the
+// wait crosses a MACROTASK boundary (setTimeout — another await would not do)
+// and the set is read again afterwards.
+//
+// Sized from the measured cascade: ~3 ms per session, 28 ms for a parent with
+// eight empty children. 400 ms sits an order of magnitude clear of that and
+// costs nothing: the notice only wakes an ALREADY IDLE primary, and the entry
+// left the registry before the wait began, so `list` and `reuse` answer
+// correctly throughout it — only the wake is deferred.
+export const RETENTION_DROP_NOTICE_GRACE_MS = 400
+
+let retentionDropNoticeGraceMs = RETENTION_DROP_NOTICE_GRACE_MS
+
+// Test seam: a suite that pins this behaviour would otherwise pay the full
+// grace period per case. Called with no argument it restores the shipped value.
+export function _setRetentionDropNoticeGraceForTests(ms) {
+  retentionDropNoticeGraceMs =
+    typeof ms === "number" && ms >= 0 ? ms : RETENTION_DROP_NOTICE_GRACE_MS
+}
+
+async function parentDeletedWithinGrace(parentID) {
+  // The parent's event already came: this is a cascade seen from the far side
+  // (a grandchild whose whole branch was published before it), and there is
+  // nothing left to wait for.
+  if (deletedSessions.has(parentID)) return true
+  if (retentionDropNoticeGraceMs > 0) {
+    // Ref'd on purpose, unlike the plugin's periodic timers: this one is a
+    // step of a notice that is being delivered right now, and an unref'd
+    // handle would let the process exit out from under it.
+    await new Promise((resolve) => setTimeout(resolve, retentionDropNoticeGraceMs))
+  }
+  return deletedSessions.has(parentID)
 }
 
 // The session ids this process has seen `session.deleted` for, newest last.

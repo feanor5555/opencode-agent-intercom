@@ -14,7 +14,7 @@ import {
   resetSettings,
   setSettingsPath,
 } from "../src/settings.js"
-import { postNotice } from "../src/client.js"
+import { postNotice, noticePostFailure } from "../src/client.js"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -135,4 +135,126 @@ test("postNotice with retries=0 makes exactly one attempt", async () => {
   )
 
   assert.equal(client.calls.length, 1, "no retries means a single attempt")
+})
+
+// ---- the HTTP-level failure the client never throws --------------------------
+//
+// opencode builds the plugin's SDK client without `throwOnError`, so a refused
+// request RESOLVES with `{ error, request, response }` instead of rejecting.
+// Everything below pins that postNotice reads that envelope: without it the
+// retry loop is dead for every HTTP failure and a notice that was never
+// delivered is reported as sent.
+
+// An envelope of the shape the client really resolves with on a failure.
+function errorEnvelope(status, name, message) {
+  return {
+    error: { name, data: { message } },
+    request: {},
+    response: { status },
+  }
+}
+
+test("postNotice retries an error envelope the client resolved with", async () => {
+  process.env[RETRIES_ENV] = "3"
+  process.env[BACKOFF_ENV] = "1"
+  resetSettings()
+
+  // Two 5xx envelopes — resolved, never thrown — then a real 204 success.
+  const client = makeFakeClient(async (n) => {
+    if (n < 3) return errorEnvelope(503, "ServerError", "upstream is restarting")
+    return { data: undefined, request: {}, response: { status: 204 } }
+  })
+
+  await postNotice(client, "sess-envelope", "wake up")
+
+  assert.equal(
+    client.calls.length,
+    3,
+    "the resolved failures went through the retry loop, they were not counted as delivered",
+  )
+})
+
+test("postNotice re-throws when every attempt comes back as an error envelope", async () => {
+  process.env[RETRIES_ENV] = "2"
+  process.env[BACKOFF_ENV] = "1"
+  resetSettings()
+
+  const client = makeFakeClient(async () => errorEnvelope(500, "InternalError", "boom"))
+
+  await assert.rejects(
+    () => postNotice(client, "sess-5xx", "wake up"),
+    (err) => {
+      assert.match(err.message, /500/, "the status the server answered with")
+      assert.match(err.message, /boom/, "and what it said")
+      assert.equal(err.status, 500)
+      return true
+    },
+  )
+
+  assert.equal(client.calls.length, 3, "1 initial attempt + 2 retries, same budget as a throw")
+})
+
+test("postNotice does not retry a 404 — the target session is gone", async () => {
+  process.env[RETRIES_ENV] = "3"
+  process.env[BACKOFF_ENV] = "1"
+  resetSettings()
+
+  const client = makeFakeClient(async () =>
+    errorEnvelope(404, "NotFoundError", "Session not found: sess-gone"),
+  )
+
+  await assert.rejects(
+    () => postNotice(client, "sess-gone", "wake up"),
+    (err) => {
+      assert.equal(err.status, 404)
+      assert.equal(err.terminal, true)
+      return true
+    },
+  )
+
+  assert.equal(
+    client.calls.length,
+    1,
+    "a deleted session stays deleted; the retry budget is not spent on it",
+  )
+})
+
+test("postNotice treats a successful envelope as delivered", async () => {
+  process.env[RETRIES_ENV] = "3"
+  process.env[BACKOFF_ENV] = "1"
+  resetSettings()
+
+  // The three success shapes the resolved client has used, one per call.
+  const shapes = [
+    { data: undefined, request: {}, response: { status: 204 } },
+    { data: true },
+    undefined,
+  ]
+  for (const [i, shape] of shapes.entries()) {
+    const client = makeFakeClient(async () => shape)
+    await postNotice(client, `sess-ok-${i}`, "wake up")
+    assert.equal(client.calls.length, 1, `shape ${i} is a delivered notice, not a retry`)
+  }
+})
+
+test("noticePostFailure reads the envelope and nothing else", () => {
+  assert.equal(noticePostFailure(undefined), undefined)
+  assert.equal(noticePostFailure({ data: undefined }), undefined)
+  assert.equal(
+    noticePostFailure({ data: undefined, response: { status: 204 } }),
+    undefined,
+    "a 204 carries a response object and is the normal success",
+  )
+  assert.equal(noticePostFailure({ data: undefined, error: null }), undefined, "a null error is no error")
+
+  const byError = noticePostFailure({ error: { name: "NotFoundError" }, response: { status: 404 } })
+  assert.ok(byError instanceof Error)
+  assert.equal(byError.terminal, true)
+
+  // A status alone is enough: an envelope may carry the failure without a
+  // parsed `error` body.
+  const byStatus = noticePostFailure({ response: { status: 502 } })
+  assert.ok(byStatus instanceof Error)
+  assert.equal(byStatus.status, 502)
+  assert.equal(byStatus.terminal, false)
 })

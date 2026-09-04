@@ -11,6 +11,7 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- Establish in which order opencode emits `session.deleted` for a parent and for the subagent sessions the cascade takes with it. `onSessionDeleted` in `src/hooks.js` suppresses the retention-lost notice when this process has already seen the parent's own deletion; if the child's event comes first the guard misses and the notice post fails into its retry backoff (~3 s at the default `postNoticeRetries: 3`).
+- `promptSession`, `deleteSession`, `abortSession`, `updateSessionTitle` and `archiveSession` in `src/client.js` still read a resolved failure envelope as success, so a 4xx/5xx on the spawn task prompt, the handoff kickoff, the DOC_SUMMARY prompt or a teardown call passes silently. The concept for the uniform repair is `concepts/client-failure-contract.md`; carrying it out changes the failure contract of `spawn`, the handoff and teardown and touches their suites.
+- The test "a parent deleted with its children is not woken for them" in `test/retention-drop-notice.test.js` feeds the parent's `session.deleted` first, an order that never occurs on a real server; it pins the already-seen fast path and the real-order case now stands beside it. Decide whether the artificial-order case stays.
 
-Last commit: 1a6be4b feat: tell the orchestrator when a held session is deleted from outside
+Last commit: ee55aa7 fix: read a subagent's last text after the flush, not before it

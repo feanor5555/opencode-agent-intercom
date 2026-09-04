@@ -14,6 +14,48 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+// The SDK client opencode hands a plugin is built WITHOUT `throwOnError`, so a
+// failed request does not reject: the call RESOLVES with an envelope
+// `{ error, request, response }` carrying the HTTP status, e.g.
+// `response.status: 404` with `error.name: "NotFoundError"` for a session that
+// is gone. A caller that only awaits the promise therefore cannot tell a
+// delivered post from a refused one.
+//
+// This turns such an envelope into the Error it is, and returns undefined for a
+// delivered post. Success takes every other shape the client has used:
+// `undefined`, a bare payload, `{ data }`, and `{ data, request, response }`
+// with a 2xx/3xx status — a present `response` alone is not a failure, since a
+// successful promptAsync answers 204 with one.
+//
+// The same reading the TUI's readSessionChildren does (tui/src/subagent-store.ts):
+// an `error` that is neither undefined nor null is the failure, and status 404
+// is the one that means "the target is gone" rather than "the request did not
+// get through".
+//
+// `terminal` marks a failure that retrying cannot repair. A deleted session
+// stays deleted, so spending the whole retry budget on it only delays the
+// caller's cleanup path by seconds.
+export function noticePostFailure(result) {
+  if (!result || typeof result !== "object") return undefined
+  const status = typeof result.response?.status === "number" ? result.response.status : undefined
+  const failed = (result.error !== undefined && result.error !== null) || (status !== undefined && status >= 400)
+  if (!failed) return undefined
+  const name = typeof result.error?.name === "string" ? result.error.name : undefined
+  const detail =
+    result.error?.data?.message ??
+    result.error?.message ??
+    (typeof result.error === "string" ? result.error : undefined) ??
+    name
+  const err = new Error(
+    `session.promptAsync failed${status === undefined ? "" : ` (HTTP ${status})`}` +
+      `${detail ? `: ${detail}` : ""}`,
+  )
+  err.status = status
+  err.errorName = name
+  err.terminal = status === 404 || name === "NotFoundError"
+  return err
+}
+
 // Wakes a session with a plain-text notice — non-blocking (204). Used to push a
 // subagent-completion notice into the idle primary so it reports back proactively.
 //
@@ -24,6 +66,17 @@ function sleep(ms) {
 // RE-tries are exhausted the last error is re-thrown — the existing
 // try/catch in hooks.js still runs its cleanup path (free slot, log,
 // showToast variant), unchanged.
+//
+// A failure reaches this loop two ways and both are handled the same: a thrown
+// exception (transport-level — the socket died, the client rejected before it
+// sent) and an error ENVELOPE the call resolved with (HTTP-level — see
+// noticePostFailure above). Only the first kind rejects on this client, so
+// without the envelope check the loop would be dead for every HTTP failure and
+// the caller would log a wake that was never delivered.
+//
+// A terminal failure — the target session is gone — breaks out at once instead
+// of retrying: the notice can never land, and the caller's catch is where the
+// answer to that is.
 //
 // `postNoticeRetries` counts RE-tries only: postNoticeRetries=3 means
 // 1 initial attempt + up to 3 retries = up to 4 total attempts. A value of 0
@@ -39,8 +92,9 @@ export async function postNotice(client, sessionID, text) {
   const maxAttempts = Math.max(1, postNoticeRetries + 1)
   let lastErr
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let failure
     try {
-      await client.session.promptAsync({
+      const result = await client.session.promptAsync({
         path: { id: sessionID },
         // intercomTextPart marks the message as plugin-generated
         // (metadata: { agentIntercom: true }) so history scans like the
@@ -49,20 +103,31 @@ export async function postNotice(client, sessionID, text) {
         // the model either way; the post is the wake and is never dropped.
         body: { parts: [intercomTextPart(text, { hidden: !showAgentcom })] },
       })
-      return
+      failure = noticePostFailure(result)
+      if (!failure) return
     } catch (err) {
-      lastErr = err
-      if (attempt >= maxAttempts) break
-      const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(postNoticeRetryBackoffMs / 4)))
-      const delay = (attempt * postNoticeRetryBackoffMs) + jitter
-      log("postNotice: retrying after failure", {
-        attempt,
-        maxAttempts,
-        delayMs: delay,
-        err: errMsg(err),
-      })
-      await sleep(delay)
+      failure = err
     }
+    lastErr = failure
+    if (failure?.terminal) {
+      log("postNotice: not retrying, the target session is gone", {
+        sessionID,
+        attempt,
+        status: failure.status,
+        err: errMsg(failure),
+      })
+      break
+    }
+    if (attempt >= maxAttempts) break
+    const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(postNoticeRetryBackoffMs / 4)))
+    const delay = (attempt * postNoticeRetryBackoffMs) + jitter
+    log("postNotice: retrying after failure", {
+      attempt,
+      maxAttempts,
+      delayMs: delay,
+      err: errMsg(failure),
+    })
+    await sleep(delay)
   }
   throw lastErr
 }

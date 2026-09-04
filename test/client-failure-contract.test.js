@@ -12,7 +12,7 @@
 
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -29,6 +29,7 @@ import {
   listSessions,
   promptSession,
   requestFailure,
+  showToast,
   snapshotOutcome,
   updateSessionTitle,
   withRetry,
@@ -120,6 +121,23 @@ test("attempt: a call that is not a function at all still folds into a value", a
   const outcome = await attempt("op", () => undefined.session.get())
   assert.equal(outcome.ok, false)
   assert.equal(outcome.error.kind, "indeterminate")
+})
+
+test("showToast folds a resolved SDK failure into its best-effort contract", async () => {
+  const refused = fakeClient("tui", "showToast", async () => envelope(503, "ServerError", "toast unavailable"))
+  await assert.doesNotReject(() =>
+    showToast(refused, { title: "agent-intercom", message: "done" }),
+  )
+  assert.equal(refused.calls.length, 1)
+})
+
+test("every SDK call in client.js is folded through attempt", () => {
+  const source = readFileSync(new URL("../src/client.js", import.meta.url), "utf8")
+  assert.doesNotMatch(
+    source,
+    /^\s*(?:await\s+client\.|(?:const|let|var)\s+\w+\s*=\s*await\s+client\.|return\s+await\s+client\.)/m,
+    "a bare SDK await bypasses requestFailure and is a defect by construction",
+  )
 })
 
 // ---- withRetry ---------------------------------------------------------------
@@ -314,6 +332,12 @@ for (const write of REPORTED_WRITES) {
     assert.equal(client.calls.length, 1)
   })
 }
+
+test("deleteSession: an explicit false body is not a confirmed delete", async () => {
+  const refused = fakeClient("session", "delete", async () => ({ data: false }))
+  assert.equal(await deleteSession(refused, "ses_false"), false)
+  assert.equal(refused.calls.length, 1)
+})
 
 test("abortSession: an unconfirmed abort and a refused one both read false", async () => {
   const confirmed = fakeClient("session", "abort", async () => ({ data: true }))

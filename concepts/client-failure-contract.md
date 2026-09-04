@@ -42,9 +42,9 @@ classified as **"the session was deleted underneath the plugin"**, and `reuse` a
 
 A transient server error permanently destroys a retained handle.
 
-Two sites in the module already read failures correctly and stay as they are, because they bypass
-the SDK client and use `fetch` directly: `patchPartSynthetic` (`src/client.js:543` `if (res?.ok) return "ok"`)
-and `selectTuiSession` (`src/client.js:667` `if (res?.error) throw new Error(errMsg(res.error))`).
+The direct-fetch paths in the module read failures themselves and stay as they are: `patchPartSynthetic`
+(`if (res?.ok) return "ok"`) and the direct-post fallback of `selectTuiSession`. The SDK branch of
+`selectTuiSession` and `showToast` are wrappers like every other SDK call and run through `attempt`.
 
 ## 2. Target state
 
@@ -59,9 +59,9 @@ Returns `undefined` for a delivered request, or an `Error` carrying:
 
 - `status` — the HTTP status, or `undefined`;
 - `errorName` — `error.name`;
-- `terminal` — `true` for any 4xx and for `errorName === "NotFoundError"`. Retrying cannot repair
-  a request the server refused on its content; today's `src/client.js:55` narrows this to 404,
-  which is the same rule stated too tightly;
+- `terminal` — `true` for a content-refusal 4xx (except 408 Request Timeout and 429 Too Many
+  Requests, which concern timing or rate limiting) and for `errorName === "NotFoundError"`.
+  Retrying cannot repair a request the server refused on its content;
 - `kind` — **new, and the axis the retry policy turns on**:
   - `"refused"` — an envelope with a status. The server answered; the write did not take effect.
   - `"indeterminate"` — a thrown transport error. No response was seen; the write may or may not
@@ -110,9 +110,10 @@ the fresh orchestrator its instructions twice.
   primary a repeated paragraph; a lost one costs it the result of a whole subagent run. The
   asymmetry is decided and stays decided.
 - **`promptSession` — retry `"refused"` with status ≥ 500 only.** The server answered, so the
-  prompt provably did not run; a 5xx is the transient case. A `"refused"` 4xx is `terminal`
-  (the session is gone, or the body was rejected) and an `"indeterminate"` throw is ambiguous —
-  there the duplicate-prompt risk outweighs the retry, so it throws on the first failure.
+  prompt provably did not run; a 5xx is the transient case. A content-refusal 4xx is `terminal`
+  (the session is gone, or the body was rejected); 408 and 429 are non-terminal but remain
+  outside this narrower status predicate. An `"indeterminate"` throw is ambiguous — there the
+  duplicate-prompt risk outweighs the retry, so it throws on the first failure.
 - **Reported writes — no retry.** `deleteSession` has a reconciliation path already:
   `sweepOrphanedSubagentSessions` (`src/teardown.js:588`) collects, at the next plugin load,
   exactly the sessions a failed delete leaves behind, and its criteria (marker in the title, a

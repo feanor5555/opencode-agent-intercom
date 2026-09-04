@@ -29,7 +29,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import plugin from "../src/index.js"
-import { resetState } from "../src/state.js"
+import { deletedSessions, resetState } from "../src/state.js"
 import {
   entryForSession,
   countRetainedSubagents,
@@ -38,7 +38,6 @@ import {
 } from "../src/registry.js"
 import {
   resetTurnNotices,
-  _resetDeletedSessionsForTests,
   _setRetentionDropNoticeGraceForTests,
   RETENTION_DROP_NOTICE_GRACE_MS,
 } from "../src/hooks.js"
@@ -85,11 +84,16 @@ beforeEach(() => {
   _stopWatchdogForTests()
   resetState()
   resetTurnNotices()
-  _resetDeletedSessionsForTests()
   resetProjectContext()
   resetPermissionGuardCache()
   rmSync(settingsFile, { force: true })
   resetSettings()
+})
+
+test("resetState clears deleted-session cascade memory", () => {
+  deletedSessions.add(PRIMARY)
+  resetState()
+  assert.equal(deletedSessions.has(PRIMARY), false)
 })
 
 // Every prompt into a session this fake did NOT create is a notice to a

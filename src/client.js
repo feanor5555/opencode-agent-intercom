@@ -53,10 +53,10 @@ function sleep(ms) {
 //
 //   status    — the HTTP status, or undefined where the envelope has none.
 //   errorName — `error.name`, e.g. "NotFoundError".
-//   terminal  — a failure retrying cannot repair: ANY 4xx (the server refused
-//               the request on its content, and the same content will be
-//               refused again) and every NotFoundError. Spending a retry
-//               budget on one only delays the caller's cleanup path.
+//   terminal  — a failure retrying cannot repair: a content-refusal 4xx (except
+//               408 Request Timeout and 429 Too Many Requests, which concern
+//               timing or rate limiting) and every NotFoundError. Spending a
+//               retry budget on one only delays the caller's cleanup path.
 //   kind      — the axis the retry policy turns on:
 //               "refused"       — the server answered with a status. The write
 //                                 did NOT take effect, so a retry cannot
@@ -82,7 +82,10 @@ export function requestFailure(result, op = "request") {
   )
   err.status = status
   err.errorName = name
-  err.terminal = (status !== undefined && status >= 400 && status < 500) || name === "NotFoundError"
+  const retryableClientError = status === 408 || status === 429
+  err.terminal =
+    (status !== undefined && status >= 400 && status < 500 && !retryableClientError) ||
+    name === "NotFoundError"
   err.kind = status === undefined ? "indeterminate" : "refused"
   err.op = op
   return err
@@ -305,8 +308,9 @@ export async function createChildSession(client, { parentID, title, directory, o
 // second kickoff hands the fresh orchestrator its instructions twice. So only
 // a "refused" failure with status >= 500 is retried: the server answered, so
 // the prompt provably did not run, and a 5xx is the transient case. A refused
-// 4xx is terminal (the session is gone, or the body was rejected) and an
-// "indeterminate" throw is ambiguous — there the duplicate-prompt risk
+// content-level 4xx is terminal (the session is gone, or the body was rejected);
+// 408 and 429 are not terminal, though this narrower prompt policy still retries
+// only 5xx. An "indeterminate" throw is ambiguous — there the duplicate-prompt risk
 // outweighs the retry, and it throws on the first failure.
 export async function promptSession(client, { sessionID, agent, prompt, hideable = false }) {
   const { showAgentcom, postNoticeRetries, postNoticeRetryBackoffMs } = getSettings()
@@ -437,7 +441,11 @@ export async function deleteSession(client, sessionID) {
     logFailure(op, outcome.error, { sessionID })
     return false
   }
-  return true
+  // The SDK types this route's 200 body as a boolean, like session.abort. An
+  // explicit false is the server saying it did not delete; anything else
+  // (including the bare undefined older shapes and the suite's doubles answer)
+  // is a confirmation.
+  return outcome.data !== false
 }
 
 // Rename of a session (PATCH /session/{id} with `title`), a REPORTED write. The
@@ -845,9 +853,9 @@ export async function applyAgentcomVisibility(client, sessionID, { hidden } = {}
 //     `throwOnError`, and its `Tui` class carries no `selectSession` at all on
 //     this version (`dist/gen/sdk.gen.d.ts`), so that branch is inert here.
 // Without `throwOnError` a 4xx comes back as `{ data, error }` rather than
-// throwing (`dist/error-interceptor.js`), which is why `res.error` is checked
-// as well: either shape has to reach the fallback below, and a reported
-// success has to mean the server accepted it.
+// throwing (`dist/error-interceptor.js`). `attempt` folds that envelope and a
+// thrown response into the same failure outcome, so either shape reaches the
+// fallback below and a reported success means the server accepted it.
 //
 // UNVERIFIED: the direct post carries no authorization header. The plugin
 // runtime builds `client` with the server's auth headers; a server that
@@ -859,16 +867,15 @@ export async function applyAgentcomVisibility(client, sessionID, { hidden } = {}
 export async function selectTuiSession(client, sessionID) {
   if (!sessionID) return false
   if (typeof client?.tui?.selectSession === "function") {
-    try {
-      const res = await client.tui.selectSession(
+    const op = "selectTuiSession (tui.selectSession)"
+    const outcome = await attempt(op, () =>
+      client.tui.selectSession(
         { sessionID, body: { sessionID }, throwOnError: true },
         { throwOnError: true },
-      )
-      if (res?.error) throw new Error(errMsg(res.error))
-      return true
-    } catch (err) {
-      log("tui.selectSession failed, falling back to the direct post", errMsg(err))
-    }
+      ),
+    )
+    if (outcome.ok) return true
+    logFailure(op, outcome.error, { sessionID })
   }
   if (!serverUrl) {
     log("tui select-session skipped: no server URL")
@@ -892,12 +899,14 @@ export async function selectTuiSession(client, sessionID) {
 }
 
 // Best-effort TUI toast — a no-op when not running under the TUI (e.g. `serve`).
+// A failed SDK request is logged and swallowed: a toast never carries plugin
+// state, so its failure must not reach the caller.
 export async function showToast(client, { title, message, variant = "info" }) {
-  try {
-    await client.tui.showToast({ body: { title, message, variant } })
-  } catch (err) {
-    log("tui.showToast failed", errMsg(err))
-  }
+  const op = "showToast (tui.showToast)"
+  const outcome = await attempt(op, () =>
+    client.tui.showToast({ body: { title, message, variant } }),
+  )
+  if (!outcome.ok) logFailure(op, outcome.error, { title })
 }
 
 // Truncates to N visual characters (code points), so an emoji or surrogate

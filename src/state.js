@@ -251,6 +251,12 @@ export const pendingSessionQuiescence = new Map()
 // age and by size; kept here so resetState can clear it between tests.
 export const quiescedSessions = new Map()
 
+// Session ids whose `session.deleted` event was seen, newest last. The event is
+// the only signal that separates a cascade from a lone delete, and the guard in
+// hooks.js reads this set after its grace period. Kept here so resetState can
+// clear it between tests.
+export const deletedSessions = new Set()
+
 // sessionID -> drain object { oldID, newID, notices: [] }. A drain is opened
 // at the START of an orchestrator handoff (beginHandoffDrain) and keyed under
 // the OLD primary's id; once the new session exists it is ALSO keyed under
@@ -322,6 +328,7 @@ export function resetState() {
   }
   pendingSessionQuiescence.clear()
   quiescedSessions.clear()
+  deletedSessions.clear()
   lastPrimaryTool.clear()
   sessionAgent.clear()
   defaultAgentByDirectory.clear()

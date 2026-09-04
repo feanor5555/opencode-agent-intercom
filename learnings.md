@@ -401,14 +401,16 @@ Every SDK call in this plugin goes through `attempt(op, call)` in
 `src/client.js`, which folds both failure routes — the thrown transport error
 and the resolved envelope — into `{ ok, data | error }`. `requestFailure`
 reads the envelope and tags the error with `status`, `errorName`, `terminal`
-(any 4xx or a NotFoundError) and `kind` (`"refused"` where the server answered
+(content-refusal 4xx except 408/429, or a NotFoundError) and `kind` (`"refused"` where the server answered
 with a status, `"indeterminate"` where no response was seen). `withRetry` is
 the retry loop built on it; the `kind` split is what makes a retry safe for a
 non-idempotent write.
 
 **A bare `await client.*` in `src/client.js` is a defect by construction.**
-The two `fetch`-based paths in that module (`patchPartSynthetic`,
-`selectTuiSession`) read their own responses and are not SDK calls.
+The direct-fetch paths in that module (`patchPartSynthetic`, and the direct-post
+fallback of `selectTuiSession`) read their own responses and are not SDK calls.
+The SDK branch of `selectTuiSession` and `showToast` use `attempt` like every
+other SDK call.
 
 Three contracts sit on top, and no fourth: a required write throws once its
 retry policy is spent (`postNotice`, `promptSession`), a reported write returns

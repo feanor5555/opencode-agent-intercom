@@ -30,7 +30,7 @@
 // message prefix. Prefix stability is the only lever that path has, and it is
 // the same lever.
 
-import { aborted, registry, lastPrimaryTool } from "./state.js"
+import { aborted, deletedSessions, registry, lastPrimaryTool } from "./state.js"
 import {
   entryForSession,
   upsertSession,
@@ -1741,17 +1741,12 @@ async function parentDeletedWithinGrace(parentID) {
   return deletedSessions.has(parentID)
 }
 
-// The session ids this process has seen `session.deleted` for, newest last.
-// Its only reader is the guard in noticeRetentionLost; the event is the sole
-// signal that a session went away, so what is not remembered here cannot be
-// asked anywhere else.
-//
 // Bounded, because a long-lived instance deletes a session per finished
 // subagent and the set would otherwise grow for the life of the process. A Set
 // iterates in insertion order, so the oldest id is the one that goes; the
-// window only has to outlive one delete cascade.
+// window only has to outlive one delete cascade. The set itself lives in
+// state.js so resetState can clear it between tests.
 const DELETED_SESSION_MEMORY = 256
-const deletedSessions = new Set()
 
 function rememberDeletedSession(sessionID) {
   deletedSessions.add(sessionID)
@@ -1759,12 +1754,6 @@ function rememberDeletedSession(sessionID) {
     const oldest = deletedSessions.values().next().value
     deletedSessions.delete(oldest)
   }
-}
-
-// Test seam: the memory above is process-wide state that outlives a session,
-// and a session id reused by the next test would otherwise read as deleted.
-export function _resetDeletedSessionsForTests() {
-  deletedSessions.clear()
 }
 
 // Trims the retained set back to `maxRetainedSubagents` after one more entry

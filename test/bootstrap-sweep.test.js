@@ -108,7 +108,7 @@ function session(id, over = {}) {
 // SDK client RESOLVES with on a refused request (it is built without
 // `throwOnError`, so a failure does not reject) — the shape client.js's
 // deleteSession reads to answer a truthful `false`.
-function makeClient({ sessions = [], failList = false, deleteStatus } = {}) {
+function makeClient({ sessions = [], failList = false, deleteStatus, deleteData = true } = {}) {
   const deleted = []
   const listCalls = []
   const getCalls = []
@@ -130,7 +130,7 @@ function makeClient({ sessions = [], failList = false, deleteStatus } = {}) {
             response: { status: deleteStatus },
           }
         }
-        return { data: true }
+        return { data: deleteData }
       },
       status: async () => ({ data: {} }),
       get: async (opts) => {
@@ -260,6 +260,18 @@ test("a refused delete is not counted as deleted", async () => {
   })
   assert.deepEqual(await sweepOrphanedSubagentSessions(client, { now }), [])
   assert.deepEqual(deleted, ["ses_refused"], "the delete was attempted, and refused")
+})
+
+test("a delete answered false is not counted as deleted", async () => {
+  // A 200 response can still carry `false`: the server answered, but did not
+  // remove the session. The sweep must leave it eligible for a later retry.
+  withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: TTL })
+  const { client, deleted } = makeClient({
+    sessions: [session("ses_false")],
+    deleteData: false,
+  })
+  assert.deepEqual(await sweepOrphanedSubagentSessions(client, { now }), [])
+  assert.deepEqual(deleted, ["ses_false"], "the delete was attempted, and refused")
 })
 
 test("a refused delete keeps the session's directory cache entry", async () => {

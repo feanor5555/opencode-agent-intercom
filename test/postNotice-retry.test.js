@@ -278,14 +278,16 @@ test("requestFailure names the operation in the message", () => {
   assert.match(requestFailure({ response: { status: 500 } }).message, /^request failed \(HTTP 500\)$/)
 })
 
-test("requestFailure: every 4xx is terminal, not only 404", () => {
+test("requestFailure: content-refusal 4xx is terminal, except timeout and rate limit", () => {
   // A request the server refused on its content is refused again on a retry.
   for (const status of [400, 401, 403, 404, 409, 422, 499]) {
     const err = requestFailure({ response: { status } }, "op")
     assert.equal(err.terminal, true, `HTTP ${status} is terminal`)
     assert.equal(err.kind, "refused")
   }
-  for (const status of [500, 502, 503, 504]) {
+  // These statuses describe a timing or rate-limit condition, not request
+  // content, so postNotice is allowed to spend its retry budget on them.
+  for (const status of [408, 429, 500, 502, 503, 504]) {
     const err = requestFailure({ response: { status } }, "op")
     assert.equal(err.terminal, false, `HTTP ${status} is worth another attempt`)
     assert.equal(err.kind, "refused")
@@ -323,4 +325,19 @@ test("postNotice does not retry a 400 either — a refused body stays refused", 
     .then(() => {
       assert.equal(client.calls.length, 1, "no budget is spent on a request the server refused")
     })
+})
+
+test("postNotice retries a 429 rate-limit response", async () => {
+  process.env[RETRIES_ENV] = "2"
+  process.env[BACKOFF_ENV] = "1"
+  resetSettings()
+
+  const client = makeFakeClient(async (n) =>
+    n === 1
+      ? errorEnvelope(429, "TooManyRequestsError", "try again later")
+      : { data: undefined, response: { status: 204 } },
+  )
+
+  await postNotice(client, "sess-429", "wake up")
+  assert.equal(client.calls.length, 2, "a rate-limit response spends one retry")
 })

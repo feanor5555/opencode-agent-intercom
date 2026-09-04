@@ -348,10 +348,10 @@ test("a malformed displaced value is not put back as a half pair", () => {
 // --- the reasoning effort stored beside the pair --------------------------
 //
 // An entry may carry one optional key, `variant`, holding the reasoning effort
-// the TUI's effort row set. Neither hook above may notice it: it travels
-// through `chat.params` instead. What matters here is that the pair comes out
-// of the same entry untouched, and that only the four ladder values are ever
-// handed on — a hand-edited file must not be able to name a fifth.
+// the TUI's effort row set. The config hook mirrors it into the agent definition;
+// `chat.params` also translates it per request. The pair still comes out of the
+// same entry untouched, and only the four ladder values are ever handed on — a
+// hand-edited file must not be able to name a fifth.
 
 test("the pair is returned unchanged when a variant sits beside it", () => {
   writeModels({ coder: { providerID: "anthropic", modelID: "claude-sonnet-4-5", variant: "high" } })
@@ -367,12 +367,32 @@ test("the pair is returned unchanged when a variant sits beside it", () => {
   })
 })
 
-test("a variant does not reach config.agent[name].model either", () => {
+test("a stored effort reaches config.agent[name].variant", () => {
   writeModels({ coder: { providerID: "anthropic", modelID: "claude-sonnet-4-5", variant: "low" } })
   const config = freshConfig()
   applyModelChoices(config)
   assert.equal(config.agent.coder.model, "anthropic/claude-sonnet-4-5")
-  assert.deepEqual(Object.keys(config.agent.coder).sort(), ["model", "permission", "prompt"])
+  assert.equal(config.agent.coder.variant, "low")
+  assert.deepEqual(Object.keys(config.agent.coder).sort(), ["model", "permission", "prompt", "variant"])
+})
+
+test("the default effort leaves config.agent[name].variant unset", () => {
+  writeModels({ coder: { providerID: "anthropic", modelID: "claude-sonnet-4-5", variant: "default" } })
+  const config = freshConfig()
+  applyModelChoices(config)
+  assert.equal(config.agent.coder.model, "anthropic/claude-sonnet-4-5")
+  assert.equal("variant" in config.agent.coder, false)
+})
+
+test("removing an effort clears config.agent[name].variant", () => {
+  writeModels({ coder: { providerID: "anthropic", modelID: "claude-sonnet-4-5", variant: "high" } })
+  const config = freshConfig()
+  applyModelChoices(config)
+  assert.equal(config.agent.coder.variant, "high")
+
+  writeModels({ coder: { providerID: "anthropic", modelID: "claude-sonnet-4-5" } })
+  applyModelChoices(config)
+  assert.equal("variant" in config.agent.coder, false)
 })
 
 test("each ladder value is read back as it stands", () => {

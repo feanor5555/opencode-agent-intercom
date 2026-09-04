@@ -238,23 +238,19 @@ that is sent it anyway rejects it as it would any effort it does not take.
 
 ## 5. How the effort reaches the model call
 
-Through `chat.params` and `output.options`, per request. Not through opencode's
-native variant, and not through the message:
+Through opencode's native variant and through `chat.params`, per request:
 
-- `UserMessage` in `node_modules/@opencode-ai/sdk/dist/gen/types.gen.d.ts` has
-  `id`, `sessionID`, `role`, `time`, `summary`, `agent`, `model`, `system`,
-  `tools` — no variant field — so `chatMessageHook` (`src/llmmodel.js:111-126`),
-  which writes `output.message.model`, has nowhere to put one.
-- `"chat.message"` carries `variant?: string` on its *input*
-  (`node_modules/@opencode-ai/plugin/dist/index.d.ts:187-199`), which the plugin
-  reads and cannot set.
-- `AgentConfig` in the same SDK types has no `variant` property, so
-  `applyModelChoices` (`src/llmmodel.js:146-162`) stays exactly as it is: it
-  writes `agent.model` and nothing else.
-- `"chat.params"` gives `input.model: Model` and a mutable
-  `output.options: Record<string, any>`
-  (`node_modules/@opencode-ai/plugin/dist/index.d.ts:203-215`), the path
-  `src/llmparams.js:80-89` already uses.
+- opencode models a per-agent variant: `config.agent[<name>].variant` exists
+  on the resolved config, and `applyModelChoices` (`src/llmmodel.js:174-193`)
+  writes the stored effort there — deleting the key for an absent or
+  `default` effort — so opencode itself resolves it for the request.
+- `chat.params` still carries the effort through `output.options` as well,
+  translated for the model's provider family (`src/reasoningeffort.js`); this
+  is the route that covers provider families opencode's own `variants` map
+  does not.
+- `UserMessage` and the `chat.message` hook output carry no `variant` field,
+  so the message hook does not write one; the input side of `chat.message`
+  does expose `variant?: string`, which the plugin reads but cannot set.
 
 **New module `src/reasoningeffort.js`**, pure, no I/O:
 

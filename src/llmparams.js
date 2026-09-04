@@ -15,8 +15,10 @@
 // agent in ~/.config/opencode/llm-models.json beside the model choice. It is
 // translated for the model's provider family (src/reasoningeffort.js) and
 // merged into `output.options` after the params file, which wins on a shared
-// key. `chat.params` is the only hook that can carry it — neither a user
-// message nor an agent config field has a place for a variant.
+// key. `applyModelChoices` in src/llmmodel.js also writes the stored effort
+// into `config.agent[<name>].variant` — the route opencode itself resolves.
+// `chat.params` carries it through `output.options` too, which covers the
+// provider families opencode's own `variants` map does not.
 
 import { readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"

@@ -26,10 +26,9 @@
 // opencode start.
 //
 // An entry may carry one optional key beside the pair, `variant`: the reasoning
-// effort for that agent. Neither hook here applies it — no message and no
-// agent config field can hold one — it is read by `resolveEffortForAgent` and
-// applied per request by `chatParamsHook` (src/llmparams.js) through
-// `output.options`.
+// effort for that agent. The config hook writes it to
+// `config.agent[<name>].variant`; `chatParamsHook` (src/llmparams.js) also
+// translates it per request through `output.options`.
 //
 // This is deliberately a separate file from llm-params.json: that one is typed
 // `Record<agent, Record<key, number>>` and `chatParamsHook` forwards every key
@@ -180,6 +179,9 @@ export function applyModelChoices(config) {
     if (!Object.hasOwn(stored, name)) continue
     const agent = agents[name]
     if (!agent || typeof agent !== "object") continue
+    const effort = resolveEffortForAgent(name)
+    if (effort) agent.variant = effort
+    else delete agent.variant
     const chosen = resolveModelForAgent(name)
     if (!chosen) continue
     // Record what the pin displaces, once per agent, so a second run of the

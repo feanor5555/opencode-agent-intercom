@@ -858,6 +858,14 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     knownAtPass.set(sessionID, startedPasses);
   };
 
+  // The pass count a new row carries, so the reap can tell whether a pass could
+  // have listed it. It is the figure `noteSessionExists` already recorded for
+  // that session — both callers record it a line before they build the row — so
+  // the row and the liveness test read one and the same moment, and a session
+  // that somehow reached a row unrecorded takes the count standing now.
+  const rowKnownAtPass = (sessionID: string): number =>
+    knownAtPass.get(sessionID) ?? startedPasses;
+
   // Whether the server is known to still hold a session. The decision itself is
   // `isSessionLive`; this supplies what the panel knows. A published
   // `session.deleted` outranks everything, because it is younger than any pass
@@ -979,6 +987,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       updatedAt: child.time?.updated ?? Date.now(),
       ctxTokens: undefined,
       lastTokenFetch: 0,
+      knownAtPass: rowKnownAtPass(child.id),
     };
   };
 
@@ -1095,16 +1104,18 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       // This pass completed, so `seen` is the whole truth about what the server
       // still lists under the sessions it asked about — and a session the
       // server no longer lists is one the plugin has deleted, which it does at
-      // every ending it controls. A row out of the pass's reach (a child of a
-      // session nobody asked about) was not disproved and stays. `session.
-      // deleted` normally gets there first; this is the backstop for the event
-      // that was missed, and for the held row whose window ran out with the
-      // session still standing.
+      // every ending it controls. A row out of the pass's reach was not
+      // disproved and stays: a child of a session nobody asked about, and a
+      // row whose session this pass learned of only after it had started, which
+      // is why the pass hands the reap its own index. `session.deleted`
+      // normally gets there first; this is the backstop for the event that was
+      // missed, and for the held row whose window ran out with the session
+      // still standing.
       listed = seen;
       completedPass = passIndex;
       for (const sessionID of reapRows(
         next.values(),
-        { seen, polled: polledIDs },
+        { seen, polled: polledIDs, completedPass: passIndex },
         now,
       )) {
         const going = next.get(sessionID);
@@ -1373,6 +1384,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
         updatedAt: info.time?.updated ?? Date.now(),
         ctxTokens: undefined,
         lastTokenFetch: 0,
+        knownAtPass: rowKnownAtPass(info.id),
       });
       setSubagents(next);
     }

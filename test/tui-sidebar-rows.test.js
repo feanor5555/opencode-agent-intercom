@@ -38,11 +38,20 @@ import { retentionStampedTitle } from "../src/teardown.js"
 import {
   decideRow,
   isOrchestratorSession,
+  isSessionLive,
+  passHadItsChance,
   reapRows,
 } from "../tui/src/subagent-store.ts"
 
 const NOW = 1_700_000_000_000
 const UNTIL = NOW + 3600000
+
+// The pass count the rows below were learned of at, and a pass that started
+// after it — the pass whose listing may answer for them. A reap is only
+// evidence about a row the pass could have listed, so every call states which
+// pass's result it is.
+const SPAWN_PASS = 3
+const LATER_PASS = SPAWN_PASS + 1
 
 const ORCHESTRATOR = "ses_primary"
 const PLANNER = "ses_planner"
@@ -83,6 +92,7 @@ function row(over = {}) {
     createdAt: NOW - 30000,
     updatedAt: NOW,
     lastTokenFetch: NOW,
+    knownAtPass: SPAWN_PASS,
     ...over,
   }
 }
@@ -169,7 +179,7 @@ test("the parent stays listed pass after pass while it waits", () => {
   const polled = new Set([ORCHESTRATOR])
   for (const pass of [0, 1, 2, 3]) {
     assert.deepEqual(
-      reapRows([parent], { seen, polled }, NOW + pass * 5000),
+      reapRows([parent], { seen, polled, completedPass: LATER_PASS }, NOW + pass * 5000),
       [],
       `the parent was reaped on pass ${pass}`,
     )
@@ -192,7 +202,11 @@ test("the nested child gets a row of its own, under its own parent", () => {
   assert.deepEqual(
     reapRows(
       [parent, child],
-      { seen: new Set([PLANNER, NESTED]), polled: new Set([ORCHESTRATOR, PLANNER]) },
+      {
+        seen: new Set([PLANNER, NESTED]),
+        polled: new Set([ORCHESTRATOR, PLANNER]),
+        completedPass: LATER_PASS,
+      },
       NOW,
     ),
     [],
@@ -207,7 +221,7 @@ test("a child of a session the pass never asked about is not reaped", () => {
   assert.deepEqual(
     reapRows(
       [child],
-      { seen: new Set([PLANNER]), polled: new Set([ORCHESTRATOR]) },
+      { seen: new Set([PLANNER]), polled: new Set([ORCHESTRATOR]), completedPass: LATER_PASS },
       NOW,
     ),
     [],
@@ -222,7 +236,7 @@ test("the deleted sessions go, parent and child together", () => {
   assert.deepEqual(
     reapRows(
       [parent, child],
-      { seen: new Set(), polled: new Set([ORCHESTRATOR, PLANNER]) },
+      { seen: new Set(), polled: new Set([ORCHESTRATOR, PLANNER]), completedPass: LATER_PASS },
       NOW,
     ),
     [PLANNER, NESTED],
@@ -235,7 +249,7 @@ test("a busy row is reaped exactly like any other once its session is gone", () 
   assert.deepEqual(
     reapRows(
       [row({ status: "busy" })],
-      { seen: new Set(), polled: new Set([ORCHESTRATOR]) },
+      { seen: new Set(), polled: new Set([ORCHESTRATOR]), completedPass: LATER_PASS },
       NOW,
     ),
     [PLANNER],
@@ -299,7 +313,11 @@ test("the grandchild keeps its row across refresh after refresh", () => {
   const seen = new Set([PLANNER, NESTED, DEEP])
   for (const pass of [0, 1, 2, 3, 4]) {
     assert.deepEqual(
-      reapRows(chainRows(), { seen, polled: POLLED_CHAIN }, NOW + pass * 5000),
+      reapRows(
+        chainRows(),
+        { seen, polled: POLLED_CHAIN, completedPass: LATER_PASS },
+        NOW + pass * 5000,
+      ),
       [],
       `a nested row was reaped on pass ${pass}`,
     )
@@ -314,7 +332,7 @@ test("a row is never reaped while its subagent is working", () => {
     assert.deepEqual(
       reapRows(
         [row({ sessionID: DEEP, parentID: NESTED, status })],
-        { seen, polled: POLLED_CHAIN },
+        { seen, polled: POLLED_CHAIN, completedPass: LATER_PASS },
         NOW,
       ),
       [],
@@ -330,18 +348,129 @@ test("each nested row goes when its own session is deleted", () => {
   assert.deepEqual(
     reapRows(
       chainRows(),
-      { seen: new Set([PLANNER, NESTED]), polled: POLLED_CHAIN },
+      { seen: new Set([PLANNER, NESTED]), polled: POLLED_CHAIN, completedPass: LATER_PASS },
       NOW,
     ),
     [DEEP],
   )
   assert.deepEqual(
-    reapRows(chainRows(), { seen: new Set([PLANNER]), polled: POLLED_CHAIN }, NOW),
+    reapRows(
+      chainRows(),
+      { seen: new Set([PLANNER]), polled: POLLED_CHAIN, completedPass: LATER_PASS },
+      NOW,
+    ),
     [NESTED, DEEP],
   )
   assert.deepEqual(
-    reapRows(chainRows(), { seen: new Set(), polled: POLLED_CHAIN }, NOW),
+    reapRows(
+      chainRows(),
+      { seen: new Set(), polled: POLLED_CHAIN, completedPass: LATER_PASS },
+      NOW,
+    ),
     [PLANNER, NESTED, DEEP],
+  )
+})
+
+test("a row spawned into a pass already under way survives that pass", () => {
+  // The guard this file is about. `session.created` puts the row up and puts
+  // the spawning session into the polled set in the same block, so "the parent
+  // is polled" is true from the row's birth and holds nothing back on its own.
+  // What holds the pass back is the pass count: pass 3 was already running when
+  // the child was learned of, so it may have asked the planner for children
+  // before that session existed, and its silence about the child is not
+  // evidence that the child is gone.
+  const child = row({
+    sessionID: NESTED,
+    parentID: PLANNER,
+    status: "waiting",
+    knownAtPass: SPAWN_PASS,
+  })
+  assert.deepEqual(
+    reapRows(
+      [child],
+      {
+        seen: new Set([PLANNER]),
+        polled: POLLED_CHAIN,
+        completedPass: SPAWN_PASS,
+      },
+      NOW,
+    ),
+    [],
+  )
+})
+
+test("the next pass, which did start after the spawn, ends that same row", () => {
+  // The protection is one pass wide and no wider: a pass that began after the
+  // panel learned of the session did ask the planner for children with the
+  // session in existence, so its silence is the plugin's teardown.
+  const child = row({
+    sessionID: NESTED,
+    parentID: PLANNER,
+    status: "waiting",
+    knownAtPass: SPAWN_PASS,
+  })
+  assert.deepEqual(
+    reapRows(
+      [child],
+      {
+        seen: new Set([PLANNER]),
+        polled: POLLED_CHAIN,
+        completedPass: LATER_PASS,
+      },
+      NOW,
+    ),
+    [NESTED],
+  )
+})
+
+test("a pass answers for a row only if it started after the row was learned of", () => {
+  const child = row({ knownAtPass: SPAWN_PASS })
+  assert.equal(passHadItsChance(child, SPAWN_PASS - 1), false)
+  assert.equal(passHadItsChance(child, SPAWN_PASS), false)
+  assert.equal(passHadItsChance(child, SPAWN_PASS + 1), true)
+  // A row with no moment recorded is in reach of every pass, including the
+  // first one: nothing says it is young.
+  assert.equal(passHadItsChance(row({ knownAtPass: undefined }), 0), true)
+  // The same two counters, read the same way as by the route escape's liveness
+  // test: what is still alive there is what is still out of reach here.
+  const liveness = (completedPass) => ({
+    deleted: false,
+    listed: false,
+    isOrchestrator: false,
+    knownAtPass: SPAWN_PASS,
+    completedPass,
+  })
+  for (const completedPass of [SPAWN_PASS - 1, SPAWN_PASS, SPAWN_PASS + 1]) {
+    assert.equal(
+      isSessionLive(liveness(completedPass)),
+      !passHadItsChance(child, completedPass),
+      `the reap and the liveness test disagree at pass ${completedPass}`,
+    )
+  }
+})
+
+test("only the newborn row is spared, not its settled siblings", () => {
+  // One pass, one clock, one index, and the rows in it were learned of at
+  // different moments: the planner and the nested session have been through a
+  // pass since, the grandchild has not. The pass ends the two it could have
+  // listed and leaves the one it could not.
+  const rows = [
+    row({ status: "waiting" }),
+    row({ sessionID: NESTED, parentID: PLANNER, status: "waiting" }),
+    row({
+      sessionID: DEEP,
+      parentID: NESTED,
+      status: "waiting",
+      knownAtPass: LATER_PASS,
+    }),
+  ]
+  assert.deepEqual(
+    reapRows(
+      rows,
+      { seen: new Set(), polled: POLLED_CHAIN, completedPass: LATER_PASS },
+      NOW,
+    ),
+    [PLANNER, NESTED],
   )
 })
 
@@ -355,6 +484,7 @@ test("a grandchild spawned before the pass reached its parent stays", () => {
       {
         seen: new Set([PLANNER, NESTED]),
         polled: new Set([ORCHESTRATOR, PLANNER]),
+        completedPass: LATER_PASS,
       },
       NOW,
     ),
@@ -547,7 +677,25 @@ test("the reap is what ends a row on a completed pass, and it is widened", () =>
   const call = only("reapRows(")
   assert.match(
     source.slice(call, call + 200),
-    /\{ seen, polled: polledIDs \}/,
-    "the reap is given both the children it saw and the parents it asked",
+    /\{ seen, polled: polledIDs, completedPass: passIndex \}/,
+    "the reap is given the children it saw, the parents it asked, and its own pass index",
   )
+})
+
+test("a row records the pass it was learned of at, wherever it is built", () => {
+  // Both row-building sites take the figure from the one map the panel keeps,
+  // so the reap and the liveness test read the same moment. A site that
+  // skipped it would put up a row no pass can be held back from, which is the
+  // defect this guard exists against.
+  const helper = only("const rowKnownAtPass = (sessionID: string): number =>")
+  assert.match(
+    source.slice(helper, helper + 200),
+    /knownAtPass\.get\(sessionID\) \?\? startedPasses/,
+  )
+  only("knownAtPass: rowKnownAtPass(child.id),")
+  only("knownAtPass: rowKnownAtPass(info.id),")
+  // And each site records the session with noteSessionExists before it builds
+  // the row, so the figure is the moment the server named the session.
+  assert.ok(only("noteSessionExists(child.id);") < only("const base = remembered ?? rowFromChild(child, parentID);"))
+  assert.ok(only("noteSessionExists(info.id);") < only("knownAtPass: rowKnownAtPass(info.id),"))
 })

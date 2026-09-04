@@ -87,6 +87,15 @@ export interface SubagentEntry {
   updatedAt: number;
   ctxTokens?: number;
   lastTokenFetch: number;
+  // The number of poll passes that had been STARTED when the panel first
+  // learned this row's session exists. It is the same figure, from the same
+  // bookkeeping, that `SessionLivenessQuery.knownAtPass` carries — the panel
+  // records it once per session and both the liveness test and the reap read
+  // it — and it is what makes a row's absence from a pass mean something: a
+  // pass that started before the session was learned of never had the chance
+  // to list it. Undefined where nothing recorded the moment, which protects
+  // the row from no pass at all.
+  knownAtPass?: number;
   // The epoch ms this row's retention window ends at, exactly as the plugin
   // published it on the session title. Not a moment the panel measured: the
   // plugin stamps its own `retainedAt + retainedSubagentTtlMs`, so the row
@@ -315,18 +324,48 @@ export function retentionExpired(
   return (entry.retainedUntil ?? 0) + graceMs < now;
 }
 
+// Whether the completed pass could have listed this row's session at all: it
+// could if it started after the panel learned that session exists, and it could
+// not if it was already under way. This is the same reading of the same two
+// counters as `isSessionLive` — a snapshot answers only for what it could have
+// seen — applied to a row instead of to a route target, and it is the second
+// half of a pass's reach.
+//
+// A row with no recorded moment is in reach of every pass: nothing says it is
+// young, so nothing holds the listing back from answering for it.
+export function passHadItsChance(
+  entry: SubagentEntry,
+  completedPass: number,
+): boolean {
+  if (entry.knownAtPass === undefined) return true;
+  return completedPass > entry.knownAtPass;
+}
+
 // The rows a completed poll has disproved, as their session ids.
 //
 // `seen` is every child the poll actually listed, across every parent it asked;
 // it is only meaningful when the whole poll went through, so this is called on
-// a completed pass and never on a partial one. `polled` is the set of sessions
-// the pass asked for children of, and it is what makes an absence evidence: a
-// row whose parent was never asked about was not disproved by the pass, it was
-// simply out of its reach, so it stays. A nested child is normally IN reach —
-// every session discovered as a subagent is polled for its own children — but
-// it is out of it in the window between a spawn and the first pass that lists
-// the spawning parent, and again once that parent has left the polled set on
-// its own deletion. Reaping either would delete a row for work that is running.
+// a completed pass and never on a partial one. `completedPass` is that pass's
+// own index.
+//
+// An absence is only evidence about a row the pass could have reached, and
+// reach has two halves, both of which have to hold:
+//
+//   - the pass asked this row's parent for children. `polled` is the set it
+//     asked, so a row whose parent is not in it was not disproved — it was out
+//     of reach. That is the case of a parent that has left the polled set on
+//     its own deletion or on a 404.
+//   - the pass started after the panel learned this row's session exists
+//     (`passHadItsChance`). A pass already under way when a subagent was
+//     spawned may have asked that subagent's parent for children BEFORE the
+//     session existed, and its listing then says nothing about it.
+//
+// The second half is what covers the window between a spawn and the first pass
+// that lists the spawning parent, and it takes a pass count to see: the spawn
+// event puts the parent into the polled set in the same moment it puts the row
+// up, so being polled is true from the row's birth and cannot on its own hold
+// a newborn row back from the pass that was already running. Reaping such a row
+// would delete a row for work that is just starting.
 //
 // Within that reach the rule is the existence rule and holds for every row,
 // held or not: a session no longer listed among its parent's children is one
@@ -335,18 +374,27 @@ export function retentionExpired(
 // the same thing sooner, and this is the pass that catches what the event
 // missed.
 //
-// The second case is a held row alone: its session is still listed, but its
-// published window ran out longer ago than the grace allows, so nothing is
-// holding it any more.
+// The second case is a held row alone: its session is still listed, so no
+// question of reach arises, but its published window ran out longer ago than
+// the grace allows and nothing is holding it any more.
 export function reapRows(
   rows: Iterable<SubagentEntry>,
-  opts: { seen: ReadonlySet<string>; polled: ReadonlySet<string> },
+  opts: {
+    seen: ReadonlySet<string>;
+    polled: ReadonlySet<string>;
+    completedPass: number;
+  },
   now: number = Date.now(),
 ): string[] {
   const gone: string[] = [];
   for (const entry of rows) {
     if (!opts.seen.has(entry.sessionID)) {
-      if (opts.polled.has(entry.parentID)) gone.push(entry.sessionID);
+      if (
+        opts.polled.has(entry.parentID) &&
+        passHadItsChance(entry, opts.completedPass)
+      ) {
+        gone.push(entry.sessionID);
+      }
       continue;
     }
     if (retentionExpired(entry, now)) gone.push(entry.sessionID);

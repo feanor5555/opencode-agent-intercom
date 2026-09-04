@@ -125,8 +125,12 @@ The decision runs in strict precedence:
 
 Steps 2 and 4 pick a status and never a lifetime: whichever of them applies,
 the answer is a row. The poll never retires a row; only `reapRows` does, on a
-session absent from a completed pass that actually polled it. `busy` and
-`retry` decide which status a row shows; they never decide that a row ends.
+session absent from a completed pass that both polled its parent and had its
+chance at the row (`passHadItsChance` against the row's `knownAtPass`,
+falling back to `startedPasses`). A row born into a pass already under way
+survives that pass and is reapable from the next one; an unrecorded
+`knownAtPass` grants no protection. `busy` and `retry` decide which status a
+row shows; they never decide that a row ends.
 
 ## 4. The three gates
 
@@ -377,9 +381,11 @@ existing `src/teardown.js` tests. The cases that matter:
    - no outcome is `retire`.
    `reapRows`:
    - retires a row whose session is not in `seen` AND whose parent was polled
-     (the nested-child-disappears case);
+     AND whose `knownAtPass` is past — the row was born into the pass or earlier,
+     so the pass had its chance at it (the nested-child-disappears case);
    - leaves a row whose session is not in `seen` but whose parent was never
-     asked about (out of reach of the pass);
+     asked about, OR a row born after the pass started (`passHadItsChance` is
+     false) — out of reach of the pass;
    - retires a held row whose published window is past the grace.
 4. `test/bootstrap-sweep.test.js` — the bootstrap sweep deletes a leaked
    subagent session at the shipped default too; the marker is the

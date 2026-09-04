@@ -11,8 +11,6 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- The nested-spawn guard in `reapRows` (`tui/src/tui.tsx`) contradicts its own comment: `onSessionCreated` marks the parent polled in the same block that creates the row, so a nested row is reapable from birth. Correcting it changes `SubagentEntry`.
-
 - Establish whether a message part streamed just before `abortSession` is persisted by the time `session.messages` is read, which bounds how much of a timed-out subagent's text `timeoutSubagent` can rescue.
 - A retained entry whose session is deleted from outside is dropped silently and the orchestrator is never told (`src/hooks.js:1613-1625`). Give that drop a notice path to the parent.
 

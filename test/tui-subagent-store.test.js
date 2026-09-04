@@ -81,6 +81,7 @@ function row(over = {}) {
     updatedAt: NOW,
     ctxTokens: 12000,
     lastTokenFetch: NOW,
+    knownAtPass: SPAWN_PASS,
     ...over,
   }
 }
@@ -109,6 +110,13 @@ function heldRow(over = {}) {
 // The two poll sets, for the reap: everything below holds rows whose parent is
 // the one session the pass asked about.
 const POLLED = new Set(["ses_primary"])
+// The pass the rows below were learned of at, and a pass that started after
+// them — the one whose listing may answer for them. A pass that was already
+// under way when a row was learned of never had the chance to list it, so
+// every reap states which pass's result it is (test/tui-sidebar-rows.test.js
+// pins that guard).
+const SPAWN_PASS = 2
+const LATER_PASS = SPAWN_PASS + 1
 
 // -------------------------------------------------------- poll result and row
 
@@ -195,7 +203,7 @@ test("retention off: an unstamped subagent is a row, never a hold", () => {
 test("retention off: rows the poll still lists are left alone", () => {
   const rows = [row({ status: "waiting" }), row({ sessionID: "ses_other", status: "busy" })]
   const seen = new Set(["ses_child", "ses_other"])
-  assert.deepEqual(reapRows(rows, { seen, polled: POLLED }, NOW), [])
+  assert.deepEqual(reapRows(rows, { seen, polled: POLLED, completedPass: LATER_PASS }, NOW), [])
 })
 
 // ------------------------------------------- the refusals the panel is told of
@@ -273,7 +281,11 @@ test("retention on: an aborted subagent is never held", () => {
 
 test("a held row whose session is still listed stays", () => {
   assert.deepEqual(
-    reapRows([heldRow()], { seen: new Set(["ses_child"]), polled: POLLED }, NOW + 60000),
+    reapRows(
+      [heldRow()],
+      { seen: new Set(["ses_child"]), polled: POLLED, completedPass: LATER_PASS },
+      NOW + 60000,
+    ),
     [],
   )
 })
@@ -286,7 +298,11 @@ test("a held row whose session is gone is reaped — whatever ended the retentio
   assert.deepEqual(
     reapRows(
       [heldRow()],
-      { seen: new Set(["ses_someone_else"]), polled: POLLED },
+      {
+        seen: new Set(["ses_someone_else"]),
+        polled: POLLED,
+        completedPass: LATER_PASS,
+      },
       NOW + 60000,
     ),
     ["ses_child"],
@@ -298,10 +314,30 @@ test("a held row is reaped once its published window is past the grace", () => {
   const seen = new Set(["ses_child"])
   const justInside = UNTIL + RETENTION_EXPIRY_GRACE_MS
   assert.equal(retentionExpired(held, justInside), false)
-  assert.deepEqual(reapRows([held], { seen, polled: POLLED }, justInside), [])
+  assert.deepEqual(reapRows([held], { seen, polled: POLLED, completedPass: LATER_PASS }, justInside), [])
   const past = justInside + 1
   assert.equal(retentionExpired(held, past), true)
-  assert.deepEqual(reapRows([held], { seen, polled: POLLED }, past), ["ses_child"])
+  assert.deepEqual(reapRows([held], { seen, polled: POLLED, completedPass: LATER_PASS }, past), ["ses_child"])
+})
+
+test("the expired hold is reaped on the very pass that learned of it", () => {
+  // The pass count guards an ABSENCE and nothing else. This row is listed, so
+  // no question of reach arises: the pass sees the session standing with its
+  // published window long past the grace, and that is enough on its own.
+  const held = heldRow({ knownAtPass: LATER_PASS })
+  const past = UNTIL + RETENTION_EXPIRY_GRACE_MS + 1
+  assert.deepEqual(
+    reapRows(
+      [held],
+      {
+        seen: new Set(["ses_child"]),
+        polled: POLLED,
+        completedPass: LATER_PASS,
+      },
+      past,
+    ),
+    ["ses_child"],
+  )
 })
 
 test("retentionExpired says nothing about a row that is not held", () => {
@@ -313,7 +349,11 @@ test("several rows the pass no longer lists are reaped at once", () => {
   const b = heldRow({ sessionID: "ses_b", handle: "coder#1" })
   const live = row({ sessionID: "ses_live", status: "busy" })
   assert.deepEqual(
-    reapRows([a, b, live], { seen: new Set(["ses_live"]), polled: POLLED }, NOW + 1000),
+    reapRows(
+      [a, b, live],
+      { seen: new Set(["ses_live"]), polled: POLLED, completedPass: LATER_PASS },
+      NOW + 1000,
+    ),
     ["ses_child", "ses_b"],
   )
 })

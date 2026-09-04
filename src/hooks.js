@@ -110,7 +110,13 @@ import {
   SUBAGENT_SESSION_TITLE_MARKER,
 } from "./teardown.js"
 import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
-import { completionNotice, errorNotice, denialLoopNotice, isBlockedResult } from "./notices.js"
+import {
+  completionNotice,
+  errorNotice,
+  denialLoopNotice,
+  retentionLostNotice,
+  isBlockedResult,
+} from "./notices.js"
 import { capReplyForAgent } from "./resultfile.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
 import {
@@ -1301,7 +1307,7 @@ export function createEventHandler(client) {
           dropEndlessLatch(props?.sessionID, "the primary's turn ended in a session error")
           break
         case "session.deleted":
-          await onSessionDeleted(props)
+          await onSessionDeleted(props, client)
           break
         default:
           if (event?.type && !unknownEventsSeen.has(event.type)) {
@@ -1605,23 +1611,108 @@ async function onSessionIdle({ sessionID }, client) {
 // The check and the removal run in one critical section: a reuse that revives
 // the entry between them would otherwise have its fresh run deleted out of the
 // registry.
-async function onSessionDeleted(props) {
+//
+// The drop is NOT silent: the parent was told this handle stays reachable, so
+// it is told that it no longer is — see noticeRetentionLost below for why this
+// drop is woken and the capacity evictions are not.
+async function onSessionDeleted(props, client) {
   const sessionID = props?.sessionID ?? props?.info?.id
   if (!sessionID) return
+  rememberDeletedSession(sessionID)
   const entry = entryForSession(sessionID)
   if (!entry || entryLifecycle(entry) !== LIFECYCLE_RETAINED) return
+  // The whole descriptor, not just the handle: the entry is gone by the time
+  // the notice is composed, and the notice names the agent type and the
+  // session, and is addressed with the parentID the entry carried.
   const dropped = await registryMutex.runExclusive(() => {
     const e = entryForSession(sessionID)
     if (!e || entryLifecycle(e) !== LIFECYCLE_RETAINED) return null
-    const handle = e.handle
-    return removeEntryLocked(sessionID) ? handle : null
+    const descriptor = { handle: e.handle, agent: e.agent, parentID: e.parentID, sessionID }
+    return removeEntryLocked(sessionID) ? descriptor : null
   })
   if (!dropped) return
   forgetSessionDirectory(sessionID)
   log("retained subagent dropped: its opencode session was deleted", {
-    handle: dropped,
+    handle: dropped.handle,
     sessionID,
   })
+  await noticeRetentionLost(client, dropped)
+}
+
+// Wakes the parent for the drop above, on the same footing as every other
+// ending it is told about (completion, error, timeout) and through the same
+// door, postParentNotice — so a handoff in flight buffers it and a completed
+// one redirects it, exactly as it does for a wake notice.
+//
+// Only THIS drop is woken. The capacity drops next door —
+// evictRetainedOverCapacity here, trimRetainedToCapacity in watchdog.js,
+// dropRetainedSubagents on a handoff or an endless cycle — stay silent, and
+// nothing in the code forces that: they run through dropRetainedSubagents,
+// which takes a notice and is passed none. They are quiet because they are the
+// decision the parent's own configuration asked for, taken at a moment the
+// parent has no reason to act on: a handoff and a cycle are replacing the very
+// primary that would be woken, and an eviction hands the room to a retention
+// that primary just heard about. This one is different in kind — nothing the
+// parent or its settings decided, no other signal that it happened, and the
+// next `reuse` is otherwise where it finds out.
+//
+// Best-effort. A parent that cannot be reached costs a log line and nothing
+// else: the entry is already out of the registry, so `list` and `reuse` are
+// straight either way.
+async function noticeRetentionLost(client, dropped) {
+  if (!dropped.parentID) return
+  // The cascade case: deleting a primary deletes its subagent sessions too, so
+  // the session this notice would wake can be as gone as the one it reports
+  // on. Posting into it would spend the post's whole retry budget on a session
+  // nobody will ever read. Guarded by what this process has seen, which covers
+  // the parent's own event arriving first; if the child's comes first the post
+  // simply fails and lands in the catch below.
+  if (deletedSessions.has(dropped.parentID)) {
+    log("retention-drop notice skipped: the parent session is gone too", {
+      handle: dropped.handle,
+      parentID: dropped.parentID,
+    })
+    return
+  }
+  try {
+    await postParentNotice(client, dropped.parentID, retentionLostNotice(dropped))
+    log("notified primary of a dropped retention", {
+      handle: dropped.handle,
+      parentID: dropped.parentID,
+    })
+  } catch (err) {
+    log("retention-drop notice failed", {
+      handle: dropped.handle,
+      parentID: dropped.parentID,
+      err: errMsg(err),
+    })
+  }
+}
+
+// The session ids this process has seen `session.deleted` for, newest last.
+// Its only reader is the guard in noticeRetentionLost; the event is the sole
+// signal that a session went away, so what is not remembered here cannot be
+// asked anywhere else.
+//
+// Bounded, because a long-lived instance deletes a session per finished
+// subagent and the set would otherwise grow for the life of the process. A Set
+// iterates in insertion order, so the oldest id is the one that goes; the
+// window only has to outlive one delete cascade.
+const DELETED_SESSION_MEMORY = 256
+const deletedSessions = new Set()
+
+function rememberDeletedSession(sessionID) {
+  deletedSessions.add(sessionID)
+  while (deletedSessions.size > DELETED_SESSION_MEMORY) {
+    const oldest = deletedSessions.values().next().value
+    deletedSessions.delete(oldest)
+  }
+}
+
+// Test seam: the memory above is process-wide state that outlives a session,
+// and a session id reused by the next test would otherwise read as deleted.
+export function _resetDeletedSessionsForTests() {
+  deletedSessions.clear()
 }
 
 // Trims the retained set back to `maxRetainedSubagents` after one more entry

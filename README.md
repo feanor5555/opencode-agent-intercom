@@ -225,8 +225,13 @@ With retention on, every clean, top-level subagent whose context fits under
 the reuse ceiling is held for `retainedSubagentTtlMs` after it finishes, the
 oldest entry is evicted when the capacity is reached, and a held session is
 reaped once its window runs out — none of which changes what the orchestrator
-receives at wake time. `list()` renders the held ones in a `RETAINED` section,
-the per-turn snapshot does the same, and the next tool addresses them.
+receives at wake time. A held session can also be deleted from outside the
+plugin (the TUI's `x` on a held row, or the user removing that session in
+opencode); the plugin drops the entry and tells the orchestrator the handle is
+gone, naming the held subagent and saying `reuse(...)` will not reach it — only
+a fresh `spawn` with a full briefing is left. `list()` renders the held ones in
+a `RETAINED` section, the per-turn snapshot does the same, and the next tool
+addresses them.
 
 The reuse tool:
 

@@ -303,3 +303,29 @@ export function denialLoopNotice(entry) {
     `or by telling you to abort it by handle). Do NOT abort on your own — abort is user-only.`
   )
 }
+
+// Wake-notice sent to the parent when a HELD subagent's session was deleted
+// from outside this plugin — the sidebar's `x` on a held row, or a user
+// deleting that session in opencode. Sibling of timeoutNotice / errorNotice:
+// same emoji + phrasing vocabulary, so the orchestrator's pattern-matching
+// stays consistent across every ending it is told about.
+//
+// It carries the one thing the orchestrator cannot work out for itself. It was
+// told, in the completion notice, that this handle stays reachable for the
+// retention window; the session behind it is now gone, and without this notice
+// the first it hears of that is the refusal of a `reuse` it has already spent a
+// turn framing. So the notice names the handle, says the context it held is
+// gone, and points at the only thing left — a fresh spawn with a full briefing.
+//
+// No slots line, unlike errorNotice: a retained subagent occupies no
+// concurrency slot (isActiveEntry counts running entries only), so this drop
+// frees nothing a spawn budget would want to hear about.
+export function retentionLostNotice(entry) {
+  return (
+    `🔔 agent-intercom: the held subagent "${entry.handle}" (${entry.agent}, session ` +
+    `${entry.sessionID}) is GONE — its opencode session was deleted from outside the plugin, ` +
+    `so the context it was holding no longer exists. reuse("${entry.handle}", …) will not reach ` +
+    `it. If that work is still needed, spawn() a fresh subagent and brief it from scratch — it ` +
+    `has none of what the held session had read.`
+  )
+}

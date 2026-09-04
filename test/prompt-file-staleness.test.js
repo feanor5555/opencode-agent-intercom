@@ -24,7 +24,9 @@
 
 import test, { beforeEach, after } from "node:test"
 import assert from "node:assert/strict"
-import { mkdirSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 import plugin from "../src/index.js"
 import { upsertSession } from "../src/registry.js"
@@ -59,6 +61,13 @@ import {
   roleOf,
   preBlockedCore,
 } from "./helpers/prompt-files.js"
+import { setVariantStorePath } from "../src/variantstore.js"
+
+// The `config` hook driven below writes the primary's reasoning effort into
+// opencode's own per-model variant store; keep that off the real state file.
+const variantStoreDir = mkdtempSync(join(tmpdir(), "aic-variantstore-"))
+setVariantStorePath(join(variantStoreDir, "model.json"))
+after(() => rmSync(variantStoreDir, { recursive: true, force: true }))
 
 after(cleanupProjects)
 beforeEach(resetPromptFileState)

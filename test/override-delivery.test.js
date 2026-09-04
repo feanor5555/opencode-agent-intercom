@@ -29,11 +29,15 @@ import { resetProjectContext } from "../src/project.js"
 import { setSettingsPath, resetSettings } from "../src/settings.js"
 import { resetPermissionGuardCache } from "../src/config.js"
 import { forgetSessionDirectory } from "../src/client.js"
+import { setVariantStorePath } from "../src/variantstore.js"
 
 const fixtureDir = mkdtempSync(join(tmpdir(), "intercom-delivery-"))
 writeFileSync(join(fixtureDir, "package.json"), JSON.stringify({ name: "fixture-proj" }))
 const settingsFile = join(fixtureDir, "agent-intercom.json")
 setSettingsPath(settingsFile)
+// The `config` hook driven below writes the primary's reasoning effort into
+// opencode's own per-model variant store; keep that off the real state file.
+setVariantStorePath(join(fixtureDir, "model.json"))
 
 // A project agent file, so the finding can name it.
 mkdirSync(join(fixtureDir, ".opencode", "agent"), { recursive: true })

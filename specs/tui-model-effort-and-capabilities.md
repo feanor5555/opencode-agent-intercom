@@ -3,7 +3,14 @@
 The sidebar's LLM-params section shows, per agent, the model's vision and reasoning
 capability as two ASCII badge columns, and carries an `effort` row that sets the
 reasoning effort for agents whose model supports it. The chosen effort is stored
-alongside the model choice and applied per request through the `chat.params` hook.
+alongside the model choice and travels three ways: `applyModelChoices` writes it
+into `config.agent[<name>].variant`, which is what actually reaches the
+provider for the families opencode's own `variants` map covers;
+`chatParamsHook` writes the provider option for the families it does not;
+and `applyModelChoices` additionally seeds opencode's own variant store at
+`${XDG_STATE_HOME:-$HOME/.local/state}/opencode/model.json` under its
+`variant` map, keyed `"<providerID>/<modelID>"`, so opencode's TUI shows
+the active variant in a freshly started session.
 
 ## 1. Capability metadata kept from `/config/providers`
 
@@ -238,63 +245,41 @@ that is sent it anyway rejects it as it would any effort it does not take.
 
 ## 5. How the effort reaches the model call
 
-Through opencode's native variant and through `chat.params`, per request:
+The effort chosen in the sidebar is stored as the optional `variant` on the
+entry in `~/.config/opencode/llm-models.json`, and from there it travels three
+ways:
 
-- opencode models a per-agent variant: `config.agent[<name>].variant` exists
-  on the resolved config, and `applyModelChoices` (`src/llmmodel.js:174-193`)
-  writes the stored effort there — deleting the key for an absent or
-  `default` effort — so opencode itself resolves it for the request.
-- `chat.params` still carries the effort through `output.options` as well,
-  translated for the model's provider family (`src/reasoningeffort.js`); this
-  is the route that covers provider families opencode's own `variants` map
-  does not.
-- `UserMessage` and the `chat.message` hook output carry no `variant` field,
-  so the message hook does not write one; the input side of `chat.message`
-  does expose `variant?: string`, which the plugin reads but cannot set.
+- **Native variant** — opencode models a per-agent variant:
+  `config.agent[<name>].variant` exists on the resolved config, and
+  `applyModelChoices` (`src/llmmodel.js`) writes the stored effort there —
+  deleting the key for an absent or `default` effort — so opencode itself
+  resolves it for the request. This is what actually reaches the provider
+  for the families opencode's own `variants` map covers.
 
-**New module `src/reasoningeffort.js`**, pure, no I/O:
+- **`chat.params` hook** — `chatParamsHook` (`src/llmparams.js`) translates the
+  effort into the provider family's own option key and writes it through
+  `output.options`, via `src/reasoningeffort.js`. This is the route that
+  covers provider families opencode's own `variants` map does not.
 
-```js
-export function effortOptions(effort, model)   // -> object | null
-```
+- **opencode's variant store** — `applyModelChoices` also calls
+  `saveModelVariants` (`src/variantstore.js`) to seed opencode's own variant
+  store at `${XDG_STATE_HOME:-$HOME/.local/state}/opencode/model.json`,
+  under its `variant` map, keyed `"<providerID>/<modelID>"`. The TUI seeds a
+  fresh session's variant from that store; it never reads
+  `config.agent[<name>].variant`. That store is keyed per model, so its
+  entry takes the effort of the visible primary agent
+  (`mode === "primary"` and not `hidden`; `default_agent` wins where two
+  visible primaries share a model). A `default`, absent or out-of-ladder
+  effort writes `DEFAULT_VARIANT = "default"`. Writes are atomic
+  (temp file + rename in the same directory); a store that does not parse
+  is left untouched; `saveModelVariants` is wrapped in a try/catch so every
+  failure is swallowed and a load of the plugin cannot break.
 
-Returns null unless `effort` is `low`/`medium`/`high`/`xhigh` **and**
-`model?.capabilities?.reasoning === true`. The family key is `model?.api?.npm` —
-the AI-SDK package name, present on `Model.api` in the SDK type, and stable where
-a custom `providerID` is not:
+`UserMessage` and the `chat.message` hook output carry no `variant` field,
+so the message hook does not write one; the input side of `chat.message`
+does expose `variant?: string`, which the plugin reads but cannot set.
 
-One ladder (`low`/`medium`/`high`/`xhigh`) serves every family that accepts a
-string value: no per-model value discovery, no numeric token budget. The
-google/vertex `thinkingConfig.thinkingLevel` family is the exception — its
-vocabulary is `low`/`medium`/`high` only, so `xhigh` emits nothing for it,
-exactly as for a value it does not know. A model whose provider wants either
-is served by hand-editing `llm-params.json`, whose unknown keys already ride
-through into `output.options` (`src/llmparams.js:85-89`).
 
-| `model.api.npm` | patch merged into `output.options` |
-|---|---|
-| `@ai-sdk/openai`, `@ai-sdk/openai-compatible`, `@ai-sdk/azure`, `@ai-sdk/xai` | `{ reasoningEffort: <effort> }` |
-| `@ai-sdk/anthropic`, `@ai-sdk/google-vertex-anthropic` | `{ effort: <effort> }` |
-| `@ai-sdk/google`, `@ai-sdk/google-vertex` | `{ thinkingConfig: { thinkingLevel: <effort>, includeThoughts: true } }` for `low`/`medium`/`high`; nothing for `xhigh` |
-| `@openrouter/ai-sdk-provider` | `{ reasoning: { effort: <effort> } }` |
-| anything else | `null` — nothing is written |
-
-**Call site**: at the end of `chatParamsHook` (`src/llmparams.js:70-90`), after the
-loop that applies the params file:
-
-```js
-const patch = effortOptions(resolveEffortForAgent(input?.agent), input?.model)
-```
-
-and where `patch` is non-null, each of its top-level keys is written into
-`output.options` **only where that key is not already set** — the params file is
-the hand-edit escape hatch and wins over the ladder. `output.options` is created
-the same way it is today (`src/llmparams.js:81`, `:87`) when it is absent.
-
-`src/llmparams.js` imports `resolveEffortForAgent` from `./llmmodel.js` and
-`effortOptions` from `./reasoningeffort.js`. No hook registration changes:
-`"chat.params"` is already wired at `src/index.js:189-195` inside its own
-try/catch, so a throw from the new path cannot break a request.
 
 ## 6. Tests
 

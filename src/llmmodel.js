@@ -30,6 +30,15 @@
 // `config.agent[<name>].variant`; `chatParamsHook` (src/llmparams.js) also
 // translates it per request through `output.options`.
 //
+// Neither of those two routes reaches the label opencode's TUI prints in the
+// chat area: it seeds a fresh session's variant from its own per-model store
+// (src/variantstore.js) and never reads `config.agent[<name>].variant`. The
+// config hook therefore writes the effort there as well. That store is keyed
+// per MODEL, so it cannot express two agents that share a model at different
+// efforts; the key takes the effort of the primary agent, the session the chat
+// area shows, and every other agent's effort keeps travelling by the two routes
+// above alone.
+//
 // This is deliberately a separate file from llm-params.json: that one is typed
 // `Record<agent, Record<key, number>>` and `chatParamsHook` forwards every key
 // it does not recognise into `output.options`, which goes straight into the
@@ -40,6 +49,7 @@ import { readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { log, errMsg } from "./log.js"
+import { DEFAULT_VARIANT, modelKey, saveModelVariants } from "./variantstore.js"
 
 let modelsFile = join(homedir(), ".config", "opencode", "llm-models.json")
 
@@ -175,6 +185,7 @@ export function applyModelChoices(config) {
   const agents = config?.agent
   if (!agents || typeof agents !== "object") return
   const stored = readModels()
+  const primaries = []
   for (const name of Object.keys(agents)) {
     if (!Object.hasOwn(stored, name)) continue
     const agent = agents[name]
@@ -183,12 +194,58 @@ export function applyModelChoices(config) {
     if (effort) agent.variant = effort
     else delete agent.variant
     const chosen = resolveModelForAgent(name)
+    if (isVisiblePrimary(agent)) {
+      // The model this agent will run: the choice from the panel, or — where
+      // the panel holds only an effort for it — the model already standing in
+      // the config. Neither is invented, and where there is no model at all
+      // the store has no key to write.
+      const ref = chosen ?? splitModelRef(agent.model)
+      // A `default` or absent effort is written as the name opencode itself
+      // stores for it, not as a deleted key.
+      if (ref) primaries.push({ name, key: modelKey(ref.providerID, ref.modelID), variant: effort ?? DEFAULT_VARIANT })
+    }
     if (!chosen) continue
     // Record what the pin displaces, once per agent, so a second run of the
     // hook cannot overwrite the value with the plugin's own. The message hook
     // reads it back when the choice is later removed.
     if (!pinnedBefore.has(name)) pinnedBefore.set(name, agent.model)
     agent.model = `${chosen.providerID}/${chosen.modelID}`
+  }
+  writePrimaryVariants(config, primaries)
+}
+
+// A primary agent whose sessions the user actually sees. opencode's internal
+// `compaction`, `title` and `summary` are `mode: "primary"` and hidden both;
+// the chat area never shows one, so neither may claim a model's variant key.
+function isVisiblePrimary(agent) {
+  return agent.mode === "primary" && agent.hidden !== true
+}
+
+// Puts the primary agents' efforts into opencode's per-model variant store.
+//
+// The store has one entry per model, so two primaries sharing a model at
+// different efforts have to be ordered: `default_agent` wins, since that is the
+// agent a fresh session starts as, and among the rest the first in config order
+// does. The loser is not written anywhere else — its effort still travels by
+// `config.agent[<name>].variant` and by `chat.params`, as every subagent's
+// does.
+//
+// A model no visible primary uses is never named here, so whatever stands in
+// the file for it survives. Never throws: this is a state file of another
+// program and a failure to update it must not cost the plugin its load.
+function writePrimaryVariants(config, primaries) {
+  if (primaries.length === 0) return
+  const preferred = config?.default_agent
+  const ordered = [
+    ...primaries.filter((p) => p.name === preferred),
+    ...primaries.filter((p) => p.name !== preferred),
+  ]
+  const perModel = new Map()
+  for (const { key, variant } of ordered) if (!perModel.has(key)) perModel.set(key, variant)
+  try {
+    saveModelVariants(perModel)
+  } catch (err) {
+    log("variant store update failed", errMsg(err))
   }
 }
 

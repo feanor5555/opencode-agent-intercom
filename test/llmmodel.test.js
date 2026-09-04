@@ -20,15 +20,22 @@ import {
   setModelsPath,
   resetCache,
 } from "../src/llmmodel.js"
+import { setVariantStorePath } from "../src/variantstore.js"
 
 const dir = mkdtempSync(join(tmpdir(), "llmmodel-"))
 const file = join(dir, "llm-models.json")
+const storeFile = join(dir, "model.json")
 
 after(() => rmSync(dir, { recursive: true, force: true }))
 
 beforeEach(() => {
   rmSync(file, { force: true })
   setModelsPath(file)
+  // The `config` hook also writes the primary's effort into opencode's own
+  // per-model variant store; that write belongs to
+  // test/variant-store-write.test.js and must not reach the real state file
+  // from here.
+  setVariantStorePath(storeFile)
 })
 
 // Writes the models file and drops the mtime cache, so a rewrite inside the

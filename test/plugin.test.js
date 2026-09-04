@@ -6,7 +6,7 @@
 //
 // Run: node --test test/
 
-import test, { beforeEach } from "node:test"
+import test, { beforeEach, after } from "node:test"
 import assert from "node:assert/strict"
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, rmSync } from "node:fs"
 import { tmpdir, homedir } from "node:os"
@@ -29,6 +29,7 @@ import {
 import { AGENTS, SPAWNABLE_ROLES } from "../src/agents.js"
 import { setParamsPath, resetCache as resetLlmParams } from "../src/llmparams.js"
 import { setModelsPath, resetCache as resetLlmModels } from "../src/llmmodel.js"
+import { setVariantStorePath } from "../src/variantstore.js"
 import {
   normalizeUrl,
   parseExaEntries,
@@ -37,6 +38,15 @@ import {
 } from "../src/searchcore.js"
 import { setCtagsProbe, probeCtags } from "../src/outline.js"
 import { renderDefaultsFile, applyCustomPrompt } from "../src/promptsfile.js"
+
+// The `config` hook writes the primary agent's reasoning effort into opencode's
+// own per-model variant store. Several tests here drive that hook with the real
+// ~/.config/opencode/llm-models.json in place, so the store is redirected for
+// the whole file — a unit run must never touch another program's state file.
+// The write itself is covered by test/variant-store-write.test.js.
+const variantStoreDir = mkdtempSync(join(tmpdir(), "aic-variantstore-"))
+setVariantStorePath(join(variantStoreDir, "model.json"))
+after(() => rmSync(variantStoreDir, { recursive: true, force: true }))
 
 // outline tests need a working `universal-ctags` binary on PATH or in
 // ~/.local/bin. CI/dev machines may not have it; in that case those tests are

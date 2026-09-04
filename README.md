@@ -590,16 +590,31 @@ exposes every runtime knob:
   is not on the pick list, or where no model is resolved. Setting an
   effort pins the model at the same time
   (`{providerID, modelID, variant}`); changing the model clears the
-  effort. The effort is applied per request through the `chat.params`
-  hook, which translates the value into the provider family's own option
-  key — `reasoningEffort` for `@ai-sdk/openai` / `@ai-sdk/openai-compatible`
-  / `@ai-sdk/azure` / `@ai-sdk/xai`; `effort` for `@ai-sdk/anthropic` /
-  `@ai-sdk/google-vertex-anthropic`; `reasoning.effort` for
-  `@openrouter/ai-sdk-provider`. The `thinkingConfig.thinkingLevel`
-  family of `@ai-sdk/google` / `@ai-sdk/google-vertex` takes only
-  `low`/`medium`/`high` (with `includeThoughts: true`) and emits nothing
-  for `xhigh`; nothing is written for any other family. Keys already
-  set in `llm-params.json` win over the ladder.
+  effort. The effort travels three ways from the stored `variant`:
+  `applyModelChoices` (`src/llmmodel.js`) writes it into
+  `config.agent[<name>].variant`, which is what actually reaches the
+  provider for the families opencode's own `variants` map covers;
+  `chatParamsHook` (`src/llmparams.js`) translates the value into the
+  provider family's own option key and writes it through `output.options`
+  — `reasoningEffort` for `@ai-sdk/openai` /
+  `@ai-sdk/openai-compatible` / `@ai-sdk/azure` / `@ai-sdk/xai`; `effort`
+  for `@ai-sdk/anthropic` / `@ai-sdk/google-vertex-anthropic`;
+  `reasoning.effort` for `@openrouter/ai-sdk-provider`. The
+  `thinkingConfig.thinkingLevel` family of `@ai-sdk/google` /
+  `@ai-sdk/google-vertex` takes only `low`/`medium`/`high` (with
+  `includeThoughts: true`) and emits nothing for `xhigh`; nothing is
+  written for any other family. Keys already set in `llm-params.json`
+  win over the ladder; and `applyModelChoices` additionally seeds
+  opencode's own variant store at
+  `${XDG_STATE_HOME:-$HOME/.local/state}/opencode/model.json` under its
+  `variant` map, keyed `"<providerID>/<modelID>"`, so opencode's TUI
+  shows the active variant in a freshly started session. That store is
+  keyed per model, so its entry takes the effort of the visible primary
+  agent (`mode === "primary"` and not `hidden`; `default_agent` wins
+  where two share a model); a `default`, absent or out-of-ladder effort
+  writes `"default"`. Writes are atomic; a store that does not parse is
+  left untouched; every failure is swallowed so the plugin cannot break
+  on load.
   The choice is applied by two hooks that share the same stored pair. The
   `config` hook writes it into `config.agent[<name>].model` (the
   `providerID/modelID` form opencode resolves an agent's model from), so

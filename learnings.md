@@ -486,3 +486,19 @@ authorization header and its address may be the placeholder.
 
 `selectTuiSession` (`src/client.js`) is built this way. The resolved address is
 logged once at load as `server url resolved` with a `placeholder` flag.
+
+## The "default model" line in setup output and plugin debug is the *configured* default, not the model that actually served the run
+
+Both the e2e drivers' setup output and this plugin's own debug slice print
+a `default model` line that names whatever the configuration asked for, not
+the model that actually answered the prompt. During the endless-mode work
+that wording misled a run into reporting that a failure had happened on
+`minimax/MiniMax-M3` when both the orchestrator and the wind-down planner
+had in fact been served by `xai/grok-4.6` — so the next step chased a
+model-quality explanation for what was a defect in the code.
+
+The model that actually ran is only established from the runtime log at
+`~/.local/share/opencode/log/opencode.log`: its `stream providerID=…
+modelID=…` lines carry the session id, the agent name and the mode, so
+the model can be tied back to the right session and the right role. Check
+there, per session, before attributing anything to a model.

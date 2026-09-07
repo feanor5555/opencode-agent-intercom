@@ -158,8 +158,8 @@ The exports of `src/childwait.js`:
   `Math.max(maxSubagentAgeMs, maxSubagentToolCallMs)` — 2 640 000 ms at the defaults.
   The base has to be the wider one, because the ceiling has to clear the longest
   window a child may still legally live under: `watchdogLimit`
-  (`src/watchdog.js:295-310`) measures a child inside a tool call, or one opencode
-  still reports busy, against `maxSubagentToolCallMs` (660 000 ms), so a ceiling
+  (`src/watchdog.js:320-335`) measures a child inside a tool call against
+  `maxSubagentToolCallMs` (660 000 ms), so a ceiling
   built on the 90 000 ms silence window alone fires at 360 000 ms and hands the
   parent `expired` for a child that is working and that no sweep has touched. The
   factor is the margin over that window: one 5 s sweep tick, the abort and teardown

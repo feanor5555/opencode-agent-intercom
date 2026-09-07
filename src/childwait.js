@@ -23,11 +23,13 @@
 // registry entry at all. Keying on the child also keeps the record and the
 // promise it guards impossible to desynchronise — one settle closes both.
 //
-// NOTHING registers a waiter yet. Registration is the spawn path's job and the
-// five places that must consult `hasLiveChildren` (teardown ordering, the
-// watchdog exemption, the concurrency cap, the endless freeze, the primary-set
-// cleanup) are separate work. What is complete here is the mechanism and its
-// bookkeeping: register, settle, expire, and the read side.
+// Nested spawns register a waiter in `src/tools.js:625`. Production reads and
+// cleanup are split across the paths that hold a parent's idle in `src/hooks.js`
+// (`hasLiveChildren`), end children before teardown in `src/teardown.js`
+// (`liveChildSessionIDs`), exempt blocked parents in `src/watchdog.js`
+// (`liveChildSessionIDs`), and settle endings in the spawn, hook, abort and
+// teardown paths. `hasChildWaiter` and `waitingParentOf` remain exported for
+// direct inspection, but have no production callers; tests exercise them.
 //
 // Every function in this module is SYNCHRONOUS and takes no lock, so it can be
 // called from inside a `registryMutex.runExclusive` section without nesting the
@@ -70,7 +72,7 @@ export const CHILD_OUTCOMES = Object.freeze([
 // watchdog measures a child against one of TWO windows (watchdogLimit,
 // src/watchdog.js): `maxSubagentAgeMs` (90 s by default) for a child with
 // nothing in flight, `maxSubagentToolCallMs` (660 s) for one inside a tool call
-// or whose session opencode still reports busy. A ceiling built on the silence
+// A ceiling built on the silence
 // window alone is SHORTER than the working window, and would hand the parent
 // `expired` for a child that is legally inside a long tool call and that no
 // sweep has touched — the rescue firing on a run that is not stuck.

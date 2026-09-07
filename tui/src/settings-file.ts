@@ -9,7 +9,7 @@
 // decided by what the subagent is doing at that moment. `maxSubagentAgeMs` is
 // the window for one with NOTHING in flight — silence with no tool call open;
 // `maxSubagentToolCallMs` is the window for one that is inside a tool call, or
-// whose session opencode still reports as busy. `0` means something different
+// `0` means something different
 // on each: on the silence window it switches the watchdog off altogether, on
 // the tool-call window it means no ceiling while the subagent works, and the
 // silence window still governs every subagent that is not working. Both are
@@ -142,7 +142,7 @@ export const DEFAULT_MAX_NESTED_SPAWNS = 2;
 // "silence (s)" row, which shows and steps it in whole seconds.
 export const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000;
 // The same watchdog's window for a subagent that is WORKING: one inside a tool
-// call, or whose session opencode still reports as busy. `0` means no ceiling
+// call. `0` means no ceiling
 // while it works. The plugin's own copy is DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS in
 // src/settings.js, pinned the same indirect way as the window above. Stepped by
 // the panel's "in tool (min)" row, which shows and steps it in whole minutes.

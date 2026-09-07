@@ -54,31 +54,60 @@ export const CHILD_OUTCOMES = Object.freeze([
   "completed", "error", "aborted", "timeout", "expired", "ended", "abandoned",
 ])
 
-// The waiter's own ceiling, as a multiple of the inactivity window.
+// The waiter's own ceiling, as a multiple of the WIDEST watchdog window.
 //
-// It cannot simply BE `maxSubagentAgeMs`: that window measures silence, and a
-// healthy child that streams tokens for ten minutes never trips it. The
+// It cannot simply BE a watchdog window: those windows measure silence, and a
+// healthy child that streams tokens for ten minutes never trips one. The
 // watchdog is the mechanism that ends a hung child (and, through
 // teardownSubagent, settles this waiter); the ceiling here only exists for the
 // case where no ending path fires at all — an event the plugin never sees, a
 // session that vanishes server-side — in which case the parent's tool call
 // would hang for the life of the opencode process.
 //
-// So it must be comfortably LONGER than the watchdog's own worst case
-// (`maxSubagentAgeMs` plus one 5 s sweep interval), which any factor > 1
-// satisfies, and short enough to still be a rescue. 4x the window — 6 minutes
-// at the 90 s default — is that: longer than any run the watchdog would let
-// live, shorter than a session the user has given up on.
+// So it must be comfortably LONGER than the watchdog's own worst case, and the
+// watchdog measures a child against one of TWO windows (watchdogLimit,
+// src/watchdog.js): `maxSubagentAgeMs` (90 s by default) for a child with
+// nothing in flight, `maxSubagentToolCallMs` (660 s) for one inside a tool call
+// or whose session opencode still reports busy. A ceiling built on the silence
+// window alone is SHORTER than the working window, and would hand the parent
+// `expired` for a child that is legally inside a long tool call and that no
+// sweep has touched — the rescue firing on a run that is not stuck.
+//
+// The base is therefore the wider of the two, and the factor is the margin over
+// it: one 5 s sweep tick, the abort and teardown behind the sweep, and room for
+// the working child that keeps its window alive across a few consecutive calls.
+// 4x — 44 minutes at the 660 s default, 6 minutes when the two windows are
+// equal — is longer than any single window the watchdog would let a child live
+// under, and shorter than a session the user has given up on.
 export const CHILD_WAITER_TIMEOUT_FACTOR = 4
 
-// Resolves the ceiling in ms, or 0 for "no ceiling". `maxSubagentAgeMs = 0`
-// disables the inactivity watchdog; it disables this ceiling too, because the
-// two are one decision — a user who has switched off the dead-man's switch has
-// asked for runs that are not cut off by a clock, and a rescue timer that
-// fires anyway would contradict the setting rather than back it up.
-export function childWaiterTimeoutMs(maxAgeMs = getSettings().maxSubagentAgeMs) {
+// Resolves the ceiling in ms from the settings, or 0 for "no ceiling".
+//
+// Either window at 0 lifts the ceiling, and for the same reason each time: a
+// window at 0 is a child the watchdog will not end, and the waiter must not
+// expire a parent over a child that is still legally running.
+//
+//   maxSubagentAgeMs = 0      — the inactivity watchdog is off entirely. A user
+//                               who has switched off the dead-man's switch has
+//                               asked for runs that are not cut off by a clock,
+//                               and a rescue timer that fires anyway would
+//                               contradict the setting rather than back it up.
+//   maxSubagentToolCallMs = 0 — no ceiling while a subagent works. A child
+//                               inside a tool call is then never swept, so any
+//                               finite ceiling here would fire on it.
+//
+// Reads the settings object rather than calling watchdogLimit: src/watchdog.js
+// imports this module (liveChildSessionIDs), so the dependency cannot run both
+// ways. A settings object that carries no tool-call window at all is read as
+// "no window wider than the silence one" — absent is not the same statement as
+// an explicit 0, and defaulting it to unbounded would drop the rescue.
+export function childWaiterTimeoutMs(settings = getSettings()) {
+  const maxAgeMs = settings?.maxSubagentAgeMs
+  const toolCallMs = settings?.maxSubagentToolCallMs
   if (!Number.isFinite(maxAgeMs) || maxAgeMs <= 0) return 0
-  return maxAgeMs * CHILD_WAITER_TIMEOUT_FACTOR
+  if (Number.isFinite(toolCallMs) && toolCallMs <= 0) return 0
+  const widestWindowMs = Number.isFinite(toolCallMs) ? Math.max(maxAgeMs, toolCallMs) : maxAgeMs
+  return widestWindowMs * CHILD_WAITER_TIMEOUT_FACTOR
 }
 
 // Registers a waiter for `childSessionID` on behalf of `parentSessionID` and

@@ -21,6 +21,7 @@ import { resetState, pendingChildResults } from "../src/state.js"
 import { entryForSession } from "../src/registry.js"
 import { resetTurnNotices, timeoutSubagent } from "../src/hooks.js"
 import { teardownSubagent } from "../src/teardown.js"
+import { sweepWatchdog, _stopWatchdogForTests } from "../src/watchdog.js"
 import { resetProjectContext } from "../src/project.js"
 import { resetPermissionGuardCache } from "../src/config.js"
 import { setSettingsPath, resetSettings, getSettings } from "../src/settings.js"
@@ -52,6 +53,10 @@ const settingsFile = join(fixtureDir, "agent-intercom.json")
 setSettingsPath(settingsFile)
 
 beforeEach(() => {
+  // The sweeps below are driven by hand; a background tick landing on an entry
+  // this file back-dates would reap it out from under the assertions.
+  // plugin(ctx) re-arms the timer with the fresh client.
+  _stopWatchdogForTests()
   resetState()
   resetTurnNotices()
   resetProjectContext()
@@ -112,6 +117,8 @@ function assistantReply(text, tokens = 4321) {
 function settledOrPending(promise) {
   return Promise.race([promise, new Promise((r) => setTimeout(() => r("pending"), 5))])
 }
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // ---- the mechanism itself --------------------------------------------------
 
@@ -230,22 +237,111 @@ test("registration requires both session ids", () => {
 
 // ---- the ceiling -----------------------------------------------------------
 
-test("the waiter ceiling is a multiple of the inactivity window, and 0 disables it", () => {
-  assert.equal(childWaiterTimeoutMs(90000), 90000 * CHILD_WAITER_TIMEOUT_FACTOR)
+test("the waiter ceiling is a multiple of the WIDEST watchdog window", () => {
+  const bothWindows = { maxSubagentAgeMs: 90000, maxSubagentToolCallMs: 660000 }
+  assert.equal(childWaiterTimeoutMs(bothWindows), 660000 * CHILD_WAITER_TIMEOUT_FACTOR)
   assert.ok(
-    childWaiterTimeoutMs(90000) > 90000,
-    "the ceiling must outlast the watchdog it backs up, or it would fire first",
+    childWaiterTimeoutMs(bothWindows) > bothWindows.maxSubagentToolCallMs,
+    "the ceiling must outlast the WIDER of the two windows it backs up, or it would fire first",
   )
-  // maxSubagentAgeMs = 0 switches the watchdog off; the ceiling goes with it.
-  assert.equal(childWaiterTimeoutMs(0), 0)
-  assert.equal(childWaiterTimeoutMs(-1), 0)
-  assert.equal(childWaiterTimeoutMs(Number.NaN), 0)
-  // Called with no argument it reads the live setting, so the two knobs cannot
+  // The silence window is the base only while it is the wider of the two.
+  assert.equal(
+    childWaiterTimeoutMs({ maxSubagentAgeMs: 90000, maxSubagentToolCallMs: 30000 }),
+    90000 * CHILD_WAITER_TIMEOUT_FACTOR,
+  )
+  // A settings object with no tool-call window at all: absent is not an
+  // explicit 0, so the silence window carries the derivation alone.
+  assert.equal(
+    childWaiterTimeoutMs({ maxSubagentAgeMs: 90000 }),
+    90000 * CHILD_WAITER_TIMEOUT_FACTOR,
+  )
+  // Called with no argument it reads the live settings, so the knobs cannot
   // drift apart.
-  assert.equal(childWaiterTimeoutMs(), getSettings().maxSubagentAgeMs * CHILD_WAITER_TIMEOUT_FACTOR)
+  const live = getSettings()
+  assert.equal(
+    childWaiterTimeoutMs(),
+    Math.max(live.maxSubagentAgeMs, live.maxSubagentToolCallMs) * CHILD_WAITER_TIMEOUT_FACTOR,
+  )
+})
+
+// The defect the derivation above repairs: at the defaults, 4 × maxSubagentAgeMs
+// is 360 000 ms while a child inside a tool call may legally be silent for
+// 660 000 ms. A ceiling under the working window hands the parent `expired` for
+// a child that is still running and that no sweep has touched.
+test("the derived ceiling is never shorter than the window a working child lives under", () => {
+  const { maxSubagentAgeMs, maxSubagentToolCallMs } = getSettings()
+  assert.ok(
+    maxSubagentToolCallMs > maxSubagentAgeMs,
+    "the defaults are the case the defect lived in: the working window is the wider one",
+  )
+  assert.ok(childWaiterTimeoutMs() > maxSubagentToolCallMs)
+  assert.ok(
+    childWaiterTimeoutMs() > maxSubagentAgeMs * CHILD_WAITER_TIMEOUT_FACTOR,
+    "the silence window alone no longer decides the ceiling",
+  )
+})
+
+test("either window at 0 lifts the ceiling", () => {
+  // maxSubagentAgeMs = 0 switches the watchdog off; the ceiling goes with it.
+  assert.equal(childWaiterTimeoutMs({ maxSubagentAgeMs: 0, maxSubagentToolCallMs: 660000 }), 0)
+  assert.equal(childWaiterTimeoutMs({ maxSubagentAgeMs: -1, maxSubagentToolCallMs: 660000 }), 0)
+  assert.equal(
+    childWaiterTimeoutMs({ maxSubagentAgeMs: Number.NaN, maxSubagentToolCallMs: 660000 }),
+    0,
+  )
+  // maxSubagentToolCallMs = 0 means a working child is never swept; a finite
+  // ceiling here would expire its parent over a child that is legally running.
+  assert.equal(childWaiterTimeoutMs({ maxSubagentAgeMs: 90000, maxSubagentToolCallMs: 0 }), 0)
+
   writeFileSync(settingsFile, JSON.stringify({ maxSubagentAgeMs: 0 }))
   resetSettings()
   assert.equal(childWaiterTimeoutMs(), 0, "switching off the watchdog switches off the ceiling")
+  writeFileSync(settingsFile, JSON.stringify({ maxSubagentToolCallMs: 0 }))
+  resetSettings()
+  assert.equal(childWaiterTimeoutMs(), 0, "an unbounded working child gets no finite ceiling")
+})
+
+// The defect end to end, on the real sweep: a child inside a tool call, its
+// parent blocked on the derived ceiling. The two windows are scaled down so the
+// whole run fits in a test; their RATIO is the one the defaults have.
+test("a parent waiting on a child inside a long tool call is not expired before the child's own limit", async () => {
+  writeFileSync(settingsFile, JSON.stringify({ maxSubagentAgeMs: 25, maxSubagentToolCallMs: 250 }))
+  resetSettings()
+  assert.equal(childWaiterTimeoutMs(), 250 * CHILD_WAITER_TIMEOUT_FACTOR)
+
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  const childID = created[0]
+  const entry = entryForSession(childID)
+
+  // The child's last sign of life IS the tool call: opencode publishes nothing
+  // until it returns.
+  await hooks["tool.execute.before"]({ tool: "bash", sessionID: childID, callID: "c1" })
+  // The derived ceiling, not an injected one — this is the value under test.
+  const promise = registerChildWaiter(childID, PARENT)
+
+  // Past 4 × maxSubagentAgeMs (100 ms — the old derivation, and the moment the
+  // parent used to be told `expired`) and many times past the silence window.
+  await sleep(150)
+  await sweepWatchdog()
+  assert.ok(entryForSession(childID), "a child inside its tool-call window must not be swept")
+  assert.equal(
+    await settledOrPending(promise),
+    "pending",
+    "and its parent must not be freed while it is still legally working",
+  )
+
+  // The child's OWN limit is what ends the wait, and the parent hears which:
+  // `timeout` naming the window that fired, never `expired`.
+  const startedAt = Date.now() - 300
+  entry.toolCallAt = startedAt
+  entry.lastActivityAt = startedAt
+  await sweepWatchdog()
+
+  const outcome = await promise
+  assert.equal(outcome.status, "timeout")
+  assert.match(outcome.detail, /maxSubagentToolCallMs 250 ms/)
 })
 
 test("the ceiling frees the parent as `expired` and drops the waiter", async () => {

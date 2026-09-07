@@ -36,7 +36,7 @@ import { sweepWatchdog, _stopWatchdogForTests } from "../src/watchdog.js"
 import { resetProjectContext } from "../src/project.js"
 import { createPermissionGuard, resetPermissionGuardCache } from "../src/config.js"
 import { setSettingsPath, resetSettings, getSettings } from "../src/settings.js"
-import { hasLiveChildren, settleChildWaiter } from "../src/childwait.js"
+import { hasLiveChildren, registerChildWaiter, settleChildWaiter } from "../src/childwait.js"
 import {
   AGENTS,
   NESTED_SPAWN_TARGETS,
@@ -736,6 +736,28 @@ test("a primary parent still gets its wake notice — the drop is scoped to a su
     notices.map((n) => n.id),
     [PRIMARY],
   )
+})
+
+test("a detached child's late completion wakes its still-tracked parent", async () => {
+  const { ctx, notices } = makeCtx({ messages: assistantReply("THE LATE RESULT") })
+  const hooks = await plugin(ctx)
+  subagentCaller("ses_planner", "planner")
+
+  // An untracked child is the rescue-ceiling case. Its waiter resolves with
+  // `expired`, but the record stays detached so a child session that appears
+  // or finishes later is still ordered before the parent's DELETE.
+  const childID = "ses_late_child"
+  const waiter = registerChildWaiter(childID, "ses_planner", { timeoutMs: 5 })
+  assert.equal((await waiter).status, "expired")
+
+  // The delayed child is now visible to the wake path. The old path settled
+  // the detached record as a no-op and then dropped this notice because the
+  // parent still had a registry entry.
+  upsertSession(childID, { agent: "researcher", prompt: "late lookup", parentID: "ses_planner" })
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: childID } } })
+
+  assert.deepEqual(notices.map((notice) => notice.id), ["ses_planner"])
+  assert.match(notices[0].text, /THE LATE RESULT/)
 })
 
 // ---- carry-forward 2: the nested child is registered at session.created ----

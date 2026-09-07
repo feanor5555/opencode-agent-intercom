@@ -219,15 +219,31 @@ export function nestedSpawnTargets(agent) {
   return NESTED_SPAWN_TARGETS[agent] ?? NO_NESTED_TARGETS
 }
 
-// The subagent roles that may delegate, derived from the permission maps below
-// rather than listed by hand so the prompt a role is given and the tool it
-// actually has cannot drift apart. A project that overrides a role's whole
-// `permission` map moves the runtime gate (checkSpawnPermission reads the
-// resolved config) without moving this set — the same limitation the outline
-// and TODO role sets in hooks.js already carry.
+// Whether `agent` is one of this plugin's SUBAGENT roles — `mode: "subagent"`
+// in the map below. False for the orchestrator, for opencode's own agents and
+// for a name nothing here defines. The mode is the plugin's own structure and
+// no project config moves it, so this is a static answer everywhere.
+export function isSubagentRole(agent) {
+  return AGENTS[agent]?.mode === "subagent"
+}
+
+// This plugin's OWN default answer to whether a subagent role may delegate,
+// derived from the permission maps below rather than listed by hand so the
+// role's default prompt and the tool it holds by default cannot drift apart.
+//
+// It is rung 2 of the decision, not the decision. The resolved config decides
+// (config.js `resolveSpawnPermission`, rung 1), and every place that acts on the
+// answer at run time — the spawn gate in tools.js and the system prompt in
+// hooks.js — asks that function, which falls through to exactly this map when
+// the config carries no `permission.spawn` for the role.
+//
+// So this is for the places that run with NO resolved config to ask: the
+// reference and default prompt FILES written by `bin/init-prompts.js`
+// (promptsfile.js), which are written outside an opencode instance and describe
+// the plugin's defaults, and the prompt-file contract probes in overrides.js
+// that are held against them.
 export function mayDelegate(agent) {
-  const def = AGENTS[agent]
-  return Boolean(def) && def.mode === "subagent" && def.permission?.spawn !== "deny"
+  return isSubagentRole(agent) && AGENTS[agent].permission?.spawn !== "deny"
 }
 
 // Every web tool this plugin gates, each denied: opencode's built-in

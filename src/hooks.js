@@ -85,7 +85,8 @@ import {
   PACKAGE_WARN_SHARE,
   PACKAGE_REFUSE_SHARE,
 } from "./settings.js"
-import { nestedSpawnTargets, SPAWNABLE_ROLES, mayDelegate, defaultAgentName } from "./agents.js"
+import { nestedSpawnTargets, SPAWNABLE_ROLES, isSubagentRole, defaultAgentName } from "./agents.js"
+import { resolveSpawnPermission } from "./config.js"
 import { overrideBlock, overrideToastText } from "./overrides.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
@@ -112,7 +113,7 @@ import {
   waitForSessionQuiescence,
   SUBAGENT_SESSION_TITLE_MARKER,
 } from "./teardown.js"
-import { settleChildWaiter, hasLiveChildren } from "./childwait.js"
+import { settleChildWaiter, detachedParentOf, hasLiveChildren } from "./childwait.js"
 import {
   completionNotice,
   errorNotice,
@@ -309,8 +310,9 @@ export function createTransformSystem(client) {
       // not otherwise.
       const projectMd = projectMdBlock(scopeDir) || ""
       // Whether THIS subagent gets the delegation guide and the reduced limits
-      // block that goes with it.
-      const delegates = isSubagent && delegatesNested(entry.agent)
+      // block that goes with it. Decided by the runtime spawn authority, so the
+      // role is told it delegates exactly when a spawn of its would be admitted.
+      const delegates = isSubagent && (await delegatesNested(client, entry.agent))
       let limits = ""
       if (!isSubagent) {
         // Primary (non-subagent) turn. Measurement only — record the current
@@ -406,6 +408,7 @@ export function createTransformSystem(client) {
           projectMd,
           agentsMd: slices.agentsMd || "",
           endlessPausedReason: pausedReason,
+          delegatingRoles: await delegatingRolesAmong(client, SPAWNABLE_ROLES),
         })
       } else if (delegates) {
         // A delegating subagent gets its own, much smaller block: it has to
@@ -416,6 +419,7 @@ export function createTransformSystem(client) {
           projectMd,
           agentsMd: slices.agentsMd || "",
           snapshot: projectContext(scopeDir),
+          delegatingRoles: await delegatingRolesAmong(client, nestedSpawnTargets(entry.agent)),
         })
       }
 
@@ -635,7 +639,7 @@ export function createTransformMessages(client) {
     let volatile
     if (entry) {
       volatile = await contextLimitNotice(client, entry)
-      if (!aborted.has(sessionID) && delegatesNested(entry.agent)) {
+      if (!aborted.has(sessionID) && (await delegatesNested(client, entry.agent))) {
         volatile += nestedQuotaNotice(sessionID)
       }
     } else {
@@ -940,6 +944,7 @@ function formatLimitsNotice({
   projectMd = "",
   agentsMd = "",
   endlessPausedReason = "",
+  delegatingRoles = new Set(),
 } = {}) {
   const s = getSettings()
   const sub = s.maxSubagents > 0 ? `${s.maxSubagents}` : "unlimited"
@@ -948,7 +953,7 @@ function formatLimitsNotice({
     .map((agent) => {
       const budget = contextBudgetFor(agent)
       if (budget <= 0) return `${agent} off`
-      const fixed = fixedOverheadFor(agent, { projectMd, agentsMd, snapshot })
+      const fixed = fixedOverheadFor(agent, { projectMd, agentsMd, snapshot, delegatingRoles })
       const headroom = Math.max(0, budget - fixed)
       return `${agent} ${fmtTokens(budget)} (−${fmtTokens(fixed)} fixed → ${fmtTokens(headroom)})`
     })
@@ -982,18 +987,71 @@ function formatLimitsNotice({
 }
 
 // Whether a subagent of this role actually delegates: two conditions, both
-// necessary — the role must allow `spawn`, and nesting must not be switched off
-// installation-wide. With `maxNestedSpawns = 0` every nested spawn is refused
-// before a session is created, so a role that may delegate still cannot: it is
-// told it does not delegate, which is what is true of it, and neither the
-// delegation guide nor the limits block nor the quota line is paid for.
+// necessary — the RESOLVED config must permit `spawn` for the role, and nesting
+// must not be switched off installation-wide.
+//
+// The spawn half is asked of `resolveSpawnPermission` (config.js), the very
+// function the spawn gate calls when the role makes the call, and not of the
+// static role map. That is what keeps the prompt and the gate from disagreeing:
+// with a project-level `agent.<role>.permission.spawn = "deny"` the static map
+// still reads "may delegate", so the role would be handed the delegation guide,
+// the limits block and the quota line on every single turn while every spawn it
+// then makes is refused — context paid for a prompt that lies to the role.
+// The direction is fixed: the prompt follows the gate, the gate is never
+// loosened to match the prompt.
+//
+// Async for that reason, and cheaply so: the resolved config is fetched once
+// per process and cached at module scope in config.js, so this adds no request
+// per turn. A config that cannot be read at all falls through inside
+// `resolveSpawnPermission` to this plugin's own role map — the answer the
+// prompt side had before — so a read failure changes no prompt.
+//
+// With `maxNestedSpawns = 0` every nested spawn is refused before a session is
+// created, so a role that may spawn still cannot: it is told it does not
+// delegate, which is what is true of it, and neither the delegation guide nor
+// the limits block nor the quota line is paid for.
 //
 // One predicate for both halves of what a delegating subagent is told — the
 // system prompt's guide-and-limits choice and the quota line on the message —
 // so the two cannot come apart and hand a role a figure for a quota it was
 // never told it has.
-function delegatesNested(agent) {
-  return mayDelegate(agent) && getSettings().maxNestedSpawns > 0
+//
+// The role must be a subagent role: `resolveSpawnPermission` answers "allowed"
+// for the orchestrator too (its map carries no `spawn` key), and none of the
+// three blocks belongs in a primary's prompt.
+//
+// The target set is the fourth condition, and it is the same shape of promise:
+// the gate's second check (tools.js nestedSpawnRefusal) refuses every target a
+// role's NESTED_SPAWN_TARGETS entry does not name, so a role with an empty set
+// can spawn nothing however its `permission.spawn` reads — and the delegation
+// guide would name it a target it cannot have (delegationGuideFor falls back to
+// the researcher block for a role the target table does not key). For the roles
+// as they ship the condition is inert: the six with `spawn` all have a target
+// and the three without have neither. It bites only where a project opens
+// `spawn` on a role the target table does not carry, which is exactly the case
+// reading the resolved config makes reachable here.
+async function delegatesNested(client, agent) {
+  if (!isSubagentRole(agent)) return false
+  if (getSettings().maxNestedSpawns <= 0) return false
+  if (nestedSpawnTargets(agent).length === 0) return false
+  return (await resolveSpawnPermission(client, agent)) === null
+}
+
+// Which of `agents` actually delegate, as a Set — the predicate above resolved
+// once for a whole list, so the limits blocks below stay synchronous text
+// builders with every decision already made.
+//
+// The limits blocks need it per TYPE and not for the session's own role: the
+// fixed overhead a spawn of a type carries depends on which of the two spawn
+// guides that type is given, and a type whose `spawn` the project denies is
+// given the shorter one. Without this the figure would be the overhead of a
+// prompt that type never receives.
+async function delegatingRolesAmong(client, agents) {
+  const delegating = new Set()
+  for (const agent of agents) {
+    if (await delegatesNested(client, agent)) delegating.add(agent)
+  }
+  return delegating
 }
 
 // The reduced limits block a DELEGATING subagent is shown, in place of the
@@ -1020,7 +1078,7 @@ function delegatesNested(agent) {
 // counts down WITHIN the run off the caller's registry entry, so it rides on
 // the last user message instead (nestedQuotaNotice, delivered by
 // transformMessages).
-function formatDelegationLimitsNotice(agent, { projectMd, agentsMd, snapshot }) {
+function formatDelegationLimitsNotice(agent, { projectMd, agentsMd, snapshot, delegatingRoles }) {
   const own = contextBudgetFor(agent)
   const targets = nestedSpawnTargets(agent)
   const targetLine =
@@ -1032,7 +1090,7 @@ function formatDelegationLimitsNotice(agent, { projectMd, agentsMd, snapshot }) 
             if (budget <= 0) {
               return `${target} off (no context budget set — the package gate does not size against it)`
             }
-            const fixed = fixedOverheadFor(target, { projectMd, agentsMd, snapshot })
+            const fixed = fixedOverheadFor(target, { projectMd, agentsMd, snapshot, delegatingRoles })
             const headroom = Math.max(0, budget - fixed)
             return `${target} ${fmtTokens(budget)} (−${fmtTokens(fixed)} fixed → ${fmtTokens(headroom)})`
           })
@@ -1081,15 +1139,17 @@ function nestedQuotaNotice(sessionID) {
 // not resolved on a primary turn. Nor is the delegation limits block above:
 // it is built from the caller's live registry entry, which does not exist on
 // the turn this estimate is made, and at ~150 tokens it moves no verdict.
-function fixedOverheadFor(agent, { projectMd, agentsMd, snapshot }) {
+function fixedOverheadFor(agent, { projectMd, agentsMd, snapshot, delegatingRoles }) {
   // The same assembly the transform injects, so the estimate cannot count a
   // block the subagent is not given: the delegation block a role actually gets
-  // depends on the nesting setting too, and the two blocks differ by ~250
-  // tokens, which is a real share of a 100k budget.
+  // depends on the nesting setting and on the resolved config's
+  // `permission.spawn` for that type, and the two blocks differ by ~250 tokens,
+  // which is a real share of a 100k budget. `delegatingRoles` carries both
+  // conditions, already resolved by delegatingRolesAmong.
   let text =
     guideBlocks({
       agent,
-      delegates: mayDelegate(agent) && getSettings().maxNestedSpawns > 0,
+      delegates: delegatingRoles?.has(agent) === true,
     }) +
     projectMd +
     snapshot
@@ -1450,6 +1510,10 @@ async function onSessionIdle({ sessionID }, client) {
       handle: e.handle,
       parentID: e.parentID,
       agent: e.agent,
+      // A detached waiter already freed its nested spawn with `expired`, so
+      // its eventual result needs the one notice route that may target a
+      // tracked subagent. Capture the waiter address before settlement drops it.
+      lateParentID: detachedParentOf(sessionID),
       taskId: e.taskId,
       directory: e.directory,
       packageTokens: e.packageTokens,
@@ -1559,6 +1623,7 @@ async function onSessionIdle({ sessionID }, client) {
         // about to take.
         retain,
       ),
+      { allowTrackedSubagent: wake.lateParentID === parentID },
     )
     showToast(client, {
       title: "agent-intercom",

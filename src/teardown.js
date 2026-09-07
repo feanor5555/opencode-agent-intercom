@@ -24,7 +24,7 @@ import {
   updateSessionTitle,
 } from "./client.js"
 import { getSettings, retentionOffered } from "./settings.js"
-import { settleChildWaiter, liveChildSessionIDs } from "./childwait.js"
+import { settleChildWaiter, detachedParentOf, liveChildSessionIDs } from "./childwait.js"
 import {
   aborted,
   pendingSessionQuiescence,
@@ -165,7 +165,12 @@ export function signalSessionIdle(sessionID) {
 // still carries the deleted old primary. The routing decision is synchronous
 // (routeParentNotice in registry.js), so it cannot tear against the handoff's
 // own drain transitions.
-export async function postParentNotice(client, parentID, notice) {
+export async function postParentNotice(
+  client,
+  parentID,
+  notice,
+  { allowTrackedSubagent = false } = {},
+) {
   // A wake notice is for a PRIMARY. A parent that is itself a subagent got its
   // child through the blocking nested spawn, where the child's ending IS the
   // return value of the parent's own `spawn` tool call — so the same ending
@@ -176,12 +181,19 @@ export async function postParentNotice(client, parentID, notice) {
   // is unblocked the only thing left in its one-shot life is the reply it is
   // already writing.
   //
+  // A waiter's ceiling is the one exception. It resolves the nested spawn with
+  // `expired` but leaves the child detached so the parent's DELETE cannot
+  // cascade over a still-running session. If that child later ends, its result
+  // has no blocked tool call left to enter and must be posted to the still
+  // tracked subagent directly; the ending path opts into that route with
+  // `allowTrackedSubagent`.
+  //
   // Checked here rather than at each of the three notice paths (completion in
   // hooks.js, error/timeout in teardownSubagent below, the denial-loop notice
   // in hooks.js) because this function is the one door all three go through and
-  // the rule is the same for all three. Inert for every subagent today: a
-  // parentID only becomes a subagent's id through a nested spawn.
-  if (entryForSession(parentID)) {
+  // the rule is the same for all three. Inert for every subagent except the
+  // detached-child late-result case above.
+  if (entryForSession(parentID) && !allowTrackedSubagent) {
     log("parent notice dropped: the parent is a subagent and takes its child's ending as a tool result", {
       parentID,
     })
@@ -351,6 +363,10 @@ export async function teardownSubagent(
   const quiescence = markAborted && !quiesced ? waitForSessionQuiescence(sessionID) : null
   reservePendingDelivery()
   if (markAborted) aborted.add(sessionID)
+  // Capture this before settleChildWaiter drops a detached record. An active
+  // waiter must keep the ordinary no-duplicate rule; only a late ending after
+  // `expired` may wake a parent that is still tracked as a subagent.
+  const detachedParentID = detachedParentOf(sessionID)
   try {
     // FIRST, before any network I/O: the waiting session is blocked inside a
     // tool call, and posting a notice or deleting a session is no reason to
@@ -363,7 +379,9 @@ export async function teardownSubagent(
     })
     if (notice != null && parentID) {
       try {
-        await postParentNotice(client, parentID, notice)
+        await postParentNotice(client, parentID, notice, {
+          allowTrackedSubagent: detachedParentID === parentID,
+        })
         if (toast) showToast(client, toast)
       } catch (err) {
         log(`${tag}postNotice failed`, { handle, parentID, err: errMsg(err) })

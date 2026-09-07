@@ -298,8 +298,13 @@ const DONE_MARKER_AGENTS = [
   "designer",
 ]
 
-// The roles whose permission map allows `spawn` (agents.js mayDelegate), i.e.
-// the ones the auto path gives a delegation block to. Same pinning.
+// The roles this plugin's OWN permission map allows `spawn` (agents.js
+// mayDelegate), i.e. the ones the default prompt FILES on disk carry a
+// delegation block for — those files are written offline by bin/init-prompts.js
+// and know no resolved config. The live prompt decides per session against the
+// resolved config instead (hooks.js delegatesNested), so this list is the right
+// one for a probe held against a file and not for what a running role is told.
+// Same pinning.
 const DELEGATING_AGENTS = [
   "planner",
   "coder",

@@ -167,49 +167,70 @@ export function createPermissionGuard(client) {
     }
   }
 
-  // Whether `callerAgent` may make a NESTED spawn — one whose caller is itself
-  // a subagent. Returns null when it may, a reason string when it may not.
-  //
-  // Fail-CLOSED, and that is the one thing separating it from
-  // checkToolPermission above. That check is a defence-in-depth re-deny sitting
-  // behind a schema strip which has already hidden the tool from the model, so
-  // a config it cannot read costs nothing and it answers "allowed". Here the
-  // permission map IS the decision — the schema strip is the model's view of
-  // its own tool list, not a caller-side gate, and no third layer stands behind
-  // this one — so an unreadable config, a role the config does not carry and a
-  // role this plugin does not define all have to resolve to "no".
-  //
-  // Resolution, absence deciding differently at each rung:
-  //   1. the live config's `agent.<role>.permission.spawn` when it carries a
-  //      decision — a project override is honoured in both directions, the way
-  //      checkToolPermission honours one;
-  //   2. otherwise this plugin's own role definition, read with opencode's
-  //      semantics: an explicit "deny" denies, an ABSENT key allows (that
-  //      absence is exactly how the delegating roles are granted `spawn`);
-  //   3. otherwise — a role neither side defines — deny. A project's own agent
-  //      type can therefore not nest; the orchestrator spawns for it.
+  // The nested-spawn decision, bound to this guard's client. The function it
+  // delegates to is exported below and is the single authority — see there.
   async function checkSpawnPermission(callerAgent) {
-    if (!callerAgent) return "the calling agent could not be identified"
-    let decision
-    try {
-      const config = await loadConfig(client)
-      decision = config?.agent?.[callerAgent]?.permission?.spawn
-    } catch (err) {
-      log("checkSpawnPermission: config read failed", errMsg(err))
-    }
-    if (decision === undefined && Object.hasOwn(AGENTS, callerAgent)) {
-      decision = AGENTS[callerAgent].permission?.spawn ?? "allow"
-    }
-    if (decision === undefined) {
-      return `agent "${callerAgent}" is not a role this plugin defines, so it cannot spawn`
-    }
-    if (decision === "deny") {
-      return `agent "${callerAgent}" is not permitted to call "spawn" (permission.spawn)`
-    }
-    return null
+    return resolveSpawnPermission(client, callerAgent)
   }
 
   return { checkTaskPermission, checkToolPermission, checkSpawnPermission }
+}
+
+// Whether `callerAgent` may make a NESTED spawn — one whose caller is itself
+// a subagent. Returns null when it may, a reason string when it may not.
+//
+// THE authority on that question, and it is asked from both sides, so the two
+// cannot disagree:
+//   - the spawn gate (tools.js, through the guard's checkSpawnPermission)
+//     calls it to decide whether the spawn happens;
+//   - the prompt side (hooks.js `delegatesNested`) calls it directly to decide
+//     what the role is TOLD — whether it gets the delegation guide, the
+//     delegation limits block and the per-run quota line.
+// Asking the static role map on the prompt side instead would let a project's
+// `agent.<role>.permission.spawn = "deny"` leave the role carrying all three
+// every turn while every spawn it then makes is refused.
+//
+// Exported as a plain function rather than only as a guard method because the
+// prompt side holds a `client` and no guard; the resolved config is cached at
+// module scope, so calling it from a second place costs no second request.
+//
+// Fail-CLOSED, and that is the one thing separating it from
+// checkToolPermission above. That check is a defence-in-depth re-deny sitting
+// behind a schema strip which has already hidden the tool from the model, so
+// a config it cannot read costs nothing and it answers "allowed". Here the
+// permission map IS the decision — the schema strip is the model's view of
+// its own tool list, not a caller-side gate, and no third layer stands behind
+// this one — so an unreadable config, a role the config does not carry and a
+// role this plugin does not define all have to resolve to "no".
+//
+// Resolution, absence deciding differently at each rung:
+//   1. the live config's `agent.<role>.permission.spawn` when it carries a
+//      decision — a project override is honoured in both directions, the way
+//      checkToolPermission honours one;
+//   2. otherwise this plugin's own role definition, read with opencode's
+//      semantics: an explicit "deny" denies, an ABSENT key allows (that
+//      absence is exactly how the delegating roles are granted `spawn`);
+//   3. otherwise — a role neither side defines — deny. A project's own agent
+//      type can therefore not nest; the orchestrator spawns for it.
+export async function resolveSpawnPermission(client, callerAgent) {
+  if (!callerAgent) return "the calling agent could not be identified"
+  let decision
+  try {
+    const config = await loadConfig(client)
+    decision = config?.agent?.[callerAgent]?.permission?.spawn
+  } catch (err) {
+    log("resolveSpawnPermission: config read failed", errMsg(err))
+  }
+  if (decision === undefined && Object.hasOwn(AGENTS, callerAgent)) {
+    decision = AGENTS[callerAgent].permission?.spawn ?? "allow"
+  }
+  if (decision === undefined) {
+    return `agent "${callerAgent}" is not a role this plugin defines, so it cannot spawn`
+  }
+  if (decision === "deny") {
+    return `agent "${callerAgent}" is not permitted to call "spawn" (permission.spawn)`
+  }
+  return null
 }
 
 // `permission.task` is either a bare decision string or a per-agent map with an

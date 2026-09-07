@@ -29,7 +29,9 @@
 // (`liveChildSessionIDs`), exempt blocked parents in `src/watchdog.js`
 // (`liveChildSessionIDs`), and settle endings in the spawn, hook, abort and
 // teardown paths. `hasChildWaiter` and `waitingParentOf` remain exported for
-// direct inspection, but have no production callers; tests exercise them.
+// direct inspection, while `detachedParentOf` lets an ending path preserve the
+// late-result addressee before settlement drops the detached record; tests
+// exercise the inspection reads.
 //
 // Every function in this module is SYNCHRONOUS and takes no lock, so it can be
 // called from inside a `registryMutex.runExclusive` section without nesting the
@@ -225,8 +227,9 @@ export function registerChildWaiter(childSessionID, parentSessionID, { timeoutMs
         // running server-side, so the record is DETACHED rather than dropped:
         // the parent's own teardown still has to end this session before its
         // DELETE cascades over it. The child's own ending path, if one ever
-        // fires, finds a settled record, drops it and routes its result to the
-        // parent as an ordinary wake notice.
+        // fires, finds a settled record and drops it; the ending path reads
+        // detachedParentOf first and delivers the late result to that parent
+        // as a wake notice even though the parent is still a tracked subagent.
         record.detached = true
         if (
           record.settle({
@@ -252,16 +255,17 @@ export function registerChildWaiter(childSessionID, parentSessionID, { timeoutMs
 }
 
 // Settles the waiter for `childSessionID`, if there is one, and drops it.
-// Returns true when this call was the one that settled it — every ending path
-// calls this unconditionally, so the return value is also the answer to "was
-// this child being waited on?", which is how a caller decides whether the
-// result still needs to go to the parent as a wake notice.
+// Returns true when this call was the one that settled an active waiter. Every
+// ending path calls this unconditionally. A detached record returns false
+// because its promise already resolved with `expired`; ending paths use
+// detachedParentOf before this call when they need to route the late result.
 //
 // A DETACHED record (the ceiling fired, the parent was freed, the child was
-// not) is dropped here and answers false: the parent already has its outcome,
-// so this ending is a wake notice like any other child's, and the record's one
-// remaining job — keeping the child visible to the teardown ordering — ends
-// with the ending that is now being reported.
+// not) is dropped here and answers false: its promise already carries the
+// `expired` outcome. The ending path reads `detachedParentOf` immediately
+// before this call and uses that preserved address to deliver the late result
+// as a wake notice, so the result is not lost merely because the parent is a
+// tracked subagent again.
 //
 // Safe to call for an unwaited child, for an already settled one, and twice
 // from the same path.
@@ -285,6 +289,17 @@ export function settleChildWaiter(childSessionID, outcome = {}) {
     })
   }
   return settled
+}
+
+// The parent ID held by a DETACHED waiter, or undefined when the child is not
+// detached. Ending paths call this before settleChildWaiter drops the record so
+// they can opt into the one wake-notice route that is valid for a tracked
+// subagent parent. An active waiter deliberately returns undefined: its result
+// still belongs in the blocked spawn tool call and must not be posted as well.
+export function detachedParentOf(childSessionID) {
+  if (!childSessionID) return undefined
+  const record = pendingChildResults.get(childSessionID)
+  return record?.detached ? record.parentSessionID : undefined
 }
 
 // True while `childSessionID` is a child somebody is blocked on. A detached

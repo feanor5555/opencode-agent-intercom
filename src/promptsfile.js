@@ -446,7 +446,9 @@ export function renderOpencodeDefaultFile(agent) {
   if (mayDelegate(agent)) {
     addNotes.push(
       `  - SUBAGENT_NO_SPAWN_GUIDE stands in for ${delegationGuideNameFor(agent)}` +
-        " while nested spawning is switched off (maxNestedSpawns = 0)",
+        " wherever this role does not actually delegate: with nested spawning" +
+        " switched off (maxNestedSpawns = 0), or with `spawn` denied for this" +
+        " role in the resolved opencode config",
     )
   }
   if (agent === "orchestrator") {

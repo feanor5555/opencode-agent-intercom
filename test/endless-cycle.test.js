@@ -1,22 +1,21 @@
 // The endless-mode cycle executor (src/endless.js): the quiesce wait and its
-// timeout on virtual time, the save against a REAL temp directory through the
-// real todofile writer, the read-back confirmation, the kickoff block, and the
-// bounds that end the loop.
+// timeout on virtual time, prepare / arm / wind-down turn / settle / confirm,
+// the V1–V7 confirmation each failing in isolation with a snapshot restore and
+// no handoff, the fallback that starts the wind-down subagent when the permit
+// went unconsumed, the settlement gate, the explicit-empty and no-progress
+// stops, and the kickoff block that carries the todo file's own text.
 //
 // runEndlessCycle is fully dependency-injected, so the whole cycle runs here
-// with no client, no network and no timers: `sleep` and `now` are virtual and
-// `performHandoff` is a recording fake. The one thing that is NOT faked is the
-// todo file — the save step's whole point is that the write reached the disk,
-// so it goes through src/todofile.js against a fresh temp directory, wired the
-// way handoffwiring.js wires it.
+// with no client, no network and no timers: `sleep`/`now` are virtual and every
+// live dependency is a recording fake. The parse and the confirmation are the
+// REAL ones (parseTasks / splitSections / interpretWindDownReply), so the
+// fixtures below are real fenced todo files and the V-checks read them exactly
+// as production does.
 //
 // Run: node --test --test-timeout=5000 test/endless-cycle.test.js
 
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 
 import { resetState, endlessProgress } from "../src/state.js"
 import {
@@ -25,659 +24,435 @@ import {
   releaseEndless,
   setEndlessCooldown,
   endlessCooldownActive,
-  isEndlessFrozen,
+  pauseEndless,
+  isEndlessPaused,
+  recordEndlessCycle,
 } from "../src/registry.js"
 import {
   runEndlessCycle,
+  verifyWindDown,
   endlessKickoffBlock,
+  cutTodoText,
+  KICKOFF_TODO_MAX_CHARS,
   ENDLESS_MAX_STALLED_CYCLES,
-  KICKOFF_TASKS_MAX,
-  KICKOFF_TASK_FIELD_MAX_CHARS,
 } from "../src/endless.js"
-import {
-  addTask,
-  listOpen,
-  findTodoFile,
-  TodoFileMissingError,
-  CANONICAL_TODO_NAME,
-} from "../src/todofile.js"
+import { parseTasks, splitSections } from "../src/todofile.js"
+import { interpretWindDownReply } from "../src/handoff.js"
 
 const SID = "ses-endless-cycle"
+const NEW_SID = "ses-endless-cycle-new"
 
 test.beforeEach(() => resetState())
 
-function tempProject(files = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "intercom-endless-"))
-  for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content)
-  return dir
+// A real fenced todo file: human prose outside the markers, task lines inside.
+const OUT_HEAD = "# Project notes\n\nSome prose a human wrote.\n"
+function fenced(taskLines, nextId) {
+  return (
+    OUT_HEAD +
+    "\n## Intercom tasks\n<!-- intercom:begin -->\n" +
+    taskLines.join("\n") +
+    `\n<!-- intercom: next-id ${nextId} -->\n<!-- intercom:end -->\n`
+  )
 }
 
-const REPLY = [
-  "## OPEN POINTS",
-  "",
-  "- Finish the migration script",
-  "  accept: `npm run migrate` exits 0",
-  "- Write the rollback procedure",
-  "  accept: the file exists",
-].join("\n")
+const SNAP = fenced(["- T1: do the thing"], "T2")
+// V3 differs, V4 outside identical, V5/V6 hold: T1 kept, T2 added.
+const FRESH = fenced(["- T1: do the thing", "- T2: another open item"], "T3")
 
-// The todo-file deps exactly as handoffwiring.js binds them: a directory with
-// NO todo file is the greenfield state addTask creates over and reads as [];
-// "several todo files" and "not a regular file" propagate.
-function todoDeps(directory) {
-  return {
-    addTask: (point) => addTask(directory, point),
-    listOpen: () => {
-      try {
-        return listOpen(directory)
-      } catch (err) {
-        if (err instanceof TodoFileMissingError && err.kind === "missing") return []
-        throw err
-      }
-    },
-    todoFileName: () => {
-      try {
-        return findTodoFile(directory).name
-      } catch {
-        return ""
-      }
-    },
-  }
+function settled(status = "completed") {
+  return Promise.resolve({ status, childSessionID: "ses-child", parentSessionID: SID })
 }
 
-// A cycle driven with the real latch, virtual time and a recording handoff.
-// `overrides` replaces any dep; `state` collects what the fakes observed.
-function makeCycle({ directory, overrides = {} } = {}) {
-  const state = {
-    handoffCalls: [],
-    toasts: [],
-    paused: [],
-    slept: 0,
-    clock: 0,
-    recorded: [],
-  }
+// The new-API deps, coherent by default toward a "complete" outcome. Every
+// field is overridable so each test can fail exactly one gate.
+function baseIo(overrides = {}) {
+  const log = []
   markEndlessPending(SID)
   const io = {
+    _log: log,
     primarySessionID: SID,
     claim: () => claimPendingEndless(SID),
     release: () => releaseEndless(SID),
     setCooldown: () => setEndlessCooldown(SID),
-    isQuiesced: async () => true,
+    dropRetained: async () => log.push("dropRetained"),
     countActive: () => 0,
-    requestOpenPoints: async () => REPLY,
+    isQuiesced: async () => {
+      log.push("isQuiesced")
+      return true
+    },
+    prepare: () => {
+      log.push("prepare")
+      return {
+        fileName: "TODO.md",
+        content: SNAP,
+        hash: "sha-snap",
+        tasks: parseTasks(SNAP),
+        driftCount: 0,
+      }
+    },
+    armWindDown: () => {
+      log.push("arm")
+      return { token: "permit-token" }
+    },
+    disarmWindDown: () => log.push("disarm"),
+    windDownTurn: async () => {
+      log.push("windDownTurn")
+      return "## WIND-DOWN DONE — 2 open"
+    },
+    windDownPermit: () => ({ consumed: true, childSessionID: "ses-child", settlement: settled() }),
+    startWindDownSubagent: async () => {
+      log.push("startWindDownSubagent")
+      return { childSessionID: "ses-child", settlement: settled() }
+    },
+    settleWindDown: async (child) => {
+      log.push("settleWindDown")
+      const outcome = await child.settlement
+      return outcome.status === "expired"
+        ? { ok: false, reason: "did not settle" }
+        : { ok: true, outcome }
+    },
+    reread: () => ({ name: "TODO.md", content: FRESH }),
+    interpretReply: interpretWindDownReply,
+    restoreSnapshot: (content) => log.push(`restore:${content === SNAP}`),
+    parseTasks,
+    splitSections,
     performHandoff: async (args) => {
-      state.handoffCalls.push(args)
-      return { newSessionID: "ses-new-1" }
+      log.push("performHandoff")
+      io._handoff = args
+      return { newSessionID: NEW_SID }
     },
     cycleNumber: 1,
     maxCycles: 10,
-    pause: (id, reason) => {
-      state.paused.push({ id, reason })
-      return true
-    },
-    recordCycle: (found, left) => {
-      state.recorded.push({ found, left })
-      return { stalledCycles: 0, completed: null }
-    },
-    toast: (t) => state.toasts.push(t),
+    pause: (id, reason) => pauseEndless(id, reason),
+    recordCycle: recordEndlessCycle,
+    toast: () => {},
     quiesceTimeoutMs: 600_000,
     pollMs: 500,
-    sleep: async (ms) => {
-      state.slept += 1
-      state.clock += ms
-    },
-    now: () => state.clock,
-    ...(directory ? todoDeps(directory) : {}),
+    sleep: async () => {},
+    now: () => 0,
     ...overrides,
   }
-  return { io, state }
+  return io
 }
 
 // ---------------------------------------------------------------------------
-// The claim
+// The happy path
 // ---------------------------------------------------------------------------
 
-test("an unclaimed latch is the whole gate: a second run returns null and does nothing", async () => {
-  const dir = tempProject()
-  const { io, state } = makeCycle({ directory: dir })
-  const first = await runEndlessCycle(io)
-  assert.equal(first.outcome, "complete")
-  const second = await runEndlessCycle(io)
-  assert.equal(second, null, "a duplicate idle event cannot start a second cycle")
-  assert.equal(state.handoffCalls.length, 1)
-})
-
-// ---------------------------------------------------------------------------
-// The save, against a real temp directory
-// ---------------------------------------------------------------------------
-
-test("greenfield: TODO.md is created with the points and the handoff runs", async () => {
-  const dir = tempProject()
-  const { io, state } = makeCycle({ directory: dir })
+test("a confirmed wind-down replaces the primary and records the ids", async () => {
+  const io = baseIo()
   const res = await runEndlessCycle(io)
 
   assert.equal(res.outcome, "complete")
-  assert.deepEqual(res.ids, ["T1", "T2"])
-  assert.deepEqual(readdirSync(dir), [CANONICAL_TODO_NAME])
-  const content = readFileSync(join(dir, CANONICAL_TODO_NAME), "utf8")
-  assert.match(content, /- T1: Finish the migration script\n {2}accept: `npm run migrate` exits 0\n/)
-  assert.match(content, /- T2: Write the rollback procedure\n {2}accept: the file exists\n/)
-  assert.equal(state.handoffCalls.length, 1)
-})
-
-test("an existing todos.md is appended to, and no second todo file is created", async () => {
-  const dir = tempProject({ "todos.md": "- T7: an older task\n  accept: it lands\n" })
-  const { io } = makeCycle({ directory: dir })
-  const res = await runEndlessCycle(io)
-
-  assert.deepEqual(res.ids, ["T8", "T9"], "ids continue above the existing maximum")
-  assert.deepEqual(readdirSync(dir), ["todos.md"], "no canonical TODO.md is created beside it")
-  const content = readFileSync(join(dir, "todos.md"), "utf8")
-  assert.match(content, /- T7: an older task/)
-  assert.match(content, /- T8: Finish the migration script/)
+  assert.equal(res.newSessionID, NEW_SID)
+  assert.deepEqual(res.openIds, ["T1", "T2"])
   assert.equal(res.openBefore, 1)
-  assert.equal(res.openAfter, 3)
+  assert.equal(res.openAfter, 2)
+  assert.ok(io._log.includes("performHandoff"))
+  // The permit is disarmed on every exit.
+  assert.ok(io._log.includes("disarm"))
+  // The kickoff carries the confirmed file's own text and the reply.
+  assert.ok(io._handoff.extraKickoffBlock.includes("do the thing"))
+  assert.equal(io._handoff.docSummariesText, "## WIND-DOWN DONE — 2 open")
 })
 
-// `todo.md` + `todos.md`, deliberately NOT `TODO.md` + `todos.md`: findTodoFile
-// gives the canonical `TODO.md` precedence over a differently-cased sibling via
-// its statSync fast path, so that pair resolves rather than erroring. "multiple"
-// is for the variants among which no such precedence exists.
-test("two todo files: the cycle abandons at save, neither file is written, no handoff", async () => {
-  const dir = tempProject({
-    "todo.md": "- T1: one\n",
-    "todos.md": "- T1: another\n",
-  })
-  const before = { todo: readFileSync(join(dir, "todo.md"), "utf8"), todos: readFileSync(join(dir, "todos.md"), "utf8") }
-  const { io, state } = makeCycle({ directory: dir })
-  const res = await runEndlessCycle(io)
-
-  assert.equal(res.outcome, "abandoned")
-  assert.equal(res.stage, "save")
-  assert.equal(state.handoffCalls.length, 0, "the primary is NOT replaced when the save failed")
-  assert.equal(readFileSync(join(dir, "todo.md"), "utf8"), before.todo)
-  assert.equal(readFileSync(join(dir, "todos.md"), "utf8"), before.todos)
-  assert.deepEqual(readdirSync(dir).sort(), ["todo.md", "todos.md"], "no third file is created")
-  assert.equal(isEndlessFrozen(SID), false, "the abandon lifts the spawn freeze")
-  assert.equal(endlessCooldownActive(SID), true, "and arms the cooldown")
-  assert.deepEqual(state.paused, [], "an abandoned cycle does not pause the mode")
-})
-
-test("a failed read-back confirmation abandons the cycle and never calls the handoff", async () => {
-  const dir = tempProject()
-  const { io, state } = makeCycle({
-    directory: dir,
-    // The write reports ids the file does not carry — the exact case the
-    // confirmation exists for.
-    overrides: { listOpen: () => [] },
-  })
-  const res = await runEndlessCycle(io)
-
-  assert.equal(res.outcome, "abandoned")
-  assert.equal(res.stage, "save")
-  assert.match(res.reason, /T1,T2 missing from the todo file/)
-  assert.equal(state.handoffCalls.length, 0)
-  assert.equal(isEndlessFrozen(SID), false)
-})
-
-test("a reply without the OPEN POINTS heading abandons at save", async () => {
-  const dir = tempProject()
-  const { io, state } = makeCycle({
-    directory: dir,
-    overrides: { requestOpenPoints: async () => "Sure! I have finished everything." },
-  })
-  const res = await runEndlessCycle(io)
-  assert.equal(res.stage, "save")
-  assert.match(res.reason, /no `## OPEN POINTS` heading/)
-  assert.equal(state.handoffCalls.length, 0)
-  assert.deepEqual(readdirSync(dir), [], "nothing is written when the reply is unusable")
-})
-
-test("a timed-out open-points turn abandons at save", async () => {
-  const dir = tempProject()
-  const { io, state } = makeCycle({
-    directory: dir,
-    overrides: {
-      requestOpenPoints: async () => {
-        throw new Error("requestDocSummaries: timed out waiting for the old primary's shaped reply")
-      },
-    },
-  })
-  const res = await runEndlessCycle(io)
-  assert.equal(res.stage, "save")
-  assert.match(res.reason, /timed out/)
-  assert.equal(state.handoffCalls.length, 0)
-})
-
-// ---------------------------------------------------------------------------
-// The kickoff
-// ---------------------------------------------------------------------------
-
-// The paragraph the e2e kickoff check parses out of the block
-// (test/e2e/endless-task.sh: `block.split("\n\n")[1]`) — the sentence naming
-// the save, and the only place an id may come from THIS cycle's write.
-function headParagraph(block) {
-  const parts = block.split("## Endless mode — work off the todo file")[1].split("\n\n")
-  return parts[1] ?? ""
-}
-
-test("the kickoff block names the confirmed ids, the confirmed count and the file", async () => {
-  const dir = tempProject({ "todos.md": "- T7: an older task\n" })
-  const { io, state } = makeCycle({ directory: dir })
+test("the drop runs before the quiesce wait", async () => {
+  const io = baseIo()
   await runEndlessCycle(io)
-
-  const { extraKickoffBlock, openPointsText } = state.handoffCalls[0]
-  assert.match(extraKickoffBlock, /^## Endless mode — work off the todo file$/m)
-  assert.match(extraKickoffBlock, /saved to todos\.md as 2 task\(s\): T8, T9\./)
-  assert.doesNotMatch(
-    headParagraph(extraKickoffBlock),
-    /\bT7\b/,
-    "the saving sentence names only ids the write returned",
-  )
-  assert.match(extraKickoffBlock, /DONE: T<n>/)
-  assert.equal(
-    openPointsText,
-    REPLY,
-    "the doc-summary turn is not asked for a second time — the text we already have is handed back",
-  )
+  assert.deepEqual(io._log.slice(0, 2), ["dropRetained", "isQuiesced"])
 })
 
-test("the kickoff carries the todo file's open tasks, not only its name", async () => {
-  const dir = tempProject({
-    "todos.md": "- T7: an older task\n  accept: the older criterion holds\n",
-  })
-  const { io, state } = makeCycle({ directory: dir })
-  await runEndlessCycle(io)
-
-  const { extraKickoffBlock } = state.handoffCalls[0]
-  assert.match(extraKickoffBlock, /The tasks standing in todos\.md right now:/)
-  // The pre-existing task the write did not produce is in the listing: the
-  // successor primary holds no todo tool and cannot read the file itself.
-  assert.match(extraKickoffBlock, /^- T7: an older task$/m)
-  assert.match(extraKickoffBlock, /^ {2}accept: the older criterion holds$/m)
-  assert.match(extraKickoffBlock, /^- T8: Finish the migration script$/m)
-  assert.match(extraKickoffBlock, /^ {2}accept: `npm run migrate` exits 0$/m)
-  assert.match(extraKickoffBlock, /^- T9: Write the rollback procedure$/m)
-  // File order, which is feasibility order: the oldest task stays first.
-  assert.ok(
-    extraKickoffBlock.indexOf("- T7:") <
-      extraKickoffBlock.indexOf("- T8:") &&
-      extraKickoffBlock.indexOf("- T8:") < extraKickoffBlock.indexOf("- T9:"),
-    "the listing keeps the file's own order",
-  )
-})
-
-test("a cycle whose every point was deduped away still hands over the open tasks", async () => {
-  // The gap the listing closes: the reply restates what already stands in the
-  // file, so no id is written and the head paragraph has none to name.
-  const dir = tempProject({
-    "todos.md":
-      "- T1: Finish the migration script\n  accept: `npm run migrate` exits 0\n" +
-      "- T2: Write the rollback procedure\n  accept: the file exists\n",
-  })
-  const { io, state } = makeCycle({ directory: dir })
-  const res = await runEndlessCycle(io)
-
-  assert.equal(res.outcome, "complete")
-  assert.deepEqual(res.ids, [], "every point was already in the file")
-  const { extraKickoffBlock } = state.handoffCalls[0]
-  assert.match(extraKickoffBlock, /no new open points/)
-  assert.match(extraKickoffBlock, /^- T1: Finish the migration script$/m)
-  assert.match(extraKickoffBlock, /^- T2: Write the rollback procedure$/m)
-})
-
-test("endlessKickoffBlock: with no new points it states the file rather than an empty id list", () => {
-  const block = endlessKickoffBlock({
-    todoFileName: "TODO.md",
-    ids: [],
-    openTasks: [{ id: "T4", text: "an open task" }],
-  })
-  assert.match(block, /no new open points/)
-  assert.doesNotMatch(block, /0 task\(s\)/)
-  assert.match(block, /work that todo file off, top to bottom/)
-  assert.match(block, /^- T4: an open task$/m)
-})
-
-test("endlessKickoffBlock: the listing stops at KICKOFF_TASKS_MAX and says how many it left", () => {
-  const openTasks = Array.from({ length: KICKOFF_TASKS_MAX + 3 }, (_, i) => ({
-    id: `T${i + 1}`,
-    text: `task number ${i + 1}`,
-  }))
-  const block = endlessKickoffBlock({ todoFileName: "TODO.md", ids: ["T1"], openTasks })
-  assert.match(block, new RegExp(`^- T${KICKOFF_TASKS_MAX}: `, "m"))
-  assert.doesNotMatch(block, new RegExp(`^- T${KICKOFF_TASKS_MAX + 1}: `, "m"))
-  assert.match(block, /^- … and 3 further task\(s\) below these in the file\.$/m)
-})
-
-test("endlessKickoffBlock: a runaway task line is capped per field, not dumped whole", () => {
-  const long = "x".repeat(KICKOFF_TASK_FIELD_MAX_CHARS + 500)
-  const block = endlessKickoffBlock({
-    todoFileName: "TODO.md",
-    ids: ["T1"],
-    openTasks: [{ id: "T1", text: long, accept: long }],
-  })
-  const titleLine = block.split("\n").find((l) => l.startsWith("- T1: "))
-  const acceptLine = block.split("\n").find((l) => l.startsWith("  accept: "))
-  assert.equal(titleLine.length, "- T1: ".length + KICKOFF_TASK_FIELD_MAX_CHARS)
-  assert.equal(acceptLine.length, "  accept: ".length + KICKOFF_TASK_FIELD_MAX_CHARS)
-  assert.ok(titleLine.endsWith("…"), "the cut is marked")
-})
-
-test("endlessKickoffBlock: with no readable task it names the way out the primary has", () => {
-  const block = endlessKickoffBlock({ todoFileName: "TODO.md", ids: [], openTasks: [] })
-  assert.match(block, /could not read any open task out of TODO\.md/)
-  assert.match(block, /Have a subagent list the file/)
-  assert.doesNotMatch(block, /The tasks standing in/)
-})
-
-test("endlessKickoffBlock: the saving sentence stays the second paragraph", () => {
-  // Pinned because test/e2e/endless-task.sh parses exactly that paragraph and
-  // fails on any T-id in it that this cycle's write did not return.
-  const block = endlessKickoffBlock({
-    todoFileName: "TODO.md",
-    ids: ["T8"],
-    openTasks: [{ id: "T7", text: "older" }, { id: "T8", text: "newer" }],
-  })
-  const head = headParagraph(block)
-  assert.deepEqual(head.match(/\bT\d+\b/g), ["T8"])
+test("a second idle event does not claim an already-claimed cycle", async () => {
+  markEndlessPending(SID)
+  assert.equal(claimPendingEndless(SID), true)
+  const io = baseIo()
+  assert.equal(await runEndlessCycle(io), null)
 })
 
 // ---------------------------------------------------------------------------
-// The quiesce wait
+// Quiesce
 // ---------------------------------------------------------------------------
 
-test("the cycle waits for quiesce before it asks for the open points", async () => {
-  const dir = tempProject()
-  let busyPolls = 3
-  const order = []
-  const { io } = makeCycle({
-    directory: dir,
-    overrides: {
-      isQuiesced: async () => {
-        order.push("poll")
-        return busyPolls-- <= 0
-      },
-      requestOpenPoints: async () => {
-        order.push("save")
-        return REPLY
-      },
+test("a quiesce timeout abandons and arms the cooldown", async () => {
+  let clock = 0
+  const io = baseIo({
+    isQuiesced: async () => false,
+    sleep: async (ms) => {
+      clock += ms
     },
+    now: () => clock,
+    quiesceTimeoutMs: 1000,
   })
   const res = await runEndlessCycle(io)
-  assert.equal(res.outcome, "complete")
-  assert.equal(order.filter((s) => s === "poll").length, 4)
-  assert.equal(order[order.length - 1], "save", "the save turn comes after the last poll")
-})
-
-test("quiesce timeout: the cycle abandons on virtual time, the freeze lifts, no session is created", async () => {
-  const dir = tempProject()
-  const { io, state } = makeCycle({
-    directory: dir,
-    overrides: { isQuiesced: async () => false },
-  })
-  const res = await runEndlessCycle(io)
-
   assert.equal(res.outcome, "abandoned")
   assert.equal(res.stage, "quiesce")
-  assert.match(res.reason, /still busy after 600000ms/)
-  assert.equal(state.clock, 600_000, "the wait ran the full timeout of virtual time")
-  assert.equal(state.slept, 1200, "600000ms at a 500ms poll")
-  assert.equal(state.handoffCalls.length, 0, "no session was created")
-  assert.deepEqual(readdirSync(dir), [], "and nothing was written")
-  assert.equal(isEndlessFrozen(SID), false)
   assert.equal(endlessCooldownActive(SID), true)
-  assert.equal(state.toasts.at(-1).variant, "error")
+  assert.ok(!io._log.includes("performHandoff"))
+  assert.ok(io._log.includes("disarm"))
 })
 
 // ---------------------------------------------------------------------------
-// The bounds
+// Prepare
 // ---------------------------------------------------------------------------
 
-test("nothing left to do: an empty point list and an empty todo file pause the mode", async () => {
-  const dir = tempProject()
-  const { io, state } = makeCycle({
-    directory: dir,
-    overrides: { requestOpenPoints: async () => "## OPEN POINTS\n" },
-  })
-  const res = await runEndlessCycle(io)
-
-  assert.equal(res.outcome, "no-open-points")
-  assert.equal(state.paused.length, 1, "the mode is paused, not switched off")
-  assert.equal(state.paused[0].id, SID, "the pause is on the primary that stopped")
-  assert.match(state.paused[0].reason, /no open points left/)
-  assert.equal(state.handoffCalls.length, 0, "the session is not replaced")
-  assert.equal(isEndlessFrozen(SID), false)
-  assert.equal(endlessCooldownActive(SID), false, "a deliberate stop arms no retry cooldown")
-  assert.equal(state.toasts.at(-1).variant, "success")
-})
-
-test("an empty point list with open tasks left still replaces the session", async () => {
-  const dir = tempProject({ "TODO.md": "- T1: still open\n" })
-  const { io, state } = makeCycle({
-    directory: dir,
-    overrides: { requestOpenPoints: async () => "## OPEN POINTS\n" },
-  })
-  const res = await runEndlessCycle(io)
-  assert.equal(res.outcome, "complete")
-  assert.deepEqual(state.paused, [])
-  assert.equal(state.handoffCalls.length, 1)
-})
-
-test("no progress: two consecutive cycles in which nothing was completed pause the NEW primary", async () => {
-  const dir = tempProject()
-  const { io, state } = makeCycle({
-    directory: dir,
-    overrides: {
-      recordCycle: (found, left) => {
-        state.recorded.push({ found, left })
-        return { stalledCycles: ENDLESS_MAX_STALLED_CYCLES, completed: 0 }
-      },
+test("a prepare that throws abandons before a turn is spent", async () => {
+  const io = baseIo({
+    prepare: () => {
+      throw new Error("several todo files")
     },
   })
   const res = await runEndlessCycle(io)
-
-  assert.equal(res.outcome, "complete")
-  assert.equal(state.handoffCalls.length, 1, "the cycle that is already past the save completes")
-  assert.equal(state.paused.length, 1)
-  assert.equal(
-    state.paused[0].id,
-    "ses-new-1",
-    "the bound fires after the replacement, so it pauses the session that inherited the loop",
-  )
-  assert.equal(res.pausedSessionID, "ses-new-1")
-  assert.deepEqual(
-    state.recorded,
-    [{ found: [], left: ["finish the migration script", "write the rollback procedure"] }],
-    "the bound is handed both snapshots, normalised: the file as found and as left",
-  )
-  assert.match(state.toasts.at(-1).message, /no task completed over 2 cycles at 0 open task\(s\)/)
-  assert.match(state.toasts.at(-1).message, /paused for the new session/)
-})
-
-test("the bound is handed the normalised title sets, not the counts", async () => {
-  // The cycle starts with one task left over, saves two fresh points, and the
-  // file ends at three. Both snapshots go to the record: the inherited set is
-  // what the NEXT cycle is measured against, the left-behind set is what the
-  // cycle after that inherits.
-  const dir = tempProject({ "TODO.md": "- T5: Inherited   Work\n" })
-  const { io, state } = makeCycle({ directory: dir })
-  const res = await runEndlessCycle(io)
-
-  assert.equal(res.openBefore, 1)
-  assert.equal(res.openAfter, 3)
-  assert.deepEqual(state.recorded, [
-    {
-      found: ["inherited work"],
-      left: [
-        "inherited work",
-        "finish the migration script",
-        "write the rollback procedure",
-      ],
-    },
-  ])
-})
-
-// ---------------------------------------------------------------------------
-// Points already standing in the file
-// ---------------------------------------------------------------------------
-
-test("a point whose title is already a task is not written a second time", async () => {
-  const dir = tempProject({
-    "todos.md": "- T7: finish   the Migration Script\n  accept: it lands\n",
-  })
-  const { io, state } = makeCycle({ directory: dir })
-  const res = await runEndlessCycle(io)
-
-  assert.equal(res.outcome, "complete")
-  assert.deepEqual(res.ids, ["T8"], "only the point the file did not carry is written")
-  const content = readFileSync(join(dir, "todos.md"), "utf8")
-  assert.equal(
-    content.match(/Finish the migration script|finish   the Migration Script/gi).length,
-    1,
-    "the title stands exactly once — case and inner spacing do not make it a new task",
-  )
-  assert.match(content, /- T8: Write the rollback procedure/)
-  assert.doesNotMatch(
-    headParagraph(state.handoffCalls[0].extraKickoffBlock),
-    /T7/,
-    "the saving sentence names only what this cycle wrote",
-  )
-  assert.match(
-    state.handoffCalls[0].extraKickoffBlock,
-    /^- T7: finish {3}the Migration Script$/m,
-    "the deduped task is still listed — it is open work the successor cannot read itself",
-  )
-  assert.match(state.handoffCalls[0].extraKickoffBlock, /1 task\(s\): T8\./)
-})
-
-test("a reply that restates the same point twice writes it once", async () => {
-  const dir = tempProject()
-  const { io } = makeCycle({
-    directory: dir,
-    overrides: {
-      requestOpenPoints: async () =>
-        ["## OPEN POINTS", "", "- Do the one thing", "- do the ONE thing", ""].join("\n"),
-    },
-  })
-  const res = await runEndlessCycle(io)
-  assert.deepEqual(res.ids, ["T1"])
-})
-
-test("a cycle whose points are all already in the file still replaces the session", async () => {
-  const dir = tempProject({
-    "TODO.md": "- T1: Finish the migration script\n- T2: Write the rollback procedure\n",
-  })
-  const { io, state } = makeCycle({ directory: dir })
-  const res = await runEndlessCycle(io)
-
-  assert.equal(res.outcome, "complete", "there is open work left, so the mode does not stop")
-  assert.deepEqual(res.ids, [])
-  assert.deepEqual(state.paused, [])
-  assert.equal(state.handoffCalls.length, 1)
-  assert.match(state.handoffCalls[0].extraKickoffBlock, /no new open points/)
-})
-
-// ---------------------------------------------------------------------------
-// The bounds, continued
-// ---------------------------------------------------------------------------
-
-test("the cycle ceiling pauses the mode before anything is written or replaced", async () => {
-  // The generation number starts at 1, so `maxCycles: 10` is spent once the
-  // chain stands at generation 11 — ten cycles ran.
-  const dir = tempProject()
-  const { io, state } = makeCycle({
-    directory: dir,
-    overrides: { cycleNumber: 11, maxCycles: 10 },
-  })
-  const res = await runEndlessCycle(io)
-
-  assert.equal(res.outcome, "ceiling")
-  assert.equal(state.paused.length, 1)
-  assert.equal(state.paused[0].id, SID)
-  assert.equal(state.handoffCalls.length, 0)
-  assert.deepEqual(readdirSync(dir), [])
-  assert.equal(isEndlessFrozen(SID), false)
-  assert.match(state.toasts.at(-1).message, /cycle ceiling reached \(10\/10\) — paused for this session/)
-})
-
-test("the ceiling grants exactly maxCycles cycles, and maxCycles 0 arms none at all", async () => {
-  // The tenth cycle of a default `endlessMaxCycles: 10` runs at generation 10.
-  const tenthDir = tempProject()
-  const tenth = makeCycle({ directory: tenthDir, overrides: { cycleNumber: 10, maxCycles: 10 } })
-  assert.equal((await runEndlessCycle(tenth.io)).outcome, "complete")
-
-  // The edge the off-by-one turned into a silent off state: `maxCycles: 1`
-  // means one cycle, not none.
-  resetState()
-  const singleDir = tempProject()
-  const single = makeCycle({ directory: singleDir, overrides: { cycleNumber: 1, maxCycles: 1 } })
-  assert.equal((await runEndlessCycle(single.io)).outcome, "complete")
-
-  resetState()
-  const spentDir = tempProject()
-  const spent = makeCycle({ directory: spentDir, overrides: { cycleNumber: 2, maxCycles: 1 } })
-  assert.equal((await runEndlessCycle(spent.io)).outcome, "ceiling")
-
-  resetState()
-  const noCeilingDir = tempProject()
-  const none = makeCycle({ directory: noCeilingDir, overrides: { cycleNumber: 99, maxCycles: 0 } })
-  assert.equal((await runEndlessCycle(none.io)).outcome, "complete")
-})
-
-test("a stop that cannot pause still ends the cycle and reports it", async () => {
-  // The pause is process-local state, so it cannot fail the way a disk write
-  // could — but the cycle reports what it got rather than assuming success,
-  // and a stop stands either way: the latch is released and the primary is not
-  // replaced.
-  const dir = tempProject()
-  const { io, state } = makeCycle({
-    directory: dir,
-    overrides: {
-      requestOpenPoints: async () => "## OPEN POINTS\n",
-      pause: (id, reason) => {
-        state.paused.push({ id, reason })
-        return false
-      },
-    },
-  })
-  const res = await runEndlessCycle(io)
-
-  assert.equal(res.outcome, "no-open-points")
-  assert.equal(res.paused, false, "the caller learns the pause did not take")
-  assert.equal(state.paused.length, 1, "the pause was attempted")
-  assert.equal(state.handoffCalls.length, 0, "the session is not replaced")
-  assert.equal(isEndlessFrozen(SID), false, "and the cycle is over either way")
-})
-
-test("a failed handoff abandons the cycle: the tasks stay written, the freeze lifts, the cooldown arms", async () => {
-  const dir = tempProject()
-  const { io, state } = makeCycle({
-    directory: dir,
-    overrides: {
-      performHandoff: async () => {
-        throw new Error("session.create failed")
-      },
-    },
-  })
-  const res = await runEndlessCycle(io)
-
   assert.equal(res.outcome, "abandoned")
-  assert.equal(res.stage, "handoff")
-  assert.equal(res.reason, "session.create failed")
-  assert.match(readFileSync(join(dir, CANONICAL_TODO_NAME), "utf8"), /- T1: Finish the migration script/)
-  assert.equal(isEndlessFrozen(SID), false)
-  assert.equal(endlessCooldownActive(SID), true)
-  assert.deepEqual(state.paused, [], "an abandoned cycle pauses nothing")
-  assert.equal(endlessProgress.lastOpenTitles, null, "an abandoned cycle records no progress")
+  assert.equal(res.stage, "prepare")
+  assert.ok(!io._log.includes("windDownTurn"))
 })
 
-test("a handoff that returns no new session id abandons rather than reporting success", async () => {
-  const dir = tempProject()
-  const { io } = makeCycle({
-    directory: dir,
-    overrides: { performHandoff: async () => ({}) },
+// ---------------------------------------------------------------------------
+// The ceiling
+// ---------------------------------------------------------------------------
+
+test("the cycle ceiling pauses and replaces nothing", async () => {
+  const io = baseIo({ cycleNumber: 11, maxCycles: 10 })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "ceiling")
+  assert.equal(isEndlessPaused(SID), true)
+  assert.ok(!io._log.includes("prepare"))
+  assert.ok(!io._log.includes("dropRetained"))
+})
+
+// ---------------------------------------------------------------------------
+// The fallback: an unconsumed permit disarms first, then the plugin spawns
+// ---------------------------------------------------------------------------
+
+test("an unconsumed permit disarms before the plugin starts the subagent itself", async () => {
+  const io = baseIo({
+    windDownTurn: async () => {
+      throw new Error("no shaped reply in the window")
+    },
+    windDownPermit: () => ({ consumed: false }),
   })
   const res = await runEndlessCycle(io)
-  assert.equal(res.stage, "handoff")
-  assert.match(res.reason, /no new session/)
+  assert.equal(res.outcome, "complete")
+  const disarmAt = io._log.indexOf("disarm")
+  const startAt = io._log.indexOf("startWindDownSubagent")
+  assert.ok(disarmAt >= 0 && startAt >= 0 && disarmAt < startAt, "disarm precedes the fallback spawn")
+})
+
+test("a fallback that cannot start a child abandons", async () => {
+  const io = baseIo({
+    windDownTurn: async () => {
+      throw new Error("no shaped reply")
+    },
+    windDownPermit: () => ({ consumed: false }),
+    startWindDownSubagent: async () => {
+      throw new Error("createChildSession returned no session id")
+    },
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "abandoned")
+  assert.equal(res.stage, "wind-down")
+  assert.ok(!io._log.includes("performHandoff"))
+})
+
+// ---------------------------------------------------------------------------
+// The settlement gate
+// ---------------------------------------------------------------------------
+
+test("a shaped reply while the child is unsettled does not reach confirm", async () => {
+  const io = baseIo({
+    windDownPermit: () => ({ consumed: true, childSessionID: "ses-child", settlement: settled("expired") }),
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "abandoned")
+  assert.equal(res.stage, "wind-down")
+  assert.ok(!io._log.includes("performHandoff"))
+})
+
+test("a child that settled errored still confirms when the file verifies", async () => {
+  const io = baseIo({
+    windDownPermit: () => ({ consumed: true, childSessionID: "ses-child", settlement: settled("error") }),
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "complete")
+})
+
+// ---------------------------------------------------------------------------
+// Confirm: V1–V7, each failing in isolation
+// ---------------------------------------------------------------------------
+
+test("V1: a renamed todo file abandons without a handoff", async () => {
+  const io = baseIo({ reread: () => ({ name: "TODO.markdown", content: FRESH }) })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "abandoned")
+  assert.equal(res.stage, "confirm")
+  assert.ok(!io._log.includes("performHandoff"))
+})
+
+test("V1: a todo file that no longer resolves abandons", async () => {
+  const io = baseIo({
+    reread: () => {
+      throw new Error("several todo files")
+    },
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "abandoned")
+  assert.equal(res.stage, "confirm")
+})
+
+test("V3: an unchanged file with no `no change` reply is restored and abandons", async () => {
+  const io = baseIo({
+    reread: () => ({ name: "TODO.md", content: SNAP }),
+    windDownTurn: async () => "## WIND-DOWN DONE — 1 open",
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "abandoned")
+  assert.equal(res.stage, "confirm")
+  assert.ok(io._log.includes("restore:true"), "the snapshot content was restored")
+  assert.ok(!io._log.includes("performHandoff"))
+})
+
+test("V3: an unchanged file WITH a `no change` reply is accepted", async () => {
+  const io = baseIo({
+    reread: () => ({ name: "TODO.md", content: SNAP }),
+    windDownTurn: async () => "## WIND-DOWN DONE — no change",
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "complete")
+  assert.deepEqual(res.openIds, ["T1"])
+})
+
+test("V4: a changed line OUTSIDE the markers is restored and abandons", async () => {
+  const tampered = FRESH.replace("Some prose a human wrote.", "Some prose a subagent rewrote.")
+  const io = baseIo({ reread: () => ({ name: "TODO.md", content: tampered }) })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "abandoned")
+  assert.equal(res.stage, "confirm")
+  assert.ok(io._log.includes("restore:true"))
+  assert.ok(!io._log.includes("performHandoff"))
+})
+
+test("V5: a duplicate id is restored and abandons", async () => {
+  const dup = fenced(["- T1: do the thing", "- T1: a clashing duplicate"], "T2")
+  const io = baseIo({ reread: () => ({ name: "TODO.md", content: dup }) })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "abandoned")
+  assert.equal(res.stage, "confirm")
+  assert.ok(io._log.includes("restore:true"))
+})
+
+test("V6: an id rebound to a different title is restored and abandons", async () => {
+  const rebound = fenced(["- T1: something else entirely"], "T2")
+  const io = baseIo({ reread: () => ({ name: "TODO.md", content: rebound }) })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "abandoned")
+  assert.equal(res.stage, "confirm")
+  assert.ok(io._log.includes("restore:true"))
+})
+
+test("V7: a reply count that disagrees with the parse still completes — the parse wins", async () => {
+  const io = baseIo({ windDownTurn: async () => "## WIND-DOWN DONE — 99 open" })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "complete")
+  assert.deepEqual(res.openIds, ["T1", "T2"])
+})
+
+// ---------------------------------------------------------------------------
+// Nothing left to do
+// ---------------------------------------------------------------------------
+
+test("an empty file with a `nothing open` reply pauses instead of starting a session", async () => {
+  const empty = fenced([], "T2")
+  const io = baseIo({
+    reread: () => ({ name: "TODO.md", content: empty }),
+    windDownTurn: async () => "## WIND-DOWN DONE — nothing open",
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "no-open-points")
+  assert.equal(isEndlessPaused(SID), true)
+  assert.ok(!io._log.includes("performHandoff"))
+})
+
+// ---------------------------------------------------------------------------
+// The no-progress bound, id-keyed
+// ---------------------------------------------------------------------------
+
+test("no inherited id leaving the file over the streak pauses the NEW primary", async () => {
+  recordEndlessCycle([], ["T1"])
+  recordEndlessCycle(["T1"], ["T1"])
+  assert.equal(endlessProgress.stalledCycles, 1)
+
+  // This cycle finds [T1] and leaves [T1,T2] — T1 never left, so it is the
+  // second consecutive stall.
+  const io = baseIo()
+  const res = await runEndlessCycle(io)
+
+  assert.equal(res.outcome, "complete")
+  assert.ok(res.stalledCycles >= ENDLESS_MAX_STALLED_CYCLES)
+  assert.equal(isEndlessPaused(NEW_SID), true, "the pause lands on the session that inherited the loop")
+  assert.equal(isEndlessPaused(SID), false)
+  assert.ok(io._log.includes("performHandoff"), "the cycle past the save is not undone by the bound")
+})
+
+// ---------------------------------------------------------------------------
+// verifyWindDown as a pure function
+// ---------------------------------------------------------------------------
+
+test("verifyWindDown reads the file, never the reply's claims", () => {
+  const snapshot = { content: SNAP, tasks: parseTasks(SNAP) }
+  const v = verifyWindDown(
+    snapshot,
+    { content: FRESH, replyNoChange: false, replyNothingOpen: false, replyCount: 2 },
+    { splitSections, parseTasks },
+  )
+  assert.equal(v.v3, true)
+  assert.equal(v.v4, true)
+  assert.equal(v.v5, true)
+  assert.equal(v.v6, true)
+  assert.equal(v.empty, false)
+  assert.deepEqual(v.openIds, ["T1", "T2"])
+  assert.equal(v.countMismatch, false)
+})
+
+test("verifyWindDown flags an outside change as a V4 failure", () => {
+  const snapshot = { content: SNAP, tasks: parseTasks(SNAP) }
+  const tampered = FRESH.replace("Some prose a human wrote.", "rewritten prose")
+  const v = verifyWindDown(
+    snapshot,
+    { content: tampered, replyNoChange: false, replyNothingOpen: false, replyCount: null },
+    { splitSections, parseTasks },
+  )
+  assert.equal(v.v4, false)
+})
+
+// ---------------------------------------------------------------------------
+// The kickoff carrier
+// ---------------------------------------------------------------------------
+
+test("endlessKickoffBlock carries the file text verbatim when it fits", () => {
+  const block = endlessKickoffBlock({ todoFileName: "TODO.md", todoFileText: SNAP, truncated: false })
+  assert.ok(block.includes("do the thing"))
+  assert.ok(block.includes("TODO.md as it stands now"))
+  assert.ok(!block.includes("have a subagent read the rest"))
+})
+
+test("endlessKickoffBlock tells the successor to read the rest when the text was cut", () => {
+  const block = endlessKickoffBlock({ todoFileName: "TODO.md", todoFileText: "partial", truncated: true })
+  assert.ok(block.includes("have a subagent read the rest"))
+})
+
+test("endlessKickoffBlock falls back to a read instruction when no text could be read", () => {
+  const block = endlessKickoffBlock({ todoFileName: "TODO.md", todoFileText: "", truncated: false })
+  assert.ok(block.includes("could not read"))
+  assert.ok(block.includes("read it in full"))
+})
+
+test("cutTodoText cuts on a block boundary and flags the truncation", () => {
+  const short = "- T1: a\n\n- T2: b\n"
+  assert.deepEqual(cutTodoText(short, 1000), { text: short, truncated: false })
+
+  const big = "AAAA\n\n" + "B".repeat(KICKOFF_TODO_MAX_CHARS)
+  const cut = cutTodoText(big)
+  assert.equal(cut.truncated, true)
+  assert.ok(cut.text.length <= KICKOFF_TODO_MAX_CHARS)
+  assert.ok(!cut.text.includes("B"), "cut at the blank line before the long block")
 })

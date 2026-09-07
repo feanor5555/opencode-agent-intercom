@@ -30,8 +30,9 @@ import assert from "node:assert/strict"
 import { registry, bySession, resetState } from "../src/state.js"
 import { entryForSession, countRetainedSubagents, LIFECYCLE_RETAINED } from "../src/registry.js"
 import { dropRetainedSubagents } from "../src/teardown.js"
-import { performPrimaryHandoff } from "../src/handoff.js"
+import { performPrimaryHandoff, interpretWindDownReply } from "../src/handoff.js"
 import { runEndlessCycle } from "../src/endless.js"
+import { parseTasks, splitSections } from "../src/todofile.js"
 import {
   markEndlessPending,
   claimPendingEndless,
@@ -226,9 +227,19 @@ test("the handoff sequence is unchanged where no drop is wired", async () => {
 
 const SID = "ses-endless-drop"
 
+// A real fenced todo file, snapshot and the wind-down's result. The confirmation
+// is the real one, so these verify cleanly and the cycle reaches "complete".
+const SNAP =
+  "# Notes\n\n## Intercom tasks\n<!-- intercom:begin -->\n- T1: a point\n" +
+  "<!-- intercom: next-id T2 -->\n<!-- intercom:end -->\n"
+const FRESH =
+  "# Notes\n\n## Intercom tasks\n<!-- intercom:begin -->\n- T1: a point\n- T2: another\n" +
+  "<!-- intercom: next-id T3 -->\n<!-- intercom:end -->\n"
+
 function cycleIo(overrides = {}) {
   const log = []
   markEndlessPending(SID)
+  const settled = () => Promise.resolve({ status: "completed" })
   return {
     _log: log,
     primarySessionID: SID,
@@ -240,21 +251,29 @@ function cycleIo(overrides = {}) {
       log.push("isQuiesced")
       return true
     },
-    requestOpenPoints: async () => {
-      log.push("requestOpenPoints")
-      return "## OPEN POINTS\n\n- a point\n  accept: it lands\n"
+    prepare: () => {
+      log.push("prepare")
+      return { fileName: "TODO.md", content: SNAP, hash: "h", tasks: parseTasks(SNAP), driftCount: 0 }
     },
-    addTask: () => ({ id: "T1" }),
-    listOpen: () => [{ id: "T1" }],
-    todoFileName: () => "TODO.md",
+    armWindDown: () => ({ token: "permit-token" }),
+    disarmWindDown: () => {},
+    windDownTurn: async () => "## WIND-DOWN DONE — 2 open",
+    windDownPermit: () => ({ consumed: true, childSessionID: "c", settlement: settled() }),
+    startWindDownSubagent: async () => ({ childSessionID: "c", settlement: settled() }),
+    settleWindDown: async (child) => ({ ok: true, outcome: await child.settlement }),
+    reread: () => ({ name: "TODO.md", content: FRESH }),
+    interpretReply: interpretWindDownReply,
+    restoreSnapshot: () => {},
+    parseTasks,
+    splitSections,
     performHandoff: async () => {
       log.push("performHandoff")
       return { newSessionID: "ses-new" }
     },
     cycleNumber: 1,
     maxCycles: 10,
-    switchOff: () => true,
-    recordCycle: () => ({ stalledCycles: 0 }),
+    pause: () => true,
+    recordCycle: () => ({ stalledCycles: 0, completed: 1 }),
     toast: () => {},
     quiesceTimeoutMs: 600_000,
     pollMs: 500,

@@ -1,191 +1,252 @@
-// The endless-mode cycle: the idle-side executor that saves the primary's open
-// points to the project's todo file and replaces the primary with a fresh
-// orchestrator that is told to work that file off.
+// The endless-mode cycle: the idle-side executor that hands the primary's open
+// work to a single wind-down subagent, which rewrites the project's todo file,
+// then replaces the primary with a fresh orchestrator told to work that file
+// off.
 //
 // Dependency-injected in the same discipline as handoff.js: this module imports
-// no client, no registry and no todo-file code, so the whole sequence — quiesce
-// wait, save, replacement, bounds — is unit-testable against fakes with virtual
-// time. The live wiring lives in handoffwiring.js.
+// no client, no registry and no todo-file I/O, so the whole sequence — quiesce
+// wait, prepare, arm, wind-down turn, settle, confirm, replacement, bounds — is
+// unit-testable against fakes with virtual time. The live wiring lives in
+// handoffwiring.js. The two pure parse helpers `splitSections`/`parseTasks` are
+// injected too, so the verification (verifyWindDown) can be exercised without
+// touching the disk.
 //
 // Sequence (do NOT reorder):
 //   1. Claim the latch. False → another idle event already took this cycle.
 //   2. The cycle ceiling: at `maxCycles` the mode pauses itself for this
 //      primary before anything is written or replaced.
-//   2b. Drop every retained subagent. A retained session is a finished subagent
-//      held alive for a follow-up question, and it must not outlive the primary
-//      it belongs to: from here on the cycle is committed to replacing that
-//      primary. The ceiling above is deliberately ahead of this: it replaces
-//      nothing and lifts the freeze again, so it leaves retention alone. Every
-//      later way out — an abandoned quiesce wait, a failed save — has already
-//      paid the drop, which is the safe direction: a dropped retention costs a
-//      fresh spawn, a surviving one would point a handle at a primary the next
-//      cycle replaces.
+//   2b. Drop every retained subagent. A retained session must not outlive the
+//      primary this cycle replaces. The ceiling above is deliberately ahead of
+//      this: it replaces nothing and lifts the freeze again.
 //   3. Wait for quiesce — no subagent running anywhere in the process —
-//      bounded by `quiesceTimeoutMs`. A timeout ABANDONS the cycle; aborting a
-//      working subagent to make room for a context refresh would destroy real
-//      work to save context.
-//   4. Save: ask the primary for its open points, parse them, write one task
-//      per point that is not already standing in the file, and READ THE FILE
-//      BACK. Every id `addTask` returned must be in that read-back — the
-//      plugin knows the write happened rather than assuming it. Any failure
-//      here abandons WITHOUT replacing the session:
-//      replacing a primary after failing to save its open points is precisely
-//      the data loss endless mode exists to prevent.
-//   5. Nothing left to do: an empty point list AND an empty todo file pause
-//      the mode instead of starting a session that would have nothing to
-//      work on.
-//   6. Replace: the handoff runs with the endless kickoff block — which
-//      carries the read-back's open tasks in full, because the successor
-//      primary cannot open the todo file itself — and with the open-points
-//      text standing in for the doc-summary turn.
-//   7. Record the open-task count the cycle found (before its own write) and
-//      apply the no-progress bound to it.
+//      bounded by `quiesceTimeoutMs`. A timeout ABANDONS the cycle.
+//   4. Prepare: resolve the todo file (creating a canonical one where the
+//      directory has none), insert the machine section where it is absent and
+//      WRITE it, then snapshot content + hash + parse + drift. Any failure
+//      here abandons before a turn is spent.
+//   5. Arm the single-use wind-down permit for this primary.
+//   6. The wind-down turn: ask the primary to spawn the wind-down `planner`
+//      through the permit. The shaped reply ends the TURN. If no shaped reply
+//      arrives and the permit is unconsumed, the plugin spawns the subagent
+//      itself (the fallback).
+//   7. Settle: the shaped reply says the turn is over; the child's own ending
+//      says the write finished. Await the child's settlement and require its
+//      registry entry gone. Where it never settles, end the child and abandon.
+//   8. Confirm: V1–V7 over the file as a whole. A failure of V1, V3, V4, V5 or
+//      V6 restores the snapshot and abandons WITHOUT replacing the session.
+//   9. Nothing left to do: the subagent's explicit "nothing open" and a
+//      zero-task parse pause the mode instead of starting an empty session.
+//   10. Replace: the handoff runs with the endless kickoff block carrying the
+//      todo file's own text, and the wind-down reply standing in for the
+//      doc-summary turn.
+//   11. Record the open-task ids the cycle found and left, and apply the
+//      no-progress bound to them.
 //
-// None of the three deliberate stops writes the settings file. `endlessMode`
-// is the user's own switch (and is on by default), so a self-stop that
-// persisted `false` would disable that default for good on its first firing.
-// A stop pauses ONE primary session instead — see `stop` below and
-// pauseEndless in registry.js.
+// None of the deliberate stops writes the settings file. `endlessMode` is the
+// user's own switch (on by default); a self-stop persisting `false` would
+// disable that default for good. A stop pauses ONE primary session instead.
 //
-// Every abandon path does the same three things: release the latch (which
-// lifts the spawn freeze), arm the cooldown so an already-over-threshold
-// primary cannot retry on its very next turn, and log the stage it failed at.
-// Like `runScheduledHandoff`, this function NEVER throws — its caller is an
-// event handler.
+// Every abandon path releases the latch (lifting the spawn freeze), arms the
+// cooldown, logs the stage, and NEVER replaces the primary. The permit is
+// disarmed in a `finally` on every exit, so no permit outlives its cycle. Like
+// runScheduledHandoff, this function NEVER throws — its caller is an event
+// handler.
 
-import {
-  parseOpenPoints,
-  capChars,
-  OPEN_POINTS_MAX,
-  OPEN_POINT_MAX_CHARS,
-} from "./openpoints.js"
 import { log, errMsg } from "./log.js"
 
-// Cadence of the quiesce wait. Mirrors DOC_SUMMARIES_POLL_MS: the wait is
-// bounded in minutes, so a half-second poll costs nothing and keeps the
-// measured "quiesced after <ms>" figure honest.
+// Cadence of the quiesce and settle waits. Mirrors DOC_SUMMARIES_POLL_MS.
 export const ENDLESS_QUIESCE_POLL_MS = 500
 
-// How many consecutive cycles may end without a single inherited task leaving
-// the todo file before the mode pauses itself. The bound against the failure
-// the mode invites: an orchestrator that saves the same points every cycle and
-// finishes none of them.
+// How many consecutive cycles may end without a single inherited task id
+// leaving the todo file before the mode pauses itself.
 export const ENDLESS_MAX_STALLED_CYCLES = 2
+
+// Bound on the todo-file text the kickoff carries inline. The successor cannot
+// open the file itself, so it is handed the file's own text verbatim; past this
+// bound the text is cut at a block boundary and the successor is told to have a
+// subagent read the rest.
+export const KICKOFF_TODO_MAX_CHARS = 16000
 
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 // Comparison form of a task title: lower-cased with every run of whitespace
-// collapsed to one space. Deliberately nothing more — no stemming, no fuzzy
-// distance; a dedupe that guesses would drop a point the orchestrator meant.
-// Exported because the no-progress bound keys its cross-cycle task sets on the
-// same expression the dedupe uses.
+// collapsed to one space. Used by V6 (an id must not be re-bound to a different
+// title) and by the no-progress record's own title normalisation where a caller
+// still wants it.
 export function normaliseTitle(title) {
   return typeof title === "string" ? title.trim().toLowerCase().replace(/\s+/g, " ") : ""
 }
 
-// Bounds on the task listing the kickoff carries. Both are the ceilings the
-// other half of the same hand-over already uses (openpoints.js): a cycle saves
-// at most OPEN_POINTS_MAX points and caps each of a point's two fields at
-// OPEN_POINT_MAX_CHARS before writing it. Listing the file back under the same
-// two numbers keeps the round trip symmetric and bounds the block at roughly
-// 40 × 400 characters — about 4k tokens against the primary's own 80k budget —
-// instead of at the size of a todo file that has no bound at all.
-export const KICKOFF_TASKS_MAX = OPEN_POINTS_MAX
-export const KICKOFF_TASK_FIELD_MAX_CHARS = OPEN_POINT_MAX_CHARS
-
-// The open tasks rendered in the todo file's OWN two-line shape, so the ids in
-// the kickoff are literally the ids the orchestrator puts on the first line of
-// each spawn prompt. Order is the file's order, which is feasibility order.
-// Past KICKOFF_TASKS_MAX the listing says how many more stand in the file
-// rather than dropping them silently — the successor cannot open the file
-// itself, so an unannounced cut would read as a complete list.
-function formatOpenTasks(openTasks) {
-  const listed = openTasks.slice(0, KICKOFF_TASKS_MAX)
-  const lines = []
-  for (const task of listed) {
-    const id = typeof task?.id === "string" ? task.id.trim() : ""
-    const text = capChars(String(task?.text ?? "").trim(), KICKOFF_TASK_FIELD_MAX_CHARS)
-    if (!id && !text) continue
-    lines.push(`- ${id ? `${id}: ` : ""}${text}`)
-    const accept = capChars(String(task?.accept ?? "").trim(), KICKOFF_TASK_FIELD_MAX_CHARS)
-    if (accept) lines.push(`  accept: ${accept}`)
-  }
-  const rest = openTasks.length - listed.length
-  if (lines.length > 0 && rest > 0) {
-    lines.push(`- … and ${rest} further task(s) below these in the file.`)
-  }
-  return lines.join("\n")
+// Cuts the todo file's text for the kickoff at a block boundary (a blank line,
+// falling back to a line boundary) so no task's indented run is split mid-way.
+// Returns `{ text, truncated }`.
+export function cutTodoText(content, max = KICKOFF_TODO_MAX_CHARS) {
+  const text = String(content ?? "")
+  if (text.length <= max) return { text, truncated: false }
+  const blank = text.lastIndexOf("\n\n", max)
+  if (blank > 0) return { text: text.slice(0, blank), truncated: true }
+  let nl = text.lastIndexOf("\n", max)
+  if (nl <= 0) nl = max
+  return { text: text.slice(0, nl), truncated: true }
 }
 
-// The block the new orchestrator's kickoff carries in an endless cycle,
-// inserted before the handoff summary so the work-off instruction is the
-// first prose the successor reads. States only what the save step confirmed:
-// the ids and the task texts alike come from the read-back of the resolved
-// todo file, never from the parse alone.
-//
-// The listing is not a convenience. A primary holds spawn / abort / list /
-// reuse and nothing else (PRIMARY_TOOLS, src/hooks.js), so the successor
-// cannot open the todo file; naming the file alone would hand a cycle whose
-// points were all deduped away a session with nothing concrete in it.
+// The block the new orchestrator's kickoff carries in an endless cycle. It
+// carries the todo file's OWN text verbatim (bounded, cut at a block boundary),
+// because the successor holds spawn / abort / list / reuse and nothing else and
+// cannot open the file itself. Where the text was truncated, or none could be
+// read, the first instruction is a `planner` spawn to read the file in full.
 //
 // @param {Object} io
-// @param {string} io.todoFileName  name of the file the tasks were written to
-// @param {string[]} io.ids         the confirmed task ids, in write order
-// @param {Array<{ id: string, text: string, accept?: string }>} io.openTasks
-//   every open task in that file after the write, in file order — the same
-//   read-back that confirmed the ids, so the two cannot disagree
-// @returns {string}
-export function endlessKickoffBlock({ todoFileName, ids = [], openTasks = [] }) {
+// @param {string} io.todoFileName  name of the todo file
+// @param {string} io.todoFileText  the file's own text (already cut for the cap)
+// @param {boolean} io.truncated    the text was cut, so the successor must read the rest
+export function endlessKickoffBlock({ todoFileName, todoFileText = "", truncated = false } = {}) {
   const file = todoFileName || "the project's todo file"
+  const text = String(todoFileText ?? "").trim()
   const head =
-    ids.length > 0
-      ? `The previous orchestrator session reached its context ceiling. Its open points ` +
-        `were saved to ${file} as ${ids.length} task(s): ${ids.join(", ")}.`
-      : `The previous orchestrator session reached its context ceiling. It reported no new ` +
-        `open points; ${file} still carries the work that is open.`
-  const listing = formatOpenTasks(Array.isArray(openTasks) ? openTasks : [])
-  // No listing means the plugin could not read a single open task out of the
-  // file. Say so and name the way out the successor actually has — it cannot
-  // read the file itself, a subagent can.
-  const tasks = listing
-    ? `The tasks standing in ${file} right now:\n\n${listing}`
-    : `The plugin could not read any open task out of ${file}. Have a subagent list ` +
-      `the file before you plan the session — you cannot read it yourself.`
+    `The previous orchestrator session reached its context ceiling. A wind-down subagent has ` +
+    `updated ${file} with everything that is still open; the fresh session continues from it.`
+  let body
+  if (!text) {
+    body =
+      `The plugin could not read ${file} for this kickoff. Have a subagent read it in full ` +
+      `before you plan the session — you cannot read it yourself.`
+  } else if (truncated) {
+    body =
+      `The start of ${file} (it was too long to carry whole — have a subagent read the rest ` +
+      `before you plan past what is shown):\n\n${text}`
+  } else {
+    body = `${file} as it stands now:\n\n${text}`
+  }
   return (
     "## Endless mode — work off the todo file\n\n" +
     head +
     "\n\n" +
-    tasks +
+    body +
     "\n\n" +
-    "Your job for this session: work that todo file off, top to bottom. The first task " +
-    "is the next one to do. Spawn one subagent per task with the task id on the first " +
-    "line of the spawn prompt. A task is finished when its subagent reports " +
-    "`DONE: T<n>` — the plugin removes it from the file itself. Do not re-add the " +
-    "tasks; do not re-plan the list; start with the first one."
+    "Your job for this session: work that todo file off, top to bottom. The first task is the " +
+    "next one to do. Spawn one subagent per task with the task id on the first line of the spawn " +
+    "prompt. A task is finished when its subagent reports `DONE: T<n>` — the plugin removes it " +
+    "from the file itself. Do not re-plan the list; start with the first task."
   )
+}
+
+// The lines of `content` that lie outside the inclusive marked range, computed
+// from an already-taken `split`. A helper kept beside V4 so the two read the
+// same rule.
+function outsideOf(content, split) {
+  const lines = String(content ?? "").split("\n")
+  if (!split.valid) return lines
+  return [...lines.slice(0, split.beginIdx), ...lines.slice(split.endIdx + 1)]
+}
+
+// The set of lines V4 expects OUTSIDE the machine section after the wind-down:
+// the snapshot's own outside lines, minus the whole block of every task the
+// parser found standing outside the markers in the snapshot. Those blocks are
+// the one licensed outside-change — the migration moves them INTO the section.
+function expectedOutside(snapshot, splitSections, parseTasks) {
+  const split = splitSections(snapshot.content)
+  const lines = snapshot.content.split("\n")
+  const marked = new Set()
+  if (split.valid) {
+    for (let i = split.beginIdx; i <= split.endIdx; i++) marked.add(i)
+  }
+  const removed = new Set()
+  for (const t of parseTasks(snapshot.content)) {
+    // A task inside the markers is not an outside block.
+    if (split.valid && t.lineIdx > split.beginIdx && t.lineIdx < split.endIdx) continue
+    for (let i = t.lineIdx; i <= t.blockEndIdx; i++) removed.add(i)
+    const after = t.blockEndIdx + 1
+    if (after < lines.length && lines[after].trim() === "") removed.add(after)
+  }
+  const out = []
+  for (let i = 0; i < lines.length; i++) {
+    if (marked.has(i) || removed.has(i)) continue
+    out.push(lines[i])
+  }
+  return out
+}
+
+function sequenceEqual(a, b) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+// The confirmation, as a pure function over the snapshot and the file the
+// subagent left behind. V1 (the file still resolves to one regular file of the
+// same name) is checked by the caller, which owns the re-resolve; V2 (the
+// child's outcome) is combined by the caller. Everything here is computed from
+// the file's content and the reply's stated signals — never asserted by the
+// subagent.
+//
+// Returns { empty, v3, v4, v5, v6, tasks, openIds, parseCount, replyCount,
+// countMismatch }.
+//
+// @param {Object} snapshot  { content, tasks } — the pre-spawn file
+// @param {Object} fresh      { content, replyNoChange, replyNothingOpen, replyCount }
+// @param {Object} deps       { splitSections, parseTasks }
+export function verifyWindDown(snapshot, fresh, { splitSections, parseTasks }) {
+  const newContent = String(fresh.content ?? "")
+  const newSplit = splitSections(newContent)
+  const newTasks = parseTasks(newContent)
+  const openIds = newTasks.map((t) => t.id)
+
+  const empty = newTasks.length === 0 && fresh.replyNothingOpen === true
+
+  const idsUnique = new Set(openIds).size === openIds.length
+  const titlesNonEmpty = newTasks.every((t) => typeof t.text === "string" && t.text.trim() !== "")
+  const v5 = newTasks.length >= 1 && idsUnique && titlesNonEmpty
+
+  const v3 = newContent !== snapshot.content || fresh.replyNoChange === true
+
+  const v4 =
+    newSplit.valid &&
+    sequenceEqual(expectedOutside(snapshot, splitSections, parseTasks), outsideOf(newContent, newSplit))
+
+  const snapTitleById = new Map((snapshot.tasks || []).map((t) => [t.id, normaliseTitle(t.text)]))
+  const v6 = newTasks.every(
+    (t) => !snapTitleById.has(t.id) || snapTitleById.get(t.id) === normaliseTitle(t.text),
+  )
+
+  const parseCount = newTasks.length
+  const replyCount = fresh.replyCount ?? null
+  const countMismatch = replyCount != null && replyCount !== parseCount
+
+  return { empty, v3, v4, v5, v6, tasks: newTasks, openIds, parseCount, replyCount, countMismatch }
 }
 
 // Runs one endless cycle.
 //
 // @typedef {Object} EndlessCycleDeps
 // @property {string} primarySessionID
-// @property {() => boolean} claim              consume the latch, atomically (claimPendingEndless)
-// @property {() => void} release               clear the in-progress latch, lifting the spawn freeze
-// @property {() => void} setCooldown           arm the post-abandon cooldown
+// @property {() => boolean} claim
+// @property {() => void} release
+// @property {() => void} setCooldown
 // @property {() => Promise<boolean>} isQuiesced
-// @property {() => Promise<unknown>} [dropRetained]  tear down every retained subagent before the quiesce wait
-// @property {() => number} [countActive]       active subagents, sampled once for the log line
-// @property {() => Promise<string>} requestOpenPoints  the primary's final open-points turn; throws on timeout
-// @property {(point: { title: string, accept?: string }) => { id: string }} addTask
-// @property {() => Array<{ id: string, text: string }>} listOpen  the todo file's open tasks; a greenfield directory reads as []
-// @property {() => string} [todoFileName]
-// @property {(io: { extraKickoffBlock: string, openPointsText: string }) => Promise<{ newSessionID: string }>} performHandoff
-// @property {number} [cycleNumber]             this primary's generation (handoffGeneration)
-// @property {number} [maxCycles]               ceiling; <= 0 arms no ceiling
-// @property {(sessionID: string, reason: string) => boolean} [pause]  pause the mode for ONE primary session (never writes the settings file)
-// @property {(openTitlesFound: string[], openTitlesLeft: string[]) => { stalledCycles: number, completed: number|null }} [recordCycle]  normalised task titles before and after this cycle's write
+// @property {() => Promise<unknown>} [dropRetained]
+// @property {() => number} [countActive]
+// @property {() => { fileName: string, content: string, hash: string, tasks: Array, driftCount: number }} prepare
+//   resolve + section-insert + write + snapshot; throws to abandon at prepare
+// @property {() => { token: string }} armWindDown
+// @property {() => void} [disarmWindDown]
+// @property {(io: { token: string, fileName: string, driftCount: number }) => Promise<string>} windDownTurn
+//   the primary's shaped reply; throws on timeout / no shaped reply
+// @property {() => ({ consumed?: boolean, childSessionID?: string, settlement?: Promise<any> }|undefined)} windDownPermit
+// @property {() => Promise<{ childSessionID: string, settlement: Promise<any> }>} startWindDownSubagent  the fallback
+// @property {(child: { childSessionID: string, settlement: Promise<any> }) => Promise<{ ok: boolean, outcome?: any, reason?: string }>} settleWindDown
+// @property {() => { name: string, content: string }} reread  V1 re-resolve; throws multiple/not-a-file
+// @property {(text: string) => { count: number|null, noChange: boolean, nothingOpen: boolean }} interpretReply
+// @property {(content: string) => void} restoreSnapshot
+// @property {(content: string) => Array} parseTasks
+// @property {(content: string) => Object} splitSections
+// @property {(io: { extraKickoffBlock: string, docSummariesText: string }) => Promise<{ newSessionID: string }>} performHandoff
+// @property {number} [cycleNumber]
+// @property {number} [maxCycles]
+// @property {(sessionID: string, reason: string) => boolean} [pause]
+// @property {(openIdsFound: string[], openIdsLeft: string[]) => { stalledCycles: number, completed: number|null }} [recordCycle]
 // @property {(t: { message: string, variant: string }) => void} [toast]
 // @property {number} [quiesceTimeoutMs]
 // @property {number} [pollMs]
@@ -193,9 +254,7 @@ export function endlessKickoffBlock({ todoFileName, ids = [], openTasks = [] }) 
 // @property {() => number} [now]
 //
 // @param {EndlessCycleDeps} deps
-// @returns {Promise<null|{ outcome: string }>} null when the latch was not
-//   claimed; otherwise an outcome record ("ceiling", "abandoned",
-//   "no-open-points", "complete").
+// @returns {Promise<null|Object>} null when the latch was not claimed.
 export async function runEndlessCycle({
   primarySessionID,
   claim,
@@ -204,10 +263,18 @@ export async function runEndlessCycle({
   isQuiesced,
   dropRetained = null,
   countActive = () => 0,
-  requestOpenPoints,
-  addTask,
-  listOpen,
-  todoFileName = () => "",
+  prepare,
+  armWindDown,
+  disarmWindDown = () => {},
+  windDownTurn,
+  windDownPermit = () => undefined,
+  startWindDownSubagent,
+  settleWindDown,
+  reread,
+  interpretReply = () => ({ count: null, noChange: false, nothingOpen: false }),
+  restoreSnapshot = () => {},
+  parseTasks,
+  splitSections,
   performHandoff,
   cycleNumber = 1,
   maxCycles = 0,
@@ -219,13 +286,8 @@ export async function runEndlessCycle({
   sleep = defaultSleep,
   now = Date.now,
 }) {
-  // 1. The claim is synchronous, so a duplicate idle event — or an idle racing
-  // the executing cycle, e.g. the old primary going idle again after its
-  // open-points turn — cannot start a second cycle.
   if (!claim()) return null
 
-  // Abandon: release the latch (the spawn freeze lifts with it), arm the
-  // cooldown, say where and why. The primary is NOT replaced.
   const abandon = (stage, reason) => {
     log(`endless: abandoned at ${stage} — ${reason}`, { sessionID: primarySessionID })
     release()
@@ -234,21 +296,6 @@ export async function runEndlessCycle({
     return { outcome: "abandoned", stage, reason }
   }
 
-  // Stop the loop by PAUSING it, and release. Used by the three bounds that end
-  // the loop deliberately; no cooldown — there is nothing left to hold back.
-  //
-  // A self-stop never persists `endlessMode: false`. The mode is on by
-  // default, so a write-back would silently disable that default for good on
-  // the first stop; the settings file is the user's own switch and only the
-  // sidebar writes it. What a stop leaves behind is a runtime pause on ONE
-  // primary session: it is what keeps the still-over-threshold primary from
-  // re-arming the latch on its very next turn, and it dies with that session,
-  // so the next orchestrator has the mode available again.
-  //
-  // `pauseTarget` is the primary the pause is set on. It is this cycle's
-  // primary for every stop that fires BEFORE the replacement; the no-progress
-  // bound fires after it and passes the new session, because pausing the
-  // session it has just retired would bound nothing.
   const stop = (outcome, message, variant, pauseTarget = primarySessionID) => {
     release()
     const paused = pause(pauseTarget, message)
@@ -257,208 +304,245 @@ export async function runEndlessCycle({
     return { outcome, paused, pausedSessionID: pauseTarget }
   }
 
-  // 2. The cycle ceiling, checked BEFORE anything is written or replaced.
-  // Counted over the handoff-redirect chain, so it survives every replacement
-  // in this process. `cycleNumber` is the generation number and starts at 1 on
-  // a primary that has never been handed off, so the number of cycles this
-  // chain has actually completed is one less — that is the figure the ceiling
-  // bounds, which makes `maxCycles: 1` a one-cycle mode rather than none at
-  // all. A non-positive ceiling arms nothing, the way a non-positive context
-  // threshold does.
-  const cyclesCompleted = cycleNumber - 1
-  if (maxCycles > 0 && cyclesCompleted >= maxCycles) {
-    return stop(
-      "ceiling",
-      `cycle ceiling reached (${cyclesCompleted}/${maxCycles}) — paused for this session`,
-      "warning",
-    )
-  }
+  try {
+    // 2. The cycle ceiling, before anything is written or replaced.
+    const cyclesCompleted = cycleNumber - 1
+    if (maxCycles > 0 && cyclesCompleted >= maxCycles) {
+      return stop(
+        "ceiling",
+        `cycle ceiling reached (${cyclesCompleted}/${maxCycles}) — paused for this session`,
+        "warning",
+      )
+    }
 
-  // 2b. The retained subagents of the primary this cycle is about to replace.
-  // Optional and best-effort: a process with `maxRetainedSubagents` at its
-  // default of 0 has none, and a drop that throws must not abandon a cycle that
-  // can still save its open points.
-  if (dropRetained) {
+    // 2b. Drop the retained subagents of the primary this cycle will replace.
+    if (dropRetained) {
+      try {
+        await dropRetained()
+      } catch (err) {
+        log(`endless: dropping retained subagents failed, continuing — ${errMsg(err)}`, {
+          sessionID: primarySessionID,
+        })
+      }
+    }
+
+    // 3. Quiesce.
+    const waitStartedAt = now()
+    const activeAtStart = countActive()
+    let quiesced = false
     try {
-      await dropRetained()
+      quiesced = await isQuiesced()
+      while (!quiesced) {
+        if (now() - waitStartedAt >= quiesceTimeoutMs) {
+          return abandon("quiesce", `still busy after ${quiesceTimeoutMs}ms`)
+        }
+        await sleep(pollMs)
+        quiesced = await isQuiesced()
+      }
     } catch (err) {
-      log(`endless: dropping retained subagents failed, continuing — ${errMsg(err)}`, {
+      return abandon("quiesce", errMsg(err))
+    }
+    log(`endless: quiesced after ${now() - waitStartedAt}ms, activeAtStart=${activeAtStart}`, {
+      sessionID: primarySessionID,
+    })
+
+    // 4. Prepare: resolve, insert the section, write, snapshot. A throw here —
+    // several todo files, a non-regular file, an ensureTodoFile or section
+    // write failure — abandons before a turn is spent.
+    let snapshot
+    try {
+      snapshot = prepare()
+    } catch (err) {
+      return abandon("prepare", `the todo file could not be prepared: ${errMsg(err)}`)
+    }
+    const fileName = snapshot.fileName || ""
+    const openIdsFound = (snapshot.tasks || []).map((t) => t.id)
+
+    // 5. Arm the single-use permit.
+    const { token } = armWindDown() || {}
+    if (!token) return abandon("prepare", "the wind-down permit could not be armed")
+
+    // 6. The wind-down turn. The shaped reply ends the turn; the child's
+    // settlement (step 7) says the write finished.
+    let replyText = ""
+    try {
+      replyText = await windDownTurn({ token, fileName, driftCount: snapshot.driftCount || 0 })
+    } catch (err) {
+      // No shaped reply in the window. The fallback covers a model that could
+      // not place the tool call at its ceiling.
+      log(`endless: wind-down turn produced no shaped reply — ${errMsg(err)}`, {
         sessionID: primarySessionID,
       })
     }
-  }
 
-  // 3. Quiesce. The count is process-wide, so the wait is an
-  // over-approximation with a second orchestrator in the same process. The
-  // inactivity watchdog resolves a HUNG subagent on its own well inside this
-  // window; the timeout is for one that is genuinely working.
-  const waitStartedAt = now()
-  // Sampled once, before the first poll: what was running when the wait began.
-  // Not "how many finished during it" — a cycle that starts already quiesced
-  // reports 0 here.
-  const activeAtStart = countActive()
-  let quiesced = false
-  try {
-    quiesced = await isQuiesced()
-    while (!quiesced) {
-      if (now() - waitStartedAt >= quiesceTimeoutMs) {
-        return abandon("quiesce", `still busy after ${quiesceTimeoutMs}ms`)
+    // Whichever route ran, the cycle waits on the child the permit records — or,
+    // where the permit was never consumed, on the fallback the plugin starts
+    // itself after disarming so a late permitted spawn cannot add a second
+    // writer against the same file.
+    let child
+    const permit = windDownPermit()
+    if (permit && permit.consumed && permit.settlement) {
+      child = { childSessionID: permit.childSessionID, settlement: permit.settlement }
+    } else {
+      // Disarm FIRST, synchronously, then start the fallback.
+      disarmWindDown()
+      log("endless: wind-down spawned by the plugin — the orchestrator made no permitted spawn", {
+        sessionID: primarySessionID,
+      })
+      try {
+        child = await startWindDownSubagent()
+      } catch (err) {
+        return abandon("wind-down", `the fallback wind-down spawn failed: ${errMsg(err)}`)
       }
-      await sleep(pollMs)
-      quiesced = await isQuiesced()
-    }
-  } catch (err) {
-    return abandon("quiesce", errMsg(err))
-  }
-  log(
-    `endless: quiesced after ${now() - waitStartedAt}ms, activeAtStart=${activeAtStart}`,
-    { sessionID: primarySessionID },
-  )
-
-  // 4a. The open-points turn. The primary cannot write files — it holds
-  // spawn / abort / list and nothing else — so the reply is plain text and the
-  // plugin does the writing.
-  let openPointsText
-  try {
-    openPointsText = await requestOpenPoints()
-  } catch (err) {
-    return abandon("save", `open-points turn failed: ${errMsg(err)}`)
-  }
-  const points = parseOpenPoints(openPointsText)
-  if (points === null) {
-    return abandon("save", "reply carried no `## OPEN POINTS` heading")
-  }
-
-  // 4b. The todo file as this cycle FOUND it — the tasks the previous cycle
-  // left behind. Its titles are both what a point is deduped against below and
-  // one half of what the no-progress bound compares across cycles; its length
-  // is the `open tasks <before>` figure of the log line and of the stop
-  // message. A directory with no todo file at all reads as empty; any
-  // other unusable todo file (several of them, or one that is not a regular
-  // file) throws and abandons the cycle rather than being written over.
-  let existingTasks
-  try {
-    existingTasks = listOpen()
-  } catch (err) {
-    return abandon("save", `todo file unusable: ${errMsg(err)}`)
-  }
-  const openBefore = existingTasks.length
-
-  // 4c. Write one task per point, skipping the ones already standing in the
-  // file. Two paths produce those: an abandoned cycle whose tasks were written
-  // before it failed is asked for the same points again once the cooldown
-  // lifts, and a new orchestrator's own open-points reply naturally restates
-  // the tasks from the list it was told to work off. Either way the file would
-  // grow monotonically and the no-progress bound would read a count that can
-  // only rise.
-  //
-  // The match is on the normalised title alone — a model restating an
-  // unfinished task rarely reproduces its accept line, and a title that comes
-  // back word for word is the case worth catching. A restatement in different
-  // words still lands as a second task; that is the residue this leaves.
-  const seen = new Set(existingTasks.map((t) => normaliseTitle(t.text)))
-  const ids = []
-  let skipped = 0
-  try {
-    for (const point of points) {
-      const key = normaliseTitle(point?.title)
-      if (key && seen.has(key)) {
-        skipped += 1
-        continue
+      if (!child || !child.settlement) {
+        return abandon("wind-down", "the fallback produced no wind-down child")
       }
-      const { id } = addTask(point)
-      if (key) seen.add(key)
-      ids.push(id)
     }
-  } catch (err) {
-    return abandon("save", `writing the open points failed: ${errMsg(err)}`)
-  }
 
-  // 4d. The confirmation, and the part that is not assumed: read the file back
-  // and require every id the write returned to be in it.
-  let openTasks
-  try {
-    openTasks = listOpen()
-  } catch (err) {
-    return abandon("save", `todo file unreadable after the write: ${errMsg(err)}`)
-  }
-  const present = new Set(openTasks.map((t) => t.id))
-  const missing = ids.filter((id) => !present.has(id))
-  if (missing.length > 0) {
-    return abandon("save", `${missing.join(",")} missing from the todo file after the write`)
-  }
-  const fileName = todoFileName()
-  log(
-    `endless: saved ${ids.length} point(s) as ${ids.join(",") || "-"} ` +
-      `confirmed=${ids.length} skipped=${skipped} file=${fileName || "-"}`,
-    { sessionID: primarySessionID },
-  )
+    // 7. Settle. Await the child's own ending, bounded; where it never settles
+    // the child is ended and the cycle abandons — never confirm against a
+    // running writer.
+    let settle
+    try {
+      settle = await settleWindDown(child)
+    } catch (err) {
+      return abandon("wind-down", `the wind-down child could not be settled: ${errMsg(err)}`)
+    }
+    if (!settle || !settle.ok) {
+      return abandon("wind-down", settle?.reason || "the wind-down child did not settle in the window")
+    }
+    const childOutcome = settle.outcome || {}
+    const childCompleted = childOutcome.status === "completed"
 
-  // 5. Nothing left to do. A restart into an empty todo file would produce a
-  // session with nothing to work on, which would idle and be woken by nothing.
-  if (ids.length === 0 && openTasks.length === 0) {
-    return stop("no-open-points", "no open points left — paused for this session", "success")
-  }
+    // 8. Confirm. V1 is the re-resolve here; the rest is verifyWindDown.
+    let fresh
+    try {
+      fresh = reread()
+    } catch (err) {
+      // multiple / not-a-file: there is no single resolved file to restore to.
+      toast({
+        message: `endless mode: the todo file no longer resolves (${snapshot.fileName || "?"}) — ${errMsg(err)}`,
+        variant: "error",
+      })
+      return abandon("confirm", `the todo file no longer resolves: ${errMsg(err)}`)
+    }
+    if (fresh.name !== snapshot.fileName) {
+      toast({
+        message: `endless mode: the todo file was renamed from ${snapshot.fileName} to ${fresh.name}`,
+        variant: "error",
+      })
+      return abandon("confirm", `the todo file was renamed from ${snapshot.fileName} to ${fresh.name}`)
+    }
 
-  // 6. Replace the primary. The open-points turn has already happened, so the
-  // doc-summary turn is not asked for a second time — the wiring hands the
-  // text we already have back to the handoff instead.
-  let result
-  try {
-    result = await performHandoff({
-      // `openTasks` is the read-back of 4d — the resolved todo file's own open
-      // tasks, obtained through the injected `listOpen` (case-insensitive
-      // lookup, "missing" reading as empty, "multiple" having abandoned the
-      // cycle above). Deliberately NOT re-read here: a second read could
-      // disagree with the very list the ids were just confirmed against.
-      extraKickoffBlock: endlessKickoffBlock({ todoFileName: fileName, ids, openTasks }),
-      openPointsText,
-    })
-  } catch (err) {
-    return abandon("handoff", errMsg(err))
-  }
-  if (!result?.newSessionID) {
-    return abandon("handoff", "the handoff produced no new session")
-  }
-
-  // 7. The progress record, and the no-progress bound on it. What the bound
-  // compares is the PREVIOUS cycle's post-write task set against this cycle's
-  // pre-write task set: a cycle is stalled only when not one title the previous
-  // cycle handed over has left the file. Both snapshots are the reads already
-  // taken here — `existingTasks` from 4b, `openTasks` from 4d — normalised on
-  // the same expression the dedupe uses, so a healthy loop that finishes what
-  // it inherited clears the streak however many fresh points it saves, and a
-  // loop that finishes nothing is caught at the first repetition.
-  const openAfter = openTasks.length
-  const { stalledCycles, completed } = recordCycle(
-    existingTasks.map((t) => normaliseTitle(t.text)),
-    openTasks.map((t) => normaliseTitle(t.text)),
-  )
-  log(
-    `endless: cycle ${cycleNumber}/${maxCycles || "∞"} complete, new session ${result.newSessionID}, ` +
-      `open tasks ${openBefore}→${openAfter} completed=${completed ?? "-"}`,
-  )
-  if (stalledCycles >= ENDLESS_MAX_STALLED_CYCLES) {
-    // The latch of the OLD primary is already gone (the handoff's forgetPrimary
-    // released it); `stop`'s release is a harmless no-op here and the pause is
-    // what matters. It goes on the NEW primary: the old one is archived and
-    // will never schedule anything again, so pausing it would leave the loop
-    // running in the session that inherited it.
-    const stopped = stop(
-      "complete",
-      `no task completed over ${stalledCycles} cycles at ${openBefore} open task(s) — ` +
-        `paused for the new session`,
-      "warning",
-      result.newSessionID,
+    const reply = interpretReply(replyText)
+    const verdict = verifyWindDown(
+      snapshot,
+      {
+        content: fresh.content,
+        replyNoChange: reply.noChange,
+        replyNothingOpen: reply.nothingOpen,
+        replyCount: reply.count,
+      },
+      { splitSections, parseTasks },
     )
-    return { ...stopped, newSessionID: result.newSessionID, ids, openBefore, openAfter, stalledCycles }
-  }
-  return {
-    outcome: "complete",
-    newSessionID: result.newSessionID,
-    ids,
-    openBefore,
-    openAfter,
-    stalledCycles,
+
+    // 9. Nothing left to do: the subagent's explicit "nothing open" and a
+    // zero-task parse pause the mode rather than start an empty session.
+    if (verdict.empty) {
+      return stop("no-open-points", "no open points left — paused for this session", "success")
+    }
+
+    // The rewrite the plugin will not stand behind (V3, V4, V5 or V6): restore
+    // the snapshot, then abandon without replacing the session.
+    const coreOk = verdict.v3 && verdict.v4 && verdict.v5 && verdict.v6
+    if (!coreOk) {
+      const failed = !verdict.v3 ? "V3" : !verdict.v4 ? "V4" : !verdict.v5 ? "V5" : "V6"
+      try {
+        restoreSnapshot(snapshot.content)
+        log("endless: wind-down rewrite rejected — the todo file was restored", {
+          sessionID: primarySessionID,
+          failed,
+        })
+      } catch (err) {
+        toast({
+          message: `endless mode: the todo file could not be restored after ${failed} at ${snapshot.fileName}: ${errMsg(err)}`,
+          variant: "error",
+        })
+      }
+      return abandon("confirm", `wind-down rewrite rejected (${failed})`)
+    }
+    // V2: a child that ended abnormally is accepted only because V3–V6 all hold.
+    if (!childCompleted) {
+      log("endless: wind-down child did not complete, but the file verifies — accepting", {
+        sessionID: primarySessionID,
+        status: childOutcome.status,
+      })
+    }
+    // V7: an observation, not a gate — the parse wins.
+    if (verdict.countMismatch) {
+      log("endless: wind-down reply count disagrees with the parse — the parse wins", {
+        sessionID: primarySessionID,
+        replyCount: verdict.replyCount,
+        parseCount: verdict.parseCount,
+      })
+    }
+
+    const openIdsLeft = verdict.openIds
+    log(
+      `endless: wind-down confirmed ${openIdsLeft.length} open task(s) [${openIdsLeft.join(",") || "-"}] ` +
+        `file=${fileName || "-"}`,
+      { sessionID: primarySessionID },
+    )
+
+    // 10. Replace the primary. The kickoff carries the confirmed file's own
+    // text; the wind-down reply stands in for the doc-summary turn.
+    const { text: todoFileText, truncated } = cutTodoText(fresh.content)
+    let result
+    try {
+      result = await performHandoff({
+        extraKickoffBlock: endlessKickoffBlock({ todoFileName: fileName, todoFileText, truncated }),
+        docSummariesText: replyText,
+      })
+    } catch (err) {
+      return abandon("handoff", errMsg(err))
+    }
+    if (!result?.newSessionID) {
+      return abandon("handoff", "the handoff produced no new session")
+    }
+
+    // 11. Record and apply the no-progress bound, keyed on open task ids.
+    const { stalledCycles, completed } = recordCycle(openIdsFound, openIdsLeft)
+    log(
+      `endless: cycle ${cycleNumber}/${maxCycles || "∞"} complete, new session ${result.newSessionID}, ` +
+        `open tasks ${openIdsFound.length}→${openIdsLeft.length} completed=${completed ?? "-"}`,
+    )
+    if (stalledCycles >= ENDLESS_MAX_STALLED_CYCLES) {
+      const stopped = stop(
+        "complete",
+        `no task completed over ${stalledCycles} cycles at ${openIdsFound.length} open task(s) — ` +
+          `paused for the new session`,
+        "warning",
+        result.newSessionID,
+      )
+      return {
+        ...stopped,
+        newSessionID: result.newSessionID,
+        openIds: openIdsLeft,
+        openBefore: openIdsFound.length,
+        openAfter: openIdsLeft.length,
+        stalledCycles,
+      }
+    }
+    return {
+      outcome: "complete",
+      newSessionID: result.newSessionID,
+      openIds: openIdsLeft,
+      openBefore: openIdsFound.length,
+      openAfter: openIdsLeft.length,
+      stalledCycles,
+    }
+  } finally {
+    // No permit may outlive its cycle, on any exit.
+    disarmWindDown()
   }
 }

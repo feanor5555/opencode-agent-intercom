@@ -29,6 +29,11 @@ import {
   releasePendingTaskId,
   isTaskIdPending,
   isEndlessFrozen,
+  isEndlessInProgress,
+  endlessWindDownPermit,
+  consumeEndlessWindDown,
+  restoreEndlessWindDown,
+  noteEndlessWindDownChild,
   rootPrimaryFor,
   spawnCapDecision,
   nestedQuotaDecision,
@@ -52,6 +57,13 @@ import {
   SUBAGENT_SESSION_TITLE_MARKER,
 } from "./teardown.js"
 import { projectContext } from "./project.js"
+import {
+  WIND_DOWN_TOKEN_PREFIX,
+  windDownTokenOf,
+  windDownPayloadOf,
+  DOC_SUMMARIES_POLL_MS,
+} from "./handoff.js"
+import { windDownSubagentPrompt } from "./prompts.js"
 import { AGENTS, nestedSpawnTargets, SPAWNABLE_ROLES } from "./agents.js"
 import { knownAgentKinds } from "./config.js"
 import {
@@ -399,22 +411,70 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // hold primary session ids only, so a nested caller asking about its own
     // id would always be told "not frozen" and would keep spawning through the
     // freeze. For a primary caller rootPrimaryFor is the identity.
-    if (isEndlessFrozen(rootPrimaryFor(toolCtx.sessionID))) {
-      log("spawn refused: endless cycle in progress", { sessionID: toolCtx.sessionID })
-      if (nested) {
-        return {
-          output:
-            "Spawn refused: endless mode is replacing the primary orchestrator, so this nested " +
-            "delegation will not start. Do what you can yourself and name in your final reply " +
-            "what you still need; the orchestrator decides. Open that reply with \"Blocked:\" " +
-            "where the missing material stops the task.",
+    //
+    // The ONE exception is the cycle's own wind-down spawn, and only while its
+    // permit is armed: the orchestrator cannot write files, so the todo file is
+    // rewritten by a `planner` it starts itself. Admission takes all five terms
+    // — the cycle is executing (never the pending phase, so the window cannot
+    // open before quiesce), the caller IS the root primary, the agent is the
+    // permitted one, the prompt's first line carries the per-cycle token, and
+    // the permit is unconsumed — and the consume happens in the SAME
+    // synchronous block as the test, before any await, for the reason
+    // reservePendingTaskId states below: two spawns in one turn carrying the
+    // same token would otherwise both pass.
+    const rootPrimary = rootPrimaryFor(toolCtx.sessionID)
+    let windDown = false
+    if (isEndlessFrozen(rootPrimary)) {
+      const permit = endlessWindDownPermit(rootPrimary)
+      const eligible =
+        !nested &&
+        Boolean(permit) &&
+        isEndlessInProgress(rootPrimary) &&
+        toolCtx.sessionID === rootPrimary
+      const admission = eligible
+        ? consumeEndlessWindDown(rootPrimary, {
+            token: windDownTokenOf(args.prompt),
+            agent: args.agent,
+          })
+        : { ok: false, reason: "none" }
+      if (admission.ok) {
+        windDown = true
+        log("spawn admitted: endless wind-down permit consumed", {
+          sessionID: toolCtx.sessionID,
+          agent: args.agent,
+        })
+      } else {
+        log("spawn refused: endless cycle in progress", {
+          sessionID: toolCtx.sessionID,
+          permit: permit ? admission.reason : "unarmed",
+        })
+        if (nested) {
+          return {
+            output:
+              "Spawn refused: endless mode is replacing the primary orchestrator, so this nested " +
+              "delegation will not start. Do what you can yourself and name in your final reply " +
+              "what you still need; the orchestrator decides. Open that reply with \"Blocked:\" " +
+              "where the missing material stops the task.",
+          }
         }
+        // While a permit is armed the refusal SPELLS OUT the one spawn that is
+        // allowed, so a wrong attempt self-corrects inside the window instead
+        // of exhausting it. A refusal never consumes the permit.
+        if (permit && !permit.consumed) {
+          throw new Error(
+            `Endless mode is winding this session down. Exactly ONE spawn is allowed: ` +
+              `spawn("${permit.agent}", …) whose prompt's FIRST line is exactly ` +
+              `"${WIND_DOWN_TOKEN_PREFIX} ${permit.token}". This call was not it, so nothing ` +
+              `started and the one call is still open. Make it now, with your whole hand-over ` +
+              `after that first line.`,
+          )
+        }
+        throw new Error(
+          "Endless mode is saving this session's open points and replacing it with a fresh " +
+            "orchestrator. No new subagent will start. End your turn now — the work you would " +
+            "delegate belongs in your open points, which you are about to be asked for.",
+        )
       }
-      throw new Error(
-        "Endless mode is saving this session's open points and replacing it with a fresh " +
-          "orchestrator. No new subagent will start. End your turn now — the work you would " +
-          "delegate belongs in your open points, which you are about to be asked for.",
-      )
     }
     trackPrimary(toolCtx.sessionID)
     const directory = await dirFor(toolCtx)
@@ -469,7 +529,9 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // is the orchestrator trying to dump its whole batch into one coder. The
     // size rule is per spawn — one concern, one task — so reject up front with
     // a clear hint to split. Allowed: zero or one ID.
-    const allTaskIds = extractAllTaskIds(args.prompt)
+    // The wind-down briefing names every open task id by design; this guard
+    // exists against a coder batch, which the composed child prompt is not.
+    const allTaskIds = windDown ? new Set() : extractAllTaskIds(args.prompt)
     if (allTaskIds.size > 1) {
       const list = [...allTaskIds].sort().join(", ")
       log("spawn refused: multi-task prompt", { ids: list })
@@ -487,9 +549,19 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // `fullPrompt` is built here and reused for promptSession below — the gate
     // measures exactly the text the subagent gets.
     const ctxBlock = projectContext(directory)
-    const fullPrompt = ctxBlock ? `${ctxBlock}\n\n${args.prompt}` : args.prompt
+    // The wind-down child's prompt is composed by the PLUGIN: its own
+    // instruction block, the orchestrator's hand-over (capped, under a fixed
+    // heading, with the token line stripped) and its own contract. `args.prompt`
+    // is a payload, never instructions — otherwise the permit would hand the
+    // orchestrator one arbitrary file-writing `planner` run whose task it
+    // chooses, in the session's own directory.
+    const childPrompt = windDown ? windDownSubagentPrompt(windDownPayloadOf(args.prompt)) : args.prompt
+    const fullPrompt = ctxBlock ? `${ctxBlock}\n\n${childPrompt}` : childPrompt
     const size = packageSizeVerdict(args.agent, fullPrompt)
-    if (size.refusal) {
+    // The size refusal is exempted for the wind-down: the briefing IS the whole
+    // hand-over, and refusing it here would abandon the cycle over its length.
+    // Its bound is WIND_DOWN_PAYLOAD_MAX_CHARS, applied above.
+    if (size.refusal && !windDown) {
       log("spawn refused: package too large", {
         agent: args.agent,
         estimate: size.estimate,
@@ -513,7 +585,9 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // visible to any later spawn() in the same micro-batch — mirrors the
     // pendingSpawns cap reservation. Prefix-free spawns pass taskId=undefined
     // and never reserve, so they cannot block one another.
-    const taskId = extractTaskId(args.prompt)
+    // The wind-down prompt carries no single task id to reserve — it names the
+    // whole list — so it reserves nothing.
+    const taskId = windDown ? undefined : extractTaskId(args.prompt)
     if (taskId) {
       const active = activeTaskIdsFor(toolCtx.sessionID)
       if (active.has(taskId) || isTaskIdPending(taskId)) {
@@ -576,7 +650,12 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       // and it gates a spawn made by a PRIMARY only: a nested spawn is admitted
       // unconditionally and still counted, because the caller already holds the
       // slot it would be told to wait for (see spawnCapDecision in registry.js).
-      const cap = spawnCapDecision(toolCtx.sessionID, maxSubagents)
+      // The global cap does not gate the wind-down: quiesce is scoped to THIS
+      // primary, so another orchestrator's subagents must not be able to block
+      // the one spawn this cycle depends on.
+      const cap = windDown
+        ? { refused: false }
+        : spawnCapDecision(toolCtx.sessionID, maxSubagents)
       if (cap.refused) {
         log("spawn refused: subagent limit", { active: cap.active, limit: maxSubagents })
         return {
@@ -612,11 +691,20 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
         directory,
       })
       if (!sessionID) {
-        return {
-          output: createFailure
-            ? `Failed to create subagent session: ${errMsg(createFailure)}`
-            : "Failed to create subagent session.",
+        const reason = createFailure
+          ? `Failed to create subagent session: ${errMsg(createFailure)}`
+          : "Failed to create subagent session."
+        // Nothing was prompted, so nothing is running and nothing was written:
+        // the consume was a reservation and is given back, once. A transient
+        // 5xx must not burn the single permit and sit the cycle out.
+        if (windDown && restoreEndlessWindDown(rootPrimary)) {
+          return {
+            output:
+              `${reason} The wind-down spawn did not start. You may repeat that one call ONCE, ` +
+              `unchanged.`,
+          }
         }
+        return { output: reason }
       }
 
       // The waiter goes up here — after the child's id exists, BEFORE the child
@@ -630,8 +718,28 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       // held, its silence does not count against the watchdog, and its session
       // is not deleted out from under the child. Every path that ends the child
       // settles the waiter, and the waiter carries its own rescue ceiling.
+      //
+      // The wind-down spawn registers one too, with its parent a PRIMARY, which
+      // childwait.js explicitly allows. Its ceiling is set explicitly: the
+      // derived one is four times the larger watchdog window and would outlive
+      // the turn the cycle is waiting inside, so the waiter's own expiry is put
+      // strictly before the wind-down window closes.
       let childResult
-      if (nested) childResult = registerChildWaiter(sessionID, toolCtx.sessionID)
+      if (nested) {
+        childResult = registerChildWaiter(sessionID, toolCtx.sessionID)
+      } else if (windDown) {
+        const window = getSettings().endlessWindDownTimeoutMs
+        childResult = registerChildWaiter(sessionID, toolCtx.sessionID, {
+          timeoutMs: window > 0 ? Math.max(0, window - DOC_SUMMARIES_POLL_MS) : 0,
+        })
+        // The permit records the child and the promise: THAT settlement, not
+        // the orchestrator's text, is what the cycle waits on before it reads
+        // the file back.
+        noteEndlessWindDownChild(rootPrimary, {
+          childSessionID: sessionID,
+          settlement: childResult,
+        })
+      }
 
       // The child session now exists at the opencode level. If anything below
       // throws (typically promptSession), guard() would catch it and report an
@@ -676,6 +784,17 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
             },
           }
         }
+        // The second branch that ends before the child was prompted: the permit
+        // goes back once, and the refusal names the repeat, so the cycle is not
+        // lost to one failed round trip.
+        if (windDown && restoreEndlessWindDown(rootPrimary)) {
+          return {
+            output:
+              `The wind-down spawn did not start (${detail}). You may repeat that one call ` +
+              `ONCE, unchanged.`,
+            metadata: { sessionID, agent: args.agent, windDown: true, status: "error" },
+          }
+        }
         throw err
       }
 
@@ -692,6 +811,11 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
         // The gate's own figure, kept for the completion notice: it reports
         // what this package cost beside what the whole run cost.
         packageTokens: size.estimate,
+        // The cycle's wind-down child. Read by the completion path, which posts
+        // no wake notice for it (the result already reached the primary as this
+        // tool call's own result, and that primary is being replaced), and by
+        // the retention decision, which never holds it.
+        windDown,
       })
       // Tag this tool-call with the same metadata shape that opencode's built-in
       // `task` tool emits. The TUI keys off `parentSessionId` + `sessionId` to
@@ -759,6 +883,37 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
             sessionID,
             agent: args.agent,
             nested: true,
+            status: outcome.status,
+          },
+        }
+      }
+      // The permitted wind-down spawn blocks exactly as a nested one does: the
+      // cycle's next step is the file the child is rewriting, so this call does
+      // not return until that child has ended.
+      if (windDown) {
+        if (reservedSpawn) {
+          releasePendingSpawn(toolCtx.sessionID)
+          reservedSpawn = false
+        }
+        log("wind-down spawn: the orchestrator blocks until its child ends", {
+          caller: toolCtx.sessionID,
+          handle: entry.handle,
+          sessionID,
+        })
+        const outcome = await childResult
+        log("wind-down spawn: child ended", {
+          handle: entry.handle,
+          sessionID,
+          status: outcome.status,
+          waitedMs: outcome.waitedMs,
+        })
+        return {
+          output: nestedSpawnOutput(outcome, entry.handle, args.agent),
+          metadata: {
+            handle: entry.handle,
+            sessionID,
+            agent: args.agent,
+            windDown: true,
             status: outcome.status,
           },
         }
@@ -1272,12 +1427,26 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     return { output: rows.join("\n") }
   }
 
+  // What a writer answers for an id that stands only in a legacy line outside
+  // the plugin's marked section. Not an error: the task is real, the line is
+  // human text until a wind-down moves it in, and touching it here is the
+  // silent deletion the read/write split exists against.
+  function unmigratedTaskOutput(id) {
+    return (
+      `${id} stands in the todo file OUTSIDE the plugin's marked section ` +
+      `(<!-- intercom:begin --> … <!-- intercom:end -->), so nothing was changed — a line out ` +
+      `there may be human text that merely starts with a T-token. The next wind-down migrates ` +
+      `it into the section; from then on this tool acts on it.`
+    )
+  }
+
   async function todoDoneHandler(args, toolCtx) {
     const id = String(args.id || "").trim()
     if (!/^T\d+$/.test(id)) {
       return { output: `todo_done failed: id must look like T5, got "${args.id}".` }
     }
-    removeTask(await dirFor(toolCtx), id)
+    const res = removeTask(await dirFor(toolCtx), id)
+    if (res?.unmigrated) return { output: unmigratedTaskOutput(id) }
     return { output: `${id} removed from TODO.md.` }
   }
 
@@ -1301,6 +1470,7 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       title: args.title,
       accept: args.accept,
     })
+    if (res?.unmigrated) return { output: unmigratedTaskOutput(id) }
     if (!res.changed) return { output: `${id} unchanged (provided values match current).` }
     return { output: `${id} updated.` }
   }

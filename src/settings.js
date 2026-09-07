@@ -225,6 +225,12 @@ export const DEFAULT_ENDLESS_CONTEXT = 250000
 // The inactivity watchdog (maxSubagentAgeMs) already resolves a HUNG subagent
 // in ~90 s, so this bound is for one that is genuinely working.
 const DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS = 600000
+// How long a cycle's wind-down step gets: the primary's one shaped turn, the
+// `planner` it starts, that subagent reading files and rewriting the todo list,
+// and the settlement the cycle waits for afterwards. Minutes, not the 120 s a
+// plain text turn takes. Not shown in the sidebar, exactly like
+// `endlessQuiesceTimeoutMs`.
+export const DEFAULT_ENDLESS_WIND_DOWN_TIMEOUT_MS = 900000
 // How many cycles one opencode process runs before endless mode pauses itself
 // for that primary. Counted over the handoff-redirect chain
 // (handoffGeneration).
@@ -360,6 +366,10 @@ export function getSettings() {
       "OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS",
       DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS,
     ),
+    endlessWindDownTimeoutMs: envNum(
+      "OPENCODE_AGENT_INTERCOM_ENDLESS_WIND_DOWN_TIMEOUT_MS",
+      DEFAULT_ENDLESS_WIND_DOWN_TIMEOUT_MS,
+    ),
     endlessMaxCycles: envNum("OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES", DEFAULT_ENDLESS_MAX_CYCLES),
     maxNestedSpawns: envNum("OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS", DEFAULT_MAX_NESTED_SPAWNS),
     showAgentcom: envBool("OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM", DEFAULT_SHOW_AGENTCOM),
@@ -463,6 +473,9 @@ export function getSettings() {
     }
     if (Number.isInteger(raw?.endlessQuiesceTimeoutMs) && raw.endlessQuiesceTimeoutMs >= 0) {
       resolved.endlessQuiesceTimeoutMs = raw.endlessQuiesceTimeoutMs
+    }
+    if (Number.isInteger(raw?.endlessWindDownTimeoutMs) && raw.endlessWindDownTimeoutMs >= 0) {
+      resolved.endlessWindDownTimeoutMs = raw.endlessWindDownTimeoutMs
     }
     if (Number.isInteger(raw?.endlessMaxCycles) && raw.endlessMaxCycles >= 0) {
       resolved.endlessMaxCycles = raw.endlessMaxCycles

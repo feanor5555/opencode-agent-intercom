@@ -377,7 +377,18 @@ export async function teardownSubagent(
       agent,
       ...(outcome ?? {}),
     })
-    if (notice != null && parentID) {
+    // A wind-down child never posts into its primary, on ANY ending path. Its
+    // result already reached the primary as the permitted spawn's own tool
+    // result, and that primary is being replaced by the cycle; a watchdog/abort
+    // reap firing a timeout notice here would land in a session the cycle is
+    // retiring. The completion path suppresses its own wake notice for the same
+    // entry (hooks.js); this closes the reap/abort route the concept scoped to
+    // this helper.
+    const windDownEntry = Boolean(entryForSession(sessionID)?.windDown)
+    if (windDownEntry && notice != null) {
+      log(`${tag}wind-down child reaped; no notice posted`, { handle, parentID })
+    }
+    if (notice != null && parentID && !windDownEntry) {
       try {
         await postParentNotice(client, parentID, notice, {
           allowTrackedSubagent: detachedParentID === parentID,

@@ -25,12 +25,18 @@ if hit is None:
     raise SystemExit
 
 block = hit.split(HEADING, 1)[1]
-parts = block.split("\n\n")
-head = parts[1] if len(parts) > 1 else block
-named = re.findall(r"\bT\d+\b", head)
+# The kickoff carries the todo file's own text (endlessKickoffBlock): task ids
+# appear as canonical "- T<n>:" lines in it. The watermark comment
+# (<!-- intercom: next-id T<n> -->) and the "reports `DONE: T<n>`" instruction
+# are not tasks, so ids are read off the task-line shape rather than every
+# T-token, and in file order without duplicates.
+named = []
+for match in re.findall(r"(?m)^\s*[-*]\s+(T\d+)\s*(?::|—|–|-)", block):
+    if match not in named:
+        named.append(match)
 missing = [item for item in expected if item not in named]
 extra = [item for item in named if item not in expected]
-first = " ".join(head.split())[:200]
+first = " ".join(block.split())[:200]
 if missing or extra:
     print(
         f"complete|fail|kickoff names {named or 'no id'}; missing "

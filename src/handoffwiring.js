@@ -10,9 +10,11 @@ import {
   lastUserGoal,
   requestDocSummaries,
   looksLikeDocSummariesReply,
-  looksLikeOpenPointsReply,
+  looksLikeWindDownReply,
+  interpretWindDownReply,
+  WIND_DOWN_PROMPT,
   DOC_SUMMARY_PROMPT,
-  OPEN_POINTS_PROMPT,
+  DOC_SUMMARIES_POLL_MS,
 } from "./handoff.js"
 import { runEndlessCycle } from "./endless.js"
 import {
@@ -37,6 +39,11 @@ import {
   isQuiesced,
   recordEndlessCycle,
   countActiveSubagentsFor,
+  createWindDownToken,
+  armEndlessWindDown,
+  endlessWindDownPermit,
+  disarmEndlessWindDown,
+  upsertSession,
 } from "./registry.js"
 import {
   fetchSnapshot,
@@ -49,9 +56,19 @@ import {
   createChildSession,
   promptSession,
   selectTuiSession,
+  abortSession,
 } from "./client.js"
-import { dropRetainedSubagents } from "./teardown.js"
-import { addTask, listOpen, findTodoFile, TodoFileMissingError } from "./todofile.js"
+import { dropRetainedSubagents, teardownSubagent, SUBAGENT_SESSION_TITLE_MARKER } from "./teardown.js"
+import {
+  prepareTodoFile,
+  readTodoFileNamed,
+  writeTodoFile,
+  parseTasks,
+  splitSections,
+} from "./todofile.js"
+import { registerChildWaiter, settleChildWaiter } from "./childwait.js"
+import { windDownSubagentPrompt } from "./prompts.js"
+import { createHash } from "node:crypto"
 import { getSettings } from "./settings.js"
 import { defaultAgentName, DEFAULT_AGENT } from "./agents.js"
 import { knownAgentKinds } from "./config.js"
@@ -285,9 +302,11 @@ export async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, res
 //     a session-history summary (Session-Verlauf). The new orchestrator (#2)
 //     embeds those blocks into its kickoff message and starts its life with
 //     full context WITHOUT having to re-read the docs from disk.
-//   - OPEN_POINTS_PROMPT / looksLikeOpenPointsReply — the endless cycle.
-//     Everything still open, in the todo file's own two-line shape, so the
-//     plugin can write the points itself.
+//   - WIND_DOWN_PROMPT / looksLikeWindDownReply — the endless cycle.
+//     Asks #1 to spawn a `planner` through the one-time permit; that child
+//     rewrites the todo file itself. The turn does not return until the child
+//     has settled, so its ceiling is the whole wind-down window, and its reply
+//     is the `## WIND-DOWN DONE — <n> open` line the plugin then verifies.
 //
 // Flow (implemented by `requestDocSummaries` in handoff.js — injectable
 // core, so the baseline/poll discipline is unit-testable without a runtime):
@@ -318,7 +337,12 @@ export async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, res
 // `docSummaries` block with `FALLBACK_DOC_SUMMARIES` and the kickoff still
 // lands, while the endless cycle ABANDONS — replacing a primary after failing
 // to save its open points is the data loss the mode exists to prevent.
-async function promptOldPrimaryFor(client, primarySessionID, agentName, { prompt, looksLikeReply }) {
+async function promptOldPrimaryFor(
+  client,
+  primarySessionID,
+  agentName,
+  { prompt, looksLikeReply, timeoutMs },
+) {
   if (!client || !primarySessionID) {
     throw new Error("promptOldPrimaryFor: missing client or primarySessionID")
   }
@@ -332,7 +356,97 @@ async function promptOldPrimaryFor(client, primarySessionID, agentName, { prompt
         hideable: true,
       }),
     looksLikeReply,
+    // The wind-down turn does not return until the child it spawns has finished
+    // rewriting the file, so its ceiling is the whole wind-down window, not the
+    // doc-summary default. Left undefined for the plain doc-summary turn.
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
   })
+}
+
+// The role the wind-down subagent runs as. `planner` already holds read /
+// write / edit / glob / grep and the todo tools and nothing that could delegate
+// or reach the web or a shell, which is exactly the job.
+const WIND_DOWN_AGENT = "planner"
+
+// The failure-path fallback of §5: the plugin starts the wind-down subagent
+// itself, with the same role, prompt shape and waiter the orchestrator's
+// permitted spawn would have produced — differing only in WHO calls it. Reached
+// once, after the permit has been disarmed, when the primary placed no shaped
+// reply and never consumed the permit. `payload` is whatever final text the
+// primary last produced; the child prompt caps it and wraps it in the hand-over
+// heading. Returns `{ childSessionID, settlement }`; throws when no child could
+// be started, which the cycle turns into an abandon.
+async function startWindDownSubagent(client, primarySessionID, directory, payload) {
+  const title = `${WIND_DOWN_AGENT}: endless wind-down`
+  const { sessionID, error } = await createChildSession(client, {
+    parentID: primarySessionID,
+    title: SUBAGENT_SESSION_TITLE_MARKER + title,
+    directory,
+  })
+  if (!sessionID) {
+    throw new Error(error ? errMsg(error) : "createChildSession returned no session id")
+  }
+  // The waiter goes up before the prompt and before the entry is upserted, so
+  // no window exists in which the child could end with nothing recording it.
+  const window = getSettings().endlessWindDownTimeoutMs
+  const settlement = registerChildWaiter(sessionID, primarySessionID, {
+    timeoutMs: window > 0 ? Math.max(0, window - DOC_SUMMARIES_POLL_MS) : 0,
+  })
+  // The entry carries `windDown` so the completion path and the teardown both
+  // suppress the wake notice, exactly as they do for the permitted spawn.
+  upsertSession(sessionID, {
+    agent: WIND_DOWN_AGENT,
+    parentID: primarySessionID,
+    directory,
+    title,
+    windDown: true,
+  })
+  try {
+    await promptSession(client, {
+      sessionID,
+      agent: WIND_DOWN_AGENT,
+      prompt: windDownSubagentPrompt(payload),
+    })
+  } catch (err) {
+    settleChildWaiter(sessionID, { status: "error", agent: WIND_DOWN_AGENT, detail: errMsg(err) })
+    try {
+      await deleteSession(client, sessionID)
+    } catch {}
+    throw err
+  }
+  return { childSessionID: sessionID, settlement }
+}
+
+// The settlement gate of §5: await the child's own ending, and where the waiter
+// ceiling fired without the child ending (status "expired"), end the child —
+// abort, then teardown, which removes the entry — and report the cycle as
+// unsettled. Never lets the cycle confirm against a running writer, and never
+// abandons leaving one alive.
+async function settleWindDownChild(client, primarySessionID, child) {
+  const outcome = await child.settlement
+  if (outcome && outcome.status === "expired") {
+    try {
+      await abortSession(client, child.childSessionID)
+    } catch (err) {
+      log("endless: aborting an unsettled wind-down child failed", { err: errMsg(err) })
+    }
+    try {
+      await teardownSubagent(
+        client,
+        {
+          sessionID: child.childSessionID,
+          handle: child.childSessionID,
+          parentID: primarySessionID,
+          agent: WIND_DOWN_AGENT,
+        },
+        { markAborted: true, label: "endless-wind-down" },
+      )
+    } catch (err) {
+      log("endless: tearing down an unsettled wind-down child failed", { err: errMsg(err) })
+    }
+    return { ok: false, reason: "the wind-down child did not settle in the window" }
+  }
+  return { ok: true, outcome: outcome ?? {} }
 }
 
 // Drops an endless latch that has been set but not yet claimed, and says why.
@@ -370,7 +484,8 @@ export function dropEndlessLatch(sessionID, reason) {
 // every abandon path releases it inside runEndlessCycle and arms the cooldown.
 export async function maybeRunPendingEndless(client, sessionID) {
   if (!hasEndlessPending(sessionID)) return null
-  const { endlessMode, endlessQuiesceTimeoutMs, endlessMaxCycles } = getSettings()
+  const { endlessMode, endlessQuiesceTimeoutMs, endlessMaxCycles, endlessWindDownTimeoutMs } =
+    getSettings()
   // Stop #5, the switch: the latch is usually set during the very turn that
   // crosses the ceiling and this idle follows it immediately, so the transform
   // hook's off-branch — which needs ANOTHER turn from the primary — is not a
@@ -424,43 +539,69 @@ export async function maybeRunPendingEndless(client, sessionID) {
     // The figure the "quiesced after" log line reports: what this primary's
     // own wait was on when it began, scoped exactly as isQuiesced is.
     countActive: () => countActiveSubagentsFor(sessionID),
-    requestOpenPoints: () =>
+    // Resolve the todo file, lay the machine section down where it is missing
+    // and WRITE it, then snapshot content + hash + parse + the drift count.
+    // "several todo files" / "not a regular file" propagate as a throw the
+    // cycle abandons on, rather than writing into a directory a human still has
+    // to sort out; a directory with no todo file at all is created over.
+    prepare: () => {
+      const { name, content } = prepareTodoFile(directory)
+      const tasks = parseTasks(content)
+      const split = splitSections(content)
+      const driftCount = split.valid
+        ? tasks.filter((t) => t.lineIdx < split.beginIdx || t.lineIdx > split.endIdx).length
+        : tasks.length
+      const hash = createHash("sha256").update(content).digest("hex")
+      return { fileName: name, content, hash, tasks, driftCount }
+    },
+    // Mint a per-cycle token and arm the single-use permit for the `planner`
+    // spawn the freeze will admit. Returns the token the wind-down prompt
+    // carries, or an empty object when the arm failed.
+    armWindDown: () => {
+      const token = createWindDownToken()
+      const permit = armEndlessWindDown(sessionID, { token, agent: WIND_DOWN_AGENT })
+      return permit ? { token } : {}
+    },
+    disarmWindDown: () => disarmEndlessWindDown(sessionID),
+    // The wind-down turn: ask the primary to spawn the `planner` through the
+    // permit. The call does not return until the child has rewritten the file,
+    // so its ceiling is the whole wind-down window.
+    windDownTurn: ({ token, fileName, driftCount }) =>
       promptOldPrimaryFor(client, sessionID, agentName, {
-        prompt: OPEN_POINTS_PROMPT,
-        looksLikeReply: looksLikeOpenPointsReply,
+        prompt: WIND_DOWN_PROMPT(token, fileName, driftCount),
+        looksLikeReply: looksLikeWindDownReply,
+        timeoutMs: endlessWindDownTimeoutMs,
       }),
-    addTask: (point) => addTask(directory, point),
-    // A directory with NO todo file at all is the greenfield state addTask
-    // creates over, so it reads as an empty list here. "several todo files"
-    // and "not a regular file" are NOT greenfield — they propagate and the
-    // cycle abandons rather than writing into a directory a human has to
-    // sort out first.
-    listOpen: () => {
+    windDownPermit: () => endlessWindDownPermit(sessionID),
+    // The fallback: the plugin starts the wind-down subagent itself, with the
+    // primary's last text as the hand-over. Reached only after the permit has
+    // been disarmed.
+    startWindDownSubagent: async () => {
+      let payload = ""
       try {
-        return listOpen(directory)
-      } catch (err) {
-        if (err instanceof TodoFileMissingError && err.kind === "missing") return []
-        throw err
-      }
+        payload = (await fetchSnapshot(client, sessionID))?.result ?? ""
+      } catch {}
+      return startWindDownSubagent(client, sessionID, directory, payload)
     },
-    todoFileName: () => {
-      try {
-        return findTodoFile(directory).name
-      } catch {
-        return ""
-      }
-    },
+    settleWindDown: (child) => settleWindDownChild(client, sessionID, child),
+    // V1 re-resolve after the wind-down: the resolved name and current content,
+    // throwing "multiple" / "not-a-file" / "missing" so a file that split or
+    // vanished under the cycle surfaces rather than reading as empty.
+    reread: () => readTodoFileNamed(directory),
+    interpretReply: (text) => interpretWindDownReply(text),
+    restoreSnapshot: (content) => writeTodoFile(directory, content),
+    parseTasks,
+    splitSections,
     // The plain handoff with two dependencies replaced: the endless kickoff
-    // block, and the doc-summary turn standing down. Asking a session at its
-    // context ceiling for a second long turn is what the open-points turn
-    // already was; the text we have is handed back instead, so
-    // validateDocSummaries' fallback block lands in the kickoff and the new
-    // orchestrator reads the documents itself — it has the context to.
-    performHandoff: async ({ extraKickoffBlock, openPointsText }) =>
+    // block, and the doc-summary turn standing down. The wind-down reply is
+    // handed back in place of a fresh doc-summary turn, so validateDocSummaries'
+    // fallback block lands in the kickoff and the new orchestrator reads the
+    // documents itself — it has the context to.
+    performHandoff: async ({ extraKickoffBlock, docSummariesText }) =>
       performPrimaryHandoff({
         ...(await buildPrimaryHandoffDeps(client, sessionID, directory, agentName)),
         extraKickoffBlock,
-        promptOldPrimaryForDocSummaries: async () => openPointsText,
+        promptOldPrimaryForDocSummaries: async () => docSummariesText,
       }),
     cycleNumber: handoffGeneration(sessionID),
     maxCycles: endlessMaxCycles,

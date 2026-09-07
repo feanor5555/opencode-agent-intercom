@@ -57,6 +57,15 @@ function taskOutcomeLine(outcome, blocked = false) {
         `\n⚠️ TODO.md: subagent reported \`${outcome.got}\` but was spawned for \`${outcome.expected}\`. ` +
         `Marker IGNORED (possible hallucination). Delegate verification and TODO.md cleanup to a planner/coder.`
       )
+    case "unmigrated":
+      // The task IS finished and the marker was accepted — what did not happen
+      // is the removal, because the line stands outside the plugin's marked
+      // section, where nothing this plugin writes may touch anything.
+      return (
+        `\n📋 TODO.md: ${outcome.id} is done, but its line stands OUTSIDE the plugin's marked ` +
+        `section, so it was not removed. Nothing to do — the next wind-down moves it into the ` +
+        `section. Do NOT delegate a cleanup for it.`
+      )
     case "no-todo":
       return "\n⚠️ TODO.md not present — marker ignored."
     case "error":

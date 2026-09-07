@@ -373,3 +373,63 @@ export function guideBlocks({
     replyCapBlock(agent)
   )
 }
+
+
+// ---------------------------------------------------------------------------
+// The wind-down subagent's prompt. Composed by the PLUGIN, never passed through
+// from the orchestrator: the permit admits one spawn, and what that spawn does
+// is decided here. The orchestrator supplies a payload — its hand-over — and
+// the plugin wraps it between its own instruction block and its own contract.
+// ---------------------------------------------------------------------------
+
+// Cap on the hand-over the orchestrator may put into the child's prompt. The
+// spawn's package-size refusal is exempted for this one call — a refusal there
+// would abandon the cycle over the length of its own hand-over — so the bound
+// moves here, where the plugin applies it itself.
+export const WIND_DOWN_PAYLOAD_MAX_CHARS = 32000
+
+export const WIND_DOWN_SUBAGENT_PROMPT =
+  "You are the wind-down subagent of an endless-mode cycle. The orchestrator that briefed you " +
+  "has reached its context ceiling and is about to be replaced by a fresh one that starts with " +
+  "nothing but the project's todo file. Your one job is to leave that file in the state the " +
+  "successor can carry on from.\n\n" +
+  "Read the todo file first. Then work the hand-over below into it: delete what is finished, " +
+  "add what is newly open, correct what has changed, and put the detail that does not fit in a " +
+  "task line into a file and LINK it from the task. A successor reads this file and nothing " +
+  "else — information that stands nowhere in it, and is linked from nowhere in it, is lost."
+
+export const WIND_DOWN_SUBAGENT_CONTRACT =
+  "## HOW YOU MUST WRITE THE FILE\n\n" +
+  "- Edit ONLY between the two marker lines `<!-- intercom:begin -->` and `<!-- intercom:end -->`. " +
+  "Everything outside them is human text: do not reword it, do not reformat it, do not delete " +
+  "it, do not add headings of your own. A rewrite that touches a line outside the markers is " +
+  "REJECTED in full and the file is restored from a snapshot, so the whole cycle is lost.\n" +
+  "- Task lines take exactly this shape, and no other:\n\n" +
+  "      - T<n>: <one-line title>\n" +
+  "        accept: <what would show it is done>\n" +
+  "        link: <path to the detail>\n\n" +
+  "- Ids are unique and are never re-used. Take new ones from the watermark comment " +
+  "`<!-- intercom: next-id T<n> -->` on the last line inside the markers, and leave that comment " +
+  "pointing one past the highest id you wrote.\n" +
+  "- A task line that stands OUTSIDE the markers is an unmigrated leftover: move the whole block " +
+  "into the marked section, keeping its id.\n" +
+  "- Order the tasks by feasibility — the first one is the next one to do.\n\n" +
+  "Your final reply is read by the orchestrator and must state, in one or two lines, how many " +
+  "open tasks stand in the file after your edit, or that you changed nothing, or that nothing is " +
+  "open any more. Nothing else."
+
+// The heading the orchestrator's own text travels under, so the subagent can
+// tell the plugin's instructions from the hand-over.
+export const WIND_DOWN_HANDOVER_HEADING = "## HAND-OVER FROM THE PREVIOUS ORCHESTRATOR"
+
+// The child's whole prompt: the plugin's instruction block, the capped
+// hand-over, the contract.
+export function windDownSubagentPrompt(payload) {
+  const text = typeof payload === "string" ? payload.trim() : ""
+  const capped =
+    text.length > WIND_DOWN_PAYLOAD_MAX_CHARS
+      ? text.slice(0, WIND_DOWN_PAYLOAD_MAX_CHARS - 1).replace(/\s+$/, "") + "…"
+      : text
+  const handOver = capped || "(the orchestrator supplied no hand-over text.)"
+  return `${WIND_DOWN_SUBAGENT_PROMPT}\n\n${WIND_DOWN_HANDOVER_HEADING}\n\n${handOver}\n\n${WIND_DOWN_SUBAGENT_CONTRACT}`
+}

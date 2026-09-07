@@ -6,11 +6,14 @@
 # (specs/endless-mode.md §3.1, live criteria §7 a-d):
 #
 #   trigger    the primary crosses `endlessContext`      → `endless: scheduled`
-#   (a) freeze a post-trigger spawn is refused           → `spawn refused: endless cycle in progress`
+#   (a) freeze a non-conforming post-trigger spawn is refused
+#                                                        → `spawn refused: endless cycle in progress`
+#   (a) permit the ONE conforming wind-down spawn is admitted exactly once
+#                                                        → `spawn admitted: endless wind-down permit consumed`
 #   (b) quiesce the in-flight subagent's completion notice is delivered BEFORE
 #              the cycle stops waiting                   → `notified primary of completion` < `endless: quiesced`
-#   (c) save   the open points reach the todo file on disk, one todo file only
-#                                                        → `endless: saved N point(s) as T…`
+#   (c) rewrite the wind-down subagent's rewrite reaches the todo file on disk,
+#              one todo file only, no id reused          → `endless: wind-down confirmed N open task(s) [T…] file=…`
 #   (d) replace a new orchestrator session exists, the old one is archived and
 #              not deleted                               → `endless: cycle K/M complete, new session …`
 #   kickoff    the new session's first message is the endless kickoff and names
@@ -706,18 +709,18 @@ say "[$PREFIX] turn 4 (post-trigger spawn attempt) done $(date +%H:%M:%S)"
 # ---------- (a) the freeze -------------------------------------------------
 
 if wait_for_pattern "spawn refused" "spawn refused: endless cycle in progress .*\"sessionID\":\"$SID\"" "$STEP_TIMEOUT_S" \
-     "endless: saved [0-9]+ point"; then
+     "endless: wind-down confirmed"; then
   LINE_REFUSED=$WAIT_LINENO
-  record "(a) freeze — the post-trigger spawn was refused" 1 "$WAIT_LINE"
+  record "(a) freeze — the non-conforming post-trigger spawn was refused" 1 "$WAIT_LINE"
 else
   LINE_REFUSED=0
-  record "(a) freeze — the post-trigger spawn was refused" 0 "$WAIT_REASON"
+  record "(a) freeze — the non-conforming post-trigger spawn was refused" 0 "$WAIT_REASON"
 fi
 
 # ---------- (b) the quiesce ------------------------------------------------
 
 if wait_for_pattern "endless: quiesced" "endless: quiesced after [0-9]+ms, activeAtStart=[0-9]+ .*\"sessionID\":\"$SID\"" "$STEP_TIMEOUT_S" \
-     "endless: saved [0-9]+ point"; then
+     "endless: wind-down confirmed"; then
   LINE_QUIESCED=$WAIT_LINENO
   QUIESCE_LINE=$WAIT_LINE
   ACTIVE_AT_START=$(printf '%s' "$QUIESCE_LINE" | sed -E 's/.*activeAtStart=([0-9]+).*/\1/')
@@ -743,21 +746,26 @@ else
   record "(b) quiesce — waited for the in-flight subagent" 0 "$WAIT_REASON"
 fi
 
-# ---------- (c) the save ---------------------------------------------------
+# ---------- (c) the rewrite ------------------------------------------------
 
+# The confirm line is `endless: wind-down confirmed N open task(s) [T1,T2] file=<name>`
+# (src/endless.js). The open ids stand between the brackets, comma-joined, or a
+# lone `-` when none are open. What (c) asserts against the file on disk: the
+# canonical `- <id>:` line for every confirmed id, exactly one todo file in the
+# directory, and — per §7 (c) — no id reused, checked against the id watermark.
 SAVED_IDS=""
 SAVED_FILE=""
-if wait_for_pattern "endless: saved" "endless: saved [0-9]+ point\(s\) as .* confirmed=[0-9]+ .*\"sessionID\":\"$SID\"" "$STEP_TIMEOUT_S" \
+if wait_for_pattern "endless: wind-down confirmed" "endless: wind-down confirmed [0-9]+ open task\(s\) \[[^]]*\] file=[^ ]+ .*\"sessionID\":\"$SID\"" "$STEP_TIMEOUT_S" \
      "endless: cycle [0-9]+/[^ ]+ complete"; then
   LINE_SAVED=$WAIT_LINENO
   SAVE_LINE=$WAIT_LINE
-  SAVED_IDS=$(printf '%s' "$SAVE_LINE" | sed -E 's/.* as ([^ ]+) confirmed=.*/\1/')
-  SAVED_COUNT=$(printf '%s' "$SAVE_LINE" | sed -E 's/.*confirmed=([0-9]+).*/\1/')
+  SAVED_IDS=$(printf '%s' "$SAVE_LINE" | sed -E 's/.*\[([^]]*)\].*/\1/')
+  SAVED_COUNT=$(printf '%s' "$SAVE_LINE" | sed -E 's/.*confirmed ([0-9]+) open task.*/\1/')
   SAVED_FILE=$(printf '%s' "$SAVE_LINE" | sed -E 's/.*file=([^ ]+).*/\1/')
-  if [ "$SAVED_COUNT" = 0 ] || [ "$SAVED_IDS" = "-" ]; then
+  if [ "$SAVED_COUNT" = 0 ] || [ "$SAVED_IDS" = "-" ] || [ -z "$SAVED_IDS" ]; then
     SAVED_IDS=""
-    record "(c) save — the open points reached the todo file" 0 \
-      "the cycle saved no point: $SAVE_LINE"
+    record "(c) rewrite — the wind-down rewrite reached the todo file" 0 \
+      "the cycle confirmed no open task: $SAVE_LINE"
   else
     TODO_AFTER=$(todo_names)
     TODO_COUNT_AFTER=$(printf '%s' "$TODO_AFTER" | grep -c .)
@@ -765,20 +773,55 @@ if wait_for_pattern "endless: saved" "endless: saved [0-9]+ point\(s\) as .* con
     for id in $(printf '%s' "$SAVED_IDS" | tr ',' ' '); do
       grep -qE "^- $id:" "$PROJECT_DIR/$SAVED_FILE" 2>/dev/null || MISSING="$MISSING $id"
     done
+    # No id reused: the watermark's next-id must sit strictly above every
+    # confirmed id, so no id the cycle handed out can be handed out again.
+    NEXT_ID=$(sed -nE 's/.*intercom: next-id (T[0-9]+).*/\1/p' "$PROJECT_DIR/$SAVED_FILE" 2>/dev/null | head -n1)
+    NEXT_NUM=$(printf '%s' "$NEXT_ID" | sed -E 's/^T//')
+    MAX_NUM=0
+    for id in $(printf '%s' "$SAVED_IDS" | tr ',' ' '); do
+      n=$(printf '%s' "$id" | sed -E 's/^T//')
+      [ "$n" -gt "$MAX_NUM" ] 2>/dev/null && MAX_NUM=$n
+    done
     if [ "$TODO_COUNT_AFTER" != 1 ]; then
-      record "(c) save — the open points reached the todo file" 0 \
+      record "(c) rewrite — the wind-down rewrite reached the todo file" 0 \
         "$PROJECT_DIR holds $TODO_COUNT_AFTER todo files after the cycle ($(echo "$TODO_AFTER" | tr '\n' ' ')); exactly one is required"
     elif [ -n "$MISSING" ]; then
-      record "(c) save — the open points reached the todo file" 0 \
+      record "(c) rewrite — the wind-down rewrite reached the todo file" 0 \
         "$PROJECT_DIR/$SAVED_FILE carries no \"- <id>:\" line for:$MISSING — log line: $SAVE_LINE"
+    elif [ -z "$NEXT_ID" ] || ! [ "$NEXT_NUM" -gt "$MAX_NUM" ] 2>/dev/null; then
+      record "(c) rewrite — the wind-down rewrite reached the todo file" 0 \
+        "the id watermark ${NEXT_ID:-absent} does not sit above the highest confirmed id T$MAX_NUM — an id could be reused. log line: $SAVE_LINE"
     else
-      record "(c) save — the open points reached the todo file" 1 \
-        "$SAVED_COUNT point(s) $SAVED_IDS present in $PROJECT_DIR/$SAVED_FILE, one todo file in the directory — $SAVE_LINE"
+      record "(c) rewrite — the wind-down rewrite reached the todo file" 1 \
+        "$SAVED_COUNT task(s) $SAVED_IDS present in $PROJECT_DIR/$SAVED_FILE, one todo file, watermark $NEXT_ID above T$MAX_NUM — $SAVE_LINE"
     fi
   fi
 else
   LINE_SAVED=0
-  record "(c) save — the open points reached the todo file" 0 "$WAIT_REASON"
+  record "(c) rewrite — the wind-down rewrite reached the todo file" 0 "$WAIT_REASON"
+fi
+
+# ---------- (a) the permit was consumed exactly once -----------------------
+
+# The conforming wind-down spawn is admitted through the single-use permit; a
+# second permitted spawn would be refused. Observable as exactly one
+# `spawn admitted: endless wind-down permit consumed` line in the slice.
+refresh_slice
+ADMITTED_COUNT=$(grep -cE -- "spawn admitted: endless wind-down permit consumed" "$SLICE_FILE")
+if [ "$ADMITTED_COUNT" = 1 ]; then
+  ADMIT_LINE=$(grep -nE -m1 -- "spawn admitted: endless wind-down permit consumed" "$SLICE_FILE")
+  record "(a) permit — the conforming wind-down spawn was admitted exactly once" 1 \
+    "one admission line: ${ADMIT_LINE#*:}"
+elif [ "$ADMITTED_COUNT" = 0 ]; then
+  # The plugin's own fallback spawn (startWindDownSubagent) does not go through
+  # the permit, so a confirmed rewrite with no admission means the orchestrator
+  # never made the permitted spawn and the fallback wrote the file.
+  FALLBACK=$(grep -nE -m1 -- "endless: wind-down spawned by the plugin" "$SLICE_FILE")
+  record "(a) permit — the conforming wind-down spawn was admitted exactly once" 0 \
+    "no admission line — ${FALLBACK:+the plugin fallback wrote the file instead: ${FALLBACK#*:}}${FALLBACK:-the wind-down produced no permitted spawn}"
+else
+  record "(a) permit — the conforming wind-down spawn was admitted exactly once" 0 \
+    "$ADMITTED_COUNT admission lines, expected exactly one — the single-use permit was consumed more than once"
 fi
 
 # ---------- (d) the replacement --------------------------------------------

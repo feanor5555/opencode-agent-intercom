@@ -1516,6 +1516,11 @@ async function onSessionIdle({ sessionID }, client) {
       lateParentID: detachedParentOf(sessionID),
       taskId: e.taskId,
       directory: e.directory,
+      // The cycle's wind-down child. Its result has already reached the
+      // orchestrator as the return value of its own blocking spawn call, and
+      // that orchestrator is being replaced, so no wake notice is posted for it
+      // on either route.
+      windDown: Boolean(e.windDown),
       packageTokens: e.packageTokens,
       // Read off the entry inside the critical section, with the rest of what
       // the notice needs: the entry is removed a few lines above and is gone
@@ -1600,37 +1605,50 @@ async function onSessionIdle({ sessionID }, client) {
     // present and matches the spawn-assigned task id. Done BEFORE
     // removeEntry/postNotice so the completion notice can report the outcome.
     const taskOutcome = autoMarkTask(directory, taskId, snapshot.result)
+    // The wind-down child posts nothing. The ordinary route would duplicate the
+    // tool result the orchestrator already holds, and the late route through
+    // detachedParentOf would post into a primary the cycle has retired by then;
+    // the late result is logged and dropped instead.
     // Routed delivery: during an executing primary handoff the notice is
     // buffered (and flushed to the NEW orchestrator after its kickoff);
     // after a completed handoff a stale parentID is redirected. Never posts
     // into the old session's teardown window.
-    await postParentNotice(
-      client,
-      parentID,
-      completionNotice(
+    if (wake.windDown) {
+      log("wind-down child finished; no wake notice posted", {
         handle,
-        agent,
-        reply.text,
         parentID,
+        late: wake.lateParentID === parentID,
         taskOutcome,
-        snapshot.ctxTokens,
-        packageTokens,
-        nested,
-        runs,
-        // The decision as it stands after phase 2 revoked what the snapshot
-        // refused, which is the last word on it: the teardown below acts on
-        // this same value, so the notice cannot claim a session the delete is
-        // about to take.
-        retain,
-      ),
-      { allowTrackedSubagent: wake.lateParentID === parentID },
-    )
-    showToast(client, {
-      title: "agent-intercom",
-      message: `${handle} finished`,
-      variant: "success",
-    })
-    log("notified primary of completion", { handle, parentID, taskOutcome })
+      })
+    } else {
+      await postParentNotice(
+        client,
+        parentID,
+        completionNotice(
+          handle,
+          agent,
+          reply.text,
+          parentID,
+          taskOutcome,
+          snapshot.ctxTokens,
+          packageTokens,
+          nested,
+          runs,
+          // The decision as it stands after phase 2 revoked what the snapshot
+          // refused, which is the last word on it: the teardown below acts on
+          // this same value, so the notice cannot claim a session the delete is
+          // about to take.
+          retain,
+        ),
+        { allowTrackedSubagent: wake.lateParentID === parentID },
+      )
+      showToast(client, {
+        title: "agent-intercom",
+        message: `${handle} finished`,
+        variant: "success",
+      })
+      log("notified primary of completion", { handle, parentID, taskOutcome })
+    }
   } catch (err) {
     log("notify parent failed", errMsg(err))
     // Fall through to cleanup of the underlying opencode session — keeping it
@@ -2026,6 +2044,8 @@ const MARKER_RE = /^\s*DONE:\s*(T\d+)\s*$/i
 //   { kind: "no-marker" } — task id given but reply has no accepted DONE line
 //   { kind: "mismatch" }  — marker present but for a different id (ignored)
 //   { kind: "no-todo" }   — no todo file in the directory (greenfield)
+//   { kind: "unmigrated", id } — the id stands only in a legacy line outside
+//                          the plugin's marked section; nothing was removed
 //   { kind: "done", id }  — successfully removed
 //   { kind: "error", message } — TODO.md operation threw (id not found etc.)
 function autoMarkTask(directory, taskId, finalReply) {
@@ -2047,7 +2067,12 @@ function autoMarkTask(directory, taskId, finalReply) {
   // "error" — reporting them as greenfield would silently drop the marker for
   // a task that is still standing in a file we merely failed to resolve.
   try {
-    removeTask(directory, taskId)
+    const res = removeTask(directory, taskId)
+    // The task is finished, but its line stands outside the plugin's marked
+    // section, where no writer of this plugin touches anything. Neither an
+    // error nor a greenfield: the line is left exactly as it is and the next
+    // wind-down migrates it.
+    if (res?.unmigrated) return { kind: "unmigrated", id: taskId }
     return { kind: "done", id: taskId }
   } catch (err) {
     if (err instanceof TodoFileMissingError && err.kind === "missing") return { kind: "no-todo" }

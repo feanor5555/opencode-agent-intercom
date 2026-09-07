@@ -14,12 +14,11 @@
 //   - `src/pluginmsg.js` (constants + pure predicates), imported so
 //     `lastUserGoal` can skip plugin-generated messages (wake notices,
 //     kickoffs, DOC_SUMMARY prompts) when scanning for the real user goal.
-//   - `src/openpoints.js` (a pure parser that itself imports nothing),
-//     imported so `looksLikeOpenPointsReply` tests the heading with the same
-//     expression the parse uses.
+//   - `src/format.js` (pure formatters), imported for `capChars`, the shared
+//     per-field truncation the summaries and the wind-down payload apply.
 import { log, errMsg } from "./log.js"
 import { isPluginGeneratedMessage, looksLikePluginMessage } from "./pluginmsg.js"
-import { hasOpenPointsHeading } from "./openpoints.js"
+import { capChars } from "./format.js"
 //
 // Sequence (do NOT reorder):
 //   0. Open the delivery drain for the old primary (deps.beginDrain). From
@@ -445,36 +444,102 @@ export const DOC_SUMMARY_PROMPT =
   "no `read`/`bash`/`glob`/`grep` tool calls, no preamble, no postscript, no markdown other than " +
   "the four `## …` headings above. Start your reply with `## PROJECT.md —` literally."
 
-// The prompt an endless cycle sends to the primary that is about to be
-// replaced: state everything still open, in the todo file's own two-line
-// shape, so the plugin can write the points itself. The orchestrator cannot
-// write files — it holds spawn / abort / list and nothing else — so the reply
-// is plain text, which is the one thing a session at its context ceiling can
-// still reliably produce. `parseOpenPoints` (src/openpoints.js) maps the reply
-// onto `addTask({ title, accept })`.
-export const OPEN_POINTS_PROMPT =
-  "You are about to be replaced by a fresh orchestrator session that will continue this work " +
-  "from the project's todo file. Before that, emit ONE final plain-text reply listing EVERY " +
-  "point that is still open: what was being worked on, what was decided and not yet carried " +
-  "out, and what a subagent reported back as unfinished.\n\n" +
-  "Use EXACTLY this shape (no extra prose, no tool calls, no code blocks):\n\n" +
-  "## OPEN POINTS\n\n" +
-  "- <one open point, imperative, max ~120 characters>\n" +
-  "  accept: <one line naming what would show it is done>\n" +
-  "- <the next one>\n" +
-  "  accept: <…>\n\n" +
-  "One point per `- ` line, its criterion on the indented `accept:` line below it. Draw them " +
-  "from your context ONLY — do NOT read files from disk and do NOT spawn anything. If nothing " +
-  "is genuinely open, emit `## OPEN POINTS` and nothing else. Start your reply with " +
-  "`## OPEN POINTS` literally."
+// The first line of the spawn prompt the endless cycle's wind-down permit
+// admits. The token behind it is per-cycle random and stands nowhere but in the
+// wind-down prompt the plugin sent to that one primary, so a spawn carrying it
+// can only be the spawn that prompt asked for. `spawnHandler` (src/tools.js)
+// tests the line and strips it before it composes the child's own prompt.
+export const WIND_DOWN_TOKEN_PREFIX = "INTERCOM-WIND-DOWN"
 
-// Recognises the open-points reply: the counterpart of
-// looksLikeDocSummariesReply for the endless cycle's own poll. The heading
-// expression itself lives with the parser that consumes the reply
-// (`hasOpenPointsHeading`, src/openpoints.js), so the poll cannot come to
-// accept a reply the parse would reject.
-export function looksLikeOpenPointsReply(text) {
-  return hasOpenPointsHeading(text)
+// Reads the permit token off a spawn prompt: the FIRST non-empty line must be
+// exactly `INTERCOM-WIND-DOWN <token>`. Returns the token, or "" for anything
+// else. Everything after that line is the orchestrator's hand-over payload.
+export function windDownTokenOf(prompt) {
+  if (typeof prompt !== "string") return ""
+  const first = prompt.split("\n").find((line) => line.trim().length > 0)
+  if (first === undefined) return ""
+  const m = new RegExp(`^${WIND_DOWN_TOKEN_PREFIX}\\s+(\\S+)$`).exec(first.trim())
+  return m ? m[1] : ""
+}
+
+// Strips that first line and hands back the rest — the hand-over the plugin
+// puts into the child's prompt under its own heading.
+export function windDownPayloadOf(prompt) {
+  if (typeof prompt !== "string") return ""
+  const lines = prompt.split("\n")
+  const at = lines.findIndex((line) => line.trim().length > 0)
+  if (at === -1) return ""
+  return lines.slice(at + 1).join("\n").trim()
+}
+
+// The prompt an endless cycle sends to the primary that is about to be
+// replaced. The orchestrator cannot write files — it holds spawn / abort /
+// list / reuse and nothing else — so the file is written by a `planner` the
+// orchestrator itself starts, through the single-use permit the freeze admits.
+// What comes back here is only the shaped closing line: the three forms below
+// are what the cycle's V3, V7 and its explicit-empty stop read.
+//
+// @param {string} token      the permit token; the spawn's first line must carry it
+// @param {string} fileName   the todo file the subagent updates
+// @param {number} driftCount task lines the plugin's parse found outside its own section
+export function WIND_DOWN_PROMPT(token, fileName, driftCount = 0) {
+  const file = fileName || "the project's todo file"
+  const drift =
+    driftCount > 0
+      ? ` ${driftCount} task line(s) still stand outside the plugin's marked section; ` +
+        `tell the subagent to move them into it.`
+      : ""
+  return (
+    "You are about to be replaced by a fresh orchestrator session that will continue this work " +
+    `from ${file}. Every subagent has finished and no further work will be delegated.\n\n` +
+    "You may make exactly ONE more tool call: `spawn(\"planner\", …)` whose prompt's FIRST line " +
+    `is\n\n    ${WIND_DOWN_TOKEN_PREFIX} ${token}\n\n` +
+    "Everything after that line is handed to the subagent as your hand-over: what is finished, " +
+    "what is open, what was decided and not yet carried out, what a subagent reported back as " +
+    `unfinished, and the path of every artefact that carries detail you cannot restate. The ` +
+    `subagent updates ${file} — it deletes what is finished, adds what is newly open, and links ` +
+    `the rest.${drift} The call will not return until it is done, and its result tells you what ` +
+    "it wrote.\n\n" +
+    "When it returns, reply with exactly ONE of these three lines and nothing else:\n\n" +
+    "- `## WIND-DOWN DONE — <n> open` — the normal case; `<n>` is the number of open tasks the " +
+    "subagent reports it left in the file;\n" +
+    "- `## WIND-DOWN DONE — no change` — the subagent reports the file already said everything " +
+    "and it changed nothing;\n" +
+    "- `## WIND-DOWN DONE — nothing open` — the subagent reports nothing is open any more."
+  )
+}
+
+// Recognises the wind-down reply, deliberately loose: a model that adds a
+// suffix of its own to the shaped line still ends the turn. What the reply says
+// is read afterwards, by the confirmation; this only says the turn is over.
+export function looksLikeWindDownReply(text) {
+  return typeof text === "string" && /^##\s+WIND-DOWN DONE\b/m.test(text)
+}
+
+// The number of open tasks the reply claims, or null when it claims none —
+// the assertion V7 holds against the plugin's own parse of the file.
+export function windDownReplyCount(text) {
+  if (typeof text !== "string") return null
+  const m = /^##\s+WIND-DOWN DONE\s+[—–-]\s+(\d+)\s+open\b/m.exec(text)
+  return m ? Number(m[1]) : null
+}
+
+// The three signals the endless cycle's confirmation reads off the wind-down
+// reply, in one pass:
+//   - `count`       the open-task figure of the normal `— <n> open` line, or
+//                   null when the reply carries no such figure (V7);
+//   - `noChange`    the `— no change` variant, which lets V3 pass on a file the
+//                   subagent deliberately left byte-for-byte identical;
+//   - `nothingOpen` the `— nothing open` variant, the explicit-empty stop.
+// The reply only says the turn is over (looksLikeWindDownReply); what it claims
+// is never a gate on its own — the plugin's own parse of the file wins.
+export function interpretWindDownReply(text) {
+  const s = typeof text === "string" ? text : ""
+  return {
+    count: windDownReplyCount(s),
+    noChange: /^##\s+WIND-DOWN DONE\s+[—–-]\s+no change\b/m.test(s),
+    nothingOpen: /^##\s+WIND-DOWN DONE\s+[—–-]\s+nothing open\b/m.test(s),
+  }
 }
 
 // Section cap on each per-file summary. Mirrors the "~400 characters" the
@@ -658,11 +723,6 @@ export function extractHistorySummary(rawText) {
   const body = m[1].trim()
   if (body.length === 0) return ""
   return `## ${HISTORY_SUMMARY_HEADING} — ${capChars(body, HISTORY_SUMMARY_MAX_CHARS)}`
-}
-
-function capChars(text, max) {
-  if (typeof text !== "string" || text.length <= max) return text
-  return text.slice(0, max - 1).replace(/\s+$/, "") + "…"
 }
 
 function escapeRe(s) {

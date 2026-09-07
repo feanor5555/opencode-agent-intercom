@@ -89,3 +89,12 @@ export function cutToTokens(text, ceiling) {
   const kept = s.slice(0, end)
   return { kept, omittedTokens: total - estimateReplyTokens(kept) }
 }
+
+// Truncation with a visible ellipsis marker, cutting on a character boundary
+// and trimming the trailing whitespace the cut exposes. A non-string, or a text
+// already within `max`, is returned unchanged. One source of truth for the
+// per-field caps the handoff summaries and the wind-down payload apply.
+export function capChars(text, max) {
+  if (typeof text !== "string" || text.length <= max) return text
+  return text.slice(0, max - 1).replace(/\s+$/, "") + "…"
+}

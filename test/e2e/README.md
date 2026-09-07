@@ -171,14 +171,15 @@ live criteria §7:
 | criterion | evidence |
 |---|---|
 | trigger | `endless: scheduled` for the primary, with `ctx` and `threshold`, the threshold being the armed one |
-| (a) freeze | `spawn refused: endless cycle in progress` after a post-trigger `spawn` |
+| (a) freeze | `spawn refused: endless cycle in progress` after a non-conforming post-trigger `spawn` |
+| (a) permit | `spawn admitted: endless wind-down permit consumed` appears **exactly once** — the single-use permit admits the one conforming wind-down spawn and a second is refused |
 | (b) quiesce | `notified primary of completion` appears **before** `endless: quiesced …, activeAtStart>=1`, and after the trigger line |
-| (c) save | `endless: saved N point(s) as T…`, every id present as `- T<n>:` in the todo file, exactly one todo file in the directory |
+| (c) rewrite | `endless: wind-down confirmed N open task(s) [T…] file=…`, every confirmed id present as `- T<n>:` in the todo file, exactly one todo file in the directory, and the `next-id` watermark above every confirmed id (no id reused) |
 | (d) replacement | `endless: cycle K/M complete, new session …`; the new session is readable, the old one is readable **and** archived |
-| kickoff | the new session carries `## Endless mode — work off the todo file` naming exactly the ids of (c) |
+| kickoff | the new session carries `## Endless mode — work off the todo file`, whose body is the todo file's own text, naming exactly the ids of (c) as `- T<n>:` lines |
 | (e) work-off | the successor's first turn contains a `spawn` tool call whose `input.prompt` carries the first saved task id as the first non-empty line (`T<n>:` / `T<n>.` / `T<n>-` …) and every further spawn prompt of that turn likewise carries a saved id; the turn's per-task spawn tally rides along as evidence |
 | (e) removal | a successor subagent's `DONE: T<n>` reply removes that task: `notified primary of completion` for the successor carrying `"kind":"done","id":"T<n>"`, the id one of (c)'s, and the line `- T<n>:` gone from the todo file on disk while the file itself stays |
-| order | the five cycle lines — scheduled, refused, quiesced, saved, complete — appear in that order in the debug-log slice |
+| order | the five cycle lines — scheduled, refused, quiesced, confirmed, complete — appear in that order in the debug-log slice |
 
 **The successor's first turn is captured whole.** The kickoff starts that turn
 asynchronously, and the driver follows it to its end — every tool call, not only

@@ -1,6 +1,6 @@
 # Concept: the wind-down subagent writes the todo file
 
-Boundary: the `opencode-agent-intercom` plugin under `/home/wu/opencode-agent-intercom`.
+Boundary: the `opencode-agent-intercom` plugin under `~/opencode-agent-intercom`.
 Nothing outside `src/`, `specs/`, `test/` is designed here. The material read for this
 concept is `specs/endless-mode.md`, `src/endless.js`, `src/handoff.js`,
 `src/handoffwiring.js`, `src/todofile.js`, `src/openpoints.js`, `src/tools.js`,
@@ -372,11 +372,15 @@ Decided:
    may have touched*.
 
    **The plugin creates the section; the subagent never does.** Where the markers are
-   absent, the plugin inserts the heading and the two markers — immediately after the first
-   heading matching `/^#{1,6}\s+(open|pending|todo|todos)\b/i`, or at the end of the file
-   where there is none — **and writes the file**, before it takes the snapshot (§4 step 4).
+   absent, the plugin inserts the heading and the two markers, in this order:
+   below a marker-less `## Intercom tasks` heading (human text it does not adopt); else
+   immediately after the first heading of **level 2 or deeper** matching
+   `/^#{2,6}\s+(open|pending|todo|todos)\b/i` — a level-1 document title (`# TODO` at the top
+   of a file names the whole file, not a section within it) is skipped even when its text
+   matches; else at the end of the file where no such heading exists — **and writes the
+   file**, before it takes the snapshot (§4 step 4).
    This is not a detail of ordering. Every project's first cycle meets a file without
-   markers, including this repository and `/home/wu/vantage/todos.md`; had the subagent
+   markers, including this repository and `~/vantage/todos.md`; had the subagent
    created the region, the snapshot's outside region would be the whole file and the new
    content's outside region would carry an added heading the snapshot lacks, so V4 would
    fail by construction on the first cycle everywhere. The same insertion is what `addTask`
@@ -384,7 +388,7 @@ Decided:
    (`ensureSection(content)`) and one result.
 
    **A name collision is not resolved by taking the section over.** The live file
-   (`/home/wu/vantage/todos.md`) has a `## Open` section holding human prose —
+   (`~/vantage/todos.md`) has a `## Open` section holding human prose —
    `None. Chat-develop-via-UI stays NONE (\`plan.md\` §17)` — and prose under a heading the
    plugin adopted would be inside the region the subagent may delete. So the plugin never
    adopts an existing section: it inserts its own `## Intercom tasks` heading with its
@@ -399,7 +403,7 @@ Decided:
    the owner's decision and it is the same rule as everywhere else — the plugin owns its
    region and nothing beyond it.
 
-   The one cost on `/home/wu/vantage/todos.md`: it will carry both a human `## Open` and a
+   The one cost on `~/vantage/todos.md`: it will carry both a human `## Open` and a
    machine `## Intercom tasks`, and the existing `- T45 — …` lines stay where they are, read
    by the widened parser and moved into the marked section by the first wind-down subagent
    that runs — the one outside-change V4 licenses, and the one shape §3.4.7 keeps the
@@ -430,7 +434,7 @@ Decided:
    the markers. The reason is `autoMarkTask` (`src/hooks.js:2031-2056`), which fires on the
    `DONE: T<n>` marker of *any* subagent reply, all session long, in every project, with the
    endless cycle nowhere near it and V4 not applying: after a naive widening, a reply
-   `DONE: T1` against `/home/wu/vantage/todos.md` would delete the human prose bullet
+   `DONE: T1` against `~/vantage/todos.md` would delete the human prose bullet
    `- T1 — reverse Pfeile …` and everything indented under it. Silent deletion of human text
    on the ordinary work-off path is not a cost this design pays for a parser fix.
 

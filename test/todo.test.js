@@ -54,14 +54,22 @@ writeFileSync(
 const settingsFile = join(projectDir, "agent-intercom.json")
 before(() => setSettingsPath(settingsFile))
 
+// The fixture file in the state the plugin maintains: the three tasks stand in
+// the machine section, between the two markers, in the canonical write shape.
+// A file WITHOUT that fence is a different case with its own tests below — the
+// writers refuse it and answer `unmigrated`.
 const TODO_SEED = `# TODO
 
+## Intercom tasks
+<!-- intercom:begin -->
 - T1: add export endpoint
   accept: GET /export returns 200 with JSON
 - T2: write tests for export
   accept: at least one passing integration test
 - T3: drop unused dependency
   accept: package.json no longer lists "lodash"
+<!-- intercom: next-id T4 -->
+<!-- intercom:end -->
 `
 
 function writeTodo(content = TODO_SEED) {
@@ -233,14 +241,17 @@ test("lookup: files that only look like a todo file are ignored", () => {
 test("writes go back to the variant that was found, not to TODO.md", () => {
   withTempDir((dir) => {
     const variant = join(dir, "todos.md")
-    writeFileSync(variant, "- T1: first\n  accept: stays\n")
+    writeFileSync(
+      variant,
+      "## Intercom tasks\n<!-- intercom:begin -->\n- T1: first\n  accept: stays\n<!-- intercom:end -->\n",
+    )
     assert.equal(addTask(dir, { title: "second", accept: "appended" }).id, "T2")
     assert.equal(editTask(dir, "T1", { title: "first, edited" }).changed, true)
     assert.equal(removeTask(dir, "T2").changed, true)
     assert.ok(!existsSync(join(dir, CANONICAL_TODO_NAME)), "no TODO.md may be created alongside")
     const content = readFileSync(variant, "utf8")
     assert.match(content, /- T1: first, edited/)
-    assert.doesNotMatch(content, /T2/)
+    assert.doesNotMatch(content, /- T2:/)
   })
 })
 
@@ -285,7 +296,12 @@ test("addTask: creates TODO.md when the directory has no todo file", () => {
     assert.equal(findTodoFile(dir).name, CANONICAL_TODO_NAME)
     assert.equal(
       readFileSync(join(dir, CANONICAL_TODO_NAME), "utf8"),
-      "- T1: first task\n  accept: it exists\n",
+      "## Intercom tasks\n" +
+        "<!-- intercom:begin -->\n" +
+        "- T1: first task\n" +
+        "  accept: it exists\n" +
+        "<!-- intercom: next-id T2 -->\n" +
+        "<!-- intercom:end -->\n",
     )
     // second call reuses the file it just created rather than making another
     assert.equal(addTask(dir, { title: "second task" }).id, "T2")
@@ -354,7 +370,7 @@ test("lookup: an unreadable directory fails visibly instead of reporting no todo
 })
 
 
-test("nextFreeId: max+1, T1 when empty / file absent", () => {
+test("nextFreeId: the watermark when present, max+1 otherwise, T1 when empty / absent", () => {
   assert.equal(nextFreeId(projectDir), "T4")
   writeTodo("# TODO\n")
   assert.equal(nextFreeId(projectDir), "T1")
@@ -363,7 +379,7 @@ test("nextFreeId: max+1, T1 when empty / file absent", () => {
 })
 
 test("removeTask: deletes header + accept line, throws on unknown id", () => {
-  removeTask(projectDir, "T1")
+  assert.equal(removeTask(projectDir, "T1").changed, true)
   const content = readTodoFile(projectDir)
   assert.doesNotMatch(content, /T1:/, "T1 header gone")
   assert.doesNotMatch(content, /GET \/export returns 200/, "T1 accept gone")
@@ -371,9 +387,16 @@ test("removeTask: deletes header + accept line, throws on unknown id", () => {
   assert.throws(() => removeTask(projectDir, "T99"), /T99 not found/)
 })
 
-test("addTask: appends with next free id, preserves order", () => {
+test("addTask: appends inside the markers with the next free id, preserves order", () => {
   const res = addTask(projectDir, { title: "wire pagination", accept: "?page=N works" })
   assert.equal(res.id, "T4")
+  const content = readTodoFile(projectDir)
+  const inside = content.slice(
+    content.indexOf("<!-- intercom:begin -->"),
+    content.indexOf("<!-- intercom:end -->"),
+  )
+  assert.match(inside, /- T4: wire pagination/)
+  assert.match(inside, /<!-- intercom: next-id T5 -->\n$/)
   const tasks = listOpen(projectDir)
   assert.deepEqual(tasks.map((t) => t.id), ["T1", "T2", "T3", "T4"])
   assert.equal(tasks[3].text, "wire pagination")
@@ -471,6 +494,31 @@ test("wake-hook auto-removes T1 when subagent replies with `DONE: T1`", async ()
   const wake = notices.find((n) => n.sessionID === primaryCtx.sessionID)
   assert.ok(wake, "the orchestrator must be woken")
   assert.match(wake.text, /T1 removed/)
+})
+
+// The ordinary work-off path, in every project, all session long, with no
+// verification anywhere near it: a `DONE: T1` against a human prose bullet
+// standing outside the plugin's section must delete nothing.
+test("wake-hook leaves a legacy line outside the markers standing and says so", async () => {
+  const { ctx, notices, setReply } = makeCtx()
+  const hooks = await plugin(ctx)
+  const legacy =
+    "# TODO\n\n## Open\n\n- T1 — reverse the arrows in the diagram\n  a human note\n\n" +
+    "## Intercom tasks\n<!-- intercom:begin -->\n<!-- intercom:end -->\n"
+  writeTodo(legacy)
+  const spawned = await hooks.tool.spawn.execute(
+    { agent: "coder", prompt: "T1: reverse the arrows" },
+    primaryCtx,
+  )
+  const subID = spawned.metadata.sessionID
+  setReply(subID, "DONE: T1\nreversed them.")
+
+  await fireIdle(hooks, subID)
+
+  assert.equal(readTodoFile(projectDir), legacy, "not one byte of the file moved")
+  const wake = notices.find((n) => n.sessionID === primaryCtx.sessionID)
+  assert.match(wake.text, /T1 is done, but its line stands OUTSIDE/)
+  assert.match(wake.text, /next wind-down/)
 })
 
 test("wake-hook reports no-todo when the directory has no todo file at all", async () => {

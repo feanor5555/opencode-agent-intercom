@@ -55,7 +55,8 @@ import {
   resetSettings,
   primaryContextThreshold,
 } from "../src/settings.js"
-import { addTask, listOpen, TodoFileMissingError } from "../src/todofile.js"
+import { parseTasks, splitSections } from "../src/todofile.js"
+import { interpretWindDownReply } from "../src/handoff.js"
 import {
   setSettingsPath as setTuiSettingsPath,
   readSettings as readTuiSettings,
@@ -108,10 +109,35 @@ function assertUntouched(fixture, what) {
   )
 }
 
-// One cycle wired the way handoffwiring.js wires it, with the REAL pause and
-// the REAL todo file, virtual time and a recording handoff.
-function makeCycle({ directory, overrides = {} } = {}) {
+// A real fenced todo file: human prose outside the markers, task lines inside.
+const OUT_HEAD = "# Project notes\n\nSome prose a human wrote.\n"
+function fenced(taskLines, nextId) {
+  return (
+    OUT_HEAD +
+    "\n## Intercom tasks\n<!-- intercom:begin -->\n" +
+    taskLines.join("\n") +
+    `\n<!-- intercom: next-id ${nextId} -->\n<!-- intercom:end -->\n`
+  )
+}
+
+// One cycle wired the way handoffwiring.js wires it, with the REAL pause, the
+// REAL parse and confirmation, virtual time and a recording handoff. The
+// snapshot and the file the wind-down subagent leaves behind are driven by
+// `snapTasks`/`freshTasks`; the defaults verify cleanly to a "complete"
+// outcome. The cycle mechanics themselves are pinned in test/endless-cycle.js —
+// what this file pins is the stop's effect on the settings file and the pause.
+function makeCycle({
+  snapTasks = ["- T1: do the thing"],
+  snapNextId = "T2",
+  freshTasks,
+  freshNextId = "T3",
+  reply = "## WIND-DOWN DONE — 1 open",
+  overrides = {},
+} = {}) {
   const state = { handoffCalls: [], toasts: [], clock: 0 }
+  const snapContent = fenced(snapTasks, snapNextId)
+  const freshContent = freshTasks === undefined ? snapContent : fenced(freshTasks, freshNextId)
+  const settled = () => Promise.resolve({ status: "completed" })
   markEndlessPending(SID)
   const io = {
     primarySessionID: SID,
@@ -120,18 +146,28 @@ function makeCycle({ directory, overrides = {} } = {}) {
     setCooldown: () => setEndlessCooldown(SID),
     isQuiesced: async () => true,
     countActive: () => 0,
-    requestOpenPoints: async () =>
-      "## OPEN POINTS\n\n- Finish the migration script\n  accept: it exits 0\n",
-    addTask: (point) => addTask(directory, point),
-    listOpen: () => {
-      try {
-        return listOpen(directory)
-      } catch (err) {
-        if (err instanceof TodoFileMissingError && err.kind === "missing") return []
-        throw err
-      }
+    dropRetained: async () => {},
+    prepare: () => ({
+      fileName: "TODO.md",
+      content: snapContent,
+      hash: "sha-snap",
+      tasks: parseTasks(snapContent),
+      driftCount: 0,
+    }),
+    armWindDown: () => ({ token: "permit-token" }),
+    disarmWindDown: () => {},
+    windDownTurn: async () => reply,
+    windDownPermit: () => ({ consumed: true, childSessionID: "ses-child", settlement: settled() }),
+    startWindDownSubagent: async () => ({ childSessionID: "ses-child", settlement: settled() }),
+    settleWindDown: async (child) => {
+      const outcome = await child.settlement
+      return outcome.status === "expired" ? { ok: false, reason: "did not settle" } : { ok: true, outcome }
     },
-    todoFileName: () => "TODO.md",
+    reread: () => ({ name: "TODO.md", content: freshContent }),
+    interpretReply: interpretWindDownReply,
+    restoreSnapshot: () => {},
+    parseTasks,
+    splitSections,
     performHandoff: async (args) => {
       state.handoffCalls.push(args)
       return { newSessionID: NEW_SID }
@@ -159,7 +195,6 @@ function makeCycle({ directory, overrides = {} } = {}) {
 test("the cycle ceiling pauses and leaves the settings file untouched", async () => {
   const fixture = settingsFixture()
   const { io, state } = makeCycle({
-    directory: tempProject(),
     overrides: { cycleNumber: 11, maxCycles: 10 },
   })
 
@@ -175,8 +210,8 @@ test("the cycle ceiling pauses and leaves the settings file untouched", async ()
 test("nothing left to do pauses and leaves the settings file untouched", async () => {
   const fixture = settingsFixture()
   const { io, state } = makeCycle({
-    directory: tempProject(),
-    overrides: { requestOpenPoints: async () => "## OPEN POINTS\n" },
+    freshTasks: [],
+    reply: "## WIND-DOWN DONE — nothing open",
   })
 
   const res = await runEndlessCycle(io)
@@ -190,13 +225,16 @@ test("nothing left to do pauses and leaves the settings file untouched", async (
 
 test("the no-progress bound pauses the NEW primary and leaves the settings file untouched", async () => {
   const fixture = settingsFixture()
-  const dir = tempProject({ "TODO.md": "- T1: still open\n" })
-  // The streak the bound reads: an earlier cycle that left `still open` behind
-  // and a second that still found it there, so the cycle below is the second
-  // consecutive one from which no inherited task has disappeared.
-  recordEndlessCycle([], ["still open"])
-  recordEndlessCycle(["still open"], ["still open"])
-  const { io, state } = makeCycle({ directory: dir })
+  // The streak the bound reads: an earlier cycle that left T1 behind and a
+  // second that still found it there, so the cycle below is the second
+  // consecutive one from which no inherited task id has disappeared.
+  recordEndlessCycle([], ["T1"])
+  recordEndlessCycle(["T1"], ["T1"])
+  const { io, state } = makeCycle({
+    snapTasks: ["- T1: still open"],
+    freshTasks: ["- T1: still open", "- T2: a fresh point"],
+    reply: "## WIND-DOWN DONE — 2 open",
+  })
 
   const res = await runEndlessCycle(io)
 
@@ -218,53 +256,57 @@ test("the no-progress bound pauses the NEW primary and leaves the settings file 
 })
 
 // ---------------------------------------------------------------------------
-// What the no-progress bound measures: the tasks that LEFT the file, not the
+// What the no-progress bound measures: the task IDS that LEFT the file, not the
 // count standing in it. The two cases the old count-based measure conflated.
 // ---------------------------------------------------------------------------
 
-test("a cycle that adds no new point but completed an inherited task clears the streak", async () => {
-  // The file was left with two tasks; one of them is gone by the time this
-  // cycle reads it. The open-points reply restates the survivor word for word,
-  // so the cycle saves NOTHING — the shape the kickoff makes likely, and the
-  // shape the old measure read as a stall.
-  const dir = tempProject({ "TODO.md": "- T7: Finish the migration script\n" })
-  recordEndlessCycle([], ["write the rollback procedure", "finish the migration script"])
-  recordEndlessCycle(
-    ["write the rollback procedure", "finish the migration script"],
-    ["write the rollback procedure", "finish the migration script"],
-  )
+test("a cycle that completed an inherited task clears the streak", async () => {
+  // The file was left with two tasks (T5, T7); T5 is gone by the time this
+  // cycle reads it while T7 survives. The count of open tasks does not fall —
+  // the survivor is still there — but an inherited id LEFT, which is progress.
+  recordEndlessCycle([], ["T5", "T7"])
+  recordEndlessCycle(["T5", "T7"], ["T5", "T7"])
   assert.equal(endlessProgress.stalledCycles, 1, "one stall already stands on the record")
 
-  const { io, state } = makeCycle({ directory: dir })
+  const { io, state } = makeCycle({
+    snapTasks: ["- T7: the survivor"],
+    snapNextId: "T8",
+    freshTasks: ["- T7: the survivor"],
+    freshNextId: "T8",
+    // The wind-down found nothing to move — T5 had already left before this
+    // cycle — so it reports the file unchanged, which V3 accepts.
+    reply: "## WIND-DOWN DONE — no change",
+  })
   const res = await runEndlessCycle(io)
 
   assert.equal(res.outcome, "complete")
-  assert.deepEqual(res.ids, [], "every point deduped against a task already in the file")
   assert.equal(res.openBefore, 1)
   assert.equal(res.openAfter, 1)
-  assert.equal(res.stalledCycles, 0, "one inherited task left the file: that is progress")
+  assert.equal(res.stalledCycles, 0, "one inherited task id left the file: that is progress")
   assert.equal(state.handoffCalls.length, 1, "the primary is replaced either way")
   assert.deepEqual(state.toasts, [], "no stop, so no toast")
   assert.equal(isEndlessPaused(NEW_SID), false)
-  assert.deepEqual(endlessProgress.lastOpenTitles, ["finish the migration script"])
+  assert.deepEqual(endlessProgress.lastOpenIds, ["T7"])
 })
 
 test("a cycle from which no inherited task left is stalled however many points it saved", async () => {
-  // Nothing was completed — the inherited task is still there — but the cycle
-  // saves a fresh point on top. The count would read 1 -> 2 and look like
-  // movement; the set difference is empty, so it is the second stall and the
-  // bound fires on the NEW primary.
-  const dir = tempProject({ "TODO.md": "- T1: still open\n" })
-  recordEndlessCycle([], ["still open"])
-  recordEndlessCycle(["still open"], ["still open"])
+  // Nothing was completed — the inherited task T1 is still there — but the
+  // cycle saves a fresh task T2 on top. The count would read 1 -> 2 and look
+  // like movement; the set difference of ids that left is empty, so it is the
+  // second stall and the bound fires on the NEW primary.
+  recordEndlessCycle([], ["T1"])
+  recordEndlessCycle(["T1"], ["T1"])
 
-  const { io, state } = makeCycle({ directory: dir })
+  const { io, state } = makeCycle({
+    snapTasks: ["- T1: still open"],
+    freshTasks: ["- T1: still open", "- T2: a fresh point"],
+    reply: "## WIND-DOWN DONE — 2 open",
+  })
   const res = await runEndlessCycle(io)
 
   assert.equal(res.outcome, "complete")
-  assert.equal(res.ids.length, 1, "the cycle did save a point")
   assert.equal(res.openBefore, 1)
-  assert.equal(res.openAfter, 2)
+  assert.equal(res.openAfter, 2, "the cycle did save a task")
   assert.equal(res.stalledCycles, ENDLESS_MAX_STALLED_CYCLES)
   assert.equal(state.handoffCalls.length, 1)
   assert.equal(isEndlessPaused(NEW_SID), true, "the pause goes on the session that inherited the loop")
@@ -275,7 +317,6 @@ test("a cycle from which no inherited task left is stalled however many points i
 test("an abandoned cycle neither writes nor pauses — it arms the cooldown", async () => {
   const fixture = settingsFixture()
   const { io } = makeCycle({
-    directory: tempProject(),
     overrides: {
       isQuiesced: async () => false,
       quiesceTimeoutMs: 0,
@@ -366,7 +407,7 @@ test("a pause resets the cross-cycle progress record", () => {
 
   assert.equal(endlessProgress.stalledCycles, 0)
   assert.equal(
-    endlessProgress.lastOpenTitles,
+    endlessProgress.lastOpenIds,
     null,
     "the record measures one run of the mode, and this run has stopped",
   )

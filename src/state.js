@@ -200,13 +200,16 @@ export const endlessPauses = new Map()
 
 // Cross-cycle progress bookkeeping for the no-progress bound. NOT keyed by
 // session id: each cycle replaces the primary, so the record has to survive the
-// replacement to be comparable at all. `lastOpenTitles` is the array of
-// normalised open-task titles the cycle LEFT in the todo file, after it wrote
-// its own points (null before the first cycle), `stalledCycles` counts
-// consecutive cycles from which not one of those titles had disappeared by the
-// time the next cycle read the file. Wrapped in an object for the same reason
-// as pendingSpawns (resetState reassigns the fields, importers share the one
-// live reference).
+// replacement to be comparable at all. `lastOpenIds` is the array of open task
+// ids the cycle LEFT in the todo file (null before the first cycle),
+// `stalledCycles` counts consecutive cycles from which not one of those ids had
+// disappeared by the time the next cycle read the file. Ids rather than titles:
+// the wind-down subagent authors the titles now, so a cycle that merely
+// rephrases the same open work would read as progress that did not happen,
+// while the `next-id` watermark (src/todofile.js) makes an id disappear exactly
+// once, when its task is removed. Wrapped in an object for the same reason as
+// pendingSpawns (resetState reassigns the fields, importers share the one live
+// reference).
 //
 // The record is PROCESS-GLOBAL, not per orchestrator chain: two orchestrators
 // running endless cycles in one process interleave their counts into one
@@ -215,7 +218,21 @@ export const endlessPauses = new Map()
 // every primary turn that observes the mode switched off — so re-arming the
 // mode always starts from a fresh streak rather than inheriting the one that
 // switched it off.
-export const endlessProgress = { lastOpenTitles: null, stalledCycles: 0 }
+export const endlessProgress = { lastOpenIds: null, stalledCycles: 0 }
+
+// primary session id -> the single-use wind-down permit of the endless cycle
+// running on that primary:
+//
+//   { token, agent, consumed, restores, childSessionID, settlement }
+//
+// The one window in which the endless spawn freeze admits a spawn. Armed
+// between the quiesce wait and the wind-down turn, consumed synchronously at
+// admission, given back at most once when the child never started, and
+// disarmed on every exit of the cycle — see armEndlessWindDown and its five
+// siblings in registry.js. Here rather than in registry.js for the same reason
+// as every other map in this file: it is process-wide shared state, and
+// resetState has to be able to clear it.
+export const endlessWindDownPermits = new Map()
 
 // childSessionID -> waiter record { childSessionID, parentSessionID, promise,
 //                                   createdAt, settled, timer, settle }.
@@ -362,6 +379,7 @@ export function resetState() {
   endlessInProgress.clear()
   endlessCooldowns.clear()
   endlessPauses.clear()
-  endlessProgress.lastOpenTitles = null
+  endlessProgress.lastOpenIds = null
   endlessProgress.stalledCycles = 0
+  endlessWindDownPermits.clear()
 }

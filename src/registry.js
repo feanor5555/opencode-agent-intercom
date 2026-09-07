@@ -1,6 +1,7 @@
 // Subagent bookkeeping: friendly handles and the sessionID <-> entry mapping.
 // Operates on the module-level shared state in state.js.
 
+import { randomBytes } from "node:crypto"
 import {
   registry,
   bySession,
@@ -21,6 +22,7 @@ import {
   endlessInProgress,
   endlessCooldowns,
   endlessPauses,
+  endlessWindDownPermits,
   endlessProgress,
   sessionAgent,
   primaryDirectory,
@@ -128,6 +130,11 @@ export function forgetPrimary(sessionID) {
   pendingEndless.delete(sessionID)
   endlessInProgress.delete(sessionID)
   endlessCooldowns.delete(sessionID)
+  // The wind-down permit of the cycle that just replaced this primary. It is
+  // single-use and belongs to one cycle; the cycle's own `finally` disarms it
+  // too, and this is the second half of the same guarantee — no permit outlives
+  // the primary it was armed for.
+  endlessWindDownPermits.delete(sessionID)
   // The self-stop pause goes with it. It is what holds a stopped run back for
   // the session it was set on, and this session is being replaced: the primary
   // that takes over is a different id, has no pause, and starts with endless
@@ -366,6 +373,10 @@ export function retentionDecision(entry, maxRetained) {
   if (!entry) return { retain: false, reason: "no-entry" }
   if (!(maxRetained > 0)) return { retain: false, reason: "retention-off" }
   if (!entry.parentID) return { retain: false, reason: "no-parent" }
+  // The endless cycle's wind-down child. The cycle drops every retained session
+  // as it replaces the primary this one belongs to, so holding it would only
+  // offer a handle to a session that is about to be torn down.
+  if (entry.windDown) return { retain: false, reason: "wind-down" }
   if (entryForSession(entry.parentID)) return { retain: false, reason: "nested" }
   return { retain: true, reason: "retained" }
 }
@@ -862,7 +873,7 @@ export function isTaskIdPending(taskId) {
 // whoever is first creates the entry, the second upgrades it in place.
 export function upsertSession(
   sessionID,
-  { agent, prompt, parentID, taskId, directory, packageTokens, title } = {},
+  { agent, prompt, parentID, taskId, directory, packageTokens, title, windDown } = {},
 ) {
   if (!sessionID) return undefined
   const existing = entryForSession(sessionID)
@@ -874,6 +885,7 @@ export function upsertSession(
     if (directory && !existing.directory) existing.directory = directory
     if (packageTokens && !existing.packageTokens) existing.packageTokens = packageTokens
     if (title && !existing.title) existing.title = title
+    if (windDown) existing.windDown = true
     return existing
   }
   return createEntry(
@@ -885,6 +897,7 @@ export function upsertSession(
     directory,
     packageTokens,
     title,
+    windDown,
   )
 }
 
@@ -1520,6 +1533,102 @@ export function isEndlessFrozen(sessionID) {
   return pendingEndless.has(sessionID) || endlessInProgress.has(sessionID)
 }
 
+// ----------------------------------------------------------------------------
+// The wind-down permit: the ONE spawn the endless freeze admits.
+//
+// The freeze above refuses every spawn from the moment the latch is set. The
+// cycle's wind-down step needs exactly one exception — the orchestrator starts
+// a `planner` that rewrites the todo file — and the permit is what makes that
+// exception single-use, typed and unforgeable rather than a hole in the freeze.
+//
+// Armed at exactly one call site (between the quiesce wait and the wind-down
+// turn, never in the `pendingEndless` phase), consumed SYNCHRONOUSLY at
+// admission in `spawnHandler`, given back at most once when the child never
+// started, and disarmed in the cycle's `finally` and by `forgetPrimary`.
+// ----------------------------------------------------------------------------
+
+// A permit token: 16 hex characters, per cycle, appearing nowhere but in the
+// wind-down prompt the plugin sends to that one primary.
+export function createWindDownToken() {
+  return randomBytes(8).toString("hex")
+}
+
+// Arms the permit for `primaryID`. Overwrites any permit still standing on the
+// same primary — one cycle, one permit.
+export function armEndlessWindDown(primaryID, { token, agent } = {}) {
+  if (!primaryID || !token || !agent) return null
+  const permit = {
+    token,
+    agent,
+    consumed: false,
+    // How often a consume was given back. Capped at 1, so a repeatedly failing
+    // spawn cannot reopen the window for the whole turn.
+    restores: 0,
+    // Set at admission, once the child session exists.
+    childSessionID: null,
+    // The child waiter's promise — the cycle's gate. The shaped reply ends the
+    // TURN; this is what says the write finished.
+    settlement: null,
+  }
+  endlessWindDownPermits.set(primaryID, permit)
+  return permit
+}
+
+export function endlessWindDownPermit(primaryID) {
+  return primaryID ? endlessWindDownPermits.get(primaryID) : undefined
+}
+
+// The admission test and the consume, in ONE synchronous step. Two spawn calls
+// in the same turn carrying the same token cannot both pass: the second finds
+// `consumed: true`. Answers `{ ok: true, permit }` or `{ ok: false, reason }`
+// with reason one of "none" / "agent" / "token" / "consumed"; a refusal never
+// consumes.
+export function consumeEndlessWindDown(primaryID, { token, agent } = {}) {
+  const permit = endlessWindDownPermits.get(primaryID)
+  if (!permit) return { ok: false, reason: "none" }
+  if (permit.consumed) return { ok: false, reason: "consumed" }
+  if (permit.agent !== agent) return { ok: false, reason: "agent" }
+  if (!token || permit.token !== token) return { ok: false, reason: "token" }
+  permit.consumed = true
+  return { ok: true, permit }
+}
+
+// Gives a consumed permit back, once. Only the two branches that end BEFORE the
+// child was prompted call it — a create that returned no session id, and a
+// `promptSession` that threw — because everything they leave behind is nothing:
+// no child, no writer, no result. A second failure leaves the permit consumed
+// and the cycle takes the "consumed but no child" path instead of reopening the
+// window indefinitely.
+export function restoreEndlessWindDown(primaryID) {
+  const permit = endlessWindDownPermits.get(primaryID)
+  if (!permit || !permit.consumed) return false
+  if (permit.restores >= 1) return false
+  permit.consumed = false
+  permit.restores += 1
+  permit.childSessionID = null
+  permit.settlement = null
+  return true
+}
+
+// Records the admitted child and the promise the cycle waits on. Called once
+// the child session exists, so the cycle can wait for the WRITER to end rather
+// than for the orchestrator to say it did.
+export function noteEndlessWindDownChild(primaryID, { childSessionID, settlement } = {}) {
+  const permit = endlessWindDownPermits.get(primaryID)
+  if (!permit) return false
+  permit.childSessionID = childSessionID ?? null
+  permit.settlement = settlement ?? null
+  return true
+}
+
+// Drops the permit. In the cycle's `finally` on every exit, and before the
+// plugin's own fallback spawn: an armed permit would stay admissible, and a
+// slow primary whose spawn landed after the fallback started would put a second
+// writer against the same file.
+export function disarmEndlessWindDown(primaryID) {
+  return endlessWindDownPermits.delete(primaryID)
+}
+
 // Arms the post-abandon cooldown for this primary.
 export function setEndlessCooldown(sessionID, ms = ENDLESS_COOLDOWN_MS) {
   if (!sessionID) return
@@ -1624,31 +1733,33 @@ export function isQuiesced(sessionID) {
   )
 }
 
-// The cross-cycle progress record, as a set difference over normalised task
-// titles. `openTitlesFound` is what this cycle read from the todo file BEFORE
-// its own write, `openTitlesLeft` what stands in it AFTER — the list the next
-// cycle will be measured against.
+// The cross-cycle progress record, as a set difference over open task IDS.
+// `openIdsFound` is what this cycle read from the todo file BEFORE the
+// wind-down subagent rewrote it, `openIdsLeft` what stands in it AFTER — the
+// list the next cycle will be measured against.
 //
-// A cycle is stalled when not one of the titles the previous cycle handed over
-// has left the file: `completed` counts the handed-over titles that are gone,
-// and any of them being gone resets the streak. What the cycle ADDED does not
-// enter the verdict — a cycle that finished one task and discovered five is
-// progress, a cycle that finished nothing is a stall whatever it saved. Titles
-// rather than ids because `nextFreeIdFrom` (src/todofile.js) reuses the id of a
-// removed task, so an id-keyed measure would read a completed-then-reused id as
-// still open. The first cycle of a process has nothing to compare against and
-// never counts as stalled; `completed` is null for it. The no-progress bound
-// pauses the mode at 2.
-export function recordEndlessCycle(openTitlesFound, openTitlesLeft) {
-  const previous = endlessProgress.lastOpenTitles
+// A cycle is stalled when not one of the ids the previous cycle handed over has
+// left the file: `completed` counts the handed-over ids that are gone, and any
+// of them being gone resets the streak. What the cycle ADDED does not enter the
+// verdict — a cycle that finished one task and discovered five is progress, a
+// cycle that finished nothing is a stall whatever it saved. Ids rather than
+// titles because the wind-down subagent authors the titles: a cycle that merely
+// rephrases the same open work would report every previous title as gone and
+// read as progress that did not happen. The `next-id` watermark
+// (src/todofile.js) is what makes ids usable here — an id disappears exactly
+// when its task is removed and is never handed out again. The first cycle of a
+// process has nothing to compare against and never counts as stalled;
+// `completed` is null for it. The no-progress bound pauses the mode at 2.
+export function recordEndlessCycle(openIdsFound, openIdsLeft) {
+  const previous = endlessProgress.lastOpenIds
   let completed = null
   if (Array.isArray(previous)) {
-    const found = new Set(openTitlesFound || [])
-    completed = previous.filter((title) => !found.has(title)).length
+    const found = new Set(openIdsFound || [])
+    completed = previous.filter((id) => !found.has(id)).length
     if (completed > 0) endlessProgress.stalledCycles = 0
     else endlessProgress.stalledCycles += 1
   }
-  endlessProgress.lastOpenTitles = Array.isArray(openTitlesLeft) ? [...openTitlesLeft] : null
+  endlessProgress.lastOpenIds = Array.isArray(openIdsLeft) ? [...openIdsLeft] : null
   return { stalledCycles: endlessProgress.stalledCycles, completed }
 }
 
@@ -1661,11 +1772,21 @@ export function recordEndlessCycle(openTitlesFound, openTitlesLeft) {
 // saying why. The record is process-global, so any primary observing the mode
 // off clears it.
 export function resetEndlessProgress() {
-  endlessProgress.lastOpenTitles = null
+  endlessProgress.lastOpenIds = null
   endlessProgress.stalledCycles = 0
 }
 
-function createEntry(sessionID, agent, prompt, parentID, taskId, directory, packageTokens, title) {
+function createEntry(
+  sessionID,
+  agent,
+  prompt,
+  parentID,
+  taskId,
+  directory,
+  packageTokens,
+  title,
+  windDown,
+) {
   const now = Date.now()
   const entry = {
     handle: nextHandle(agent),
@@ -1699,6 +1820,10 @@ function createEntry(sessionID, agent, prompt, parentID, taskId, directory, pack
     // total so the orchestrator can tell an oversized package from a task
     // that sprawled once it was running.
     packageTokens: packageTokens || undefined,
+    // The endless cycle's wind-down child: the one subagent whose result is
+    // already the orchestrator's own tool result, so no wake notice is posted
+    // for it and it is never retained.
+    windDown: windDown ? true : undefined,
     status: "busy",
     // How many runs this session has had. 1 from the spawn; incremented by
     // every accepted reuse (reviveRetainedEntryLocked), so the completion

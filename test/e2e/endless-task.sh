@@ -19,6 +19,10 @@
 #   (c) carry-over the accepted rewrite kept at least one id that ALREADY stood
 #              in the file before this cycle, and the run says which of those
 #              ids the rewrite re-titled
+#   re-title   over the whole run: at least one driven cycle re-bound a
+#              carried-over id to a DIFFERENT title, and the plugin logged that
+#              change and still accepted the rewrite
+#                                                        → `endless: wind-down task title changed — V6 observation`
 #   (d) replace a new orchestrator session exists, the old one is archived and
 #              not deleted                               → `endless: cycle K/M complete, new session …`
 #   kickoff    the new session's first message is the endless kickoff and names
@@ -44,20 +48,34 @@
 #   - SEEDS the todo file with several ids inside the markers before cycle 1,
 #     so even the first cycle rewrites a file that already carries entries;
 #   - arranges those entries so that ONE task landing makes ANOTHER task's title
-#     stale — T101 lands the merge that T102's title still describes as
-#     outstanding — which is the live shape that makes a wind-down subagent
-#     re-title a surviving id;
+#     stale — T101 produces `merged.md`, which is exactly the thing T104's title
+#     still says is outstanding — which is the live shape that makes a wind-down
+#     subagent re-title a surviving id;
+#   - keeps that stale entry ALIVE past the work-off phase that would otherwise
+#     eat it. This is what the first two-cycle run could not do: its stale entry
+#     was worked off inside cycle 1 and cycle 2 met a file without it. Every
+#     seeded task except T101 is GATED on a flag file under the fixture
+#     directory that no subagent may create — a subagent that finds its gate
+#     absent reports blocked and the plugin leaves the task in the file — and
+#     the driver opens exactly ONE gate per cycle, after that cycle's rewrite is
+#     confirmed and before its work-off. So the list cannot drain: cycle k's
+#     work-off can finish the one task whose gate the driver just opened and
+#     nothing else, and the stale entry, whose gate is never opened, is still
+#     open when the last cycle winds down;
 #   - drives the cycles one after the other, each from the file and the session
 #     its predecessor left behind;
 #   - asserts PER CYCLE that the cycle confirmed and replaced, and that the
-#     accepted rewrite touched an id that already existed.
+#     accepted rewrite touched an id that already existed, and ONCE over the
+#     whole run that a carried-over id was re-titled and the plugin logged the
+#     change as a V6 observation instead of rejecting the rewrite over it.
 #
 # How each cycle is sequenced, and why in this order:
 #
 #   turn 1  the primary reads the todo file and names its open points
 #           (context grows; from cycle 2 on it is asked which entry the last
-#           completion has made stale, which is what the wind-down hand-over
-#           carries)
+#           completion has made stale AND for the corrected title line that
+#           entry must carry now — that answer is what the wind-down hand-over
+#           carries into the file)
 #   turn 2  the primary spawns ONE sleeping subagent and ends its turn
 #           → the driver waits for the plugin's own `spawned` line and takes the
 #             handle from it; that handle is the in-flight state everything below
@@ -77,6 +95,10 @@
 #           it at or above the armed ceiling and latches the cycle. The turn
 #           spawns nothing — the freeze is already on from the latch.
 #   turn 4  the post-trigger spawn attempt of (a).
+#   gate    once the rewrite is confirmed — the freeze is on, nothing is in
+#           flight and the successor does not exist yet — the driver opens this
+#           cycle's work-off gate, so exactly one of the remaining tasks becomes
+#           finishable and the rest, the stale one included, cannot be drained.
 #   work-off the successor's first turn, its spawn prompts, and the removal of a
 #           saved task when one of its subagents replies `DONE: T<n>`. That
 #           removal is also what makes the next cycle's file an accumulated one
@@ -146,7 +168,10 @@
 #                      does not cover
 #   SEED_TODO          1                       1 seeds the project's todo file
 #                      and the fixture directory the seeded tasks work on; 0
-#                      drives whatever file is there
+#                      drives whatever file is there. The seeded file carries a
+#                      work-off gate for cycles 2 and 3 only, so SEED_TODO=1
+#                      with ENDLESS_CYCLES above 3 is refused in the preflight:
+#                      a later cycle's work-off would meet nothing it can finish
 #   SPAWN_AGENT        coder                   the in-flight subagent's role
 #   SUBAGENT_SLEEP_S   45                      how long it stays in flight; the
 #                      run is gated on the observed handle, not on this number
@@ -219,8 +244,13 @@ SETTINGS_FILE="$HOME/.config/opencode/agent-intercom.json"
 DEBUG_LOG="$HOME/.cache/opencode-agent-intercom/debug.log"
 
 # The directory the seeded tasks operate on. It is named for this driver, is
-# created by it and is removed again in cleanup.
+# created by it and is removed again in cleanup. The work-off gates the driver
+# opens are flag files inside it, so they go with it.
 FIXTURE_NAME=e2e-endless-fixture
+
+# The seeded file carries a gate task for these cycles. Cycle 1 needs none —
+# T101 is finishable from the start — so the gates cover cycles 2 and 3.
+GATE_CYCLES_MAX=3
 
 mkdir -p "$OUT_DIR"
 # Absolute from here on: the server is started with the project directory as its
@@ -266,6 +296,16 @@ ARMED_CONTEXT=""
 CYCLE_NEWSID=""
 CYCLE_SAVED_IDS=""
 CYCLE_SAVED_FILE=""
+# The re-title, collected across the cycles and asserted once at the end: the
+# ids an accepted rewrite re-bound to a different title, the file evidence for
+# them, the plugin's own V6 observation line, and — per cycle — what the
+# carry-over comparison saw and whether the staleness the seed arranges was
+# actually in front of that cycle.
+RETITLE_IDS=""
+RETITLE_EVIDENCE=""
+RETITLE_V6=""
+CARRYOVER_SUMMARY=""
+STALE_PRECONDITION=""
 
 # ---------- reporting ------------------------------------------------------
 
@@ -435,14 +475,26 @@ task_title() {
 
 # The seeded todo file. It stands in for an ACCUMULATED file, which is the state
 # every cycle after the first works on and the state the single-cycle run never
-# reached: human prose outside the markers, five ids inside them and a watermark
+# reached: human prose outside the markers, four ids inside them and a watermark
 # above all of them.
 #
-# The two first entries are the shape that makes a wind-down subagent re-title a
-# surviving id, which is what reaches V6: T101 lands the merge that T102's title
-# still describes as outstanding, so once T101 is done and removed, T102's title
-# names work that is already landed and only its deletion half is left. T103
-# goes stale the same way once the note files are gone.
+# T101 and T104 are the pair that makes a wind-down subagent re-title a
+# surviving id, which is what reaches V6: T101 produces `merged.md`, and T104's
+# title still says it is waiting for T101 to produce exactly that file. Once
+# T101 is finished and removed, T104's title names work that has already landed
+# and only its second half — the owner's release — is left, so the correct
+# rewrite keeps the id and changes the title.
+#
+# WHY EVERY TASK BUT T101 IS GATED. A stale entry is only worth anything if it
+# is still open when a LATER cycle winds down, and a successor works its file
+# off in the meantime: the first two-cycle run watched the stale entry be
+# completed and removed inside cycle 1. Each of T102, T103 and T104 therefore
+# names a flag file no subagent may create; a subagent that finds its gate
+# absent reports blocked, no `DONE: T<n>` marker reaches the wake hook, and the
+# plugin leaves the task in the file. The driver opens `cycle<k>.flag` after
+# cycle k's rewrite is confirmed, so cycle k's work-off has exactly ONE task it
+# can finish — which is what criterion (e) removal needs — while T104's gate,
+# `owner.flag`, is never written by anything in this run.
 seed_todo_file() {
   local path="$1"
   cat > "$path" <<'SEED'
@@ -462,19 +514,16 @@ before the first cycle and removed again when the run ends.
 - T101: Write e2e-endless-fixture/merged.md, holding the lines of e2e-endless-fixture/notes-a.md and then those of e2e-endless-fixture/notes-b.md
   accept: e2e-endless-fixture/merged.md carries every line of both note files, in that order, and both note files are still there
   link: e2e-endless-fixture/notes-a.md
-- T102: Merge the two note files into e2e-endless-fixture/merged.md and delete notes-a.md and notes-b.md afterwards — not before T101 has landed
-  accept: merged.md carries both notes and neither note file is left in e2e-endless-fixture/
-  link: e2e-endless-fixture/notes-b.md
-- T103: Compare e2e-endless-fixture/merged.md against the two note files and write the verdict to e2e-endless-fixture/review.md
-  accept: e2e-endless-fixture/review.md names every line that is missing from merged.md, or states there is none
-  link: e2e-endless-fixture/merged.md
-- T104: List the file names under e2e-endless-fixture/, one per line, in e2e-endless-fixture/index.md
-  accept: e2e-endless-fixture/index.md carries one line per file in that directory
-  link: e2e-endless-fixture/index.md
-- T105: Write the total line count over the files under e2e-endless-fixture/ to e2e-endless-fixture/count.txt
-  accept: e2e-endless-fixture/count.txt holds a single number
+- T102: Once e2e-endless-fixture/cycle2.flag is there, write the number of lines in e2e-endless-fixture/merged.md to e2e-endless-fixture/count.txt
+  accept: e2e-endless-fixture/count.txt holds a single number. cycle2.flag is written by the run's owner and by nobody else — while it is absent, do not create it, do no other task's work, and report blocked so this task stays open.
   link: e2e-endless-fixture/count.txt
-<!-- intercom: next-id T106 -->
+- T103: Once e2e-endless-fixture/cycle3.flag is there, list the file names under e2e-endless-fixture/, one per line, in e2e-endless-fixture/index.md
+  accept: e2e-endless-fixture/index.md carries one line per file in that directory. cycle3.flag is written by the run's owner and by nobody else — while it is absent, do not create it, do no other task's work, and report blocked so this task stays open.
+  link: e2e-endless-fixture/index.md
+- T104: Waiting on T101 to produce e2e-endless-fixture/merged.md; once it is there and e2e-endless-fixture/owner.flag has been written, copy merged.md to e2e-endless-fixture/released.md
+  accept: e2e-endless-fixture/released.md holds the merged text. owner.flag is written by the run's owner and by nobody else — while it is absent, do not create it and report blocked so this task stays open.
+  link: e2e-endless-fixture/merged.md
+<!-- intercom: next-id T105 -->
 <!-- intercom:end -->
 
 ## Notes
@@ -483,13 +532,48 @@ The `bytes()` helper in `src/format.js` is an artefact of the multi-agent run.
 SEED
 }
 
-# The two note files T101 and T102 work on.
+# The two note files T101 merges and T104 waits for. No gate flag is created
+# here: every gate starts closed and the driver opens one per cycle.
 seed_fixture() {
   rm -rf "${PROJECT_DIR:?}/$FIXTURE_NAME" || return 1
   mkdir -p "$PROJECT_DIR/$FIXTURE_NAME" || return 1
   printf '%s\n' '# notes a' 'alpha one' 'alpha two' > "$PROJECT_DIR/$FIXTURE_NAME/notes-a.md" || return 1
   printf '%s\n' '# notes b' 'beta one' 'beta two' > "$PROJECT_DIR/$FIXTURE_NAME/notes-b.md" || return 1
   FIXTURE_CREATED=1
+}
+
+# Opens the work-off gate of cycle $1: the one task that cycle's successor is
+# able to finish. Called once per cycle, AFTER the rewrite is confirmed — at
+# that moment the freeze is on, the quiesce has emptied the flight and the
+# successor session does not exist yet, so no subagent can have taken the task
+# before the gate was open, and none of the earlier cycles could drain it.
+# Cycle 1 needs no gate: T101 is finishable from the start.
+open_workoff_gate() {
+  local k="$1" flag="$PROJECT_DIR/$FIXTURE_NAME/cycle$1.flag"
+  [ "$TODO_SEEDED" = 1 ] || return 0
+  [ "$k" -ge 2 ] 2>/dev/null || return 0
+  if printf 'opened by test/e2e/endless-task.sh for cycle %s at %s\n' "$k" "$(date -Is)" > "$flag"; then
+    say "[$PREFIX] cycle $k work-off gate opened: $flag"
+    printf 'gate                cycle %s: opened %s — the one task cycle %s can finish\n' \
+      "$k" "$flag" "$k" >> "$REPORT_FILE"
+  else
+    say "[$PREFIX] WARNING: could not open the work-off gate $flag — cycle $k's work-off has nothing it can finish"
+  fi
+}
+
+# The state a cycle after the first needs in front of it for the re-title to be
+# worth anything: the task that caused the staleness gone from the file, and the
+# artefact it produced on disk. Reported rather than enforced — where it does not
+# hold, the re-title criterion's evidence says so instead of reading as a plain
+# model failure.
+stale_precondition() {
+  local file="$1" merged="$PROJECT_DIR/$FIXTURE_NAME/merged.md"
+  local cause=present artefact=absent open_now
+  grep -qE '^- T101:' "$file" 2>/dev/null || cause=gone
+  [ -f "$merged" ] && artefact=present
+  open_now=$(sed -nE 's/^- (T[0-9]+):.*/\1/p' "$file" 2>/dev/null | tr '\n' ' ')
+  printf 'T101 (the cause) %s from %s, %s %s, open ids: %s' \
+    "$cause" "$file" "$merged" "$artefact" "${open_now:-none}"
 }
 
 # ---------- cleanup --------------------------------------------------------
@@ -596,6 +680,9 @@ command -v opencode >/dev/null || die "opencode is not on PATH"
 case "$ENDLESS_CYCLES" in
   '' | *[!0-9]* | 0) die "ENDLESS_CYCLES=$ENDLESS_CYCLES is not a positive whole number" ;;
 esac
+if [ "$SEED_TODO" = 1 ] && [ "$ENDLESS_CYCLES" -gt "$GATE_CYCLES_MAX" ] 2>/dev/null; then
+  die "ENDLESS_CYCLES=$ENDLESS_CYCLES with SEED_TODO=1: the seeded file carries a task a work-off phase can finish for cycles 1..$GATE_CYCLES_MAX only — every task past those is gated on a flag nothing in this run writes, so a later cycle's (e) removal would fail on a file it cannot make progress in. Drive at most $GATE_CYCLES_MAX cycles, or seed a file of your own and run with SEED_TODO=0"
+fi
 if [ "$ENDLESS_MAX_CYCLES" -lt "$ENDLESS_CYCLES" ] 2>/dev/null; then
   die "ENDLESS_MAX_CYCLES=$ENDLESS_MAX_CYCLES is below ENDLESS_CYCLES=$ENDLESS_CYCLES — the plugin would pause the mode before the last driven cycle and that cycle's criteria would be asserted over a cycle that never started"
 fi
@@ -751,7 +838,7 @@ settings written    endlessMode=true endlessQuiesceTimeoutMs=$ENDLESS_QUIESCE_TI
 endless ceiling     held at $ENDLESS_CONTEXT_CEILING between cycles, then ${ARMED_CONTEXT:-(armed per cycle after its spawn turn)}   (ENDLESS_CONTEXT=${ENDLESS_CONTEXT:-derive from the measured context}, margin $ENDLESS_CONTEXT_MARGIN, settings-cache wait ${SETTINGS_TTL_WAIT_S}s)
 debug log           $DEBUG_LOG   (read from byte $LOG_OFFSET)
 todo baseline       $TODO_BASELINE   (backup: $TODO_BAK)
-fixture             $PROJECT_DIR/$FIXTURE_NAME   (seeded=$TODO_SEEDED; T101 lands the merge T102's title still describes)
+fixture             $PROJECT_DIR/$FIXTURE_NAME   (seeded=$TODO_SEEDED; T101 produces merged.md, which T104's title still calls outstanding; every task but T101 is gated on a flag file, and the driver opens cycle<k>.flag after cycle k's rewrite is confirmed)
 in-flight subagent  spawn("$SPAWN_AGENT", sleep ${SUBAGENT_SLEEP_S}s) -> handle ${SPAWN_HANDLE:-(spawned in the turn 2 of each cycle)}
 timeouts            turn=${TURN_TIMEOUT_S}s step=${STEP_TIMEOUT_S}s quiesce=${QUIESCE_WAIT_S}s work-off=${WORKOFF_TIMEOUT_S}s start=${SERVER_START_TIMEOUT_S}s poll=${POLL_S}s
 out dir             $OUT_DIR
@@ -882,13 +969,24 @@ run_cycle() {
   #
   # From cycle 2 on the turn asks for the ONE thing that makes an accumulated
   # file different from a fresh one: which entry the last completion has made
-  # stale. That answer travels into the wind-down hand-over, and a wind-down that
-  # corrects a stale title is what re-binds a pre-existing id.
+  # stale, and the corrected title line that entry has to carry now. That answer
+  # travels into the wind-down hand-over, and a wind-down that corrects a stale
+  # title is what re-binds a pre-existing id.
   local turn1
   if [ "$CYCLE" = 1 ]; then
     turn1="Read ./$TODO_NAME in this project. Then name, one line each, the three open tasks you would take first and what would still be left of the others afterwards. Read that one file, call no other tool — do not spawn, do not list — and end your turn."
   else
-    turn1="Read ./$TODO_NAME in this project. Then state, one line each: which task id a subagent of yours has just completed; which remaining task's title still describes work that has already landed; and what is actually left of that task now. Read that one file, call no other tool — do not spawn, do not list — and end your turn."
+    # The staleness the seed arranges is a fact about the file by now; it is
+    # recorded here so a failed re-title criterion can say whether the cycle was
+    # even given the condition it is asserted on.
+    local pre_file
+    pre_file=$(todo_path)
+    if [ -n "$pre_file" ]; then
+      STALE_PRECONDITION="cycle $CYCLE: $(stale_precondition "$pre_file")"
+      say "[$PREFIX] $tag staleness precondition — ${STALE_PRECONDITION#cycle $CYCLE: }"
+      printf 'staleness           %s\n' "$STALE_PRECONDITION" >> "$REPORT_FILE"
+    fi
+    turn1="Read ./$TODO_NAME in this project. Then state, one line each: which task id a subagent of yours has just completed; which remaining task's title still describes work that has already landed; and the corrected one-line title that task must carry from now on, keeping its id and written out in full in the form \"- T<n>: <title>\". Read that one file, call no other tool — do not spawn, do not list — and end your turn."
   fi
   post_prompt "$turn1" "$OUT_DIR/$PREFIX.cycle$CYCLE.turn1.json"
   say "[$PREFIX] $tag turn 1 (open points) done $(date +%H:%M:%S)"
@@ -1098,6 +1196,15 @@ run_cycle() {
       "${rejected:+the rewrite was rejected and the snapshot restored: $rejected — }$WAIT_REASON"
   fi
 
+  # ---------- this cycle's work-off gate ------------------------------------
+
+  # Opened here and nowhere else: the rewrite is confirmed, the freeze is on,
+  # the quiesce emptied the flight and the successor does not exist yet, so the
+  # task behind this gate cannot have been taken by an earlier cycle. It is the
+  # one task this cycle's work-off can finish; everything else in the file,
+  # including the stale entry the re-title criterion needs, stays blocked.
+  open_workoff_gate "$CYCLE"
+
   # ---------- (c) the rewrite touched an entry that was already there --------
 
   # The hole this driver was extended to close. A cycle whose accepted rewrite
@@ -1108,15 +1215,28 @@ run_cycle() {
   # an all-fresh rewrite instead of passing over an empty comparison, and names
   # which of the carried-over ids were re-titled.
   local carried="" retitled="" id pre_title now_title
+  refresh_slice
   if [ -n "$saved_ids" ] && [ -s "$pre_todo" ]; then
     for id in $(printf '%s' "$saved_ids" | tr ',' ' '); do
       pre_title=$(task_title "$id" "$pre_todo")
       [ -n "$pre_title" ] || continue
       carried="$carried $id"
       now_title=$(task_title "$id" "$PROJECT_DIR/$saved_file")
-      [ "$now_title" != "$pre_title" ] && retitled="$retitled $id"
+      if [ "$now_title" != "$pre_title" ]; then
+        retitled="$retitled $id"
+        RETITLE_IDS="$RETITLE_IDS $id"
+        RETITLE_EVIDENCE="${RETITLE_EVIDENCE:+$RETITLE_EVIDENCE; }$tag re-bound $id: \"$pre_title\" -> \"$now_title\""
+        # The plugin's own side of the same change. V6 stopped being a gate in
+        # commit debed11 and became this observation, so its line is what says
+        # the rewrite was accepted WITH the re-title rather than rejected over
+        # it. Read inside the cycle's own window, where the ids belong.
+        local v6_hit
+        v6_hit=$(slice_match_after "endless: wind-down task title changed .*\"id\":\"$id\"")
+        [ -n "$v6_hit" ] && RETITLE_V6="${RETITLE_V6:+$RETITLE_V6; }$tag: ${v6_hit#*:}"
+      fi
     done
   fi
+  CARRYOVER_SUMMARY="${CARRYOVER_SUMMARY:+$CARRYOVER_SUMMARY | }$tag pre-existing [${pre_ids:-none}], confirmed [${saved_ids:-none}], kept [${carried:- none}], re-titled [${retitled:- none}]"
   if [ -z "$saved_ids" ]; then
     local rejected2
     rejected2=$(rejection_line)
@@ -1131,8 +1251,7 @@ run_cycle() {
   else
     record "$tag (c) carry-over — the accepted rewrite touched a pre-existing id" 1 \
       "pre-existing [$pre_ids], confirmed [$saved_ids]; kept:$carried; re-titled by the rewrite:${retitled:- none}"
-    [ -z "$retitled" ] && note_uncovered "$tag — an accepted RE-TITLE of a carried-over id" \
-      "the rewrite kept$carried unchanged in title, so the id-rebinding path (V6) was not reached in this cycle"
+    [ -z "$retitled" ] && say "[$PREFIX] $tag re-titled nothing it carried over ($carried) — the run-level re-title criterion decides on the cycles together"
   fi
 
   # ---------- (a) the permit was consumed exactly once -----------------------
@@ -1372,6 +1491,40 @@ while [ "$k" -le "$ENDLESS_CYCLES" ]; do
   CYCLES_DRIVEN=$k
   k=$((k + 1))
 done
+
+# ---------- the re-title, asserted over the driven cycles -------------------
+
+# The case the live session broke on, and the one a per-cycle carry-over check
+# cannot force: an id that already existed keeps its id and gets a DIFFERENT
+# title, because another task completing made the old one wrong. It is asserted
+# once, over the cycles together — the seed puts the staleness in front of the
+# LAST cycle, not every one of them — and it is a criterion, not a note: a run
+# in which no carried-over id was ever re-titled has not reached the path and
+# must fail rather than report a clean pass.
+#
+# One cycle cannot produce it: with the file as the seed leaves it, nothing has
+# been completed yet when cycle 1 winds down, so no title can have gone stale.
+# That case is reported as uncovered instead of failed.
+say ""
+if [ "$ENDLESS_CYCLES" -lt 2 ]; then
+  note_uncovered "re-title — a carried-over id re-bound to a new title" \
+    "ENDLESS_CYCLES=$ENDLESS_CYCLES: no work-off phase precedes a wind-down in this run, so no completion can have made a title stale. Drive at least 2 cycles for this criterion"
+elif [ -n "$RETITLE_IDS" ]; then
+  record "re-title — an accepted rewrite re-bound a carried-over id to a new title" 1 \
+    "$RETITLE_EVIDENCE"
+  if [ -n "$RETITLE_V6" ]; then
+    record "re-title (V6) — the plugin logged the title change and still accepted the rewrite" 1 \
+      "$RETITLE_V6"
+  else
+    record "re-title (V6) — the plugin logged the title change and still accepted the rewrite" 0 \
+      "the file shows a re-titled carried-over id ($RETITLE_EVIDENCE) but no \"endless: wind-down task title changed — V6 observation\" line names those ids in that cycle's window — the rewrite did not reach the accepted path through V6"
+  fi
+else
+  record "re-title — an accepted rewrite re-bound a carried-over id to a new title" 0 \
+    "no driven cycle re-titled an id it carried over, so the id-rebinding path was never reached: $CARRYOVER_SUMMARY${STALE_PRECONDITION:+ — staleness in front of the last cycle: $STALE_PRECONDITION}"
+  record "re-title (V6) — the plugin logged the title change and still accepted the rewrite" 0 \
+    "not reachable: no carried-over id was re-titled in any driven cycle"
+fi
 
 # ---------- what this driver does not assert -------------------------------
 

@@ -14,8 +14,10 @@ that opencode upgrades don't shift the system-prompt composition.
   → gitter pipeline that adds `bytes(n)` to `src/format.js`.
 - `endless-task.sh` — endless-mode harness. Seeds the driven project's todo
   file, then drives two endless cycles in sequence — the second from the file
-  and the session the first left behind — and asserts each cycle's steps in
-  order; see "Endless mode" below.
+  and the session the first left behind — asserts each cycle's steps in order
+  and, once over the cycles together, that a carried-over task id was re-titled;
+  see "Endless mode" below. Its seed and its work-off gates are covered by
+  `test/e2e-endless-task.test.js`, which runs them without a server.
 - `nested-task.sh` — nested-delegation harness. Drives one nested spawn
   (orchestrator → coder → researcher) and asserts it; see "Nested delegation"
   below.
@@ -135,13 +137,26 @@ against pre-existing entries passes over an empty comparison. That hole let the
 same class of defect through four times, each failure sitting in the second
 cycle on an accumulated file. The driver therefore
 
-- seeds the project's todo file with five ids (`T101`–`T105`) inside the
-  markers, human prose outside them and a `next-id T106` watermark, plus the
+- seeds the project's todo file with four ids (`T101`–`T104`) inside the
+  markers, human prose outside them and a `next-id T105` watermark, plus the
   fixture directory `e2e-endless-fixture/` the seeded tasks work on;
-- shapes two of those entries the way the live file was shaped: `T101` lands the
-  merge that `T102`'s title still describes as outstanding, so once `T101` is
-  worked off and removed, `T102`'s title names work that is already landed —
+- shapes two of those entries the way the live file was shaped: `T101` produces
+  `merged.md`, and `T104`'s title still says it is waiting for `T101` to produce
+  exactly that file, so once `T101` is worked off and removed, `T104`'s title
+  names work that is already landed and only the owner's release is left of it —
   which is what makes a wind-down subagent re-title a surviving id;
+- keeps that stale entry alive past the work-off phase that would otherwise eat
+  it. Every seeded task but `T101` is **gated** on a flag file under the fixture
+  directory that its own `accept:` line forbids the subagent to create: a
+  subagent that finds its gate absent reports blocked, no `DONE: T<n>` reaches
+  the wake hook, and the plugin leaves the task in the file. The driver opens
+  exactly one gate per cycle — `cycle<k>.flag`, written after cycle `k`'s
+  rewrite is confirmed, while the freeze is on, the quiesce has emptied the
+  flight and the successor does not exist yet — so cycle `k`'s work-off can
+  finish that one task and nothing else, and `T104`, whose gate `owner.flag`
+  nothing in the run writes, is still open when the last cycle winds down. This
+  is what the first two-cycle run could not do: its stale entry was worked off
+  inside cycle 1 and cycle 2 met a file without it;
 - drives `ENDLESS_CYCLES` (2) cycles in sequence, each on the session and the
   file its predecessor left, with `ENDLESS_MAX_CYCLES` defaulting to the same
   number so the plugin's own ceiling stops the loop right after the last driven
@@ -223,15 +238,40 @@ to, so a report says which cycle a failure sits in):
 | (e) removal | a successor subagent's `DONE: T<n>` reply removes that task: `notified primary of completion` for the successor carrying `"kind":"done","id":"T<n>"`, the id one of (c)'s, and the line `- T<n>:` gone from the todo file on disk while the file itself stays |
 | order | the five cycle lines — scheduled, refused, quiesced, confirmed, complete — appear in that order in the debug-log slice |
 
+And once over the driven cycles together, after the last work-off phase:
+
+| criterion | evidence |
+|---|---|
+| re-title | some cycle's accepted rewrite kept an id and gave it a **different** title; the evidence quotes the old and the new one |
+| re-title (V6) | `endless: wind-down task title changed — V6 observation` names that id in that cycle's window — the plugin saw the change and accepted the rewrite instead of rejecting it |
+
 **The carry-over criterion is what closes the vacuous-pass hole.** When a cycle
 latches, the driver copies the todo file to `out/11-endless.cycle<k>.pre-todo.md`
 and reads its `- T<n>:` ids and titles. After the confirmation it compares: at
 least one confirmed id has to be one of those, or the criterion FAILS naming
 both sets — an all-fresh rewrite exercises nothing of the path the live failures
-sit on and must not be reported as a pass. Where ids were carried over but none
-was re-titled, the run adds a `NOT ASSERTED` line saying the id-rebinding path
-was not reached in that cycle; titles are compared in the plugin's own form
-(trimmed, lower-cased, whitespace collapsed — `normaliseTitle`).
+sit on and must not be reported as a pass. Titles are compared in the plugin's
+own form (trimmed, lower-cased, whitespace collapsed — `normaliseTitle`).
+
+**The re-title is a criterion of the run, not of a cycle.** Carrying an id over
+is not yet the case the live session broke on: there the id survived and its
+*title* changed, because another task completing had made the old title wrong.
+The seed puts that staleness in front of the LAST cycle and not every one of
+them — nothing has been completed when cycle 1 winds down — so the driver
+collects the re-titles of every cycle and asserts them once, after the last
+work-off phase. A run in which no carried-over id was ever re-titled FAILS,
+quoting each cycle's carry-over comparison and the staleness precondition it
+recorded before the last cycle's first turn (whether `T101` was gone from the
+file and `merged.md` on disk), so a failure says whether the condition was even
+in front of the cycle. The second criterion is the plugin's own side of the same
+change: V6 stopped being a gate in commit `debed11` and became an observation,
+so its line is what shows the rewrite was accepted **with** the re-title rather
+than rejected over it. A file that shows the change without that line is
+reported as the rewrite not having reached the accepted path.
+
+`ENDLESS_CYCLES=1` cannot produce the case at all — no work-off phase precedes
+its wind-down — so a single-cycle run reports the re-title as `NOT ASSERTED`
+rather than failing it.
 
 A cycle that produces no confirmation because the plugin rejected the rewrite
 reports the rejection line, with its failing conjunct, as the evidence of (c) —
@@ -290,7 +330,9 @@ Parameters are env vars with cheap defaults — `ENDLESS_PROJECT_DIR`,
 `ENDLESS_PORT`, `ENDLESS_CONTEXT` (empty, i.e. derived),
 `ENDLESS_CONTEXT_CEILING` (100000000), `ENDLESS_CONTEXT_MARGIN` (1000),
 `SETTINGS_TTL_WAIT_S` (3, past the plugin's 2 000 ms settings cache),
-`ENDLESS_CYCLES` (2), `SEED_TODO` (1),
+`ENDLESS_CYCLES` (2), `SEED_TODO` (1 — the seeded file carries a work-off gate
+for cycles 2 and 3 only, so `SEED_TODO=1` with more than 3 cycles is refused in
+the preflight: a later cycle's work-off would meet nothing it can finish),
 `ENDLESS_MAX_CYCLES` (`$ENDLESS_CYCLES`), `ENDLESS_QUIESCE_TIMEOUT_MS` (600000 —
 a later cycle quiesces over the previous cycle's work-off subagents as well),
 `QUIESCE_WAIT_S` (that bound + 60 s, the driver's own wait for the quiesce

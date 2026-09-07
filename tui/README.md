@@ -12,30 +12,43 @@ This plugin puts that snapshot — and every runtime knob worth tuning — right
 in your opencode sidebar.
 
 ```
-┌─ ▼ Subagents (2) ──────────────────────────┐
-│   coder        busy   6.2 K   0:42   [✕]   │
-│   designer     idle   2.1 K   1:08   [✕]   │
-│   retained subs [-]   0   [+]              │
-│   retain (min)  [-]  60   [+]              │
+┌─ ▼ Subagents (2) ─────────────────────────┐
+│   ● 1 running · ✓ 3 done                  │
+│   › coder        busy     6.2 K    0:42 ✕  │
+│       · 0:42 · 6.2 K ctx                   │
+│   › designer     idle     2.1 K    1:08 ✕  │
+│       · 1:08                               │
+│   j/k move · ⏎ open · x abort · esc       │
+│   max subagents   [-]    8 [+]             │
+│   retained subs   [-]  off [+]             │
+│   retain (min)    [-]   25 [+]             │
+│   silence (s)     [-]   90 [+]             │
+│   in tool (min)   [-]   11 [+]             │
+│   endless mode    [off]                    │
+│   endless (k)     [-]   98 [+]             │
 └────────────────────────────────────────────┘
-┌─ ▼ Limits ─────────────────────────────────┐
-│   max subagents   [-]   3   [+]            │
+┌─ ▼ TUI settings ──────────────────────────┐
 │   thinking        [on]                     │
 │   tool details    [on]                     │
+│   show agentcom   [on]                     │
 └────────────────────────────────────────────┘
 ┌─ ▼ LLM params    [<] orchestrator  [>] ────┐
-│   model          [<] gpt-oss-120b [>]  ★   │
-│   effort         [<]  default   [>]   ★    │
-│   max Token(k)   [-]  40   [+]        ★    │
-│   reuse Token(k) [-]  70   [+]        ★    │
-│   result Token   [-] 2000 [+]        ★    │
+│   agent          [<] orchestrator [>]      │
+│   model          [<] gpt-oss-120b [>]  ★ V R│
+│   effort         [<]     medium [>]    ★   │
+│   max Token(k)   [-]   40   [+]        ★   │
+│   reuse Token(k) [-]   70   [+]        ★   │
+│   result Token   [-] 2000 [+]        ★     │
+│   [reset current agent]                    │
 │   temperature    [-]  0.70 [+]   ★         │
 │   top_p          [-]  0.90 [+]             │
 │   top_k          [-]    40 [+]   ★         │
 │   min_p          [-]  0.05 [+]             │
 │   rep_penalty    [-]  1.05 [+]             │
-│                                            │
-│   [reset current agent]                    │
+└────────────────────────────────────────────┘
+┌─ ▼ Prompts ────────────────────────────────┐
+│   files           [3/9]                    │
+│         [↻ reload]                         │
 └────────────────────────────────────────────┘
 ```
 
@@ -72,6 +85,10 @@ in your opencode sidebar.
 
 - **Stay oriented.** When a subagent finishes and its session vanishes, the
   panel drops you back into the orchestrator chat — not the home page.
+
+- **Bust the prompts cache.** The Prompts section shows how many prompt
+  files the running plugin sees and lets you force a re-read on the next
+  LLM call without editing the file bodies.
 
 Every change is written to a file under `~/.config/opencode/`. The main
 plugin watches. There is nothing else to wire.

@@ -11,4 +11,8 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-Last commit: 6e72f40 refactor: return the create failure instead of writing it out
+- Decide O2 in `specs/nested-delegation.md` (the open assumption that `maxSubagents` bounds the orchestrator's attention rather than a provider rate limit or a host resource).
+- Decide O4 in `specs/nested-delegation.md` (a project can open `permission.spawn` on a role through the config but cannot give it a target, because `NESTED_SPAWN_TARGETS` has no runtime counterpart).
+- Verify whether `tool.execute.after` fires for MCP tools; if it does not, a subagent whose only work is an MCP call keeps the wide watchdog window instead of the silence one. The live end-to-end run that proved `after` fires could not cover the MCP case because no MCP server was reachable from that instance.
+
+Last commit: 35058ec docs: rewrite nested-delegation as the contract a blocked parent is owed

@@ -12,17 +12,20 @@ that opencode upgrades don't shift the system-prompt composition.
   polls until the orchestrator session settles, dumps the full message tree.
 - `multi-task.sh` — multi-agent harness. Drives a planner → coder → reviewer
   → gitter pipeline that adds `bytes(n)` to `src/format.js`.
-- `endless-task.sh` — endless-mode harness. Drives one full endless cycle and
-  asserts its steps in order; see "Endless mode" below.
+- `endless-task.sh` — endless-mode harness. Seeds the driven project's todo
+  file, then drives two endless cycles in sequence — the second from the file
+  and the session the first left behind — and asserts each cycle's steps in
+  order; see "Endless mode" below.
 - `nested-task.sh` — nested-delegation harness. Drives one nested spawn
   (orchestrator → coder → researcher) and asserts it; see "Nested delegation"
   below.
 - `run-all.sh` — runs the 8 single-agent tests, the multi-agent test and the
-  endless-mode cycle. Owns the server the first ten use: builds the TUI, starts
+  endless-mode cycles. Owns the server the first ten use: builds the TUI, starts
   a fresh `opencode serve` in the configured directory (default
   `$HOME/testopencode`), and stops it again on the way out.
-- `lib/` — the Python evidence readers used by `endless-task.sh`, plus their
-  shared recursive payload walker.
+- `lib/` — the Python evidence readers used by `endless-task.sh` (the kickoff
+  ids, the successor's first turn, and the child session id of the driver's own
+  spawn), plus their shared recursive payload walker.
 - `server-lifecycle.sh` — sourced library, not a driver. Holds the four server
   steps `run-all.sh` and `endless-task.sh` share: `e2e_build_tui`,
   `e2e_server_start`, `e2e_server_wait_ready`, `e2e_server_stop`, plus
@@ -122,10 +125,40 @@ The setup the drivers are written against:
 `run-all.sh` starts. A cycle needs endless mode armed with a threshold the
 primary is known to cross, and it is read off the plugin's debug log, so the
 driver starts its own server on its own port and tears it down again, through
-the same `server-lifecycle.sh`:
+the same `server-lifecycle.sh`.
+
+**Two cycles, on a seeded file.** A first cycle over a freshly created todo file
+proves less than it looks: with nothing in the file, every id the wind-down
+subagent writes is a fresh one, so the rule that decides whether an EXISTING
+entry may be rewritten (V6, `src/endless.js`) is never reached and every check
+against pre-existing entries passes over an empty comparison. That hole let the
+same class of defect through four times, each failure sitting in the second
+cycle on an accumulated file. The driver therefore
+
+- seeds the project's todo file with five ids (`T101`–`T105`) inside the
+  markers, human prose outside them and a `next-id T106` watermark, plus the
+  fixture directory `e2e-endless-fixture/` the seeded tasks work on;
+- shapes two of those entries the way the live file was shaped: `T101` lands the
+  merge that `T102`'s title still describes as outstanding, so once `T101` is
+  worked off and removed, `T102`'s title names work that is already landed —
+  which is what makes a wind-down subagent re-title a surviving id;
+- drives `ENDLESS_CYCLES` (2) cycles in sequence, each on the session and the
+  file its predecessor left, with `ENDLESS_MAX_CYCLES` defaulting to the same
+  number so the plugin's own ceiling stops the loop right after the last driven
+  cycle;
+- asserts every criterion **per cycle**, reading the debug log through a
+  per-cycle window: the driver records the slice's line count when a cycle
+  starts and no wait, count or ordering check looks at a line before it, so
+  cycle 2 can never be satisfied by cycle 1's lines.
+
+The seeded file, the fixture directory and every session of every cycle are put
+back in `cleanup()`; a todo file that was there before the run is restored
+byte-identically from the backup, one the driver created is removed.
 
 ```bash
-bash test/e2e/endless-task.sh                       # defaults, ~3-5 min
+bash test/e2e/endless-task.sh                       # defaults: 2 cycles, ~15-25 min
+ENDLESS_CYCLES=1 bash test/e2e/endless-task.sh      # the old single-cycle run
+SEED_TODO=0 bash test/e2e/endless-task.sh           # drive the file that is there
 SUBAGENT_SLEEP_S=30 bash test/e2e/endless-task.sh   # shorter flight window
 ENDLESS_CONTEXT=6000 bash test/e2e/endless-task.sh  # a fixed ceiling, verified
 ENDLESS_PROJECT_DIR="$HOME/testopencode" \
@@ -149,15 +182,22 @@ measured context and the context read again at that moment.
 
 **The in-flight subagent is observed, not assumed.** The run is sequenced
 turn 1 open points → turn 2 the one `spawn` → arm the ceiling → turn 3 the
-crossing → turn 4 the post-trigger spawn attempt. The driver takes the handle
-out of the plugin's own `spawned` line and treats the subagent as in flight
-until `notified primary of completion` names that handle. It checks twice, once
+crossing → turn 4 the post-trigger spawn attempt. The driver puts a marker of its own into that
+spawn's prompt, polls the primary's messages for the `spawn` tool call carrying
+it (`lib/spawn-child.py`), takes the child session id off that call's metadata,
+and only then reads the handle out of the plugin's `spawned` line for that
+session; from the second cycle on the primary is a successor still working its
+todo file off, so it spawns subagents of its own at the same time and neither
+the role nor the absence of a task-id prefix would pick the driver's subagent
+out. The subagent counts as in flight until `notified primary of completion`
+names that handle. It checks twice, once
 before arming and once immediately before the crossing turn; a subagent that
 finished earlier ends the run as a **setup error (exit 2)** naming exactly that,
 because criterion (b) would otherwise be asserted over a cycle that had nothing
 to wait for. A completion that lands between the arming and the trigger is
 caught at (b) itself, whose failure text names the two slice lines. More than
-one `spawned` line in the slice is likewise a setup error — the gate would be
+one prefix-free `spawned` line since that cycle's spawn turn is likewise a setup
+error — the gate would be
 watching a subagent the cycle is not waiting for.
 
 Exit `0` = every asserted criterion passed, `1` = at least one failed, `2` =
@@ -165,8 +205,9 @@ preflight/setup error (nothing was asserted). Each criterion is reported as
 `PASS`/`FAIL` with the evidence line that decided it; the run's captures,
 backups and report land in `out/11-endless.*`.
 
-What it asserts, in this order, against `specs/endless-mode.md` §3.1 and its
-live criteria §7:
+What it asserts per cycle, in this order, against `specs/endless-mode.md` §3.1
+and its live criteria §7 (every criterion's name carries the cycle it belongs
+to, so a report says which cycle a failure sits in):
 
 | criterion | evidence |
 |---|---|
@@ -175,11 +216,27 @@ live criteria §7:
 | (a) permit | `spawn admitted: endless wind-down permit consumed` appears **exactly once** — the single-use permit admits the one conforming wind-down spawn and a second is refused |
 | (b) quiesce | `notified primary of completion` appears **before** `endless: quiesced …, activeAtStart>=1`, and after the trigger line |
 | (c) rewrite | `endless: wind-down confirmed N open task(s) [T…] file=…`, every confirmed id present as `- T<n>:` in the todo file, exactly one todo file in the directory, and the `next-id` watermark above every confirmed id (no id reused) |
+| (c) carry-over | the accepted rewrite kept at least one id that already stood in the file when the cycle latched, and the evidence names which of those ids it re-titled |
 | (d) replacement | `endless: cycle K/M complete, new session …`; the new session is readable, the old one is readable **and** archived |
 | kickoff | the new session carries `## Endless mode — work off the todo file`, whose body is the todo file's own text, naming exactly the ids of (c) as `- T<n>:` lines |
 | (e) work-off | the successor's first turn contains a `spawn` tool call whose `input.prompt` carries the first saved task id as the first non-empty line (`T<n>:` / `T<n>.` / `T<n>-` …) and every further spawn prompt of that turn likewise carries a saved id; the turn's per-task spawn tally rides along as evidence |
 | (e) removal | a successor subagent's `DONE: T<n>` reply removes that task: `notified primary of completion` for the successor carrying `"kind":"done","id":"T<n>"`, the id one of (c)'s, and the line `- T<n>:` gone from the todo file on disk while the file itself stays |
 | order | the five cycle lines — scheduled, refused, quiesced, confirmed, complete — appear in that order in the debug-log slice |
+
+**The carry-over criterion is what closes the vacuous-pass hole.** When a cycle
+latches, the driver copies the todo file to `out/11-endless.cycle<k>.pre-todo.md`
+and reads its `- T<n>:` ids and titles. After the confirmation it compares: at
+least one confirmed id has to be one of those, or the criterion FAILS naming
+both sets — an all-fresh rewrite exercises nothing of the path the live failures
+sit on and must not be reported as a pass. Where ids were carried over but none
+was re-titled, the run adds a `NOT ASSERTED` line saying the id-rebinding path
+was not reached in that cycle; titles are compared in the plugin's own form
+(trimmed, lower-cased, whitespace collapsed — `normaliseTitle`).
+
+A cycle that produces no confirmation because the plugin rejected the rewrite
+reports the rejection line, with its failing conjunct, as the evidence of (c) —
+so `wind-down rewrite rejected … "failed":"V6"` is legible as itself rather than
+as a missing log line.
 
 **The successor's first turn is captured whole.** The kickoff starts that turn
 asynchronously, and the driver follows it to its end — every tool call, not only
@@ -212,15 +269,17 @@ a subagent finishing real work rather than on a line the cycle emits by itself,
 so it has its own bound, `WORKOFF_TIMEOUT_S` (600 s), instead of
 `STEP_TIMEOUT_S`.
 
-**The teardown runs after the whole work-off phase**, and in this order:
-the two sessions (which needs a live server), then the server, then the todo
-file, then the settings file. Deleting the successor's session takes its
+**The teardown runs after the last cycle's work-off phase**, and in this order:
+every session of every cycle (which needs a live server), then the server, then
+the todo file, then the fixture directory, then the settings file. Deleting the successor's session takes its
 running subagents with it and restoring the todo file puts a removed task
 straight back, so a teardown before the observation above would make the
 removal unobservable; and the todo file is restored only once the server is
 gone, because a late wake writes that file too and would otherwise overwrite
 the restore. `KEEP_SERVER=1` keeps the server but not the sessions — those are
-deleted either way, which is what ends the writing. The restore path hangs on
+deleted either way, which is what ends the writing. The work-off of a cycle also
+runs before the NEXT cycle starts, because its removal is what leaves that cycle
+an accumulated file whose entries no longer all match the state on disk. The restore path hangs on
 the baseline having been taken, not on any assertion, so it runs on a failing
 run as well.
 
@@ -231,7 +290,11 @@ Parameters are env vars with cheap defaults — `ENDLESS_PROJECT_DIR`,
 `ENDLESS_PORT`, `ENDLESS_CONTEXT` (empty, i.e. derived),
 `ENDLESS_CONTEXT_CEILING` (100000000), `ENDLESS_CONTEXT_MARGIN` (1000),
 `SETTINGS_TTL_WAIT_S` (3, past the plugin's 2 000 ms settings cache),
-`ENDLESS_MAX_CYCLES` (1), `ENDLESS_QUIESCE_TIMEOUT_MS`, `SPAWN_AGENT`,
+`ENDLESS_CYCLES` (2), `SEED_TODO` (1),
+`ENDLESS_MAX_CYCLES` (`$ENDLESS_CYCLES`), `ENDLESS_QUIESCE_TIMEOUT_MS` (600000 —
+a later cycle quiesces over the previous cycle's work-off subagents as well),
+`QUIESCE_WAIT_S` (that bound + 60 s, the driver's own wait for the quiesce
+line), `SPAWN_AGENT`,
 `SUBAGENT_SLEEP_S` (45, and the preflight refuses a value within 10 s of
 `maxSubagentAgeMs`, where the watchdog would abort the subagent instead),
 `TURN_TIMEOUT_S`, `STEP_TIMEOUT_S`, `WORKOFF_TIMEOUT_S` (600, the removal step's
@@ -269,14 +332,18 @@ Three things the lifecycle library is deliberate about:
   instead of the single call (`bash test/e2e/run-all.sh 2>&1 | tee run.log`),
   which keeps the state in the driver's own shell and is unaffected.
 
-`ENDLESS_MAX_CYCLES=1` is what keeps the loop from running on: the cycle the
-driver asserts completes, and the next one stops at the ceiling with
-`endless: cycle ceiling reached (1/1) — paused for this session`. That stop is a
+`ENDLESS_MAX_CYCLES` is what keeps the loop from running on: the cycles the
+driver asserts complete, and the next one stops at the ceiling with
+`endless: cycle ceiling reached (2/2) — paused for this session`. Between one
+cycle completing and the next one being set up the driver also puts
+`endlessContext` back to `ENDLESS_CONTEXT_CEILING`, so the successor cannot latch
+a cycle on a turn of its own while the driver is still observing the work-off. That stop is a
 runtime pause on the successor session and nothing else — the plugin never
 writes the settings file, `endlessMode` stays the user's own switch
 (`src/endless.js`). The driver backs up and restores
 `~/.config/opencode/agent-intercom.json` and the driven project's todo file,
-deletes the two sessions of the cycle, and stops the server's process group.
+deletes every session of every cycle, removes the fixture directory, and stops
+the server's process group.
 
 ## Nested delegation
 

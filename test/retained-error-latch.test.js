@@ -273,7 +273,7 @@ test("a throw after the timeout latch releases it, and the next sweep tears the 
   await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
   const sessionID = created[0]
   const entry = entryForSession(sessionID)
-  entry.lastActivityAt = Date.now() - 600_000
+  entry.lastActivityAt = Date.now() - 700_000
 
   poison(entry, "parentID")
   await sweepWatchdog()
@@ -327,7 +327,7 @@ test("one entry throwing does not stop the sweep of the others", async () => {
   await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
   await hooks.tool.spawn.execute({ agent: "coder", prompt: "y" }, toolCtx)
   const [first, second] = created
-  for (const id of created) entryForSession(id).lastActivityAt = Date.now() - 600_000
+  for (const id of created) entryForSession(id).lastActivityAt = Date.now() - 700_000
 
   poison(entryForSession(first), "parentID")
   await sweepWatchdog()

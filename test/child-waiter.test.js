@@ -401,12 +401,13 @@ test("the inactivity watchdog settles the waiter of the child it reaps", async (
   const entry = entryForSession(childID)
 
   const promise = registerChildWaiter(childID, PARENT, { timeoutMs: 0 })
-  await timeoutSubagent(entry, 90000, 91000)
+  // The limit descriptor the sweep hands over: which window fired and its value.
+  await timeoutSubagent(entry, { ms: 90000, setting: "maxSubagentAgeMs", kind: "silence" }, 91000)
 
   const outcome = await promise
   assert.equal(outcome.status, "timeout")
   assert.match(outcome.detail, /91000 ms/)
-  assert.match(outcome.detail, /90000 ms/)
+  assert.match(outcome.detail, /maxSubagentAgeMs 90000 ms/)
   assert.equal(hasLiveChildren(PARENT), false)
 })
 
@@ -423,7 +424,7 @@ test("the inactivity watchdog hands the rescued text to the waiter as `result`",
   const childID = created[0]
 
   const promise = registerChildWaiter(childID, PARENT, { timeoutMs: 0 })
-  await timeoutSubagent(entryForSession(childID), 90000, 91000)
+  await timeoutSubagent(entryForSession(childID), { ms: 90000, setting: "maxSubagentAgeMs", kind: "silence" }, 91000)
 
   const outcome = await promise
   assert.equal(outcome.status, "timeout")
@@ -440,7 +441,7 @@ test("a timed-out child with nothing to rescue settles with an empty `result`", 
   const childID = created[0]
 
   const promise = registerChildWaiter(childID, PARENT, { timeoutMs: 0 })
-  await timeoutSubagent(entryForSession(childID), 90000, 91000)
+  await timeoutSubagent(entryForSession(childID), { ms: 90000, setting: "maxSubagentAgeMs", kind: "silence" }, 91000)
 
   const outcome = await promise
   assert.equal(outcome.status, "timeout")

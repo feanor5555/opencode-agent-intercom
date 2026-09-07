@@ -27,7 +27,7 @@ import { join } from "node:path"
 
 import plugin from "../src/index.js"
 import { finalResult, fetchSnapshot } from "../src/client.js"
-import { completionNotice, errorNotice, timeoutNotice } from "../src/notices.js"
+import { completionNotice, errorNotice, lastSeenPhrase, timeoutNotice } from "../src/notices.js"
 import { resetState } from "../src/state.js"
 import { trackPrimary, upsertSession, entryForSession } from "../src/registry.js"
 import { resetTurnNotices } from "../src/hooks.js"
@@ -307,6 +307,10 @@ test("session.error on a session with no assistant text reports the failure alon
 
 // ---- 4. the watchdog timeout carries the recovered text ----------------------
 
+// The silence window as the watchdog hands it over: the value that fired and
+// the key it came from.
+const SILENCE_LIMIT = { ms: 90000, setting: "maxSubagentAgeMs", kind: "silence" }
+
 const reapedEntry = {
   handle: "coder#1",
   agent: "coder",
@@ -316,21 +320,70 @@ const reapedEntry = {
 
 test("timeoutNotice without recovered text is byte-identical to the timeout line alone", () => {
   assert.equal(
-    timeoutNotice(reapedEntry, 90000, 91000),
-    '🔔 agent-intercom: subagent "coder#1" (coder, session ses_sub1) timed out after 91s of ' +
-      "inactivity (limit 90s) — slot freed. You may re-dispatch with spawn() if the work is " +
+    timeoutNotice(reapedEntry, SILENCE_LIMIT, 91000),
+    '🔔 agent-intercom: subagent "coder#1" (coder, session ses_sub1) gave no sign of life for ' +
+      "91s (limit 90s, maxSubagentAgeMs) and was cut off — slot freed. Nothing is known of what " +
+      "it was doing — no text and no tool call of its own has reached this plugin. It may have " +
+      "hung, or it may have been inside a single long step — nothing reaches this plugin while " +
+      "one tool call runs, so the two look alike from here. Judge from what it was last doing " +
+      "before you cover the same ground again. You may re-dispatch with spawn() if the work is " +
       "still needed.",
   )
+})
+
+// The reap cannot tell a hung call from a subagent inside one long tool call —
+// opencode publishes nothing during either — so the notice must not settle that
+// question for the orchestrator. It reports the silence and hands over the
+// evidence: what the entry was last seen doing.
+test("timeoutNotice does not assert inactivity and says what the subagent was last doing", () => {
+  const notice = timeoutNotice({ ...reapedEntry, lastActivity: "[tool: bash]" }, SILENCE_LIMIT, 91000)
+  assert.match(notice, /gave no sign of life for 91s \(limit 90s, maxSubagentAgeMs\)/)
+  assert.match(notice, /Last seen doing: \[tool: bash\]\./)
+  assert.match(notice, /may have hung, or it may have been inside a single long step/)
+  assert.doesNotMatch(notice, /inactivity/)
+})
+
+// Which of the two limits fired is the whole difference between "this hung" and
+// "this step needs more room", and only the notice carries it to the
+// orchestrator.
+test("timeoutNotice names the tool call that was in flight and the setting that cut it off", () => {
+  const notice = timeoutNotice(
+    { ...reapedEntry, lastActivity: "[tool: bash]" },
+    { ms: 660000, setting: "maxSubagentToolCallMs", kind: "tool-call", tool: "bash" },
+    670000,
+  )
+  assert.match(notice, /spent 670s inside a single `bash` tool call \(limit 660s, maxSubagentToolCallMs\)/)
+  assert.match(notice, /still working when it was cut off/)
+  assert.match(notice, /raise `maxSubagentToolCallMs`/)
+  assert.doesNotMatch(notice, /inactivity/)
+})
+
+test("timeoutNotice separates a busy session from a call in flight", () => {
+  const notice = timeoutNotice(
+    reapedEntry,
+    { ms: 660000, setting: "maxSubagentToolCallMs", kind: "busy" },
+    670000,
+  )
+  assert.match(notice, /gave no sign of life for 670s while opencode still reported its session busy \(limit 660s, maxSubagentToolCallMs\)/)
+  assert.match(notice, /still working when it was cut off/)
+})
+
+test("lastSeenPhrase flattens the activity string and caps it", () => {
+  assert.equal(lastSeenPhrase({ lastActivity: " mapping\n  the   call sites\n" }), "mapping the call sites")
+  assert.equal(lastSeenPhrase({}), "")
+  assert.equal(lastSeenPhrase({ lastActivity: "   " }), "")
+  const long = lastSeenPhrase({ lastActivity: "x".repeat(400) })
+  assert.equal(long, "x".repeat(160) + "…")
 })
 
 test("timeoutNotice with recovered text keeps the timeout wording AND reports the text", () => {
   const notice = timeoutNotice(
     reapedEntry,
-    90000,
+    SILENCE_LIMIT,
     91000,
     "Done: rewrote the parser; the CLI flags are still open.",
   )
-  assert.match(notice, /timed out after 91s of inactivity \(limit 90s\) — slot freed\./)
+  assert.match(notice, /gave no sign of life for 91s \(limit 90s, maxSubagentAgeMs\) and was cut off — slot freed\./)
   assert.match(notice, /You may re-dispatch with spawn\(\) if the work is still needed\./)
   assert.match(notice, /Done: rewrote the parser; the CLI flags are still open\./)
   assert.match(notice, /do not have the same ground covered twice/)
@@ -349,7 +402,7 @@ async function reapedNotice({ resultParts, ctxTokens = 5000 }) {
   await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
   const sessionID = created[created.length - 1]
   posted.length = 0
-  entryForSession(sessionID).lastActivityAt = Date.now() - 600_000
+  entryForSession(sessionID).lastActivityAt = Date.now() - 700_000
   await sweepWatchdog()
   return { notice: posted.map((p) => p.text).join("\n"), sessionID }
 }
@@ -358,7 +411,7 @@ test("the inactivity watchdog posts the recovered text to the parent", async () 
   const { notice } = await reapedNotice({
     resultParts: [textPart("Done: mapped the call sites; the migration is not written.")],
   })
-  assert.match(notice, /timed out after \d+s of inactivity/)
+  assert.match(notice, /(gave no sign of life for|spent) \d+s/)
   assert.match(notice, /Done: mapped the call sites; the migration is not written\./)
 })
 
@@ -373,7 +426,7 @@ test("the inactivity watchdog carries a capped last text and files the rest", as
   process.env.HOME = home
   try {
     const { notice } = await reapedNotice({ resultParts: [textPart(huge)] })
-    assert.match(notice, /timed out after \d+s of inactivity/)
+    assert.match(notice, /(gave no sign of life for|spent) \d+s/)
     assert.match(notice, /\[cut at 2000 tokens — \d+ more tokens of this reply are not shown here/)
     assert.doesNotMatch(notice, /TAIL_MARKER/)
     const path = /^(\/\S+\.md)$/m.exec(notice)?.[1]
@@ -389,7 +442,7 @@ test("the inactivity watchdog carries a capped last text and files the rest", as
 
 test("a timed-out session with no assistant text reports the timeout alone", async () => {
   const { notice } = await reapedNotice({ resultParts: [toolPart("read")] })
-  assert.match(notice, /timed out after \d+s of inactivity/)
+  assert.match(notice, /(gave no sign of life for|spent) \d+s/)
   assert.doesNotMatch(notice, /the only account of the work it managed/)
 })
 

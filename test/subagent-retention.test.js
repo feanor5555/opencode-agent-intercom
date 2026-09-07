@@ -510,7 +510,7 @@ test("a retained entry is exempt from maxSubagentAgeMs and is not timed out", as
   // Silent for far longer than the 90 s inactivity window: a retained session
   // emits no events at all, so its lastActivityAt stands still by construction.
   const entry = entryForSession(sessionID)
-  entry.lastActivityAt = Date.now() - 600_000
+  entry.lastActivityAt = Date.now() - 700_000
   entry.status = "busy" // the idle-status race guard must not be what saves it
 
   await sweepWatchdog()
@@ -552,8 +552,8 @@ test("a running subagent is still timed out by the same sweep that spares a reta
   const [retainedID, hungID] = created
   await idle(hooks, retainedID)
 
-  entryForSession(retainedID).lastActivityAt = Date.now() - 600_000
-  entryForSession(hungID).lastActivityAt = Date.now() - 600_000
+  entryForSession(retainedID).lastActivityAt = Date.now() - 700_000
+  entryForSession(hungID).lastActivityAt = Date.now() - 700_000
 
   await sweepWatchdog()
 
@@ -578,7 +578,7 @@ test("maxSubagentAgeMs = 0 disables the inactivity timer alone — the reap stil
   await idle(hooks, retainedID)
 
   entryForSession(retainedID).retainedAt = Date.now() - 61_000
-  entryForSession(silentID).lastActivityAt = Date.now() - 600_000
+  entryForSession(silentID).lastActivityAt = Date.now() - 700_000
 
   await sweepWatchdog()
 

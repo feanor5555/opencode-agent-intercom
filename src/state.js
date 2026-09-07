@@ -9,8 +9,8 @@
 // `chat.system.transform` hook runs, and they must see the same registry.
 
 // handle -> { handle, sessionID, agent, prompt, parentID, status, lifecycle,
-//             spawnedAt, retainedAt, lastActivityAt, lastActivity, ctxTokens,
-//             lastTokensFetchAt, timedOut }
+//             spawnedAt, retainedAt, lastActivityAt, toolCallAt, toolCallTool,
+//             lastActivity, ctxTokens, lastTokensFetchAt, timedOut }
 //
 // `status` is what opencode reports the session is doing; `lifecycle` is what
 // the entry means to this plugin, and is what decides whether the entry counts

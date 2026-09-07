@@ -654,7 +654,7 @@ test("the real inactivity sweep hands a reaped child's work to its blocked calle
   const pending = hooks.tool.spawn.execute({ agent: "researcher", prompt: "q" }, callerCtx)
   const childID = await until(() => created[0], "the child session")
   await until(() => hasLiveChildren("ses_planner"), "the block")
-  entryForSession(childID).lastActivityAt = Date.now() - 600_000
+  entryForSession(childID).lastActivityAt = Date.now() - 700_000
   await sweepWatchdog()
 
   const res = await pending

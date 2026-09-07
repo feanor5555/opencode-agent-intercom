@@ -2018,6 +2018,32 @@ export function createGuardToolExecute(client, permissionGuard) {
 
     const entry = entryForSession(sessionID)
 
+    // A tool call is a sign of life towards the watchdog, and this is the only
+    // place the plugin sees one. opencode publishes nothing at all between the
+    // part that announces a tool call and the part that reports its result —
+    // its own `bash` tool blocks for up to 120 000 ms by default and 600 000 ms
+    // on request — so a subagent inside one long call is indistinguishable, on
+    // events alone, from a hung LLM call, and the sweep reaps it mid-command.
+    //
+    // Two stamps, from one clock read so they compare exactly:
+    //   lastActivityAt — the sign of life itself.
+    //   toolCallAt     — the start of the call, plus the tool's name. The sweep
+    //                    reads the two together: while no later event has moved
+    //                    lastActivityAt past toolCallAt, that call is still the
+    //                    last thing seen of this subagent, i.e. in flight, and
+    //                    the entry is measured against maxSubagentToolCallMs
+    //                    instead of the silence window.
+    //
+    // Done BEFORE every deny below, deliberately: a denied call is still the
+    // model producing, and a subagent locked down to a text-only handover must
+    // not be reaped while it writes that handover.
+    if (entry) {
+      const seenAt = Date.now()
+      entry.lastActivityAt = seenAt
+      entry.toolCallAt = seenAt
+      entry.toolCallTool = input.tool
+    }
+
     // A tracked subagent may run any tool — unless it has reached its context
     // budget, in which case every tool is denied so it can only emit its final
     // text and return control. entry.ctxTokens is kept fresh by the transform

@@ -323,7 +323,7 @@ test("the watchdog does not reap a silent parent whose child is still tracked", 
   const parent = entryForSession(parentID)
   // Silent for well over the 90 s window: every event of the run belongs to
   // the child's session.
-  parent.lastActivityAt = Date.now() - 600_000
+  parent.lastActivityAt = Date.now() - 700_000
   entryForSession(childID).lastActivityAt = Date.now()
 
   assert.equal(isWaitingOnWatchdoggedChild(parentID), true)
@@ -346,7 +346,7 @@ test("the exemption is lifted the moment the child stops being tracked", async (
   // A waiter whose child has no registry entry: nothing watchdogs that child,
   // so an exemption keyed on it could never be lifted.
   registerChildWaiter("ses_untracked_child", parentID, { timeoutMs: 0 })
-  entryForSession(parentID).lastActivityAt = Date.now() - 600_000
+  entryForSession(parentID).lastActivityAt = Date.now() - 700_000
 
   assert.equal(isWaitingOnWatchdoggedChild(parentID), false)
   await sweepWatchdog()
@@ -364,8 +364,8 @@ test("the watchdog still reaps the CHILD, and the parent follows once it is gone
   const [parentID, childID] = created
   const childResult = nest(childID, parentID, { timeoutMs: 0 })
 
-  entryForSession(parentID).lastActivityAt = Date.now() - 600_000
-  entryForSession(childID).lastActivityAt = Date.now() - 600_000
+  entryForSession(parentID).lastActivityAt = Date.now() - 700_000
+  entryForSession(childID).lastActivityAt = Date.now() - 700_000
 
   await sweepWatchdog()
 
@@ -375,7 +375,7 @@ test("the watchdog still reaps the CHILD, and the parent follows once it is gone
 
   // With the child gone the exemption is over: the parent is reaped like any
   // other silent subagent on the next window.
-  entryForSession(parentID).lastActivityAt = Date.now() - 600_000
+  entryForSession(parentID).lastActivityAt = Date.now() - 700_000
   await sweepWatchdog()
   assert.equal(entryForSession(parentID), undefined)
 })

@@ -1656,6 +1656,14 @@ function createEntry(sessionID, agent, prompt, parentID, taskId, directory, pack
     // slot freed. Distinct from `lastActivity` (a short string snapshot of
     // what the subagent was last doing, used by the system-prompt snapshot).
     lastActivityAt: now,
+    // Wall-clock ms at which this subagent last STARTED a tool call, and the
+    // name of that tool, both stamped by guardToolExecute (hooks.js). While
+    // `toolCallAt >= lastActivityAt` that call is still the last thing seen of
+    // the subagent — opencode publishes nothing while one runs — and the sweep
+    // measures the entry against `maxSubagentToolCallMs` rather than the
+    // silence window. Undefined until the subagent's first tool call.
+    toolCallAt: undefined,
+    toolCallTool: undefined,
     lastActivity: undefined,
     ctxTokens: undefined,
     // wall-clock timestamp of the most recent fetchSnapshot() that returned

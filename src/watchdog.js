@@ -7,16 +7,27 @@
 // the opencode process. The orchestrator also never gets woken, so it sits
 // idle waiting for a result that will never arrive.
 //
-// The fix is a periodic sweep over the registry: any entry whose `lastActivityAt`
-// is older than `maxSubagentAgeMs` is treated as hung, aborted cooperatively,
-// and its slot is freed. The orchestrator is woken with a timeout notice so it
-// can re-dispatch.
+// The mechanism is a periodic sweep over the registry: an entry that has shown
+// no sign of life for its silence limit is treated as hung, aborted
+// cooperatively, and its slot is freed. The orchestrator is woken with a
+// timeout notice so it can re-dispatch.
 //
-// Important: the threshold is INACTIVITY (time since the last event), not
-// total lifetime. A long-running subagent that keeps emitting events is
-// healthy — its `lastActivityAt` gets bumped on every event by `handleEvent`
-// in hooks.js, so it never trips. Only a subagent that produces ZERO events for
-// `maxSubagentAgeMs` (default 90 s) gets killed.
+// Important: the threshold is SILENCE (time since the last sign of life), not
+// total lifetime. A long-running subagent that keeps showing signs of life is
+// healthy, so it never trips. Three things count as a sign of life, and the
+// sweep needs all three because opencode publishes nothing while one tool call
+// runs:
+//   - any event on the session — `lastActivityAt` is bumped by `handleEvent`
+//     in hooks.js;
+//   - the start of any tool call — bumped by `guardToolExecute`, also hooks.js;
+//   - opencode's own `session.status === "busy"`, held on the entry.
+// The last two say the subagent is WORKING, and a working subagent is measured
+// against `maxSubagentToolCallMs` (default 660 s, above the 600 000 ms ceiling
+// opencode's own bash tool allows) rather than `maxSubagentAgeMs` (default
+// 90 s), which is the window for one with nothing in flight. Neither is
+// unbounded: a session that died inside a tool call, or one whose seeded
+// `busy` was never refreshed, still frees its slot at the wider window.
+// See watchdogLimit.
 
 import { registry, aborted } from "./state.js"
 import { getSettings, retentionCapacity } from "./settings.js"
@@ -31,7 +42,7 @@ import {
 } from "./registry.js"
 import { liveChildSessionIDs } from "./childwait.js"
 import { teardownSubagent, dropRetainedSubagents } from "./teardown.js"
-import { timeoutNotice } from "./notices.js"
+import { lastSeenPhrase, timeoutNotice } from "./notices.js"
 import { capReplyForAgent } from "./resultfile.js"
 import { log, errMsg } from "./log.js"
 
@@ -142,12 +153,25 @@ export async function sweepWatchdog() {
         entry.lastActivityAt = now
         continue
       }
+      // Which of the two windows this entry is measured against — see
+      // watchdogLimit. A subagent that is working is measured against
+      // `maxSubagentToolCallMs`, one with nothing in flight against
+      // `maxSubagentAgeMs`; the limit that fires travels with the reap so the
+      // parent is told which one it was.
+      //
+      // NOT bumped like the child-wait exemption above: the bump there is safe
+      // because the child is watchdogged on its own clock, whereas a working
+      // subagent has no second clock behind it, and bumping would push its
+      // ceiling out on every tick — i.e. never reap it.
+      const limit = watchdogLimit(entry, settings)
+      if (limit.ms <= 0) continue // this window switched off
       const last = entry.lastActivityAt ?? entry.spawnedAt
-      if (now - last <= maxAge) continue
+      const silentMs = now - last
+      if (silentMs <= limit.ms) continue
 
       // Latch FIRST so any racing event handler / onSessionIdle skips this entry.
       entry.timedOut = true
-      await timeoutSubagent(entry, maxAge, now - last)
+      await timeoutSubagent(entry, limit, silentMs)
     } catch (err) {
       // Per-entry best effort, and a latch release. Each branch above marks the
       // entry BEFORE the I/O that tears it down — `timedOut` in the running
@@ -250,22 +274,66 @@ export function isWaitingOnWatchdoggedChild(sessionID) {
   return false
 }
 
+// Which window one entry is measured against, and what to call it when it
+// fires. Three cases, two windows:
+//
+//   tool-call — the subagent's last sign of life was the START of a tool call
+//               (`toolCallAt` not moved past by any later event). opencode
+//               publishes nothing while that call runs, so the silence is the
+//               call, not a hang: `maxSubagentToolCallMs`.
+//   busy      — no call in flight, but opencode still reports the session busy
+//               (`session.status`, onSessionStatus). Same window, same reason:
+//               the server says a turn is in flight and we cannot see it.
+//   silence   — nothing in flight and opencode does not call it busy. This is
+//               the case the dead-man's switch was built for:
+//               `maxSubagentAgeMs`.
+//
+// The descriptor travels with the reap so that the log, the wake notice and the
+// nested-spawn detail all name the limit that actually fired and its value —
+// a subagent cut off at 660 s reported against a 90 s window would read as a
+// timeout that should not have happened.
+export function watchdogLimit(entry, settings = getSettings()) {
+  const toolCallAt = entry?.toolCallAt
+  const lastActivityAt = entry?.lastActivityAt ?? entry?.spawnedAt ?? 0
+  if (toolCallAt != null && toolCallAt >= lastActivityAt) {
+    return {
+      ms: settings.maxSubagentToolCallMs,
+      setting: "maxSubagentToolCallMs",
+      kind: "tool-call",
+      tool: entry.toolCallTool,
+    }
+  }
+  if (entry?.status === "busy") {
+    return { ms: settings.maxSubagentToolCallMs, setting: "maxSubagentToolCallMs", kind: "busy" }
+  }
+  return { ms: settings.maxSubagentAgeMs, setting: "maxSubagentAgeMs", kind: "silence" }
+}
+
 // Performs the actual timeout for one entry: abort the opencode session,
 // recover the text it had produced so far, post a wake notice carrying that
 // text to the parent, and free the slot by running the same cleanup path as
 // onSessionIdle (removeEntry + deleteSession + forgetSessionDirectory).
 // Best-effort; failures are logged, never thrown.
-export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
+//
+// `limit` is the descriptor watchdogLimit returned for THIS entry — which of
+// the two windows fired, its value and its setting key — so the figure the
+// parent is given is the one it was measured against.
+export async function timeoutSubagent(entry, limit, silentMs) {
   const sessionID = entry.sessionID
   const handle = entry.handle
   const agent = entry.agent
   const parentID = entry.parentID
-  log("subagent timed out (inactivity)", {
+  log("subagent timed out", {
     handle,
     sessionID,
     agent,
     silentMs,
-    maxAgeMs,
+    limitMs: limit.ms,
+    limit: limit.kind,
+    setting: limit.setting,
+    tool: limit.tool,
+    status: entry.status,
+    lastActivity: entry.lastActivity,
   })
 
   // 1. Cooperative abort (best-effort, mirrors signalAbort in tools.js).
@@ -292,9 +360,18 @@ export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
   //    file under the results cache is written HERE, while the session it
   //    belongs to still exists. `retained: false`: a timed-out subagent is
   //    never held. Skipped without a client, like the notice below.
+  //
+  //    The same read also refreshes what the subagent was last seen doing. The
+  //    entry's `lastActivity` is otherwise only restamped on the LLM-turn path
+  //    (contextLimitNotice), behind a cache, so on the very silence that gets a
+  //    subagent reaped it is by definition stale — and a stale phrase is the
+  //    one thing the parent must not be handed here, since it reads it as the
+  //    last thing the subagent did before it stopped. Costs nothing: the
+  //    snapshot is already being fetched and already carries the field.
   let rescued = ""
   if (watchdogClient) {
-    const { result: lastText } = await fetchSnapshot(watchdogClient, sessionID)
+    const { result: lastText, lastActivity } = await fetchSnapshot(watchdogClient, sessionID)
+    if (lastActivity) entry.lastActivity = lastActivity
     rescued = capReplyForAgent(lastText, {
       handle,
       agent,
@@ -304,6 +381,7 @@ export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
       retained: false,
     }).text
   }
+  const lastSeen = lastSeenPhrase(entry)
   // 3. Wake the parent with a timeout notice + free the slot — same teardown
   //    as onSessionIdle / onSessionError.
   //
@@ -312,6 +390,11 @@ export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
   //    own nested `spawn` tool call, which is settled from `outcome` and never
   //    sees a notice at all. `result` is empty when nothing could be read, and
   //    both renderings then fall back to their bare timeout wording.
+  //
+  //    What the subagent was last seen doing rides on both channels too, and
+  //    from the same source (lastSeenPhrase over `entry.lastActivity`): the two
+  //    parents are told the same thing about the same reap, in the shape each
+  //    channel takes — a sentence in the notice, a clause in the detail.
   //
   //    markAborted keeps the abort marker in
   //    place across removeEntry(clearAborted:false) + deleteSession so the guard
@@ -325,9 +408,11 @@ export async function timeoutSubagent(entry, maxAgeMs, silentMs) {
       handle,
       agent,
       result: rescued,
-      detail: `no activity for ${silentMs} ms (inactivity limit ${maxAgeMs} ms)`,
+      detail:
+        `no sign of life for ${silentMs} ms (${limit.setting} ${limit.ms} ms)` +
+        (lastSeen ? `; last seen: ${lastSeen}` : ""),
     },
-    notice: watchdogClient ? timeoutNotice(entry, maxAgeMs, silentMs, rescued) : null,
+    notice: watchdogClient ? timeoutNotice(entry, limit, silentMs, rescued) : null,
     markAborted: true,
     label: "watchdog",
   })

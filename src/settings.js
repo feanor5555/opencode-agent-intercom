@@ -111,12 +111,29 @@ const DEFAULT_MAX_PRIMARY_CONTEXT = 80000
 // 90 s is the default — long enough that a healthy long-running subagent
 // (which keeps emitting events) is never tripped, short enough that a hung
 // LLM call doesn't silently pin a slot for the life of the process.
+// This is the window for a subagent with NOTHING in flight; one that is inside
+// a tool call, or that opencode still reports as busy, is measured against
+// maxSubagentToolCallMs instead.
 // One subagent is silent and healthy: one blocked on a live child of its own,
 // whose events all belong to the child's session. The sweep treats waiting on
 // a watchdogged child as activity (see isWaitingOnWatchdoggedChild), so this
 // window measures the CHILD, and the parent outlives it by construction.
 // It also sets the child-waiter's own rescue ceiling — see childwait.js.
 const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
+// The same watchdog's window for a subagent that is WORKING: one whose last
+// sign of life was the start of a tool call, or whose session opencode still
+// reports as busy. opencode publishes nothing between the part that announces
+// a tool call and the part that reports its result, so a subagent inside one
+// long call is silent by construction and the window above says nothing about
+// it. 0 means no ceiling while it works — the silence watchdog still applies
+// to every subagent that is not working.
+// 660 s is the default: opencode's own bash tool permits a command timeout of
+// at most 600 000 ms (its default is 120 000 ms), so this clears the longest
+// call opencode itself would run, plus a minute for the kill and one sweep
+// tick. Below that a healthy command is reaped mid-run; far above it a session
+// that really died inside a tool call would pin its slot for the life of the
+// process.
+const DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS = 660000
 // How many finished subagents may be held as retained sessions in this
 // process at once. A retained subagent has delivered its result and had its
 // wake posted, but its opencode session was NOT deleted, so it stays
@@ -267,13 +284,17 @@ function envStr(name, def) {
 
 // Current settings: { maxSubagents, maxContext, maxContextSource, agentContext,
 // maxPrimaryContext,
-// maxSubagentAgeMs, searxngUrl, exaApiKey, forumBangs, postNoticeRetries,
+// maxSubagentAgeMs, maxSubagentToolCallMs, searxngUrl, exaApiKey, forumBangs,
+// postNoticeRetries,
 // postNoticeRetryBackoffMs, endlessMode, endlessContext,
 // endlessQuiesceTimeoutMs, endlessMaxCycles, maxNestedSpawns, showAgentcom }.
 // Cached for TTL_MS so the hot paths (spawn, every subagent transform) don't
 // stat the file constantly. searxngUrl is "" when unset (searxng disabled).
 // exaApiKey is "" when unset (web_search falls back to Exa's anonymous tier).
-// maxSubagentAgeMs is the inactivity watchdog window; 0 disables it.
+// maxSubagentAgeMs is the watchdog window for a subagent with nothing in
+// flight; 0 disables the watchdog. maxSubagentToolCallMs is the same
+// watchdog's window for one that is inside a tool call or that opencode still
+// reports as busy; 0 means no ceiling while it works.
 // maxPrimaryContext is the orchestrator primary-session context-refresh
 // threshold (tokens); 0 disables auto-handoff. agentContext is the per-agent
 // context budget map exactly as the file holds it (empty when the file names
@@ -311,6 +332,10 @@ export function getSettings() {
     agentContext: {},
     maxPrimaryContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT", DEFAULT_MAX_PRIMARY_CONTEXT),
     maxSubagentAgeMs: envNum("OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS", DEFAULT_MAX_SUBAGENT_AGE_MS),
+    maxSubagentToolCallMs: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS",
+      DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
+    ),
     maxRetainedSubagents: envNum(
       "OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS",
       DEFAULT_MAX_RETAINED_SUBAGENTS,
@@ -365,6 +390,9 @@ export function getSettings() {
     }
     if (Number.isInteger(raw?.maxSubagentAgeMs) && raw.maxSubagentAgeMs >= 0) {
       resolved.maxSubagentAgeMs = raw.maxSubagentAgeMs
+    }
+    if (Number.isInteger(raw?.maxSubagentToolCallMs) && raw.maxSubagentToolCallMs >= 0) {
+      resolved.maxSubagentToolCallMs = raw.maxSubagentToolCallMs
     }
     if (Number.isInteger(raw?.maxRetainedSubagents) && raw.maxRetainedSubagents >= 0) {
       resolved.maxRetainedSubagents = raw.maxRetainedSubagents

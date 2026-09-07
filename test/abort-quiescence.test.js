@@ -290,7 +290,7 @@ async function timedReap({ onAbort }) {
   abortHook.fire = onAbort ? (id) => onAbort(hooks, id) : null
   await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
   const sessionID = created[0]
-  entryForSession(sessionID).lastActivityAt = Date.now() - 600_000
+  entryForSession(sessionID).lastActivityAt = Date.now() - 700_000
   const started = Date.now()
   await sweepWatchdog()
   return { elapsed: Date.now() - started, sessionID, deleted }

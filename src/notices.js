@@ -240,25 +240,85 @@ function slotsNoticeAfterFinish(primaryID) {
 // a snapshot taken in timeoutSubagent before the teardown deleted the session
 // and put through the reply token ceiling there. It is the same block
 // errorNotice carries and it is here for the same reason: a subagent reaped on
-// the inactivity clock has usually done real work — several finished steps —
-// and without this the entire run reaches the orchestrator as a bare timeout,
-// so the only thing it can do is have the same ground covered again. Appended
-// only when there IS text; the timeout wording above it is unchanged either
-// way, so a notice for a session that produced nothing reads exactly as it did
-// before.
-export function timeoutNotice(entry, maxAgeMs, silentMs, result) {
+// the silence clock has usually done real work — several finished steps — and
+// without this the entire run reaches the orchestrator as a bare timeout, so
+// the only thing it can do is have the same ground covered again. Appended only
+// when there IS text; the wording above it does not depend on it.
+//
+// `limit` is the descriptor watchdogLimit built for this entry: which of the
+// two windows fired (`kind`), its value (`ms`), the setting key that holds it
+// (`setting`) and, for a call caught in flight, the tool (`tool`). All four
+// reach the orchestrator: the number alone does not tell it whether to give the
+// work more room or to treat the subagent as hung, and the setting key is what
+// it would have to name to give it that room.
+//
+// What it does NOT say is that the subagent was inactive. The clock behind it
+// measures the plugin's own silence, and that silence has two causes it cannot
+// tell apart: a genuinely hung call, and a subagent working inside one long
+// tool call, which opencode publishes nothing during. Asserting inactivity puts
+// the first as a fact and sends the orchestrator off to re-dispatch identical
+// work over a run that was healthy. So the notice reports the silence, and
+// hands over the one piece of evidence that separates the two — what the
+// subagent was last seen doing — for the orchestrator to judge on.
+export function timeoutNotice(entry, limit, silentMs, result) {
   const silentSec = Math.round(silentMs / 1000)
-  const maxSec = Math.round(maxAgeMs / 1000)
+  const limitSec = Math.round(limit.ms / 1000)
+  const held = `(limit ${limitSec}s, ${limit.setting})`
+  const cause =
+    limit.kind === "tool-call"
+      ? `spent ${silentSec}s inside a single \`${limit.tool ?? "unknown"}\` tool call ${held} ` +
+        `and was cut off`
+      : limit.kind === "busy"
+        ? `gave no sign of life for ${silentSec}s while opencode still reported its session busy ` +
+          `${held} and was cut off`
+        : `gave no sign of life for ${silentSec}s ${held} and was cut off`
+  const lastSeen = lastSeenPhrase(entry)
+  const seen = lastSeen
+    ? `Last seen doing: ${lastSeen}. `
+    : `Nothing is known of what it was doing — no text and no tool call of its own has reached ` +
+      `this plugin. `
+  const judgement =
+    limit.kind === "silence"
+      ? `It may have hung, or it may have been inside a single long step — nothing reaches this ` +
+        `plugin while one tool call runs, so the two look alike from here. Judge from what it ` +
+        `was last doing before you cover the same ground again. `
+      : `It was still working when it was cut off, so this is a limit on how long one step may ` +
+        `take and not proof of a hang: raise \`${limit.setting}\` if that step legitimately ` +
+        `needs longer. `
   const recovered = result
     ? `\nWhat it produced before it was cut off — this is the only account of the work it ` +
       `managed, read it before you re-dispatch and do not have the same ground covered twice:\n${result}\n`
     : ""
   return (
     `🔔 agent-intercom: subagent "${entry.handle}" (${entry.agent}, session ${entry.sessionID}) ` +
-    `timed out after ${silentSec}s of inactivity (limit ${maxSec}s) — slot freed. ` +
+    `${cause} — slot freed. ` +
+    seen +
+    judgement +
     `You may re-dispatch with spawn() if the work is still needed.` +
     recovered
   )
+}
+
+// How much of `entry.lastActivity` a notice quotes. Enough for a tool marker
+// (`[tool: bash]`) whole and for the opening sentence of a text step, short
+// enough that the phrase stays a phrase.
+const LAST_SEEN_CHARS = 160
+
+// What a subagent was last seen doing, as one line fit to drop into a sentence,
+// or "" where nothing is known of it.
+//
+// The source is `entry.lastActivity` — the newest text or tool part of the
+// session, cut to 280 chars by latestActivity (client.js). Two things happen to
+// it here. Whitespace is collapsed, because that string is raw model output and
+// may carry newlines that would break a one-line notice into pieces the
+// orchestrator reads as separate instructions. And it is cut again, harder: the
+// notice is a wake message, not a transcript, and the run's actual text is
+// already carried in full below it on the paths that recovered any.
+export function lastSeenPhrase(entry, maxChars = LAST_SEEN_CHARS) {
+  const raw = typeof entry?.lastActivity === "string" ? entry.lastActivity.trim() : ""
+  if (!raw) return ""
+  const flat = raw.replace(/\s+/g, " ")
+  return flat.length > maxChars ? `${flat.slice(0, maxChars)}…` : flat
 }
 
 // Wake-notice sent to the parent when a subagent's LLM call failed (caught

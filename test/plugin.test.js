@@ -385,7 +385,7 @@ test("watchdog timeout teardown keeps the abort marker until deleteSession is th
     return { data: true }
   }
 
-  const teardown = timeoutSubagent(entry, 1000, 1000)
+  const teardown = timeoutSubagent(entry, { ms: 1000, setting: "maxSubagentAgeMs", kind: "silence" }, 1000)
   await deleteReached
 
   await assert.rejects(

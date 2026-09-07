@@ -24,8 +24,9 @@ in your opencode sidebar.
 │   retain (min)    [-]   25 [+]             │
 │   silence (s)     [-]   90 [+]             │
 │   in tool (min)   [-]   11 [+]             │
-│   endless mode    [off]                    │
-│   endless (k)     [-]   98 [+]             │
+│   endless mode    [paused]                 │
+│      no open points left                   │
+│   endless (k)     [-]   18 [+]             │
 └────────────────────────────────────────────┘
 ┌─ ▼ TUI settings ──────────────────────────┐
 │   thinking        [on]                     │

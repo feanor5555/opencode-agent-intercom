@@ -552,7 +552,11 @@ exposes every runtime knob:
   clears the 600 000 ms ceiling opencode's own bash tool allows plus a minute
   for the kill and one sweep tick.
 - **`endless mode [on/off]`** / **`endless (k)`** — arms the self-restarting
-  orchestrator loop and sets its context threshold.
+  orchestrator loop and sets its context threshold. The row has a third
+  state `[paused]`, set when endless mode has stopped itself for the
+  current session: the stop's cause is written on the line beneath.
+  The pause is per session, is not written to the settings file, and
+  is cleared by switching the row off and on again.
 - Under **`TUI settings`**: **`thinking [on/off]`** and **`tool details
   [on/off]`**, opencode's built-in visibility toggles, plus **`show agentcom
   [on/off]`**, which decides whether the plugin's own notices (subagent

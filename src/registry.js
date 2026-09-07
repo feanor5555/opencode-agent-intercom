@@ -32,6 +32,9 @@ import {
 // import cycle. This is the clean cut the alternative (a dynamic import inside
 // forgetPrimary) would only paper over.
 import { forgetSessionDirectory } from "./client.js"
+// The pause map's published copy for the sidebar. A leaf module over log.js and
+// node:fs alone, so it adds no cycle here either.
+import { publishEndlessPause, unpublishEndlessPause } from "./endlesspause.js"
 
 // Re-export so callers (e.g. hooks.js in the next slice) can grab the mutex
 // from registry.js without having to know it lives in state.js.
@@ -139,8 +142,11 @@ export function forgetPrimary(sessionID) {
   // the session it was set on, and this session is being replaced: the primary
   // that takes over is a different id, has no pause, and starts with endless
   // mode available again. Keeping the entry would leak one map row per
-  // replaced primary and nothing else.
+  // replaced primary and nothing else. The panel's copy goes with it, so the
+  // row of the successor session is not painted from the pause of the one it
+  // replaced.
   endlessPauses.delete(sessionID)
+  unpublishEndlessPause(sessionID)
 }
 
 // Per-agent monotonic friendly handle, e.g. "researcher#1".
@@ -1670,9 +1676,19 @@ export function endlessCooldownActive(sessionID) {
 // mode (see resetEndlessProgress), and a run that has just stopped itself must
 // not hand its streak to the next primary — a fresh orchestrator would
 // otherwise get exactly one cycle before the no-progress bound fired again.
+//
+// The map is the authority and the only thing any decision here reads. It is
+// also invisible outside this process, and the sidebar's `endless mode` row is
+// outside it: a paused session used to render `[on]`, which is the state of the
+// switch and not the state of the loop. So every change of the map is mirrored
+// into the published file (src/endlesspause.js) that the panel reads — set
+// here, taken off again in clearEndlessPause and forgetPrimary, the three
+// places this map is written at all.
 export function pauseEndless(sessionID, reason = "") {
   if (!sessionID) return false
-  endlessPauses.set(sessionID, { reason: String(reason || ""), at: Date.now() })
+  const at = Date.now()
+  endlessPauses.set(sessionID, { reason: String(reason || ""), at })
+  publishEndlessPause(sessionID, String(reason || ""), at)
   resetEndlessProgress()
   return true
 }
@@ -1691,6 +1707,7 @@ export function endlessPauseReason(sessionID) {
 // is nothing to write back — the next over-threshold turn arms a cycle again.
 export function clearEndlessPause(sessionID) {
   if (!sessionID) return false
+  unpublishEndlessPause(sessionID)
   return endlessPauses.delete(sessionID)
 }
 

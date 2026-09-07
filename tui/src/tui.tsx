@@ -37,6 +37,14 @@ import {
   setLlmModel,
 } from "./llm-models-file.ts";
 import { debugLog } from "./debug-log.ts";
+import {
+  type EndlessPause,
+  endlessRowCell,
+  endlessRowState,
+  pauseForSession,
+  pauseRowNote,
+  readEndlessPauses,
+} from "./endless-pause-file.ts";
 import { holdRepeat, stopHoldRepeat } from "./hold-repeat.ts";
 import {
   composeSubagentLabel,
@@ -432,6 +440,14 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // out the ceiling in effect, and every store call hands the whole state back
   // anyway.
   const [settings, setSettingsState] = createSignal<Settings>(readSettings());
+  // The endless self-stop pauses the main plugin publishes, keyed by the primary
+  // session each one is set on. Not a setting and not in the settings file: a
+  // pause is runtime state of one session in the plugin's process, and this is
+  // the panel's only sight of it (tui/src/endless-pause-file.ts). Re-read on the
+  // poll, so a self-stop reaches the row within one pass.
+  const [endlessPauses, setEndlessPauses] = createSignal<
+    ReadonlyMap<string, EndlessPause>
+  >(readEndlessPauses());
   const maxSubagents = (): number => settings().maxSubagents;
   const endlessMode = (): boolean => settings().endlessMode;
   const endlessContext = (): number => settings().endlessContext;
@@ -504,6 +520,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     showSettings(readSettings());
     setLlmParams(readLlmParams());
     setLlmModels(readLlmModels());
+    setEndlessPauses(readEndlessPauses());
   };
 
   // Opening a section that shows file-backed values re-reads them first, so what
@@ -1041,6 +1058,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     // the panel learns of from here on was not in this pass's reach and its
     // absence from the listing must not be read as gone.
     const passIndex = ++startedPasses;
+    // Cheap and on every pass, unlike the other file-backed state on the 30 s
+    // timer: a session whose loop has stopped itself must not go on reading
+    // `[on]` for half a minute, which is the misreading this row exists to end.
+    setEndlessPauses(readEndlessPauses());
     try {
       const statusRes = await api.client.session.status({});
       const statuses = (statusRes?.data ?? {}) as Record<
@@ -1566,6 +1587,12 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             onAdjustReuse={adjustReuseContext}
             onAdjustResultTokens={adjustResultTokens}
             endlessMode={endlessMode}
+            endlessPause={() =>
+              pauseForSession(endlessPauses(), [
+                orchestratorSessionID(),
+                sessionID,
+              ])
+            }
             endlessContext={endlessContext}
             onAdjust={adjustSetting}
             onToggleEndless={toggleEndless}
@@ -1640,6 +1667,10 @@ function SubagentPanel(props: {
   onAdjustReuse: (delta: number) => void;
   onAdjustResultTokens: (delta: number) => void;
   endlessMode: () => boolean;
+  // The self-stop pause published for this panel's primary, undefined while the
+  // loop is not stopped. The switch stays `endlessMode`; this only says whether
+  // the mode it switches on is still running for this session.
+  endlessPause: () => EndlessPause | undefined;
   endlessContext: () => number;
   onAdjust: (key: LimitKey, delta: number) => void;
   onToggleEndless: () => void;
@@ -1797,6 +1828,16 @@ function SubagentPanel(props: {
     syncFocus();
     syncWidth();
   };
+
+  // The state of the `endless mode` row, and the cause line under it while that
+  // state is `paused`. Both derive from the switch and the published pause, so
+  // the two rows can never disagree about which of the three the row is in.
+  const endlessState = createMemo(() =>
+    endlessRowState(props.endlessMode(), props.endlessPause()),
+  );
+  const endlessPauseNote = createMemo(() =>
+    pauseRowNote(props.endlessPause()?.reason ?? "", panelWidth()),
+  );
 
   const Row = (rowProps: { entry: SubagentEntry; depth: number }) => {
     const selected = createMemo(
@@ -2107,15 +2148,33 @@ function SubagentPanel(props: {
               {"[+]"}
             </text>
           </box>
+          {/* Three states on one switch. `on` and `off` are the setting; `paused`
+              is the mode having stopped ITSELF for this session — the switch is
+              still on, nothing was written, and the row stays the switch it was:
+              off and on again is what clears the pause. Without this state a
+              paused session reads `[on]` with nothing happening. */}
           <box flexDirection="row">
             <text fg={props.theme.textMuted}>{rowLabel("endless mode")}</text>
             <text
-              fg={props.endlessMode() ? props.theme.success : props.theme.textMuted}
+              fg={
+                endlessState() === "paused"
+                  ? props.theme.warning
+                  : endlessState() === "on"
+                    ? props.theme.success
+                    : props.theme.textMuted
+              }
               onMouseDown={props.onToggleEndless}
             >
-              {props.endlessMode() ? "[on] " : "[off]"}
+              {endlessRowCell(endlessState())}
             </text>
           </box>
+          {/* Which of the three stops it was, on the line under the switch: the
+              row itself has no width left for it. */}
+          <Show when={endlessState() === "paused" && endlessPauseNote() !== ""}>
+            <box flexDirection="row">
+              <text fg={props.theme.textMuted}>{endlessPauseNote()}</text>
+            </box>
+          </Show>
           <box flexDirection="row">
             <text fg={props.theme.textMuted}>{rowLabel("endless (k)")}</text>
             <text fg={props.theme.accent} {...holdRepeat("endless-context-decrease", () => props.onAdjust("endlessContext", -10000))}>

@@ -572,6 +572,15 @@ sidebar clears the pause (`clearEndlessPause` runs in the mode-off branch alone)
 primary cannot re-enter the cycle through the branch that relieves it. It is told its state in
 its per-turn limits block. Only the sidebar's toggle writes `endlessMode`.
 
+The pause travels out of process to the sidebar under
+`~/.cache/opencode-agent-intercom/endless-pauses.json`
+(`publishEndlessPause`, `src/endlesspause.js`), mirrored by the three writers
+of the in-process pause map (`pauseEndless`, `clearEndlessPause`, `forgetPrimary`,
+all in `src/registry.js`). The sidebar reads it (`tui/src/endless-pause-file.ts`,
+rendered in `tui/src/tui.tsx`); the in-process map stays the sole authority and
+nothing reads the file back into a decision. An entry whose writer pid is gone
+is dropped on read and pruned on the next write.
+
 1. **Nothing left to do.** When the confirmation's parse yields zero tasks *and* the wind-down
    reply carries `## WIND-DOWN DONE — nothing open`, the cycle stops before the replacement:
    latch released, freeze lifted, the primary paused, success toast "endless mode: no open
@@ -617,15 +626,30 @@ sharing the section's agent cycler — that is where the two limits the
 mode interacts with already sit (`tui/src/tui.tsx:1236-1255`):
 
 ```
-  endless        [off]
+  endless        [on]
   endless (k)    [-] 250 [+]
 ```
 
-The toggle cell follows the `thinking` / `tool details` shape exactly: one text cell,
-`"[on] "` / `"[off]"`, coloured `theme.success` when on and `theme.textMuted` when off,
-`onMouseDown` toggling (`tui/src/tui.tsx:1274-1291`). The threshold row follows the numeric
-shape with `holdRepeat` and a step of 10 000 tokens, displayed in thousands like
-`max Token(k)` (`:1251`) — from 250 to 500 in 25 taps, or a hold.
+or, while endless mode has paused itself for the current session:
+
+```
+  endless        [paused]
+     no open points left
+  endless (k)    [-] 250 [+]
+```
+
+The cell carries one of three labels: `"[on] "`, `"[off]"` or `"[paused]"`,
+coloured `theme.success` when on, `theme.textMuted` when off and
+`theme.warning` when paused (the colour change is the read of the pause;
+`[off]` outranks a pause left standing, because the user's switch-off is the
+younger statement and is what the plugin's mode-off branch uses to clear the
+pause on the primary's next turn — `tui/src/tui.tsx`).
+`onMouseDown` still toggles the boolean in the settings file, so switching off
+and on again clears the pause. The cause line under `[paused]` is the head of
+the published sentence at `" — "` (`pauseCause`, `tui/src/endless-pause-file.ts`);
+a sentence without that separator is shown whole. The threshold row follows
+the numeric shape with `holdRepeat` and a step of 10 000 tokens, displayed in
+thousands like `max Token(k)` (`:1251`) — from 250 to 500 in 25 taps, or a hold.
 
 Persistence goes through `settings-file.ts` on its existing read-modify-write
 (`tui/src/settings-file.ts:92-105`) with three changes:

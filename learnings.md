@@ -451,3 +451,38 @@ Do not try to hold that label from `src/` — it would mean racing opencode's
 own writer for a cosmetic value. The authoritative display of the chosen
 step is the plugin's own sidebar `effort` row, fed from
 `~/.config/opencode/llm-models.json`, which cannot be clobbered.
+
+## `PluginInput.serverUrl` is a placeholder on an interactive TUI instance
+
+An interactive `opencode` runs its server IN PROCESS and binds no socket at all
+— no TCP listener, no unix socket. `Server.url` is then undefined, and opencode
+builds the plugin context (1.18.29) as:
+
+```js
+const url = Server.url
+const client = createOpencodeClient({
+  baseUrl: url?.toString() ?? "http://localhost:4096",
+  directory, headers: auth.headers(),
+  ...(url ? {} : { fetch: (...a) => Server.Default().app.fetch(...a) }),
+})
+{ client, ..., get serverUrl() { return Server.url ?? new URL("http://localhost:4096") } }
+```
+
+So a plugin under the TUI receives `serverUrl = http://localhost:4096` — an
+address nothing is listening on — while the `client` in the same context is
+given a `fetch` override that dispatches straight into the in-process server.
+Every call through `client` works; a bare `fetch` at `serverUrl` gets
+`ECONNREFUSED` (Bun words it "Unable to connect. Is the computer able to access
+the url?"). Under `opencode serve --port N` the same `serverUrl` is the real
+address and a bare post does connect — which is why this only bites in the TUI.
+
+Consequence for any route the generated typed client has no method for: post it
+through the client's own transport (`client._client` on a root-style client,
+`client.client` on a v2 one; both expose `post({ url, body, headers,
+throwOnError })` and `getConfig()`). That carries the base URL, the
+`x-opencode-directory` header, the auth headers and the in-process dispatch. A
+bare `fetch` at `serverUrl` is the last resort, not the fallback: it carries no
+authorization header and its address may be the placeholder.
+
+`selectTuiSession` (`src/client.js`) is built this way. The resolved address is
+logged once at load as `server url resolved` with a `placeholder` flag.

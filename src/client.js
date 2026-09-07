@@ -698,14 +698,74 @@ function latestContextTokens(messages) {
   return undefined
 }
 
-// The opencode server's base URL. The plugin factory receives it in its
-// context object (`PluginInput.serverUrl`) and hands it over at init, so the
-// TUI view switch below has a target even where the resolved SDK client does
-// not carry the method. Empty until then, which only costs the fallback.
-let serverUrl = ""
+// The address opencode reports as its server base URL — and the one thing it
+// is NOT is a guaranteed-reachable one.
+//
+// opencode builds the plugin context (1.18.29, plugin bootstrap) as:
+//
+//   const url = Server.url
+//   const client = createOpencodeClient({
+//     baseUrl: url?.toString() ?? "http://localhost:4096",
+//     directory, headers: auth.headers(),
+//     ...(url ? {} : { fetch: (...a) => Server.Default().app.fetch(...a) }),
+//   })
+//   { client, ..., get serverUrl() { return Server.url ?? new URL("http://localhost:4096") } }
+//
+// An instance that runs an HTTP listener (`opencode serve`) has `Server.url`
+// and reports it. An interactive `opencode` TUI runs the server IN PROCESS with
+// no listener at all: `Server.url` is undefined, so the context reports the
+// placeholder below — an address nothing is bound to — while the SDK client it
+// hands over in the same object is given a `fetch` override that dispatches
+// straight into the in-process server. That is the whole asymmetry: every call
+// through `client` works, and a bare `fetch` at `serverUrl` cannot connect.
+//
+// So `serverUrl` is the LAST route for a raw route post, never the first. Where
+// the resolved client exposes its own transport (`lowLevelClient`), the request
+// goes through that: same base URL, same auth and directory headers, same
+// in-process dispatch.
+export const PLACEHOLDER_SERVER_URL = "http://localhost:4096"
 
-export function setServerUrl(url) {
-  serverUrl = url ? String(url).replace(/\/+$/, "") : ""
+let serverUrl = ""
+let serverUrlLogged = false
+
+// The generated SDK client's underlying HTTP client — the transport every
+// namespace method routes through. The root client keeps it on `_client`, the
+// v2 client on `client`; both expose `post({ url, body, headers, throwOnError })`
+// and `getConfig()`. Undefined for a client shape that has neither, which is
+// what the bare-`fetch` fallback is left for.
+export function lowLevelClient(client) {
+  for (const candidate of [client?._client, client?.client]) {
+    if (candidate && typeof candidate.post === "function") return candidate
+  }
+  return undefined
+}
+
+// Records the base URL and logs it once, so a later failure to reach it can be
+// read off the log instead of guessed at. `client` is optional and only read
+// for the log: its base URL and whether it can carry a raw route post at all.
+// Logged again only when the value actually changes, so the per-session factory
+// call does not repeat the line.
+export function setServerUrl(url, client) {
+  const next = url ? String(url).replace(/\/+$/, "") : ""
+  const changed = next !== serverUrl
+  serverUrl = next
+  if (serverUrlLogged && !changed) return
+  serverUrlLogged = true
+  let clientBaseUrl
+  try {
+    const configured = lowLevelClient(client)?.getConfig?.()?.baseUrl
+    if (configured) clientBaseUrl = String(configured)
+  } catch {
+    // a client shape without a readable config costs the field, nothing else
+  }
+  log("server url resolved", {
+    serverUrl: serverUrl || "(none)",
+    // True means: unreachable by design on an interactive TUI instance. Any
+    // direct post to it will fail to connect; the client transport is the route.
+    placeholder: serverUrl === PLACEHOLDER_SERVER_URL,
+    clientBaseUrl,
+    clientRoutePost: typeof lowLevelClient(client)?.post === "function",
+  })
 }
 
 // How many of one session's stale notice parts a single visibility sweep
@@ -837,43 +897,77 @@ export async function applyAgentcomVisibility(client, sessionID, { hidden } = {}
   return outcome
 }
 
+export const TUI_SELECT_SESSION_ROUTE = "/tui/select-session"
+
+// Names the KIND of a thrown transport failure, so a log line separates "the
+// server answered and refused" from "nothing is listening there" from "it never
+// came back". Read off the message, because the runtimes disagree on the shape:
+// Bun reports a refused connection as "Unable to connect. Is the computer able
+// to access the url?", Node's undici as "fetch failed" with an `ECONNREFUSED`
+// cause.
+function transportReason(err) {
+  if (err?.name === "AbortError" || err?.name === "TimeoutError") return "timeout"
+  const text = `${errMsg(err)} ${errMsg(err?.cause ?? "")} ${err?.code ?? ""}`.toLowerCase()
+  if (text.includes("timeout") || text.includes("timed out")) return "timeout"
+  if (
+    text.includes("unable to connect") ||
+    text.includes("econnrefused") ||
+    text.includes("enotfound") ||
+    text.includes("eai_again") ||
+    text.includes("ehostunreach") ||
+    text.includes("enetunreach") ||
+    text.includes("econnreset") ||
+    text.includes("fetch failed") ||
+    text.includes("failed to fetch")
+  ) {
+    return "unreachable"
+  }
+  return "error"
+}
+
 // Best-effort TUI view switch: point the interactive TUI at `sessionID`
 // (`POST /tui/select-session`, "Navigate the TUI to display the specified
-// session"). Called right after the handoff kickoff — without it the user
-// keeps looking at the session that is about to be archived.
+// session"). Called right after the handoff kickoff — without it the user keeps
+// looking at the session that is about to be archived.
 //
-// Two routes to the same server endpoint, for the same reason `archiveSession`
-// sends a field the pinned types do not know: the generated typed client lags
-// the server here. The v2-generated client carries `tui.selectSession`, the
-// root one does not, and which of the two a given opencode build resolves is
-// not something this plugin can decide. So: call the method where the resolved
-// client has one, and post the route directly otherwise — including when the
-// method is there but rejects the argument shape.
+// Three routes to the one endpoint, tried in order of how much each can be
+// trusted to arrive:
 //
-// The call carries the session id in BOTH shapes and asks for a rejection in
-// both ways, because the two clients disagree on all of it (read off the
-// resolved @opencode-ai/sdk 1.18.23):
-//   - the v2 client's signature is `selectSession({ sessionID }, options)` and
-//     it maps the flat key into the request body itself, dropping every key it
-//     does not know (`dist/v2/gen/core/params.gen.js`) — so a lone
-//     `{ body: { sessionID } }` would post an EMPTY body;
-//   - a root-style client takes one options object with `body` and
-//     `throwOnError`, and its `Tui` class carries no `selectSession` at all on
-//     this version (`dist/gen/sdk.gen.d.ts`), so that branch is inert here.
-// Without `throwOnError` a 4xx comes back as `{ data, error }` rather than
-// throwing (`dist/error-interceptor.js`). `attempt` folds that envelope and a
-// thrown response into the same failure outcome, so either shape reaches the
-// fallback below and a reported success means the server accepted it.
+//   1. `client.tui.selectSession` — the typed method, where the resolved client
+//      has one. The generated typed client lags the server here: the v2 client
+//      carries it, the root one does not (`dist/gen/sdk.gen.js`, Tui class,
+//      @opencode-ai/sdk 1.18.23), and which of the two a given opencode build
+//      resolves is not something this plugin can decide.
 //
-// UNVERIFIED: the direct post carries no authorization header. The plugin
-// runtime builds `client` with the server's auth headers; a server that
-// requires them will refuse the bare post, and the switch then degrades to
-// today's behaviour (the TUI stays on the old session).
+//      The call carries the session id in BOTH argument shapes and asks for a
+//      rejection in both ways, because the two clients disagree on all of it:
+//      the v2 signature is `selectSession({ sessionID }, options)` and maps the
+//      flat key into the body itself, dropping every key it does not know
+//      (`dist/v2/gen/core/params.gen.js`) — so a lone `{ body: { sessionID } }`
+//      would post an EMPTY body — while a root-style client takes one options
+//      object with `body` and `throwOnError`. Without `throwOnError` a 4xx comes
+//      back as `{ data, error }` rather than throwing
+//      (`dist/error-interceptor.js`); `attempt` folds that envelope and a thrown
+//      response into the same failure outcome, so a reported success here means
+//      the server accepted it.
+//
+//   2. the SAME client's underlying transport, posting the route by hand. This
+//      is the route that actually works on an interactive TUI instance: the
+//      client carries the auth and directory headers and, where the instance
+//      runs no HTTP listener, the in-process dispatch — see the serverUrl block
+//      above for why a bare post to `serverUrl` cannot connect there.
+//
+//   3. a bare `fetch` at `serverUrl`, for a client shape that exposes neither.
+//      It carries no authorization header and its address may be opencode's
+//      placeholder, so it is the last resort rather than the fallback.
 //
 // Best-effort throughout — a failed switch is a presentation failure, never a
 // data one, and is logged and swallowed rather than thrown into the handoff.
+// Every failure names the route it took and either the status or the reason
+// class, so a stalled handover can be read off the log.
 export async function selectTuiSession(client, sessionID) {
   if (!sessionID) return false
+
   if (typeof client?.tui?.selectSession === "function") {
     const op = "selectTuiSession (tui.selectSession)"
     const outcome = await attempt(op, () =>
@@ -885,23 +979,54 @@ export async function selectTuiSession(client, sessionID) {
     if (outcome.ok) return true
     logFailure(op, outcome.error, { sessionID })
   }
+
+  const transport = lowLevelClient(client)
+  if (transport) {
+    const op = "selectTuiSession (client route post)"
+    const outcome = await attempt(op, () =>
+      transport.post({
+        url: TUI_SELECT_SESSION_ROUTE,
+        body: { sessionID },
+        headers: { "Content-Type": "application/json" },
+        throwOnError: true,
+      }),
+    )
+    if (outcome.ok) return true
+    logFailure(op, outcome.error, { sessionID, route: TUI_SELECT_SESSION_ROUTE })
+  }
+
   if (!serverUrl) {
-    log("tui select-session skipped: no server URL")
+    log("tui select-session skipped: no server URL", { sessionID })
     return false
   }
+  const url = `${serverUrl}${TUI_SELECT_SESSION_ROUTE}`
   try {
-    const res = await fetch(`${serverUrl}/tui/select-session`, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ sessionID }),
     })
-    if (!res.ok) {
-      log("tui select-session post failed", { status: res.status })
+    if (!res?.ok) {
+      log("tui select-session post failed", {
+        url,
+        status: res?.status,
+        reason: "refused",
+        sessionID,
+      })
       return false
     }
     return true
   } catch (err) {
-    log("tui select-session post failed", errMsg(err))
+    log("tui select-session post failed", {
+      url,
+      reason: transportReason(err),
+      // The placeholder address is unreachable by design, so a connect failure
+      // against it says the client transport was missing, not that the server
+      // is down.
+      placeholder: serverUrl === PLACEHOLDER_SERVER_URL,
+      sessionID,
+      err: errMsg(err),
+    })
     return false
   }
 }

@@ -87,9 +87,13 @@ export default async (ctx) => {
   log("agent-intercom initialized")
 
   // The TUI view switch after a handoff posts `/tui/select-session` where the
-  // resolved SDK client carries no method for it; `serverUrl` is where it
-  // posts to and reaches the plugin only here, in the factory context.
-  setServerUrl(serverUrl)
+  // resolved SDK client carries no method for it. `serverUrl` reaches the
+  // plugin only here, in the factory context, and is the LAST route of that
+  // switch, not the first: on an interactive TUI instance opencode reports the
+  // placeholder `http://localhost:4096` because that instance runs no HTTP
+  // listener at all. The client goes along so the resolved address is logged
+  // once, next to whether that client can carry a raw route post.
+  setServerUrl(serverUrl, client)
 
   // The `show agentcom` switch governs the parts already in the transcript, not
   // only the ones posted from here on: the companion TUI writes the setting

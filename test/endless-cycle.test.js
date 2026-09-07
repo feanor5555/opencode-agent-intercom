@@ -16,7 +16,8 @@
 
 import test from "node:test"
 import assert from "node:assert/strict"
-import { readFileSync, unlinkSync } from "node:fs"
+import { existsSync, readFileSync, unlinkSync } from "node:fs"
+import { join } from "node:path"
 
 import { resetState, endlessProgress } from "../src/state.js"
 import {
@@ -41,6 +42,7 @@ import {
 import { parseTasks, splitSections } from "../src/todofile.js"
 import { interpretWindDownReply } from "../src/handoff.js"
 import { WIND_DOWN_SUBAGENT_CONTRACT } from "../src/prompts.js"
+import { cacheDir } from "../src/log.js"
 
 const SID = "ses-endless-cycle"
 const NEW_SID = "ses-endless-cycle-new"
@@ -284,6 +286,42 @@ test("a shaped reply while the child is unsettled does not reach confirm", async
   assert.ok(!io._log.includes("performHandoff"))
 })
 
+test("confirmation waits for the child settlement, not the shaped orchestrator reply", async () => {
+  let resolveChild
+  const childSettlement = new Promise((resolve) => {
+    resolveChild = resolve
+  })
+  let settleCalled = false
+  let rereadCalls = 0
+  const io = baseIo({
+    windDownPermit: () => ({
+      consumed: true,
+      childSessionID: "ses-child",
+      settlement: childSettlement,
+    }),
+    settleWindDown: async (child) => {
+      settleCalled = true
+      return { ok: true, outcome: await child.settlement }
+    },
+    reread: () => {
+      rereadCalls += 1
+      return { name: "TODO.md", content: FRESH }
+    },
+  })
+
+  const running = runEndlessCycle(io)
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(settleCalled, true, "the cycle is waiting on the child")
+  assert.equal(rereadCalls, 0, "the shaped reply does not start confirmation")
+  assert.ok(!io._log.includes("performHandoff"))
+
+  resolveChild({ status: "completed" })
+  const res = await running
+  assert.equal(res.outcome, "complete")
+  assert.equal(rereadCalls, 1)
+})
+
 test("a child that settled errored still confirms when the file verifies", async () => {
   const io = baseIo({
     windDownPermit: () => ({ consumed: true, childSessionID: "ses-child", settlement: settled("error") }),
@@ -313,6 +351,18 @@ test("V1: a todo file that no longer resolves abandons", async () => {
   const res = await runEndlessCycle(io)
   assert.equal(res.outcome, "abandoned")
   assert.equal(res.stage, "confirm")
+})
+
+test("V1: a resolved todo path that is not a regular file abandons", async () => {
+  const io = baseIo({
+    reread: () => {
+      throw new Error("TODO.md is not a regular file")
+    },
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "abandoned")
+  assert.equal(res.stage, "confirm")
+  assert.ok(!io._log.includes("performHandoff"))
 })
 
 test("V3: an unchanged file with no `no change` reply is restored and abandons", async () => {
@@ -365,11 +415,19 @@ test("V6: an id rebound to a different title is restored and abandons", async ()
   assert.ok(io._log.includes("restore:true"))
 })
 
-test("V7: a reply count that disagrees with the parse still completes — the parse wins", async () => {
+test("V7: a reply count that disagrees with the parse is logged but not fatal", async () => {
+  const logPath = join(cacheDir(), "debug.log")
+  const before = existsSync(logPath) ? readFileSync(logPath, "utf8").length : 0
   const io = baseIo({ windDownTurn: async () => "## WIND-DOWN DONE — 99 open" })
   const res = await runEndlessCycle(io)
+  const after = existsSync(logPath) ? readFileSync(logPath, "utf8") : ""
+  const delta = after.slice(before)
+
   assert.equal(res.outcome, "complete")
   assert.deepEqual(res.openIds, ["T1", "T2"])
+  assert.match(delta, /endless: wind-down reply count disagrees with the parse — the parse wins/)
+  assert.match(delta, /"replyCount":99/)
+  assert.match(delta, /"parseCount":2/)
 })
 
 // ---------------------------------------------------------------------------

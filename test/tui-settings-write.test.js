@@ -20,6 +20,11 @@
 // count reaches 0, which is how retention is switched off; the window does not,
 // because it has no off state of its own and the row steps it in whole minutes.
 //
+// The two watchdog windows are scalars of the same kind, stepped in whole
+// seconds and whole minutes. Both reach 0 and stop there, because 0 is a value
+// the plugin honours on each — the inactivity watchdog off, and no ceiling while
+// a subagent works — so neither carries a floor above it.
+//
 // Run: node --test test/tui-settings-write.test.js
 
 import test, { beforeEach, after } from "node:test"
@@ -38,8 +43,12 @@ import {
   DEFAULT_MAX_REUSE_CONTEXT,
   DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_MAX_SUBAGENTS,
+  DEFAULT_MAX_SUBAGENT_AGE_MS,
+  DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
   DEFAULT_SHOW_AGENTCOM,
   RETAINED_SUBAGENT_TTL_STEP_MS,
+  SUBAGENT_AGE_STEP_MS,
+  SUBAGENT_TOOL_CALL_STEP_MS,
   effectiveResultTokens,
   effectiveReuseContext,
   readSettings,
@@ -71,6 +80,8 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS
   delete process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT
@@ -87,6 +98,8 @@ const state = (over = {}) => ({
   maxContext: DEFAULT_MAX_CONTEXT,
   maxContextSource: over.maxContext === undefined ? "default" : "file",
   agentContext: {},
+  maxSubagentAgeMs: DEFAULT_MAX_SUBAGENT_AGE_MS,
+  maxSubagentToolCallMs: DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
   endlessMode: DEFAULT_ENDLESS_MODE,
   endlessContext: DEFAULT_ENDLESS_CONTEXT,
   // Read and preserved by the store, stepped by no sidebar row; it is part of
@@ -594,6 +607,97 @@ test("a window of 0 in the file still resolves to the plugin's 1 ms floor", () =
   writeFileSync(file, JSON.stringify({ retainedSubagentTtlMs: 0 }))
 
   assert.equal(readSettings().retainedSubagentTtlMs, 1)
+})
+
+test("the silence watchdog steps by whole seconds and is written in milliseconds", () => {
+  writeFileSync(file, JSON.stringify({ maxSubagents: 2 }))
+
+  const merged = stepSetting("maxSubagentAgeMs", SUBAGENT_AGE_STEP_MS)
+
+  assert.equal(SUBAGENT_AGE_STEP_MS, 15000)
+  assert.deepEqual(onDisk(), {
+    maxSubagents: 2,
+    maxSubagentAgeMs: DEFAULT_MAX_SUBAGENT_AGE_MS + 15000,
+  })
+  assert.deepEqual(
+    merged,
+    state({ maxSubagents: 2, maxSubagentAgeMs: DEFAULT_MAX_SUBAGENT_AGE_MS + 15000 }),
+  )
+})
+
+test("the silence watchdog steps down to 0, the value that switches it off", () => {
+  writeFileSync(file, JSON.stringify({ maxSubagentAgeMs: SUBAGENT_AGE_STEP_MS }))
+
+  const merged = stepSetting("maxSubagentAgeMs", -SUBAGENT_AGE_STEP_MS)
+
+  assert.deepEqual(onDisk(), { maxSubagentAgeMs: 0 })
+  assert.equal(merged.maxSubagentAgeMs, 0)
+
+  // And no further: 0 is the floor, not a step on the way to a negative.
+  assert.equal(stepSetting("maxSubagentAgeMs", -SUBAGENT_AGE_STEP_MS).maxSubagentAgeMs, 0)
+})
+
+test("the tool-call watchdog steps by whole minutes and is written in milliseconds", () => {
+  const merged = stepSetting("maxSubagentToolCallMs", -SUBAGENT_TOOL_CALL_STEP_MS)
+
+  assert.equal(SUBAGENT_TOOL_CALL_STEP_MS, 60000)
+  assert.deepEqual(onDisk(), {
+    maxSubagentToolCallMs: DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS - 60000,
+  })
+  assert.equal(merged.maxSubagentToolCallMs, DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS - 60000)
+})
+
+// Unlike the retention window, this one has an off state of its own and the row
+// has to reach it: 0 here is "no ceiling while a subagent works", and a floor of
+// one minute would put that value out of the user's reach.
+test("the tool-call watchdog steps down to 0, its no-ceiling value, and stops there", () => {
+  writeFileSync(file, JSON.stringify({ maxSubagentToolCallMs: SUBAGENT_TOOL_CALL_STEP_MS }))
+
+  const merged = stepSetting("maxSubagentToolCallMs", -SUBAGENT_TOOL_CALL_STEP_MS)
+
+  assert.deepEqual(onDisk(), { maxSubagentToolCallMs: 0 })
+  assert.equal(merged.maxSubagentToolCallMs, 0)
+
+  assert.equal(
+    stepSetting("maxSubagentToolCallMs", -SUBAGENT_TOOL_CALL_STEP_MS).maxSubagentToolCallMs,
+    0,
+  )
+})
+
+// A 0 on either window is a value the plugin honours, so the write must leave
+// it standing rather than prune it as it prunes a rejected one.
+test("a watchdog window of 0 survives the next write to another key", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ maxSubagentAgeMs: 0, maxSubagentToolCallMs: 0 }),
+  )
+
+  const merged = setSetting("maxSubagents", 3)
+
+  assert.deepEqual(onDisk(), {
+    maxSubagentAgeMs: 0,
+    maxSubagentToolCallMs: 0,
+    maxSubagents: 3,
+  })
+  assert.deepEqual(
+    merged,
+    state({ maxSubagents: 3, maxSubagentAgeMs: 0, maxSubagentToolCallMs: 0 }),
+  )
+})
+
+// The two windows are stepped independently: the row for one must not carry the
+// other into the file, and a value the plugin rejects on one is dropped without
+// costing the user the other.
+test("a rejected watchdog value is dropped by the next write and the other window stays", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ maxSubagentAgeMs: "90s", maxSubagentToolCallMs: 300000 }),
+  )
+
+  const merged = stepSetting("maxSubagentToolCallMs", SUBAGENT_TOOL_CALL_STEP_MS)
+
+  assert.deepEqual(onDisk(), { maxSubagentToolCallMs: 360000 })
+  assert.deepEqual(merged, state({ maxSubagentToolCallMs: 360000 }))
 })
 
 test("the first reuse ceiling edit freezes every listed agent and drops the flat key", () => {

@@ -69,6 +69,8 @@ import {
   DEFAULT_MAX_RETAINED_SUBAGENTS as TUI_DEFAULT_MAX_RETAINED_SUBAGENTS,
   DEFAULT_MAX_REUSE_CONTEXT as TUI_DEFAULT_MAX_REUSE_CONTEXT,
   DEFAULT_MAX_SUBAGENTS as TUI_DEFAULT_MAX_SUBAGENTS,
+  DEFAULT_MAX_SUBAGENT_AGE_MS as TUI_DEFAULT_MAX_SUBAGENT_AGE_MS,
+  DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS as TUI_DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
   DEFAULT_RETAINED_SUBAGENT_TTL_MS as TUI_DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_SHOW_AGENTCOM as TUI_DEFAULT_SHOW_AGENTCOM,
   effectiveAgentContext,
@@ -94,11 +96,24 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS
   delete process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS
 })
+
+// The two watchdog windows as every case below expects them when neither the
+// file nor the env names one. src/settings.js keeps its own two defaults
+// module-private, so the sidebar's copies are the only named constants for
+// them; what pins the plugin against those constants is the dedicated test
+// further down, which reads the value the plugin resolves with an empty file
+// and a clean env.
+const WATCHDOG_DEFAULTS = {
+  maxSubagentAgeMs: TUI_DEFAULT_MAX_SUBAGENT_AGE_MS,
+  maxSubagentToolCallMs: TUI_DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
+}
 
 // Every setting both sides carry, as each resolves it right now. The plugin
 // caches for TTL_MS, so its cache is dropped first.
@@ -112,6 +127,8 @@ function bothSides() {
       maxContext: plugin.maxContext,
       maxContextSource: plugin.maxContextSource,
       agentContext: plugin.agentContext,
+      maxSubagentAgeMs: plugin.maxSubagentAgeMs,
+      maxSubagentToolCallMs: plugin.maxSubagentToolCallMs,
       endlessMode: plugin.endlessMode,
       endlessContext: plugin.endlessContext,
       maxNestedSpawns: plugin.maxNestedSpawns,
@@ -262,6 +279,7 @@ test("with neither file nor env both resolve the built-in defaults", () => {
     maxContext: DEFAULT_MAX_CONTEXT,
     maxContextSource: "default",
     agentContext: {},
+    ...WATCHDOG_DEFAULTS,
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
     maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
@@ -289,6 +307,7 @@ test("with env alone both resolve the env value", () => {
     maxContext: 70000,
     maxContextSource: "env",
     agentContext: {},
+    ...WATCHDOG_DEFAULTS,
     endlessMode: true,
     endlessContext: 300000,
     maxNestedSpawns: 3,
@@ -327,6 +346,7 @@ test("with file and env both let the file win", () => {
     maxContext: 95000,
     maxContextSource: "file",
     agentContext: {},
+    ...WATCHDOG_DEFAULTS,
     endlessMode: false,
     endlessContext: 120000,
     maxNestedSpawns: 1,
@@ -353,6 +373,7 @@ test("both reject the same file values and fall back to env or default", () => {
     maxContext: DEFAULT_MAX_CONTEXT,
     maxContextSource: "default",
     agentContext: {},
+    ...WATCHDOG_DEFAULTS,
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
     maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
@@ -378,6 +399,7 @@ test("both keep 0 as a value in its own right", () => {
     maxContext: 0,
     maxContextSource: "file",
     agentContext: {},
+    ...WATCHDOG_DEFAULTS,
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: 0,
     maxNestedSpawns: 0,
@@ -581,6 +603,62 @@ test("both ignore an agentContext that is not a plain object", () => {
     assert.deepEqual(tui, plugin)
     assertBudget("coder", DEFAULT_AGENT_CONTEXT.coder, "inherited")
   }
+})
+
+// The two watchdog windows, now that a sidebar row steps each of them. The
+// plugin does not export their defaults, so the parity that can be pinned is
+// the resolved one: with an empty file and a clean env the plugin's own value
+// IS its built-in default, and the sidebar's named constant has to equal it.
+test("both carry the same watchdog defaults", () => {
+  const [plugin, tui] = bothSides()
+  assert.equal(plugin.maxSubagentAgeMs, TUI_DEFAULT_MAX_SUBAGENT_AGE_MS)
+  assert.equal(plugin.maxSubagentToolCallMs, TUI_DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS)
+  assert.deepEqual(tui, plugin)
+})
+
+test("both resolve the watchdog keys file > env > default and reject the same values", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS = "120000"
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS = "900000"
+  const [envOnly, tuiEnvOnly] = bothSides()
+  assert.equal(envOnly.maxSubagentAgeMs, 120000, "env over the built-in default")
+  assert.equal(envOnly.maxSubagentToolCallMs, 900000)
+  assert.deepEqual(tuiEnvOnly, envOnly)
+
+  writeFileSync(
+    file,
+    JSON.stringify({ maxSubagentAgeMs: 45000, maxSubagentToolCallMs: 300000 }),
+  )
+  const [fromFile, tuiFromFile] = bothSides()
+  assert.equal(fromFile.maxSubagentAgeMs, 45000, "the file wins over the env var")
+  assert.equal(fromFile.maxSubagentToolCallMs, 300000)
+  assert.deepEqual(tuiFromFile, fromFile)
+
+  for (const bad of [1.5, -1, "60000", null]) {
+    writeFileSync(
+      file,
+      JSON.stringify({ maxSubagentAgeMs: bad, maxSubagentToolCallMs: bad }),
+    )
+    const [plugin, tui] = bothSides()
+    assert.equal(plugin.maxSubagentAgeMs, 120000, `${bad} must be rejected by both`)
+    assert.equal(plugin.maxSubagentToolCallMs, 900000)
+    assert.deepEqual(tui, plugin)
+  }
+})
+
+// 0 is a real value on both windows and means a different thing on each: the
+// inactivity watchdog switched off entirely, and no ceiling at all while a
+// subagent works. Neither is floored the way the retention window is, so the
+// two sides must carry the 0 through unchanged — a floor on one side would
+// re-arm a watchdog the user switched off.
+test("both keep a watchdog window of 0 as the off value it is", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ maxSubagentAgeMs: 0, maxSubagentToolCallMs: 0 }),
+  )
+  const [plugin, tui] = bothSides()
+  assert.equal(plugin.maxSubagentAgeMs, 0)
+  assert.equal(plugin.maxSubagentToolCallMs, 0)
+  assert.deepEqual(tui, plugin)
 })
 
 // The two retention keys the plugin gates the feature on. The sidebar carries

@@ -11,7 +11,8 @@
 // `result Token` — live in the LLM params body, directly after the `effort`
 // row and before `[reset current agent]`, and read the agent from the LLM
 // section's own cycler (`props.llmAgent()`, over AGENT_NAMES). The sidebar
-// therefore carries one agent cycler, not two. The flat retention rows stay in
+// therefore carries one agent cycler, not two. The flat retention rows and the
+// two watchdog rows — `silence (s)` and `in tool (min)` — stay in
 // the Subagents body, and `[reset current agent]` stays a reset of the LLM
 // parameters alone: it must not touch the three ceilings, which live in a
 // different file (agent-intercom.json) from the ones it clears.
@@ -134,6 +135,51 @@ test("the effort row cycles the ladder of the model under the cursor", () => {
     ),
     "the effort cycler hands cycleLlmVariant the model's own ladder",
   )
+})
+
+// Both watchdog windows are flat scalars over every subagent, not per-type
+// ceilings, so they sit with the other limit rows in the Subagents body rather
+// than in the LLM params body with the agent cycler.
+test("the two watchdog rows stay in the Subagents body, silence before in tool", () => {
+  const silence = row("silence (s)")
+  const inTool = row("in tool (min)")
+
+  for (const [label, at] of [["silence (s)", silence], ["in tool (min)", inTool]]) {
+    assert.ok(at > SUBAGENTS_HEADER, `${label} stands after the Subagents header`)
+    assert.ok(at < TUI_SETTINGS_HEADER, `${label} stands before the TUI settings header`)
+  }
+
+  assert.ok(silence < inTool, "the silence window stands before the tool-call window")
+})
+
+test("each watchdog row steps its own key in its own unit", () => {
+  for (const [key, step] of [
+    ["maxSubagentAgeMs", "SUBAGENT_AGE_STEP_MS"],
+    ["maxSubagentToolCallMs", "SUBAGENT_TOOL_CALL_STEP_MS"],
+  ]) {
+    assert.ok(
+      source.includes(`props.onAdjust("${key}", -${step})`),
+      `${key} steps down by ${step}`,
+    )
+    assert.ok(
+      source.includes(`props.onAdjust("${key}", ${step})`),
+      `${key} steps up by ${step}`,
+    )
+  }
+})
+
+// 0 is reachable on both rows and means "this bound does not apply" on each, so
+// neither may render it as the number 0 — a window of 0 seconds is not the
+// reading that value has. Matched over the source with its line breaks and
+// indentation collapsed, so re-wrapping the expression does not fail the test.
+const flat = source.replace(/\s+/g, " ")
+test("both watchdog rows render a 0 as off rather than as a number", () => {
+  for (const key of ["maxSubagentAgeMs", "maxSubagentToolCallMs"]) {
+    assert.ok(
+      flat.includes(`props.settings().${key} === 0 ? "off"`),
+      `${key} renders 0 as off`,
+    )
+  }
 })
 
 test("the flat retention rows stay in the Subagents body", () => {

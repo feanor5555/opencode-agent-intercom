@@ -1,8 +1,20 @@
 // The runtime settings on disk, shared with the main plugin: it reads this file
 // (file > env > default) for the subagent cap, the context budget, endless mode,
-// the nested-spawn quota, the subagent-retention window, the per-type reuse
+// the nested-spawn quota, the two watchdog windows, the subagent-retention
+// window, the per-type reuse
 // ceiling, the per-type result ceiling and the agentcom visibility switch. Writing it here changes them
 // live, no opencode restart needed.
+//
+// The watchdog is two windows over one subagent, and which of them applies is
+// decided by what the subagent is doing at that moment. `maxSubagentAgeMs` is
+// the window for one with NOTHING in flight — silence with no tool call open;
+// `maxSubagentToolCallMs` is the window for one that is inside a tool call, or
+// whose session opencode still reports as busy. `0` means something different
+// on each: on the silence window it switches the watchdog off altogether, on
+// the tool-call window it means no ceiling while the subagent works, and the
+// silence window still governs every subagent that is not working. Both are
+// scalars stepped through the ordinary [-]/[+] pair, the silence one in whole
+// seconds and the tool-call one in whole minutes.
 //
 // The context budget is a value PER AGENT TYPE, held in the `agentContext` map.
 // There is no single user-facing ceiling: a type with no entry of its own falls
@@ -73,6 +85,8 @@ export interface Settings {
   maxContext: number;
   maxContextSource: MaxContextSource;
   agentContext: AgentContext;
+  maxSubagentAgeMs: number;
+  maxSubagentToolCallMs: number;
   endlessMode: boolean;
   endlessContext: number;
   maxNestedSpawns: number;
@@ -97,6 +111,8 @@ export interface Settings {
 // with resultTokens and stepResultTokens behind it.
 export type LimitKey =
   | "maxSubagents"
+  | "maxSubagentAgeMs"
+  | "maxSubagentToolCallMs"
   | "endlessContext"
   | "maxRetainedSubagents"
   | "retainedSubagentTtlMs";
@@ -117,6 +133,31 @@ export const DEFAULT_ENDLESS_CONTEXT = 250000;
 // that parity and because a write must not drop a key the plugin honours — no
 // row steps it.
 export const DEFAULT_MAX_NESTED_SPAWNS = 2;
+// How long a subagent may be silent with no tool call in flight before the
+// watchdog aborts it, frees its slot and wakes the orchestrator with a timeout
+// notice. `0` switches that watchdog off. The plugin's own copy is
+// DEFAULT_MAX_SUBAGENT_AGE_MS in src/settings.js, which does not export it, so
+// test/settings-defaults-parity.test.js pins this constant against the value
+// the plugin resolves with neither file nor env. Stepped by the panel's
+// "silence (s)" row, which shows and steps it in whole seconds.
+export const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000;
+// The same watchdog's window for a subagent that is WORKING: one inside a tool
+// call, or whose session opencode still reports as busy. `0` means no ceiling
+// while it works. The plugin's own copy is DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS in
+// src/settings.js, pinned the same indirect way as the window above. Stepped by
+// the panel's "tool call (min)" row, which shows and steps it in whole minutes.
+export const DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS = 660000;
+// The unit the silence window is shown and stepped in: whole seconds. Fifteen
+// of them, so the 90 s default is six steps off zero and a user can reach the
+// values either side of it without a long hold, while a hold still crosses the
+// several minutes the window is ever worth.
+export const SUBAGENT_AGE_STEP_MS = 15000;
+// The unit the tool-call window is shown and stepped in: whole minutes. The
+// window is an order of magnitude longer than the silence one — 11 minutes by
+// default, above the 600 000 ms ceiling opencode's own bash tool allows — so a
+// second-sized step could not cross it, and a minute puts both `0` and the hour
+// mark within a hold of the default.
+export const SUBAGENT_TOOL_CALL_STEP_MS = 60000;
 // How many finished subagents may be held alive as re-promptable sessions at
 // once; 0 switches retention off, which is the shipped default and the one-shot
 // behaviour. The plugin's own copy is DEFAULT_MAX_RETAINED_SUBAGENTS in
@@ -198,6 +239,8 @@ const SETTING_VALIDATORS: { [K in FileKey]: (v: unknown) => boolean } = {
   maxSubagents: isLimit,
   maxContext: isLimit,
   agentContext: (v) => filterAgentContext(v) !== null,
+  maxSubagentAgeMs: isLimit,
+  maxSubagentToolCallMs: isLimit,
   endlessMode: isFlag,
   endlessContext: isLimit,
   maxNestedSpawns: isLimit,
@@ -243,6 +286,14 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
     maxContext: envNum(MAX_CONTEXT_ENV, DEFAULT_MAX_CONTEXT),
     maxContextSource: envNumSet(MAX_CONTEXT_ENV) ? "env" : "default",
     agentContext: {},
+    maxSubagentAgeMs: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS",
+      DEFAULT_MAX_SUBAGENT_AGE_MS,
+    ),
+    maxSubagentToolCallMs: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS",
+      DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
+    ),
     endlessMode: envFlag("OPENCODE_AGENT_INTERCOM_ENDLESS_MODE", DEFAULT_ENDLESS_MODE),
     endlessContext: envNum("OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT", DEFAULT_ENDLESS_CONTEXT),
     maxNestedSpawns: envNum(
@@ -276,6 +327,10 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
   }
   const perAgent = filterAgentContext(raw.agentContext);
   if (perAgent !== null) s.agentContext = perAgent;
+  if (isLimit(raw.maxSubagentAgeMs)) s.maxSubagentAgeMs = raw.maxSubagentAgeMs;
+  if (isLimit(raw.maxSubagentToolCallMs)) {
+    s.maxSubagentToolCallMs = raw.maxSubagentToolCallMs;
+  }
   if (isFlag(raw.endlessMode)) s.endlessMode = raw.endlessMode;
   if (isLimit(raw.endlessContext)) s.endlessContext = raw.endlessContext;
   if (isLimit(raw.maxNestedSpawns)) s.maxNestedSpawns = raw.maxNestedSpawns;
@@ -418,12 +473,15 @@ export function setSetting(key: LimitKey, value: number): Settings {
   return applySetting(key, () => value);
 }
 
-// The value each limit steps down to at its lowest. Zero for the three that are
-// switched off by being zero — no cap, no armed endless cycle, no retention —
-// and one whole minute for the retention window, which has no off state of its
-// own and is stepped in minutes.
+// The value each limit steps down to at its lowest. Zero for the five that are
+// switched off by being zero — no cap, no inactivity watchdog, no ceiling while
+// a subagent works, no armed endless cycle, no retention — and one whole minute
+// for the retention window, which has no off state of its own and is stepped in
+// minutes.
 const LIMIT_FLOOR: Record<LimitKey, number> = {
   maxSubagents: 0,
+  maxSubagentAgeMs: 0,
+  maxSubagentToolCallMs: 0,
   endlessContext: 0,
   maxRetainedSubagents: 0,
   retainedSubagentTtlMs: RETAINED_SUBAGENT_TTL_STEP_MS,

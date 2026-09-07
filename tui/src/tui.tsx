@@ -76,6 +76,8 @@ import {
   type LimitKey,
   type Settings,
   RETAINED_SUBAGENT_TTL_STEP_MS,
+  SUBAGENT_AGE_STEP_MS,
+  SUBAGENT_TOOL_CALL_STEP_MS,
   effectiveAgentContext,
   effectiveResultTokens,
   effectiveReuseContext,
@@ -444,10 +446,14 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
 
   // Step a setting by delta and save. Deltas are in the setting's own unit:
   // subagents ±1, endless context ±10000 tokens (= 10k on the display),
-  // retained subagents ±1, the retention window ±1 minute in milliseconds. The
+  // retained subagents ±1, the retention window ±1 minute in milliseconds, the
+  // silence watchdog ±15 seconds and the tool-call watchdog ±1 minute, both in
+  // milliseconds. The
   // floor is the store's, one per key: maxSubagents=0 means "no cap" (unlimited
   // concurrent subagents), endlessContext=0 arms no endless cycle,
-  // maxRetainedSubagents=0 switches retention off, and the window stops at one
+  // maxRetainedSubagents=0 switches retention off, maxSubagentAgeMs=0 switches
+  // the inactivity watchdog off, maxSubagentToolCallMs=0 lifts the ceiling on a
+  // working subagent, and the retention window stops at one
   // whole minute because it has no off state of its own.
   const adjustSetting = (key: LimitKey, delta: number): void => {
     // Read-modify-write inside the store: the file may have been edited outside
@@ -2027,6 +2033,75 @@ function SubagentPanel(props: {
               {...holdRepeat(
                 "retained-subagent-ttl-increase",
                 () => props.onAdjust("retainedSubagentTtlMs", RETAINED_SUBAGENT_TTL_STEP_MS),
+              )}
+            >
+              {"[+]"}
+            </text>
+          </box>
+          {/* The watchdog, as its two windows over one subagent: "silence" is
+              the window for one with nothing in flight, "in tool" the window
+              for one inside a tool call or a session opencode still reports as
+              busy. "off" is a 0 on either, and it means a different thing on
+              each — the inactivity watchdog switched off entirely on the first,
+              no ceiling at all while a subagent works on the second, with the
+              silence window still governing every subagent that is not
+              working. Each shows its own unit: whole seconds for a window in
+              the tens of them, whole minutes for one in the tens of minutes.
+              Both round up, so a value smaller than one whole unit shows as one
+              rather than as the 0 that reads "off". */}
+          <box flexDirection="row">
+            <text fg={props.theme.textMuted}>{rowLabel("silence (s)")}</text>
+            <text
+              fg={props.theme.accent}
+              {...holdRepeat(
+                "subagent-age-decrease",
+                () => props.onAdjust("maxSubagentAgeMs", -SUBAGENT_AGE_STEP_MS),
+              )}
+            >
+              {"[-]"}
+            </text>
+            <text fg={props.theme.text}>
+              {numCell(
+                props.settings().maxSubagentAgeMs === 0
+                  ? "off"
+                  : Math.ceil(props.settings().maxSubagentAgeMs / 1000),
+              )}
+            </text>
+            <text
+              fg={props.theme.accent}
+              {...holdRepeat(
+                "subagent-age-increase",
+                () => props.onAdjust("maxSubagentAgeMs", SUBAGENT_AGE_STEP_MS),
+              )}
+            >
+              {"[+]"}
+            </text>
+          </box>
+          <box flexDirection="row">
+            <text fg={props.theme.textMuted}>{rowLabel("in tool (min)")}</text>
+            <text
+              fg={props.theme.accent}
+              {...holdRepeat(
+                "subagent-tool-call-decrease",
+                () => props.onAdjust("maxSubagentToolCallMs", -SUBAGENT_TOOL_CALL_STEP_MS),
+              )}
+            >
+              {"[-]"}
+            </text>
+            <text fg={props.theme.text}>
+              {numCell(
+                props.settings().maxSubagentToolCallMs === 0
+                  ? "off"
+                  : Math.ceil(
+                      props.settings().maxSubagentToolCallMs / SUBAGENT_TOOL_CALL_STEP_MS,
+                    ),
+              )}
+            </text>
+            <text
+              fg={props.theme.accent}
+              {...holdRepeat(
+                "subagent-tool-call-increase",
+                () => props.onAdjust("maxSubagentToolCallMs", SUBAGENT_TOOL_CALL_STEP_MS),
               )}
             >
               {"[+]"}

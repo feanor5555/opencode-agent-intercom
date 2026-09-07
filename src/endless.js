@@ -32,8 +32,9 @@
 //   7. Settle: the shaped reply says the turn is over; the child's own ending
 //      says the write finished. Await the child's settlement and require its
 //      registry entry gone. Where it never settles, end the child and abandon.
-//   8. Confirm: V1–V7 over the file as a whole. A failure of V1, V3, V4, V5 or
-//      V6 restores the snapshot and abandons WITHOUT replacing the session.
+//   8. Confirm: V1–V7 over the file as a whole. A failure of V1, V3, V4 or V5
+//      restores the snapshot and abandons WITHOUT replacing the session. V6 and
+//      V7 are observations logged while the verified rewrite proceeds.
 //   9. Nothing left to do: the subagent's explicit "nothing open" and a
 //      zero-task parse pause the mode instead of starting an empty session.
 //   10. Replace: the handoff runs with the endless kickoff block carrying the
@@ -76,9 +77,8 @@ function defaultSleep(ms) {
 }
 
 // Comparison form of a task title: lower-cased with every run of whitespace
-// collapsed to one space. Used by V6 (an id must not be re-bound to a different
-// title) and by the no-progress record's own title normalisation where a caller
-// still wants it.
+// collapsed to one space. Used by V6's changed-title observation and by the
+// no-progress record's own title normalisation where a caller still wants it.
 export function normaliseTitle(title) {
   return typeof title === "string" ? title.trim().toLowerCase().replace(/\s+/g, " ") : ""
 }
@@ -262,8 +262,8 @@ export function writeRejectedWindDown(content, sessionID) {
 // the file's content and the reply's stated signals — never asserted by the
 // subagent.
 //
-// Returns { empty, v3, v4, v4Details, v5, v6, tasks, openIds, parseCount,
-// replyCount, countMismatch }.
+// Returns { empty, v3, v4, v4Details, v5, v6, titleChanges, tasks, openIds,
+// parseCount, replyCount, countMismatch }.
 //
 // @param {Object} snapshot  { content, tasks } — the pre-spawn file
 // @param {Object} fresh      { content, replyNoChange, replyNothingOpen, replyCount }
@@ -308,10 +308,14 @@ export function verifyWindDown(snapshot, fresh, { splitSections, parseTasks }) {
   }
   const v4 = v4Details.markerValid && v4Details.sequenceValid
 
-  const snapTitleById = new Map((snapshot.tasks || []).map((t) => [t.id, normaliseTitle(t.text)]))
-  const v6 = newTasks.every(
-    (t) => !snapTitleById.has(t.id) || snapTitleById.get(t.id) === normaliseTitle(t.text),
-  )
+  const snapTitleById = new Map((snapshot.tasks || []).map((t) => [t.id, t.text]))
+  const titleChanges = newTasks.flatMap((t) => {
+    if (!snapTitleById.has(t.id)) return []
+    const oldTitle = snapTitleById.get(t.id)
+    if (normaliseTitle(oldTitle) === normaliseTitle(t.text)) return []
+    return [{ id: t.id, oldTitle, newTitle: t.text }]
+  })
+  const v6 = titleChanges.length === 0
 
   const parseCount = newTasks.length
   const replyCount = fresh.replyCount ?? null
@@ -324,6 +328,7 @@ export function verifyWindDown(snapshot, fresh, { splitSections, parseTasks }) {
     v4Details,
     v5,
     v6,
+    titleChanges,
     tasks: newTasks,
     openIds,
     parseCount,
@@ -567,11 +572,11 @@ export async function runEndlessCycle({
       return stop("no-open-points", "no open points left — paused for this session", "success")
     }
 
-    // The rewrite the plugin will not stand behind (V3, V4, V5 or V6): restore
-    // the snapshot, then abandon without replacing the session.
-    const coreOk = verdict.v3 && verdict.v4 && verdict.v5 && verdict.v6
+    // The rewrite the plugin will not stand behind (V3, V4 or V5): restore the
+    // snapshot, then abandon without replacing the session.
+    const coreOk = verdict.v3 && verdict.v4 && verdict.v5
     if (!coreOk) {
-      const failed = !verdict.v3 ? "V3" : !verdict.v4 ? "V4" : !verdict.v5 ? "V5" : "V6"
+      const failed = !verdict.v3 ? "V3" : !verdict.v4 ? "V4" : "V5"
       const rejected = writeRejectedWindDown(fresh.content, primarySessionID)
       const rejectionLog = {
         sessionID: primarySessionID,
@@ -595,13 +600,23 @@ export async function runEndlessCycle({
       }
       return abandon("confirm", `wind-down rewrite rejected (${failed})`)
     }
-    // V2: a child that ended abnormally is accepted only because V3–V6 all hold.
+    // V2: a child that ended abnormally is accepted only because V3–V5 all hold.
     if (!childCompleted) {
       log("endless: wind-down child did not complete, but the file verifies — accepting", {
         sessionID: primarySessionID,
         status: childOutcome.status,
       })
     }
+    // V6: an observation, not a gate — carried-over ids may receive updated titles.
+    for (const { id, oldTitle, newTitle } of verdict.titleChanges) {
+      log("endless: wind-down task title changed — V6 observation", {
+        sessionID: primarySessionID,
+        id,
+        oldTitle,
+        newTitle,
+      })
+    }
+
     // V7: an observation, not a gate — the parse wins.
     if (verdict.countMismatch) {
       log("endless: wind-down reply count disagrees with the parse — the parse wins", {

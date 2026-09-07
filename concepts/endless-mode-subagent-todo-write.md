@@ -268,9 +268,10 @@ Five gates the admitted spawn is exempted from, each for a stated reason:
 
 ### 3.3 What remains of the verification
 
-The plugin no longer assigns ids, so id-matching goes. What replaces it is strictly
-stronger, because it reads the file as a whole rather than the lines the plugin itself
-appended — which is exactly the tautology §1 point 3 exposed.
+The plugin no longer assigns ids, so it does not claim ownership of their values. It still
+observes carried-over ids and title changes for V6. The verification is strictly stronger,
+because it reads the file as a whole rather than the lines the plugin itself appended — which is
+exactly the tautology §1 point 3 exposed.
 
 Before the spawn the plugin has already **created and written** the marked section where it
 was absent (§3.4.3, §4 step 4), then snapshots: the resolved target (`findTodoFile`,
@@ -281,12 +282,17 @@ was absent (§3.4.3, §4 step 4), then snapshots: the resolved target (`findTodo
 | # | predicate | on failure |
 |---|---|---|
 | V1 | `findTodoFile` resolves to exactly one regular file, same name as the snapshot | abandon (`multiple` / `not-a-file` / renamed) |
-| V2 | the child's outcome is `completed` (`src/childwait.js:52-58` enumerates the others) | abandon unless V3–V6 all hold anyway |
+| V2 | the child's outcome is `completed` (`src/childwait.js:52-58` enumerates the others) | abandon unless V3–V5 all hold anyway |
 | V3 | the content hash differs from the snapshot, **or** the reply carries `## WIND-DOWN DONE — no change` | abandon |
 | V4 | the marked region is intact and everything outside it matches `expectedOutside`, per the algorithm below | restore the snapshot, then abandon |
 | V5 | `parseTasks` over the new content yields ≥ 1 task, every id unique, every title non-empty | restore the snapshot, then abandon, except the explicit-empty case below |
-| V6 | no id present in the snapshot has been re-bound to a different title | restore the snapshot, then abandon |
+| V6 | a snapshot id's title differs from the new title | log the id, old title and new title; continue — the wind-down may refresh stale work |
 | V7 | the reply's stated open-task count equals the parse's | log the mismatch; the parse wins, no abandon — an observation beats an assertion |
+
+V6 is diagnostic only. For every existing id whose normalised title changes, the plugin logs
+that id together with the snapshot's old title and the new title, then continues with the V3–V5
+verified rewrite. A wind-down is expected to refresh a carried-over title when earlier work has
+made it stale.
 
 **V4, stated as an algorithm over lines.** A removal shifts every byte after it, so
 "byte-identical" cannot be literal, and the migration §3.4.3 promises moves more than the
@@ -325,7 +331,7 @@ session is not replaced, because a successor with an empty file *"would idle and
 nothing"* (`specs/endless-mode.md:449-452`).
 
 **A rejected rewrite is undone and retained for diagnosis.** Prepare holds the exact snapshot
-bytes, and a failure of V1, V3, V4, V5 or V6 means the file on disk is a rewrite the plugin
+bytes, and a failure of V1, V3, V4 or V5 means the file on disk is a rewrite the plugin
 refuses to stand behind — a reformatted human section, a deleted heading, a half-written list.
 Before abandoning, the plugin files the rejected content under its private results directory,
 then writes the snapshot back through `writeAt` and logs
@@ -341,7 +347,8 @@ back to, and the toast names the snapshot path and the original name.
 So: the parse survives and becomes the sole verification, moving from *"parse the model's
 words into the tasks the plugin writes"* to *"parse the file the subagent wrote, as the
 observation that the save happened"*. The invariant of `src/endless.js:31-33` — no
-replacement without a confirmed save — is preserved by V1–V6 as a set.
+replacement without a confirmed save — is preserved by V1–V5 as a set; V6 and V7 add
+observations without rejecting an otherwise verified rewrite.
 
 ### 3.4 The format, the section anchor and the id allocation
 
@@ -556,8 +563,9 @@ registration — and additionally requires the child's registry entry to be gone
 settlement arrives by `endlessWindDownTimeoutMs` counted from the spawn, the plugin ends the
 child itself and abandons (§3.2, §5).
 
-**8. Confirm.** V1–V7 of §3.3. A failure of V1, V3, V4, V5 or V6 restores the snapshot and
-abandons; the session is not replaced.
+**8. Confirm.** V1–V7 of §3.3. A failure of V1, V3, V4 or V5 restores the snapshot and
+abandons; V6 logs changed titles and, like V7, does not reject an otherwise verified rewrite.
+The session is not replaced on a V1/V3/V4/V5 failure.
 
 **9. Nothing left to do.** The explicit-empty case stops and pauses, as today.
 
@@ -586,9 +594,9 @@ restore of §3.3 wherever the rejected state is a rewritten file.
 | `wind-down` | the primary produced no shaped reply in the window **and** the permit is unconsumed | `disarmEndlessWindDown(primaryID)` **first, synchronously**, then the **fallback**: the plugin calls `startWindDownSubagent` itself with whatever final text the primary last produced, then goes to `settle`. The disarm is not cosmetic — an armed permit would stay admissible, and a slow primary whose `spawn` lands after the fallback started would put a second `planner` against the same file, concurrently, through a non-atomic `writeAt`, with last-writer-wins. After the disarm that spawn takes the ordinary refusal. Logged `endless: wind-down spawned by the plugin — the orchestrator made no permitted spawn` |
 | `wind-down` | the permit was consumed but the child never started (`createChildSession` gave no id, or `promptSession` threw) | `restoreEndlessWindDown` gives the permit back once and the refusal text invites one repeat; a second such failure leaves it consumed and falls through to the row below |
 | `wind-down` | **the turn window expired with the permit consumed and the child unsettled** | keep waiting for the settlement, bounded by the waiter ceiling of §3.2; on settlement go to `confirm`; if no settlement arrives by `endlessWindDownTimeoutMs` from the spawn, end the child (abort + teardown, which settles the waiter) and abandon. Never `confirm` against a running writer, and never abandon leaving one alive |
-| `wind-down` | the permit was consumed and the child settled as errored, aborted, timed out or expired | run `confirm` anyway: accept if V1, V3–V6 hold (a subagent that wrote the file and then died still saved the state); abandon otherwise |
+| `wind-down` | the permit was consumed and the child settled as errored, aborted, timed out or expired | run `confirm` anyway: accept if V1, V3–V5 hold (a subagent that wrote the file and then died still saved the state); abandon otherwise |
 | `wind-down` | the fallback spawn also fails to start or its child fails, with the file unchanged | abandon |
-| `confirm` | any of V1, V3, V4, V5, V6 fails | restore the snapshot (§3.3), then abandon |
+| `confirm` | any of V1, V3, V4 or V5 fails | restore the snapshot (§3.3), then abandon |
 | `handoff` | `performPrimaryHandoff` throws or yields no session | abandon (unchanged) |
 
 The watchdog remains the inner bound on a hung wind-down subagent: it is an ordinary
@@ -692,8 +700,9 @@ every exit and disarmed before the fallback); the widened `TASK_LINE_RE` against
 em-dash lines; `removeTask` refusing a legacy line outside the markers and answering
 `unmigrated`; `ensureSection` on a file with no markers, with a human `## Open`, and with a
 marker-less `## Intercom tasks` heading; the section-anchored insert; the watermark id
-allocation across a removal; V1–V7 each failing in isolation, each abandoning without
-calling `performPrimaryHandoff`, and each restoring the snapshot; the settle gate (a shaped
+allocation across a removal; V1–V5 each failing in isolation, each abandoning without
+calling `performPrimaryHandoff`, while V6 logs an existing-id title update and proceeds; the
+settle gate (a shaped
 reply while the child is unsettled does not reach `confirm`); the id-keyed no-progress
 record; the kickoff carrying the file text and its truncation notice.
 

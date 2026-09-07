@@ -447,12 +447,17 @@ re-reads, and **all** of these must hold or the cycle abandons without replacing
 | # | predicate | on failure |
 |---|---|---|
 | V1 | `findTodoFile` resolves to exactly one regular file, same name as the snapshot | abandon (`multiple` / `not-a-file` / renamed) — no file to restore to |
-| V2 | the child's outcome is `completed` | accepted anyway when V3–V6 all hold |
+| V2 | the child's outcome is `completed` | accepted anyway when V3–V5 all hold |
 | V3 | the content hash differs from the snapshot, **or** the reply carries `## WIND-DOWN DONE — no change` | restore, abandon |
 | V4 | exactly one `begin` and one `end` marker in order, and `outsideLines(new)` equals `expectedOutside` | restore, abandon |
 | V5 | `parseTasks` yields ≥ 1 task, every id unique, every title non-empty | restore, abandon (except the explicit-empty case) |
-| V6 | no id present in the snapshot has been re-bound to a different title | restore, abandon |
+| V6 | a snapshot id's title differs from the new title | log the id, old title and new title; continue — the wind-down may refresh stale work |
 | V7 | the reply's stated open-task count equals the parse's | log the mismatch; the parse wins, no abandon |
+
+V6 is diagnostic only. For every existing id whose normalised title changes, the plugin logs
+that id together with the snapshot's old title and the new title, then continues with the V3–V5
+verified rewrite. A wind-down is expected to refresh a carried-over title when earlier work has
+made it stale.
 
 **V4, as an algorithm over lines.** A removal shifts every byte after it, so "byte-identical"
 cannot be literal. `markedRange` is the inclusive line range between the single `begin` and
@@ -466,11 +471,12 @@ recognised in the snapshot leaving the outside region. The set is computed by th
 own snapshot, never asserted by the subagent.
 
 **A rejected rewrite is undone.** Prepare holds the exact snapshot bytes; a failure of V1, V3, V4,
-V5 or V6 means the file on disk is a rewrite the plugin refuses to stand behind, so before
+V5 means the file on disk is a rewrite the plugin refuses to stand behind, so before
 abandoning it writes the snapshot back and logs `endless: wind-down rewrite rejected — the todo
 file was restored`. Where the restore itself throws, the error toast names the path and the failed
 predicate. V1's renamed / `multiple` / `not-a-file` case is the exception: there is no resolved
-file to write back to.
+file to write back to. A V6 title change is logged with its id and old/new titles but is not a
+rejection.
 
 **Two shapes, one writer.** The widened `TASK_LINE_RE` (`/^(\s*)[-*]\s+(T\d+)\s*(?::|—|–|-)?\s+(.*)$/`)
 is a *reading* instrument only — `listOpen`, `nextFreeId`'s scan, the drift count, the snapshot
@@ -485,7 +491,8 @@ migrates it.
 that the file resolved to one regular file (V1), that the file as a whole changed and still parses
 (V3, V5), and that nothing outside the machine section moved (V4). The confirmed open-id count goes
 into the log line and the kickoff. The invariant — no replacement without a confirmed save — is
-preserved by V1–V6 as a set.
+preserved by V1–V5 as a set; V6 and V7 add observations without rejecting an otherwise
+verified rewrite.
 
 **Failure.** Any abandon — quiesce timeout, prepare throw, a fallback that could not start a child,
 a child that never settled, a rejected rewrite — leaves the session **not** replaced: replacing it
@@ -887,9 +894,9 @@ Unit, in the existing `node --test` style under `test/`:
   §3.4 states them — V1 one regular file of the snapshot's name, V2 the child settled, V3 the
   content changed or the reply said no-change, V4 the outside-lines algorithm licensing only the
   machine section and migrated task blocks to move, V5 at least one task with unique ids and
-  non-empty titles, V6 no snapshot id re-bound to a different title, V7 the reply count against
-  the parse; a failure of V1/V3/V4/V5/V6 abandons at `confirm` and — except V1, which has no
-  resolved file to restore to — restores the snapshot first; the explicit
+  non-empty titles, V6 logs every changed title on an existing id with its old and new text,
+  V7 the reply count against the parse; a failure of V1/V3/V4/V5 abandons at `confirm` and —
+  except V1, which has no resolved file to restore to — restores the snapshot first; the explicit
   `## WIND-DOWN DONE — nothing open` plus a zero-task parse is the accepted empty case.
 - The kickoff: `cutTodoText` returns the file's raw text untouched under the cap and a
   `truncated` marker with a trimmed body past `KICKOFF_TODO_MAX_CHARS`; `endlessKickoffBlock`

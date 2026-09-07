@@ -61,7 +61,7 @@ function fenced(taskLines, nextId) {
 }
 
 const SNAP = fenced(["- T1: do the thing"], "T2")
-// V3 differs, V4 outside identical, V5/V6 hold: T1 kept, T2 added.
+// V3 differs, V4 outside identical, V5 holds, and no carried title changes: T1 kept, T2 added.
 const FRESH = fenced(["- T1: do the thing", "- T2: another open item"], "T3")
 
 const LEGACY_TASK = "- T1: guard-denied-native-task\n  accept: noop"
@@ -85,13 +85,14 @@ function settled(status = "completed") {
 // field is overridable so each test can fail exactly one gate.
 function baseIo(overrides = {}) {
   const log = []
-  markEndlessPending(SID)
+  const primarySessionID = overrides.primarySessionID || SID
+  markEndlessPending(primarySessionID)
   const io = {
     _log: log,
-    primarySessionID: SID,
-    claim: () => claimPendingEndless(SID),
-    release: () => releaseEndless(SID),
-    setCooldown: () => setEndlessCooldown(SID),
+    primarySessionID,
+    claim: () => claimPendingEndless(primarySessionID),
+    release: () => releaseEndless(primarySessionID),
+    setCooldown: () => setEndlessCooldown(primarySessionID),
     dropRetained: async () => log.push("dropRetained"),
     countActive: () => 0,
     isQuiesced: async () => {
@@ -406,13 +407,74 @@ test("V5: a duplicate id is restored and abandons", async () => {
   assert.ok(io._log.includes("restore:true"))
 })
 
-test("V6: an id rebound to a different title is restored and abandons", async () => {
-  const rebound = fenced(["- T1: something else entirely"], "T2")
-  const io = baseIo({ reread: () => ({ name: "TODO.md", content: rebound }) })
-  const res = await runEndlessCycle(io)
-  assert.equal(res.outcome, "abandoned")
-  assert.equal(res.stage, "confirm")
-  assert.ok(io._log.includes("restore:true"))
+test("V6: an existing id may receive a stale-title update across cycles", async () => {
+  // The first cycle starts with an accumulated file and completes T50. T51's
+  // title is stale after that completion, so the second cycle updates T51 in
+  // place instead of inventing a new id.
+  const accumulated = fenced(
+    [
+      "- T50: Merge hygiene slices into reviews/code-hygiene.md",
+      "- T51: Merge hygiene slices into reviews/code-hygiene.md then delete slices",
+      "- T52: review the final hygiene notes",
+    ],
+    "T53",
+  )
+  const afterFirstCycle = fenced(
+    [
+      "- T51: Merge hygiene slices into reviews/code-hygiene.md then delete slices",
+      "- T52: review the final hygiene notes",
+    ],
+    "T53",
+  )
+  const afterSecondCycle = fenced(
+    [
+      "- T51: Delete leftover hygiene slices (merge already in reviews/code-hygiene.md)",
+      "- T52: review the final hygiene notes",
+    ],
+    "T53",
+  )
+  let current = accumulated
+  let next = afterFirstCycle
+  const restores = []
+  const logPath = join(cacheDir(), "debug.log")
+  const before = existsSync(logPath) ? readFileSync(logPath, "utf8").length : 0
+  const cycleOverrides = {
+    prepare: () => ({
+      fileName: "TODO.md",
+      content: current,
+      hash: "sha-snap",
+      tasks: parseTasks(current),
+      driftCount: 0,
+    }),
+    reread: () => {
+      current = next
+      next = afterSecondCycle
+      return { name: "TODO.md", content: current }
+    },
+    windDownTurn: async () => "## WIND-DOWN DONE — 2 open",
+    restoreSnapshot: (content) => {
+      restores.push(content)
+      current = content
+    },
+  }
+  const firstIo = baseIo(cycleOverrides)
+  const first = await runEndlessCycle(firstIo)
+  assert.equal(first.outcome, "complete")
+  assert.deepEqual(parseTasks(current).map((task) => task.id), ["T51", "T52"])
+
+  // The successor primary runs the second cycle against the first cycle's
+  // output as its snapshot.
+  const secondIo = baseIo({ ...cycleOverrides, primarySessionID: NEW_SID })
+  const second = await runEndlessCycle(secondIo)
+  assert.equal(second.outcome, "complete")
+  assert.deepEqual(parseTasks(current).map((task) => task.id), ["T51", "T52"])
+  assert.equal(restores.length, 0, "the accepted title update is not restored")
+
+  const delta = (existsSync(logPath) ? readFileSync(logPath, "utf8") : "").slice(before)
+  assert.match(delta, /endless: wind-down task title changed — V6 observation/)
+  assert.match(delta, /"id":"T51"/)
+  assert.ok(delta.includes('"oldTitle":"Merge hygiene slices into reviews/code-hygiene.md then delete slices"'))
+  assert.ok(delta.includes('"newTitle":"Delete leftover hygiene slices (merge already in reviews/code-hygiene.md)"'))
 })
 
 test("V7: a reply count that disagrees with the parse is logged but not fatal", async () => {

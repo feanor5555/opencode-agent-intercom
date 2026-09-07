@@ -22,6 +22,7 @@ import {
   claimPendingEndless,
   releaseEndless,
   countActiveSubagents,
+  upsertSession,
 } from "../src/registry.js"
 import { resetProjectContext } from "../src/project.js"
 import { setSettingsPath, resetSettings } from "../src/settings.js"
@@ -80,6 +81,26 @@ test("with the latch set, spawn is refused and no subagent slot is taken", async
   assert.match(res.output, /End your turn now/)
   assert.equal(countActiveSubagents(), before, "the count does not change")
   assert.deepEqual(created, [], "no session was created")
+})
+
+test("a nested caller gets an actionable refusal while the root is frozen", async () => {
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+  upsertSession("ses_planner", { agent: "planner", parentID: toolCtx.sessionID })
+  markEndlessPending(toolCtx.sessionID)
+
+  const res = await hooks.tool.spawn.execute(
+    { agent: "researcher", prompt: "do x" },
+    { sessionID: "ses_planner", agent: "planner", messageID: "m2" },
+  )
+
+  assert.match(res.output, /^Spawn refused: endless mode is replacing the primary orchestrator/)
+  assert.match(res.output, /delegation will not start/)
+  assert.match(res.output, /Do what you can yourself/)
+  assert.match(res.output, /Open that reply with "Blocked:"/)
+  assert.doesNotMatch(res.output, /End your turn now|open points/)
+  assert.doesNotMatch(res.output, /^spawn failed:/)
+  assert.deepEqual(created, [], "the nested refusal creates no session")
 })
 
 test("the freeze also holds while the cycle is executing, not only while it is pending", async () => {

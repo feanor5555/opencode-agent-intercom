@@ -256,7 +256,9 @@ async function nestedSpawnRefusal(permissionGuard, callerEntry, args, callerSess
 // caller asked a question inside a tool call and has to be told either the
 // answer or why there is none, or it sits on an empty result it cannot read.
 function nestedSpawnOutput(outcome, handle, agent) {
-  const who = `${handle} (${agent})`
+  // A prompt failure happens before the registry entry can receive a handle, so
+  // name that ending by role when no handle exists yet.
+  const who = handle ? `${handle} (${agent})` : `the "${agent}" subagent`
   if (outcome.status === "completed") {
     const cost = outcome.ctxTokens
       ? ` It used ~${fmtTokens(outcome.ctxTokens)} tokens of its own context getting there.`
@@ -388,12 +390,10 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // started now would in any case be reparented onto a session that has no
     // memory of asking for it.
     //
-    // A THROW, not a returned refusal — the shape §3.3 of the endless-mode
-    // concept names, and the shape the primary-tool guard in hooks.js already
-    // uses. NOTE: `guard` (above) catches it and hands the model
-    // `spawn failed: <this text>`, so what the model sees is the text either
-    // way; the throw is what makes the refusal a failed tool call rather than
-    // a successful one with a refusal in it.
+    // A primary caller gets the throw named by the endless-mode contract, which
+    // `guard` turns into `spawn failed: <this text>`. A nested caller instead
+    // receives a returned refusal: it has to get a result it can act on, and the
+    // primary-only open-points instruction does not apply to it.
     //
     // Asked of the caller's ROOT primary, not of the caller: the latch sets
     // hold primary session ids only, so a nested caller asking about its own
@@ -401,6 +401,15 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     // freeze. For a primary caller rootPrimaryFor is the identity.
     if (isEndlessFrozen(rootPrimaryFor(toolCtx.sessionID))) {
       log("spawn refused: endless cycle in progress", { sessionID: toolCtx.sessionID })
+      if (nested) {
+        return {
+          output:
+            "Spawn refused: endless mode is replacing the primary orchestrator, so this nested " +
+            "delegation will not start. Do what you can yourself and name in your final reply " +
+            "what you still need; the orchestrator decides. Open that reply with \"Blocked:\" " +
+            "where the missing material stops the task.",
+        }
+      }
       throw new Error(
         "Endless mode is saving this session's open points and replacing it with a fresh " +
           "orchestrator. No new subagent will start. End your turn now — the work you would " +
@@ -639,14 +648,15 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       } catch (err) {
         // Drop the waiter with the same failure, first and unconditionally. It
         // is not a blocked caller that is being freed here — this handler IS
-        // the caller and it is about to throw — but a waiter left in the map
-        // would make the caller look like a session with a live child for the
-        // rest of its run: its idle held, its silence excused, its teardown
-        // waiting on a child that was never prompted.
+        // the caller — but a waiter left in the map would make the caller look
+        // like a session with a live child for the rest of its run: its idle
+        // held, its silence excused, its teardown waiting on a child that was
+        // never prompted.
+        const detail = `the child session was never prompted: ${errMsg(err)}`
         settleChildWaiter(sessionID, {
           status: "error",
           agent: args.agent,
-          detail: `the child session was never prompted: ${errMsg(err)}`,
+          detail,
         })
         try {
           await removeEntry(sessionID)
@@ -654,6 +664,17 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
           forgetSessionDirectory(sessionID)
         } catch (cleanupErr) {
           log("spawn cleanup after prompt failure failed", errMsg(cleanupErr))
+        }
+        if (nested) {
+          return {
+            output: nestedSpawnOutput({ status: "error", detail }, undefined, args.agent),
+            metadata: {
+              sessionID,
+              agent: args.agent,
+              nested: true,
+              status: "error",
+            },
+          }
         }
         throw err
       }

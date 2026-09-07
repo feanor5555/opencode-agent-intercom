@@ -675,7 +675,12 @@ test("a child that is never prompted leaves no waiter behind", async () => {
   const callerCtx = subagentCaller("ses_planner", "planner")
 
   const res = await hooks.tool.spawn.execute({ agent: "researcher", prompt: "q" }, callerCtx)
-  assert.match(res.output, /^spawn failed: prompt rejected by the server/)
+  assert.match(res.output, /^the "researcher" subagent failed —/)
+  assert.match(res.output, /the child session was never prompted: prompt rejected by the server/)
+  assert.match(res.output, /You have no result from it/)
+  assert.match(res.output, /open that reply with "Blocked:"/)
+  assert.equal(res.metadata.nested, true)
+  assert.equal(res.metadata.status, "error")
   assert.equal(created.length, 1, "the session was created before the prompt failed")
   assert.equal(
     hasLiveChildren("ses_planner"),

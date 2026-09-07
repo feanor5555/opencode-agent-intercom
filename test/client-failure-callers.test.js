@@ -218,7 +218,12 @@ test("spawn (nested): a refused task prompt settles the caller's waiter", async 
     callerCtx,
   )
 
-  assert.match(res.output, /^spawn failed: /)
+  assert.match(res.output, /^the "researcher" subagent failed —/)
+  assert.match(res.output, /the child session was never prompted:/)
+  assert.match(res.output, /You have no result from it/)
+  assert.match(res.output, /open that reply with "Blocked:"/)
+  assert.equal(res.metadata.nested, true)
+  assert.equal(res.metadata.status, "error")
   assert.equal(hasLiveChildren("ses_planner"), false, "the waiter was settled, not left open")
 })
 

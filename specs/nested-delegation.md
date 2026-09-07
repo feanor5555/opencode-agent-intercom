@@ -32,12 +32,29 @@ Boundary: the plugin's server side (`src/`). The TUI is out of scope.
 
 ## 2. Who may delegate, and to whom
 
-**Two gates, and which wins.** The runtime authority is `checkSpawnPermission`
-(`src/config.js`): fail-closed, resolving the live config's `agent.<role>.permission.spawn`
-first, then this plugin's own role definition with opencode's semantics (an explicit
-`deny` denies, an absent key allows), then denying a role neither side defines. The
-prompt side asks `mayDelegate` (`src/agents.js:228-231`), which reads the static role map
-only. Where the two disagree the runtime wins and the prompt is wrong — see O1.
+**One gate, called from both sides.** `resolveSpawnPermission(client, role)`
+(`src/config.js:215`) is the sole authority: the spawn gate binds it as its
+`checkSpawnPermission` method, and the prompt side calls it directly. Its rungs:
+the live config's `agent.<role>.permission.spawn`, then this plugin's own role
+definition with opencode's semantics (an explicit `deny` denies, an absent key
+allows), then deny. A role neither side defines is denied; an unreadable config
+falls through to the plugin's own map.
+
+`delegatesNested(client, role)` (`src/hooks.js:1033`) asks whether to give a role
+the delegation block at all. It returns true only when the role is a subagent
+role, `maxNestedSpawns > 0`, its `NESTED_SPAWN_TARGETS` entry is non-empty, and
+`resolveSpawnPermission` returns null — so the prompt can never promise what
+the gate refuses. Anything else falls through to `SUBAGENT_NO_SPAWN_GUIDE`,
+without a limits block or a quota line. The same predicate sizes the per-type
+fixed-overhead figures in both limits blocks, since the headroom shown for a
+type depends on which of the two spawn guides that type receives.
+
+The resolved config is cached at module scope, so gate and prompt read one value
+and a config change takes effect on the next opencode start for both alike;
+unreadable configs fall through to the plugin's own role map. The one place with
+no resolved config to ask is `bin/init-prompts.js`, which writes the prompt
+files offline; `mayDelegate` (`src/agents.js:245`) is retained as that file's
+answer and as the plugin's own default.
 
 **The grant is the absence of a deny.** `NO_SPAWN = { spawn: "deny" }`
 (`src/agents.js:183-185`) is carried by `grounder`, `designer` and `gitter`. The five
@@ -241,10 +258,17 @@ somewhere else:
 - the process-state reset — `abandoned`, so a leftover promise cannot hang and its rescue
   timer cannot fire into the next run.
 
-**A nested child's ending is never also posted into its parent's session.** The notice
-door drops any parent notice whose addressee is itself a tracked subagent: the same
-ending would reach it twice, once as the tool result it asked for and once as a message
-it cannot act on while blocked and pays context for afterwards.
+**A detached child's late result reaches its parent.** Where a child outlives its
+own waiter (`expired` fired), the parent has already been freed with the placeholder
+outcome and is running again, but is still tracked as a subagent; the notice door
+would normally drop a notice for such an addressee. The ending path reads
+`detachedParentOf(sessionID)` and posts the late result directly to that parent,
+opening the door for that one delivery (`allowTrackedSubagent: true` only when
+`detachedParentOf` returned this same parent id). An ordinary nested completion
+does not match — its waiter was settled and the record is gone — so the
+no-duplicate rule still holds. Where the parent's own teardown already owns
+the child, that teardown delivers its own notice and the ending path posts
+nothing further.
 
 **The rescue ceiling.** It exists for one case: no ending path fires at all — an event the
 plugin never sees, a session that vanished server-side — where the parent's tool call
@@ -292,9 +316,11 @@ and the dependency cannot run both ways.
   over it. The child is not watchdogged — having no tracked entry is what let the ceiling
   fire — so no exemption is granted for it and nothing is held open that could not be
   lifted. If the child's own ending ever does arrive it finds a settled record, drops it,
-  and is reported as an ordinary ending; the reply it carries reaches nobody (O3). If
-  nothing ever arrives, the parent's teardown ends the session, and one that outlives the
-  process is collected by the bootstrap orphan sweep at the next plugin load.
+  and is reported as an ordinary ending — a late result whose parent has expired is
+  routed to that parent as a notice (see "A detached child's late result reaches its
+  parent" above). If nothing ever arrives, the parent's teardown ends the session, and
+  one that outlives the process is collected by the bootstrap orphan sweep at the next
+  plugin load.
 - `abandoned` — nothing owns the child. The process-state reset is a test and reload
   facility; a live opencode process does not reach it.
 
@@ -403,17 +429,21 @@ nested run ticks no TODO entry.
 
 ## 9. Open points
 
-**O1 — the prompt gate and the runtime gate can disagree, and nothing reconciles them.**
-`mayDelegate` reads the static role map; `checkSpawnPermission` reads the resolved config
-and is the authority (§2). A project that adds `spawn: "deny"` to `coder` leaves
-`mayDelegate("coder")` true, so that coder is given the delegation guide, the limits
-block and a fresh quota line on every turn while every spawn it makes is refused — paid
-prompt tokens for an instruction the runtime denies, plus the refusal round-trips this
-design works elsewhere to avoid. No owner in the source today. The shape a fix would
-take: the prompt-side predicate resolves the config gate once per run and falls back to
-the no-spawn guide, with no limits block and no quota line, wherever it denies — so the
-prompt can never promise what the gate refuses. Owner would be `delegatesNested`
-(`src/hooks.js`).
+**O4 — `permission.spawn` can open a role that has no target, and the converse cannot
+be set.** A project may write `agent.<role>.permission.spawn = "allow"` for a role
+that `NESTED_SPAWN_TARGETS` does not key, and the result is a role that is told it
+may delegate, carries a delegation guide that names a target it cannot in fact call,
+and is then refused at every spawn. The asymmetry is deliberate and survives on
+purpose: `NESTED_SPAWN_TARGETS` has no runtime counterpart, so the static table is
+the only place the graph is shaped, and shaping it from config would let a project
+add a target to a role that already has one and reach `grounder → researcher` — a
+spawn cycle the table is what makes structurally impossible. The cost of leaving
+this standing is a project that mis-sets `permission.spawn` gets the wrong guide
+on the way in and a refusal at the gate on the way out; a fresh opencode start
+clears both once the config is corrected. The fix would be either to deny
+`permission.spawn` for a role not in the table (cheap but surprises projects that
+extend with a target of their own in the same change), or to read the target set
+from config too (lets a cycle in), so the open point is left at the table.
 
 **O2 — assumption: `maxSubagents` is the orchestrator's serialisation of its own
 attention, not a resource or rate bound on the process.** The cap exemption in §4 is
@@ -422,14 +452,6 @@ a provider rate limit or the host machine, in which case a nested chain breaches
 bound it was set for, three sessions deep, without the orchestrator's cap figure showing
 it. Nothing in the settings distinguishes the two readings.
 
-**O3 — a detached child's reply reaches nobody.** After `expired` the parent has its
-outcome and is running again, so the child's own completion settles nothing; the notice
-door then drops the notice because the addressee is still a tracked subagent (§5). Where
-the parent has already ended, the parent's teardown ended the child without a notice by
-design. So work a detached child did finish is discarded in every case. Whether that is
-right is a decision this design has not taken: the alternative is routing such a reply to
-the root primary as an unasked-for notice, which costs the orchestrator context for
-material it did not request and arrives with no task to attach it to.
 
 ## 10. Out of scope
 

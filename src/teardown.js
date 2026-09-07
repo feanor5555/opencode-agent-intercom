@@ -547,9 +547,13 @@ export const ORPHAN_SWEEP_TTL_FACTOR = 2
 // short configured inactivity window from making the sweep too eager.
 export const ORPHAN_SWEEP_MIN_AGE_MS = 600000
 
-// Leave a wide margin after the inactivity watchdog would reap a silent
-// subagent. The sweep can see sessions from another opencode process, so its
-// age bound must be later than that process's own watchdog deadline.
+// Leave a wide margin after the inactivity watchdog would reap a subagent. The
+// sweep can see sessions from another opencode process, so its age bound must
+// be later than that process's own watchdog deadline — and that deadline is
+// the WIDER of the two windows watchdogLimit measures against
+// (`maxSubagentAgeMs` for a silent subagent, `maxSubagentToolCallMs` for one
+// inside a tool call), because a subagent sitting in a long tool call writes
+// nothing to its session and so looks exactly this idle from the outside.
 export const ORPHAN_SWEEP_WATCHDOG_FACTOR = 8
 
 // A session is deleted only when EVERY one of these holds. Each is a positive
@@ -571,26 +575,42 @@ export const ORPHAN_SWEEP_WATCHDOG_FACTOR = 8
 //     passes, but the sweep must stay safe wherever it is called from;
 //  5. it has been idle for longer than ORPHAN_SWEEP_TTL_FACTOR × the retention
 //     window, and in no case less than ORPHAN_SWEEP_MIN_AGE_MS or
-//     ORPHAN_SWEEP_WATCHDOG_FACTOR × maxSubagentAgeMs. A running subagent is
-//     reaped by the inactivity watchdog before that latter bound, and a
-//     retained one at its TTL, so nothing alive is ever this old; a second
-//     opencode instance's subagent on the same database is either far younger
-//     than this or already an orphan itself.
+//     ORPHAN_SWEEP_WATCHDOG_FACTOR × the WIDER of the two watchdog windows,
+//     `maxSubagentAgeMs` and `maxSubagentToolCallMs`. A running subagent is
+//     reaped by the inactivity watchdog before that latter bound — by the
+//     silence window when nothing of its own is in flight, by the tool-call
+//     window when it is inside a call that publishes nothing — and a retained
+//     one at its TTL, so nothing alive is ever this old; a second opencode
+//     instance's subagent on the same database is either far younger than this
+//     or already an orphan itself. Taking the silence window alone would leave
+//     a foreign subagent that is legally inside a tool call inside the sweep's
+//     kill range as soon as the tool-call window is raised past
+//     ORPHAN_SWEEP_WATCHDOG_FACTOR × the silence window.
 //
-// The sweep is unavailable when the inactivity watchdog is disabled. Without
-// that watchdog there is no finite age at which an untracked foreign session
-// can be known to be dead, so deleting one would turn an explicit user setting
-// into a live-session kill. A positive watchdog setting still leaves the sweep
-// useful, including for the shipped default. Every spawned session carries the
-// marker (tools.js), so the sweep can attribute them there as well; the cost at
-// load is one session.list call.
+// The sweep is unavailable when EITHER watchdog window is switched off. Without
+// the window that governs the case, there is no finite age at which an
+// untracked foreign session can be known to be dead, so deleting one would turn
+// an explicit user setting into a live-session kill: `maxSubagentAgeMs = 0`
+// switches the inactivity watchdog off altogether, and
+// `maxSubagentToolCallMs = 0` means the other instance never reaps a subagent
+// that is working, however long the call runs. Positive settings on both still
+// leave the sweep useful, including for the shipped default. Every spawned
+// session carries the marker (tools.js), so the sweep can attribute them there
+// as well; the cost at load is one session.list call.
 export async function sweepOrphanedSubagentSessions(client, { directory, now = Date.now() } = {}) {
   const settings = getSettings()
   if (settings.maxSubagentAgeMs <= 0) return []
+  // A settings object carrying no tool-call window is read as "no window wider
+  // than the silence one", the same way childWaiterTimeoutMs reads it: absent
+  // is not the statement an explicit 0 makes.
+  const toolCallMs = Number.isFinite(settings.maxSubagentToolCallMs)
+    ? settings.maxSubagentToolCallMs
+    : settings.maxSubagentAgeMs
+  if (toolCallMs <= 0) return []
   const minAgeMs = Math.max(
     ORPHAN_SWEEP_TTL_FACTOR * settings.retainedSubagentTtlMs,
     ORPHAN_SWEEP_MIN_AGE_MS,
-    ORPHAN_SWEEP_WATCHDOG_FACTOR * settings.maxSubagentAgeMs,
+    ORPHAN_SWEEP_WATCHDOG_FACTOR * Math.max(settings.maxSubagentAgeMs, toolCallMs),
   )
   const sessions = await listSessions(client, { directory })
   const parents = new Set()

@@ -17,9 +17,12 @@
 //   - it never touches a primary, the handoff's successor orchestrator
 //     included: that session is a child and carries no marker;
 //   - the age bound is twice the retention window, never less than
-//     ORPHAN_SWEEP_MIN_AGE_MS or the watchdog-derived margin, so a short
-//     retention window cannot pull it down onto a subagent that is merely
-//     running;
+//     ORPHAN_SWEEP_MIN_AGE_MS or the watchdog-derived margin — and that margin
+//     follows the WIDER of the two watchdog windows, so a foreign subagent
+//     sitting silently inside a legal tool call is out of range; a short
+//     retention window cannot pull the bound down onto a subagent that is
+//     merely running;
+//   - it is unavailable when EITHER watchdog window is switched off;
 //   - it runs at the shipped default too, on titles that carry the marker at
 //     the shipped default.
 //
@@ -356,7 +359,14 @@ test("a retention window too short to bound anything cannot pull the age bound d
   // Twice a one-second window is two seconds. With a one-minute watchdog the
   // independent floor remains the stronger bound, so a session idle for five
   // minutes may still be a running one — the floor keeps the sweep off it.
-  withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: 1000, maxSubagentAgeMs: 60000 })
+  withSettings({
+    maxRetainedSubagents: 3,
+    retainedSubagentTtlMs: 1000,
+    maxSubagentAgeMs: 60000,
+    // Both windows named, so the watchdog-derived margin is 8 × 60 000 here and
+    // the floor is what this test is about.
+    maxSubagentToolCallMs: 60000,
+  })
   const sessions = [
     session("ses_recent", { time: { created: now, updated: now - 300000 } }),
     session("ses_at_floor", { time: { created: now, updated: now - ORPHAN_SWEEP_MIN_AGE_MS } }),
@@ -377,7 +387,12 @@ test("the sweep bound follows a longer configured watchdog window", async () => 
     ORPHAN_SWEEP_MIN_AGE_MS,
     ORPHAN_SWEEP_WATCHDOG_FACTOR * watchdogAge,
   )
-  withSettings({ maxRetainedSubagents: 3, retainedSubagentTtlMs: 1000, maxSubagentAgeMs: watchdogAge })
+  withSettings({
+    maxRetainedSubagents: 3,
+    retainedSubagentTtlMs: 1000,
+    maxSubagentAgeMs: watchdogAge,
+    maxSubagentToolCallMs: watchdogAge,
+  })
   const sessions = [
     session("ses_at_watchdog_bound", {
       time: { created: now, updated: now - bound },
@@ -392,6 +407,58 @@ test("the sweep bound follows a longer configured watchdog window", async () => 
     ["ses_past_watchdog_bound"],
   )
   assert.deepEqual(deleted, ["ses_past_watchdog_bound"])
+})
+
+// The other instance's subagent is the only kind of session this sweep ever
+// judges, and such a subagent inside a tool call writes nothing to its session
+// — so `time.updated` says "idle" for the whole call. The bound has to clear
+// the window that instance's own watchdog measures it against, which is the
+// wider of the two, not the silence one.
+test("the sweep bound follows the WIDER of the two watchdog windows", async () => {
+  const silence = 90000
+  const inTool = 1200000 // above ORPHAN_SWEEP_WATCHDOG_FACTOR × silence
+  withSettings({
+    maxRetainedSubagents: 3,
+    retainedSubagentTtlMs: 1000,
+    maxSubagentAgeMs: silence,
+    maxSubagentToolCallMs: inTool,
+  })
+  const bound = ORPHAN_SWEEP_WATCHDOG_FACTOR * inTool
+  assert.ok(bound > ORPHAN_SWEEP_MIN_AGE_MS, "the watchdog-derived margin is the governing one")
+
+  const sessions = [
+    // Past 8 × the silence window — the old bound, at which this session was
+    // deleted — while its own instance is still holding it inside a tool call.
+    session("ses_foreign_in_tool", {
+      time: { created: now, updated: now - (ORPHAN_SWEEP_WATCHDOG_FACTOR * silence + 1) },
+    }),
+    session("ses_at_bound", { time: { created: now, updated: now - bound } }),
+    session("ses_past_bound", { time: { created: now, updated: now - bound - 1 } }),
+  ]
+  const { client, deleted } = makeClient({ sessions })
+  assert.deepEqual(
+    await sweepOrphanedSubagentSessions(client, { directory: fixtureDir, now }),
+    ["ses_past_bound"],
+    "only what is past the wider window's margin is attributable as dead",
+  )
+  assert.deepEqual(deleted, ["ses_past_bound"])
+})
+
+test("an unbounded working window disables the sweep", async () => {
+  // `maxSubagentToolCallMs = 0` says the other instance never reaps a subagent
+  // that is working, so no finite age makes its silence attributable.
+  withSettings({
+    maxRetainedSubagents: 3,
+    retainedSubagentTtlMs: 1000,
+    maxSubagentAgeMs: 90000,
+    maxSubagentToolCallMs: 0,
+  })
+  const { client, deleted, listCalls } = makeClient({
+    sessions: [session("ses_live_foreign", { time: { created: now, updated: 0 } })],
+  })
+  assert.deepEqual(await sweepOrphanedSubagentSessions(client, { directory: fixtureDir, now }), [])
+  assert.deepEqual(listCalls, [], "no age can make a session under an unbounded window safe")
+  assert.deepEqual(deleted, [])
 })
 
 test("a disabled watchdog leaves foreign sessions standing", async () => {

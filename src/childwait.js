@@ -33,7 +33,7 @@
 // called from inside a `registryMutex.runExclusive` section without nesting the
 // non-re-entrant FIFO mutex.
 
-import { pendingChildResults } from "./state.js"
+import { pendingChildResults, registry, bySession } from "./state.js"
 import { getSettings } from "./settings.js"
 import { log } from "./log.js"
 
@@ -47,7 +47,9 @@ import { log } from "./log.js"
 //               text rescued off the session before the teardown deleted it,
 //               already through the reply token ceiling, and is absent or
 //               empty when nothing could be read
-//   expired   — the waiter's OWN ceiling fired; the child may still be running
+//   expired   — the waiter's OWN ceiling fired; the child may still be running,
+//               and its record stays behind as a DETACHED child (see below) so
+//               a teardown of the parent still ends it first
 //   ended     — the child was torn down by a path that named no outcome
 //   abandoned — resetState() cleared the process state out from under it
 export const CHILD_OUTCOMES = Object.freeze([
@@ -79,35 +81,56 @@ export const CHILD_OUTCOMES = Object.freeze([
 // 4x — 44 minutes at the 660 s default, 6 minutes when the two windows are
 // equal — is longer than any single window the watchdog would let a child live
 // under, and shorter than a session the user has given up on.
+//
+// A child's legal lifetime is not one window, though: each tool call and each
+// event restarts the clock the window is measured against, so consecutive long
+// calls can carry a healthy child past any fixed multiple. The number alone
+// therefore cannot separate "stuck" from "slow", and the timer does not try to:
+// when it fires it ASKS, and re-arms for another period while the child is
+// still a tracked registry entry (registerChildWaiter). The ceiling expires a
+// parent only over a child the watchdog no longer owns — which is the case it
+// exists for.
 export const CHILD_WAITER_TIMEOUT_FACTOR = 4
 
 // Resolves the ceiling in ms from the settings, or 0 for "no ceiling".
 //
-// Either window at 0 lifts the ceiling, and for the same reason each time: a
-// window at 0 is a child the watchdog will not end, and the waiter must not
-// expire a parent over a child that is still legally running.
+// Only `maxSubagentAgeMs = 0` lifts the ceiling: that switches the inactivity
+// watchdog off entirely, and a user who has taken out the dead-man's switch has
+// asked for runs no clock cuts off — a rescue timer firing anyway would
+// contradict the setting rather than back it up. The registry entry of such a
+// child is never reaped, so the re-arm below would never expire it in any case.
 //
-//   maxSubagentAgeMs = 0      — the inactivity watchdog is off entirely. A user
-//                               who has switched off the dead-man's switch has
-//                               asked for runs that are not cut off by a clock,
-//                               and a rescue timer that fires anyway would
-//                               contradict the setting rather than back it up.
-//   maxSubagentToolCallMs = 0 — no ceiling while a subagent works. A child
-//                               inside a tool call is then never swept, so any
-//                               finite ceiling here would fire on it.
+// `maxSubagentToolCallMs = 0` does NOT lift it. That 0 says "no ceiling while a
+// subagent works", and the re-arm in registerChildWaiter is what honours it: a
+// child that is still a tracked entry is never expired, however long it works.
+// Returning 0 here instead would drop the rescue for the one case the ceiling
+// exists for — a child session that vanished server-side, whose ending path
+// never fires, leaving the parent's `spawn` tool call blocked for the life of
+// the opencode process. The window is then read as "no window wider than the
+// silence one", so the ceiling keeps a finite value to rescue from.
 //
 // Reads the settings object rather than calling watchdogLimit: src/watchdog.js
 // imports this module (liveChildSessionIDs), so the dependency cannot run both
-// ways. A settings object that carries no tool-call window at all is read as
-// "no window wider than the silence one" — absent is not the same statement as
-// an explicit 0, and defaulting it to unbounded would drop the rescue.
+// ways. A settings object that carries no tool-call window at all is read the
+// same way as an explicit 0 here — both leave the silence window as the base —
+// which is the reading the sweep in src/teardown.js also takes for an absent
+// key.
 export function childWaiterTimeoutMs(settings = getSettings()) {
   const maxAgeMs = settings?.maxSubagentAgeMs
   const toolCallMs = settings?.maxSubagentToolCallMs
   if (!Number.isFinite(maxAgeMs) || maxAgeMs <= 0) return 0
-  if (Number.isFinite(toolCallMs) && toolCallMs <= 0) return 0
-  const widestWindowMs = Number.isFinite(toolCallMs) ? Math.max(maxAgeMs, toolCallMs) : maxAgeMs
-  return widestWindowMs * CHILD_WAITER_TIMEOUT_FACTOR
+  const workingWindowMs = Number.isFinite(toolCallMs) && toolCallMs > 0 ? toolCallMs : maxAgeMs
+  return Math.max(maxAgeMs, workingWindowMs) * CHILD_WAITER_TIMEOUT_FACTOR
+}
+
+// The registry entry for a session, or undefined. A two-line copy of
+// registry.js's `entryForSession` on purpose: registry.js is far above this
+// module in the import order, and this module is imported by watchdog.js,
+// teardown.js, hooks.js and tools.js, so reaching for it here would close a
+// cycle. The maps themselves come from state.js, which this module already
+// imports and which imports nothing of ours.
+function trackedEntryFor(sessionID) {
+  return registry.get(bySession.get(sessionID))
 }
 
 // Registers a waiter for `childSessionID` on behalf of `parentSessionID` and
@@ -141,6 +164,12 @@ export function registerChildWaiter(childSessionID, parentSessionID, { timeoutMs
     promise,
     createdAt: Date.now(),
     settled: false,
+    // Set by the ceiling alone: the parent has been freed with `expired`, but
+    // the child was never ended, so the record stays in the map as a DETACHED
+    // child. It answers `liveChildSessionIDs` (the teardown ordering that keeps
+    // a parent's DELETE from cascading over it) and no longer answers
+    // `hasLiveChildren` (nobody is blocked on it any more).
+    detached: false,
     timer: null,
     // Idempotent, and the ONLY place the promise is resolved. Kept on the
     // record (rather than reached through the map) so resetState can settle a
@@ -166,20 +195,53 @@ export function registerChildWaiter(childSessionID, parentSessionID, { timeoutMs
 
   const ceiling = timeoutMs === undefined ? childWaiterTimeoutMs() : timeoutMs
   if (ceiling > 0) {
-    const timer = setTimeout(() => {
-      // The ceiling frees the PARENT, not the child: the child keeps running
-      // and is still reaped by its own idle / error / watchdog path, whose
-      // later settle attempt then finds no waiter and is a no-op.
-      if (settleChildWaiter(childSessionID, {
-        status: "expired",
-        detail: `no outcome within ${ceiling} ms; the child may still be running`,
-      })) {
-        log("child waiter expired", { childSessionID, parentSessionID, ceiling })
-      }
-    }, ceiling)
+    // Re-arming rather than one-shot. A child that is still a tracked registry
+    // entry is a child the watchdog owns: it is measured against one of the two
+    // windows on every sweep and ended when it trips one, and that ending
+    // settles this waiter. There is nothing for the rescue to rescue while that
+    // holds, so it waits another period instead of expiring a parent over a
+    // child that is legally working — which is what a raised or switched-off
+    // `maxSubagentToolCallMs` asks for, and what no fixed multiple of a window
+    // can decide on its own (CHILD_WAITER_TIMEOUT_FACTOR).
+    //
+    // The expiry that remains is the case the ceiling was built for: no entry,
+    // so no watchdog clock, so no ending path — a session that vanished
+    // server-side or an event the plugin never saw.
+    const arm = () =>
+      setTimeout(() => {
+        record.timer = null
+        if (trackedEntryFor(childSessionID)) {
+          record.timer = arm()
+          log("child waiter re-armed: the child is still watchdogged", {
+            childSessionID,
+            parentSessionID,
+            ceiling,
+          })
+          return
+        }
+        // The ceiling frees the PARENT, not the child. The child may still be
+        // running server-side, so the record is DETACHED rather than dropped:
+        // the parent's own teardown still has to end this session before its
+        // DELETE cascades over it. The child's own ending path, if one ever
+        // fires, finds a settled record, drops it and routes its result to the
+        // parent as an ordinary wake notice.
+        record.detached = true
+        if (
+          record.settle({
+            status: "expired",
+            detail: `no outcome within ${ceiling} ms; the child may still be running`,
+          })
+        ) {
+          log("child waiter expired; the child stays a detached child", {
+            childSessionID,
+            parentSessionID,
+            ceiling,
+          })
+        }
+      }, ceiling)
     // Keep the rescue timer referenced while its promise is pending.
     // settleChildWaiter clears it once an outcome arrives.
-    record.timer = timer
+    record.timer = arm()
   }
 
   pendingChildResults.set(childSessionID, record)
@@ -193,8 +255,14 @@ export function registerChildWaiter(childSessionID, parentSessionID, { timeoutMs
 // this child being waited on?", which is how a caller decides whether the
 // result still needs to go to the parent as a wake notice.
 //
-// Safe to call for an unwaited child (every child today), for an already
-// settled one, and twice from the same path.
+// A DETACHED record (the ceiling fired, the parent was freed, the child was
+// not) is dropped here and answers false: the parent already has its outcome,
+// so this ending is a wake notice like any other child's, and the record's one
+// remaining job — keeping the child visible to the teardown ordering — ends
+// with the ending that is now being reported.
+//
+// Safe to call for an unwaited child, for an already settled one, and twice
+// from the same path.
 export function settleChildWaiter(childSessionID, outcome = {}) {
   if (!childSessionID) return false
   const record = pendingChildResults.get(childSessionID)
@@ -207,16 +275,36 @@ export function settleChildWaiter(childSessionID, outcome = {}) {
       parentSessionID: record.parentSessionID,
       status: outcome.status ?? "ended",
     })
+  } else if (record.detached) {
+    log("detached child ended; its record is dropped", {
+      childSessionID,
+      parentSessionID: record.parentSessionID,
+      status: outcome.status ?? "ended",
+    })
   }
   return settled
 }
 
-// True while `childSessionID` is a child somebody is blocked on.
+// True while `childSessionID` is a child somebody is blocked on. A detached
+// child is not: its parent has been freed with `expired` and is running again.
 export function hasChildWaiter(childSessionID) {
-  return !!childSessionID && pendingChildResults.has(childSessionID)
+  if (!childSessionID) return false
+  const record = pendingChildResults.get(childSessionID)
+  return !!record && !record.detached
 }
 
-// The session ids of the live children `parentSessionID` is blocked on.
+// The session ids of the children of `parentSessionID` that may still be
+// running — the ones it is blocked on AND its detached ones, whose ceiling
+// freed the parent while the child itself was never ended.
+//
+// Detached children are in on purpose: this is the read the teardown ordering
+// uses (endLiveChildrenOf, src/teardown.js), and opencode's DELETE cascades
+// recursively over child sessions, so a child left out here is a child whose
+// rows the parent's delete wipes mid-write. It is also the read the watchdog
+// exemption uses (isWaitingOnWatchdoggedChild, src/watchdog.js), which narrows
+// it again to children that are tracked registry entries — and a detached child
+// is one nothing tracks, so no exemption is granted for it and nothing is held
+// open that could not be lifted.
 //
 // A linear scan: a parent has at most one live child under the blocking shape
 // (its own tool call is what waits), and the map holds one record per waited
@@ -231,21 +319,32 @@ export function liveChildSessionIDs(parentSessionID) {
   return out
 }
 
-// True when `parentSessionID` has at least one live child. This is the
-// predicate the nesting fixes ask for — an idle parent with live children must
-// not be torn down, its DELETE must not cascade, and the watchdog must not
-// count its silence against it.
+// True when `parentSessionID` is blocked on at least one child — i.e. its
+// `spawn` tool call has not returned. This is the predicate the idle hold asks
+// for (onSessionIdle, src/hooks.js): an idle event from a session whose tool
+// call is still outstanding is not the one-shot reply that path delivers, so
+// taking it would post a premature result to the grandparent and free a slot
+// that is not free.
+//
+// A DETACHED child does NOT make this true, and that is the difference between
+// this predicate and `liveChildSessionIDs`: once the ceiling has handed the
+// parent `expired`, its tool call HAS returned, so its next idle is genuine and
+// must be taken. What still has to happen to the detached child — being ended
+// before the parent's DELETE reaches it — is teardown's business and is carried
+// by that other read.
 export function hasLiveChildren(parentSessionID) {
   if (!parentSessionID) return false
   for (const record of pendingChildResults.values()) {
-    if (record.parentSessionID === parentSessionID) return true
+    if (record.parentSessionID === parentSessionID && !record.detached) return true
   }
   return false
 }
 
-// The waiter's parent, or undefined when the child is not being waited on.
-// Lets an ending path address the blocked session without a registry lookup —
-// the registry entry may already be gone by then.
+// The waiter's parent, or undefined when the child is not being waited on — a
+// detached child included, whose parent is no longer blocked on it. Lets an
+// ending path address the blocked session without a registry lookup: the
+// registry entry may already be gone by then.
 export function waitingParentOf(childSessionID) {
-  return pendingChildResults.get(childSessionID)?.parentSessionID
+  const record = pendingChildResults.get(childSessionID)
+  return record && !record.detached ? record.parentSessionID : undefined
 }

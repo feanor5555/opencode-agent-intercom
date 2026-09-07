@@ -145,7 +145,7 @@ export const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000;
 // call, or whose session opencode still reports as busy. `0` means no ceiling
 // while it works. The plugin's own copy is DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS in
 // src/settings.js, pinned the same indirect way as the window above. Stepped by
-// the panel's "tool call (min)" row, which shows and steps it in whole minutes.
+// the panel's "in tool (min)" row, which shows and steps it in whole minutes.
 export const DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS = 660000;
 // The unit the silence window is shown and stepped in: whole seconds. Fifteen
 // of them, so the 90 s default is six steps off zero and a user can reach the

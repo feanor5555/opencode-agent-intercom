@@ -18,7 +18,7 @@ import { join } from "node:path"
 
 import plugin from "../src/index.js"
 import { resetState, pendingChildResults } from "../src/state.js"
-import { entryForSession } from "../src/registry.js"
+import { entryForSession, removeEntry } from "../src/registry.js"
 import { resetTurnNotices, timeoutSubagent } from "../src/hooks.js"
 import { teardownSubagent } from "../src/teardown.js"
 import { sweepWatchdog, _stopWatchdogForTests } from "../src/watchdog.js"
@@ -281,7 +281,7 @@ test("the derived ceiling is never shorter than the window a working child lives
   )
 })
 
-test("either window at 0 lifts the ceiling", () => {
+test("the silence window at 0 lifts the ceiling; the working window at 0 does not", () => {
   // maxSubagentAgeMs = 0 switches the watchdog off; the ceiling goes with it.
   assert.equal(childWaiterTimeoutMs({ maxSubagentAgeMs: 0, maxSubagentToolCallMs: 660000 }), 0)
   assert.equal(childWaiterTimeoutMs({ maxSubagentAgeMs: -1, maxSubagentToolCallMs: 660000 }), 0)
@@ -289,16 +289,29 @@ test("either window at 0 lifts the ceiling", () => {
     childWaiterTimeoutMs({ maxSubagentAgeMs: Number.NaN, maxSubagentToolCallMs: 660000 }),
     0,
   )
-  // maxSubagentToolCallMs = 0 means a working child is never swept; a finite
-  // ceiling here would expire its parent over a child that is legally running.
-  assert.equal(childWaiterTimeoutMs({ maxSubagentAgeMs: 90000, maxSubagentToolCallMs: 0 }), 0)
+
+  // maxSubagentToolCallMs = 0 means a working child is never swept — and that
+  // is honoured by the re-arm, not by dropping the ceiling: a child the
+  // watchdog still tracks is never expired, while one whose session vanished
+  // server-side is still rescued. Returning 0 here would leave the parent's
+  // tool call blocked for the life of the process, which is the one case the
+  // ceiling exists for.
+  assert.equal(
+    childWaiterTimeoutMs({ maxSubagentAgeMs: 90000, maxSubagentToolCallMs: 0 }),
+    90000 * CHILD_WAITER_TIMEOUT_FACTOR,
+    "the silence window carries the derivation when the working one is unbounded",
+  )
 
   writeFileSync(settingsFile, JSON.stringify({ maxSubagentAgeMs: 0 }))
   resetSettings()
   assert.equal(childWaiterTimeoutMs(), 0, "switching off the watchdog switches off the ceiling")
   writeFileSync(settingsFile, JSON.stringify({ maxSubagentToolCallMs: 0 }))
   resetSettings()
-  assert.equal(childWaiterTimeoutMs(), 0, "an unbounded working child gets no finite ceiling")
+  assert.equal(
+    childWaiterTimeoutMs(),
+    getSettings().maxSubagentAgeMs * CHILD_WAITER_TIMEOUT_FACTOR,
+    "an unbounded working window still leaves a finite rescue",
+  )
 })
 
 // The defect end to end, on the real sweep: a child inside a tool call, its
@@ -335,7 +348,7 @@ test("a parent waiting on a child inside a long tool call is not expired before 
   // The child's OWN limit is what ends the wait, and the parent hears which:
   // `timeout` naming the window that fired, never `expired`.
   const startedAt = Date.now() - 300
-  entry.toolCallAt = startedAt
+  entry.toolCalls.get("c1").startedAt = startedAt
   entry.lastActivityAt = startedAt
   await sweepWatchdog()
 
@@ -344,17 +357,90 @@ test("a parent waiting on a child inside a long tool call is not expired before 
   assert.match(outcome.detail, /maxSubagentToolCallMs 250 ms/)
 })
 
-test("the ceiling frees the parent as `expired` and drops the waiter", async () => {
+// ---- the ceiling: re-arm, and the detached child it leaves ------------------
+
+test("the ceiling frees the parent as `expired` and detaches the child", async () => {
   const promise = registerChildWaiter(CHILD, PARENT, { timeoutMs: 5 })
   const outcome = await promise
   assert.equal(outcome.status, "expired")
   assert.match(outcome.detail, /may still be running/)
-  assert.equal(hasLiveChildren(PARENT), false, "an expired waiter is no longer a live child")
 
-  // The child is NOT dead — its own ending path runs later and finds no
-  // waiter, which must not throw or resurrect one.
+  // The parent's tool call has RETURNED, so it is not blocked any more: its
+  // next idle is a genuine one and the hold must not take it.
+  assert.equal(hasLiveChildren(PARENT), false, "an expired waiter no longer blocks its parent")
+  assert.equal(hasChildWaiter(CHILD), false, "and nobody is waiting on the child")
+  assert.equal(waitingParentOf(CHILD), undefined)
+
+  // The child was never ended, though, and opencode's DELETE cascades over
+  // child sessions — so the record stays, and the teardown ordering still sees
+  // the child it has to end before the parent's own delete.
+  assert.deepEqual(liveChildSessionIDs(PARENT), [CHILD], "it stays a detached child")
+  assert.equal(pendingChildResults.size, 1)
+
+  // Its own ending path, whenever it comes, finds no waiter to settle — its
+  // result goes to the parent as an ordinary wake notice — and drops the
+  // record. It must not throw or resurrect a waiter.
   assert.equal(settleChildWaiter(CHILD, { status: "completed", result: "late" }), false)
   assert.equal(pendingChildResults.size, 0)
+  assert.deepEqual(liveChildSessionIDs(PARENT), [])
+})
+
+test("a parent's teardown ends its detached child before its own DELETE cascades", async () => {
+  const { ctx, deleted } = makeCtx()
+  const outcome = await registerChildWaiter(CHILD, PARENT, { timeoutMs: 5 })
+  assert.equal(outcome.status, "expired")
+
+  await teardownSubagent(
+    ctx.client,
+    { sessionID: PARENT, handle: "planner#1", parentID: "ses_primary", agent: "planner" },
+    { label: "test" },
+  )
+
+  assert.deepEqual(
+    deleted,
+    [CHILD, PARENT],
+    "the detached child is ended first: the parent's delete must not cascade onto it mid-write",
+  )
+  assert.equal(pendingChildResults.size, 0, "and the detached record goes with it")
+})
+
+// The ceiling asks rather than fires: while the child is a tracked registry
+// entry the watchdog owns it, measures it against one of its two windows and
+// settles this waiter when it ends, so there is nothing to rescue.
+test("the ceiling re-arms while the child is still tracked, and expires once it is not", async () => {
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+  const childID = created[0]
+  assert.ok(entryForSession(childID), "the child is watchdogged")
+
+  const promise = registerChildWaiter(childID, PARENT, { timeoutMs: 10 })
+  await sleep(80) // eight periods
+  assert.equal(
+    await settledOrPending(promise),
+    "pending",
+    "a child the watchdog still owns is never expired, however many periods pass",
+  )
+  assert.equal(hasLiveChildren(PARENT), true, "so its parent is still blocked on it")
+
+  // The entry goes without settling the waiter — the vanished-session case the
+  // ceiling exists for. The next period finds nothing tracking the child.
+  await removeEntry(childID)
+  const outcome = await Promise.race([promise, sleep(2000).then(() => "never expired")])
+  assert.equal(outcome.status, "expired", "an untracked child has no clock but this one")
+})
+
+test("`maxSubagentToolCallMs = 0` still rescues a parent whose child has vanished", async () => {
+  // The row set to `off` says "no ceiling while it WORKS". A child with no
+  // registry entry is not working — nothing in this process is watching it at
+  // all — and its parent would otherwise block for the life of the process.
+  writeFileSync(settingsFile, JSON.stringify({ maxSubagentAgeMs: 10, maxSubagentToolCallMs: 0 }))
+  resetSettings()
+  assert.equal(childWaiterTimeoutMs(), 10 * CHILD_WAITER_TIMEOUT_FACTOR)
+
+  const promise = registerChildWaiter(CHILD, PARENT) // the DERIVED ceiling
+  const outcome = await Promise.race([promise, sleep(2000).then(() => "never expired")])
+  assert.equal(outcome.status, "expired")
 })
 
 test("a waiter that settles in time never expires", async () => {

@@ -118,7 +118,8 @@ const DEFAULT_MAX_PRIMARY_CONTEXT = 80000
 // whose events all belong to the child's session. The sweep treats waiting on
 // a watchdogged child as activity (see isWaitingOnWatchdoggedChild), so this
 // window measures the CHILD, and the parent outlives it by construction.
-// It also sets the child-waiter's own rescue ceiling — see childwait.js.
+// The child-waiter's rescue ceiling is 4 × the wider of this and the
+// tool-call window; either window at 0 lifts that ceiling entirely — see childwait.js.
 const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
 // The same watchdog's window for a subagent that is WORKING: one whose last
 // sign of life was the start of a tool call, or whose session opencode still
@@ -133,6 +134,8 @@ const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
 // tick. Below that a healthy command is reaped mid-run; far above it a session
 // that really died inside a tool call would pin its slot for the life of the
 // process.
+// The child-waiter's rescue ceiling is 4 × the wider of the silence and this
+// window; either window at 0 lifts that ceiling entirely — see childwait.js.
 const DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS = 660000
 // How many finished subagents may be held as retained sessions in this
 // process at once. A retained subagent has delivered its result and had its

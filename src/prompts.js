@@ -402,8 +402,11 @@ export const WIND_DOWN_SUBAGENT_CONTRACT =
   "## HOW YOU MUST WRITE THE FILE\n\n" +
   "- Edit ONLY between the two marker lines `<!-- intercom:begin -->` and `<!-- intercom:end -->`. " +
   "Everything outside them is human text: do not reword it, do not reformat it, do not delete " +
-  "it, do not add headings of your own. A rewrite that touches a line outside the markers is " +
-  "REJECTED in full and the file is restored from a snapshot, so the whole cycle is lost.\n" +
+  "it, do not add headings of your own. The one exception is the exact migration in the next " +
+  "bullet: an unmigrated task block may be deleted from outside the markers when it is moved " +
+  "inside. Its immediately following blank line may stay or be deleted; no other outside line " +
+  "may change. A rewrite that touches any other outside line is REJECTED in full and the file is " +
+  "restored from a snapshot, so the whole cycle is lost.\n" +
   "- Task lines take exactly this shape, and no other:\n\n" +
   "      - T<n>: <one-line title>\n" +
   "        accept: <what would show it is done>\n" +
@@ -412,7 +415,9 @@ export const WIND_DOWN_SUBAGENT_CONTRACT =
   "`<!-- intercom: next-id T<n> -->` on the last line inside the markers, and leave that comment " +
   "pointing one past the highest id you wrote.\n" +
   "- A task line that stands OUTSIDE the markers is an unmigrated leftover: move the whole block " +
-  "into the marked section, keeping its id.\n" +
+  "into the marked section, keeping its id, and delete that whole block from where it stood. " +
+  "This migration is the only permitted outside change; its immediately following blank line " +
+  "may stay or be deleted, but no other outside line may change.\n" +
   "- Order the tasks by feasibility — the first one is the next one to do.\n\n" +
   "Your final reply is read by the orchestrator and must state, in one or two lines, how many " +
   "open tasks stand in the file after your edit, or that you changed nothing, or that nothing is " +

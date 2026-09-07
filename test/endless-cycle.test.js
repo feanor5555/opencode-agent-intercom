@@ -16,6 +16,7 @@
 
 import test from "node:test"
 import assert from "node:assert/strict"
+import { readFileSync, unlinkSync } from "node:fs"
 
 import { resetState, endlessProgress } from "../src/state.js"
 import {
@@ -33,11 +34,13 @@ import {
   verifyWindDown,
   endlessKickoffBlock,
   cutTodoText,
+  writeRejectedWindDown,
   KICKOFF_TODO_MAX_CHARS,
   ENDLESS_MAX_STALLED_CYCLES,
 } from "../src/endless.js"
 import { parseTasks, splitSections } from "../src/todofile.js"
 import { interpretWindDownReply } from "../src/handoff.js"
+import { WIND_DOWN_SUBAGENT_CONTRACT } from "../src/prompts.js"
 
 const SID = "ses-endless-cycle"
 const NEW_SID = "ses-endless-cycle-new"
@@ -58,6 +61,19 @@ function fenced(taskLines, nextId) {
 const SNAP = fenced(["- T1: do the thing"], "T2")
 // V3 differs, V4 outside identical, V5/V6 hold: T1 kept, T2 added.
 const FRESH = fenced(["- T1: do the thing", "- T2: another open item"], "T3")
+
+const LEGACY_TASK = "- T1: guard-denied-native-task\n  accept: noop"
+const LEGACY_SNAPSHOT =
+  `${LEGACY_TASK}\n\n## Intercom tasks\n<!-- intercom:begin -->\n<!-- intercom:end -->\n`
+const MOVED_WITH_SEPARATOR =
+  `\n## Intercom tasks\n<!-- intercom:begin -->\n${LEGACY_TASK}\n<!-- intercom:end -->\n`
+const MOVED_WITHOUT_SEPARATOR =
+  `## Intercom tasks\n<!-- intercom:begin -->\n${LEGACY_TASK}\n<!-- intercom:end -->\n`
+const LEGACY_LEFT_STANDING =
+  `${LEGACY_SNAPSHOT.slice(0, LEGACY_SNAPSHOT.indexOf("<!-- intercom:begin -->") + "<!-- intercom:begin -->".length)}\n${LEGACY_TASK}\n<!-- intercom:end -->\n`
+const MOVED_WITHOUT_TRAILING_NEWLINE = MOVED_WITHOUT_SEPARATOR.slice(0, -1)
+const MOVED_WITH_ADDED_TRAILING_NEWLINE = `${MOVED_WITHOUT_TRAILING_NEWLINE}\n`
+const FRESH_WITHOUT_TRAILING_NEWLINE = FRESH.slice(0, -1)
 
 function settled(status = "completed") {
   return Promise.resolve({ status, childSessionID: "ses-child", parentSessionID: SID })
@@ -422,6 +438,107 @@ test("verifyWindDown flags an outside change as a V4 failure", () => {
     { splitSections, parseTasks },
   )
   assert.equal(v.v4, false)
+})
+
+test("V4 accepts a moved legacy block with its separator blank left", () => {
+  const v = verifyWindDown(
+    { content: LEGACY_SNAPSHOT, tasks: parseTasks(LEGACY_SNAPSHOT) },
+    { content: MOVED_WITH_SEPARATOR, replyNoChange: false, replyNothingOpen: false, replyCount: 1 },
+    { splitSections, parseTasks },
+  )
+  assert.equal(v.v4, true)
+})
+
+test("V4 accepts a moved legacy block with its separator blank deleted", () => {
+  const v = verifyWindDown(
+    { content: LEGACY_SNAPSHOT, tasks: parseTasks(LEGACY_SNAPSHOT) },
+    { content: MOVED_WITHOUT_SEPARATOR, replyNoChange: false, replyNothingOpen: false, replyCount: 1 },
+    { splitSections, parseTasks },
+  )
+  assert.equal(v.v4, true)
+})
+
+test("V4 rejects a legacy block left standing beside its migrated copy", () => {
+  const v = verifyWindDown(
+    { content: LEGACY_SNAPSHOT, tasks: parseTasks(LEGACY_SNAPSHOT) },
+    { content: LEGACY_LEFT_STANDING, replyNoChange: false, replyNothingOpen: false, replyCount: 2 },
+    { splitSections, parseTasks },
+  )
+  assert.equal(v.v4, false)
+})
+
+test("V4 accepts a correct migration that drops the trailing newline", () => {
+  const v = verifyWindDown(
+    { content: LEGACY_SNAPSHOT, tasks: parseTasks(LEGACY_SNAPSHOT) },
+    {
+      content: MOVED_WITHOUT_TRAILING_NEWLINE,
+      replyNoChange: false,
+      replyNothingOpen: false,
+      replyCount: 1,
+    },
+    { splitSections, parseTasks },
+  )
+  assert.equal(v.v4, true)
+})
+
+test("V4 accepts a correct migration that adds the trailing newline", () => {
+  const v = verifyWindDown(
+    { content: LEGACY_SNAPSHOT, tasks: parseTasks(LEGACY_SNAPSHOT) },
+    {
+      content: MOVED_WITH_ADDED_TRAILING_NEWLINE,
+      replyNoChange: false,
+      replyNothingOpen: false,
+      replyCount: 1,
+    },
+    { splitSections, parseTasks },
+  )
+  assert.equal(v.v4, true)
+})
+
+test("an accepted rewrite is written back with one trailing newline", async () => {
+  const writes = []
+  const io = baseIo({
+    reread: () => ({ name: "TODO.md", content: FRESH_WITHOUT_TRAILING_NEWLINE }),
+    restoreSnapshot: (content) => writes.push(content),
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "complete")
+  assert.deepEqual(writes, [FRESH])
+})
+
+test("V4 exposes the failed conjunct and line-level comparison", () => {
+  const v = verifyWindDown(
+    { content: LEGACY_SNAPSHOT, tasks: parseTasks(LEGACY_SNAPSHOT) },
+    { content: LEGACY_LEFT_STANDING, replyNoChange: false, replyNothingOpen: false, replyCount: 2 },
+    { splitSections, parseTasks },
+  )
+  assert.equal(v.v4Details.markerValid, true)
+  assert.equal(v.v4Details.sequenceValid, false)
+  assert.equal(v.v4Details.firstDifference.index, 0)
+  assert.equal(v.v4Details.firstDifference.expectedLine, JSON.stringify(""))
+  assert.equal(v.v4Details.firstDifference.actualLine, JSON.stringify(LEGACY_TASK.split("\n")[0]))
+  assert.equal(v.v4Details.expectedLength, 3)
+  assert.equal(v.v4Details.actualLength, 5)
+  assert.deepEqual(v.v4Details.migratedBlockIndices, [0, 1])
+})
+
+test("the wind-down contract licenses only the task-block migration outside the markers", () => {
+  assert.match(WIND_DOWN_SUBAGENT_CONTRACT, /one exception is the exact migration/)
+  assert.match(WIND_DOWN_SUBAGENT_CONTRACT, /delete that whole block from where it stood/)
+  assert.match(WIND_DOWN_SUBAGENT_CONTRACT, /blank line may stay or be deleted/)
+  assert.match(WIND_DOWN_SUBAGENT_CONTRACT, /no other outside line may change/)
+})
+
+test("rejected wind-down content is filed verbatim", () => {
+  const content = "rejected rewrite\\nwith trailing detail\\n"
+  const result = writeRejectedWindDown(content, "ses-endless-cycle-test")
+  assert.equal(result.error, null)
+  assert.ok(result.path)
+  try {
+    assert.equal(readFileSync(result.path, "utf8"), content)
+  } finally {
+    unlinkSync(result.path)
+  }
 })
 
 // ---------------------------------------------------------------------------

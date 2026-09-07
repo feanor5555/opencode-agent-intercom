@@ -296,19 +296,27 @@ header lines the parser matches. Define:
 markedRange(content)   the line range from the single `<!-- intercom:begin -->` line to the
                        single `<!-- intercom:end -->` line, inclusive
 outsideLines(content)  content.split("\n") minus markedRange(content)
-blockRange(task)       the task's header line, the contiguous indented run under it, and at
-                       most ONE immediately following blank line
+blockRange(task)       the task's header line and the contiguous indented run under it
+separator(task)        the one immediately following blank line, when there is one; it is
+                       optional during migration and may remain or be removed
 expectedOutside        outsideLines(snapshot) minus blockRange(t) for every task t the
-                       widened parser found in outsideLines(snapshot)
+                       widened parser found in outsideLines(snapshot), with either choice
+                       for each corresponding optional separator
 ```
 
 V4 holds iff **both**: the new content carries exactly one `begin` and one `end` marker, in
 that order (a subagent that deleted, duplicated or reordered them fails here); and
-`outsideLines(new)` equals `expectedOutside` as a sequence of strings. Anything else — an
-edited legacy line, a reflowed human paragraph, a removed blank line elsewhere, an added
-heading — fails. The one licensed outside-change is therefore exactly the migration: whole
-task blocks the parser recognised in the snapshot leave the outside region. The set is
-computed by the plugin from its own snapshot, never asserted by the subagent.
+`outsideLines(new)` equals one of the `expectedOutside` sequences as strings. Anything else —
+an edited legacy line, a reflowed human paragraph, a removed non-separator blank line, an
+added heading, or an unmigrated task left outside — fails. The one licensed outside-change is
+therefore exactly the migration: whole task blocks the parser recognised in the snapshot leave
+the outside region, while the separator blank immediately under each moved block is the one
+layout line the comparison tolerates either way. The set is computed by the plugin from its
+own snapshot, never asserted by the subagent.
+
+For the comparison only, one final newline at end of file is optional: a rewrite may add it
+or omit it, but no other final blank line is ignored. Once the rewrite is accepted, the plugin
+writes the file back with exactly one final newline so the next cycle's snapshot is stable.
 
 The explicit-empty case: `parseTasks` yields zero tasks **and** the reply carries
 `## WIND-DOWN DONE — nothing open`. That is not a failure; it routes into the existing stop
@@ -316,15 +324,19 @@ of `src/endless.js:399-401` (*"no open points left — paused for this session"*
 session is not replaced, because a successor with an empty file *"would idle and be woken by
 nothing"* (`specs/endless-mode.md:449-452`).
 
-**A rejected rewrite is undone.** Prepare holds the exact snapshot bytes, and a failure of
-V1, V3, V4, V5 or V6 means the file on disk is a rewrite the plugin refuses to stand behind
-— a reformatted human section, a deleted heading, a half-written list. Before abandoning,
-the plugin writes the snapshot back through `writeAt` and logs
-`endless: wind-down rewrite rejected — the todo file was restored`. Where the restore itself
-throws, the error toast names the path and the failed predicate, so the damage is at least
-addressed to the user rather than silent. V1's `multiple` / `not-a-file` / renamed case is
-the one exception: there is no resolved file to write back to, and the toast names the
-snapshot path and the original name.
+**A rejected rewrite is undone and retained for diagnosis.** Prepare holds the exact snapshot
+bytes, and a failure of V1, V3, V4, V5 or V6 means the file on disk is a rewrite the plugin
+refuses to stand behind — a reformatted human section, a deleted heading, a half-written list.
+Before abandoning, the plugin files the rejected content under its private results directory,
+then writes the snapshot back through `writeAt` and logs
+`endless: wind-down rewrite rejected — the todo file was restored` with the artifact path. A
+V4 log also identifies the marker-validity and outside-sequence conjuncts, the marker counts
+and positions, the first differing outside line with both lines JSON-stringified, both sequence
+lengths, and the snapshot line indices of the migrated blocks (with tolerated separator blanks
+identified separately). Where the restore itself throws, the error toast names the path and the
+failed predicate, so the damage is at least addressed to the user rather than silent. V1's
+`multiple` / `not-a-file` / renamed case is the one exception: there is no resolved file to write
+back to, and the toast names the snapshot path and the original name.
 
 So: the parse survives and becomes the sole verification, moving from *"parse the model's
 words into the tasks the plugin writes"* to *"parse the file the subagent wrote, as the
@@ -406,8 +418,10 @@ Decided:
    The one cost on `~/vantage/todos.md`: it will carry both a human `## Open` and a
    machine `## Intercom tasks`, and the existing `- T45 — …` lines stay where they are, read
    by the widened parser and moved into the marked section by the first wind-down subagent
-   that runs — the one outside-change V4 licenses, and the one shape §3.4.7 keeps the
-   ordinary `DONE:` path away from.
+   that runs. The whole parsed task block is deleted from its old outside position; its
+   immediately following separator blank may remain or be deleted. That migration, and no
+   other outside edit, is what V4 licenses, while the one shape §3.4.7 keeps the ordinary
+   `DONE:` path away from.
 4. **`addTask` no longer appends at end of file.** The behaviour the diagnosis found —
    `writeAt(directory, target, content + sep + block)` at `src/todofile.js:288-289`, which
    put three saved points under a human `## Not now` — is removed, not left standing beside

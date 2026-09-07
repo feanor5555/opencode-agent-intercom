@@ -52,6 +52,10 @@
 // runScheduledHandoff, this function NEVER throws — its caller is an event
 // handler.
 
+import fs from "node:fs"
+import path from "node:path"
+
+import { ensureResultsDir } from "./resultfile.js"
 import { log, errMsg } from "./log.js"
 
 // Cadence of the quiesce and settle waits. Mirrors DOC_SUMMARIES_POLL_MS.
@@ -133,46 +137,122 @@ export function endlessKickoffBlock({ todoFileName, todoFileText = "", truncated
   )
 }
 
+// V4 treats one final newline as layout rather than content. Add it for the
+// comparison only; a second final newline remains visible and is not tolerated.
+function normaliseFinalNewlineForComparison(content) {
+  const text = String(content ?? "")
+  return text.endsWith("\n") ? text : `${text}\n`
+}
+
+// Accepted todo files always have one, and only one, final newline. This is
+// deliberately separate from the comparison normalisation so V4 still sees
+// extra final blank lines as a change.
+function normaliseAcceptedContent(content) {
+  const text = String(content ?? "")
+  return `${text.replace(/\n+$/, "")}\n`
+}
+
 // The lines of `content` that lie outside the inclusive marked range, computed
 // from an already-taken `split`. A helper kept beside V4 so the two read the
 // same rule.
 function outsideOf(content, split) {
-  const lines = String(content ?? "").split("\n")
+  const lines = normaliseFinalNewlineForComparison(content).split("\n")
   if (!split.valid) return lines
   return [...lines.slice(0, split.beginIdx), ...lines.slice(split.endIdx + 1)]
 }
 
 // The set of lines V4 expects OUTSIDE the machine section after the wind-down:
-// the snapshot's own outside lines, minus the whole block of every task the
-// parser found standing outside the markers in the snapshot. Those blocks are
-// the one licensed outside-change — the migration moves them INTO the section.
+// the snapshot's own outside lines, minus the required lines of every task block
+// the parser found standing outside the markers in the snapshot. An immediately
+// following blank line is a tolerated separator: the child may keep it or remove
+// it while moving the block.
 function expectedOutside(snapshot, splitSections, parseTasks) {
-  const split = splitSections(snapshot.content)
-  const lines = snapshot.content.split("\n")
+  const comparisonContent = normaliseFinalNewlineForComparison(snapshot.content)
+  const split = splitSections(comparisonContent)
+  const lines = comparisonContent.split("\n")
   const marked = new Set()
   if (split.valid) {
     for (let i = split.beginIdx; i <= split.endIdx; i++) marked.add(i)
   }
-  const removed = new Set()
+  const migrated = new Set()
+  const optionalTrailingBlanks = new Set()
   for (const t of parseTasks(snapshot.content)) {
     // A task inside the markers is not an outside block.
     if (split.valid && t.lineIdx > split.beginIdx && t.lineIdx < split.endIdx) continue
-    for (let i = t.lineIdx; i <= t.blockEndIdx; i++) removed.add(i)
+    for (let i = t.lineIdx; i <= t.blockEndIdx; i++) migrated.add(i)
     const after = t.blockEndIdx + 1
-    if (after < lines.length && lines[after].trim() === "") removed.add(after)
+    if (after < lines.length && lines[after].trim() === "") optionalTrailingBlanks.add(after)
   }
   const out = []
+  const optionalBlankPositions = []
   for (let i = 0; i < lines.length; i++) {
-    if (marked.has(i) || removed.has(i)) continue
+    if (marked.has(i) || migrated.has(i)) continue
+    if (optionalTrailingBlanks.has(i)) optionalBlankPositions.push(out.length)
     out.push(lines[i])
   }
-  return out
+  return {
+    lines: out,
+    optionalBlankPositions,
+    migratedBlockIndices: [...migrated].sort((a, b) => a - b),
+    optionalTrailingBlankIndices: [...optionalTrailingBlanks].sort((a, b) => a - b),
+  }
 }
 
-function sequenceEqual(a, b) {
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
-  return true
+// Compares the outside sequence while allowing each separator blank identified
+// by expectedOutside to be retained or removed, independently.
+function sequenceEqual(a, b, optionalBlankPositions) {
+  const optional = new Set(optionalBlankPositions)
+  let ai = 0
+  let bi = 0
+  while (ai < a.length && bi < b.length) {
+    if (a[ai] === b[bi]) {
+      ai += 1
+      bi += 1
+      continue
+    }
+    if (optional.has(ai) && a[ai].trim() === "") {
+      ai += 1
+      continue
+    }
+    return false
+  }
+  while (ai < a.length && optional.has(ai) && a[ai].trim() === "") ai += 1
+  return ai === a.length && bi === b.length
+}
+
+function jsonLine(line) {
+  return line === undefined ? "<missing>" : JSON.stringify(line)
+}
+
+function firstDifference(expected, actual) {
+  const length = Math.max(expected.length, actual.length)
+  for (let i = 0; i < length; i++) {
+    if (expected[i] !== actual[i]) {
+      return { index: i, expected: jsonLine(expected[i]), actual: jsonLine(actual[i]) }
+    }
+  }
+  return null
+}
+
+let rejectedWindDownSequence = 0
+
+// Keeps the rejected bytes after the caller restores the pre-spawn snapshot.
+// The result directory is private and best-effort, so a filing failure cannot
+// turn a recoverable rejection into a thrown event-handler error.
+export function writeRejectedWindDown(content, sessionID) {
+  const safeSession = String(sessionID ?? "session").replace(/[^A-Za-z0-9._-]/g, "-") || "session"
+  const file = path.join(
+    ensureResultsDir(),
+    `endless-wind-down-rejected-${safeSession}-${Date.now()}-${process.pid}-${rejectedWindDownSequence++}.md`,
+  )
+  try {
+    fs.writeFileSync(file, String(content ?? ""), { encoding: "utf8", mode: 0o600 })
+    return { path: file, error: null }
+  } catch (err) {
+    const error = errMsg(err)
+    log("endless: rejected wind-down content could not be filed", { file, error })
+    return { path: null, error }
+  }
 }
 
 // The confirmation, as a pure function over the snapshot and the file the
@@ -182,8 +262,8 @@ function sequenceEqual(a, b) {
 // the file's content and the reply's stated signals — never asserted by the
 // subagent.
 //
-// Returns { empty, v3, v4, v5, v6, tasks, openIds, parseCount, replyCount,
-// countMismatch }.
+// Returns { empty, v3, v4, v4Details, v5, v6, tasks, openIds, parseCount,
+// replyCount, countMismatch }.
 //
 // @param {Object} snapshot  { content, tasks } — the pre-spawn file
 // @param {Object} fresh      { content, replyNoChange, replyNothingOpen, replyCount }
@@ -202,9 +282,31 @@ export function verifyWindDown(snapshot, fresh, { splitSections, parseTasks }) {
 
   const v3 = newContent !== snapshot.content || fresh.replyNoChange === true
 
-  const v4 =
-    newSplit.valid &&
-    sequenceEqual(expectedOutside(snapshot, splitSections, parseTasks), outsideOf(newContent, newSplit))
+  const expected = expectedOutside(snapshot, splitSections, parseTasks)
+  const actual = outsideOf(newContent, newSplit)
+  const sequenceValid = sequenceEqual(expected.lines, actual, expected.optionalBlankPositions)
+  const v4Details = {
+    markerValid: newSplit.valid,
+    sequenceValid,
+    beginCount: newSplit.beginCount,
+    endCount: newSplit.endCount,
+    beginIdx: newSplit.beginIdx,
+    endIdx: newSplit.endIdx,
+    firstDifference: (() => {
+      const difference = firstDifference(expected.lines, actual)
+      if (!difference) return null
+      return {
+        index: difference.index,
+        expectedLine: difference.expected,
+        actualLine: difference.actual,
+      }
+    })(),
+    expectedLength: expected.lines.length,
+    actualLength: actual.length,
+    migratedBlockIndices: expected.migratedBlockIndices,
+    optionalTrailingBlankIndices: expected.optionalTrailingBlankIndices,
+  }
+  const v4 = v4Details.markerValid && v4Details.sequenceValid
 
   const snapTitleById = new Map((snapshot.tasks || []).map((t) => [t.id, normaliseTitle(t.text)]))
   const v6 = newTasks.every(
@@ -215,7 +317,19 @@ export function verifyWindDown(snapshot, fresh, { splitSections, parseTasks }) {
   const replyCount = fresh.replyCount ?? null
   const countMismatch = replyCount != null && replyCount !== parseCount
 
-  return { empty, v3, v4, v5, v6, tasks: newTasks, openIds, parseCount, replyCount, countMismatch }
+  return {
+    empty,
+    v3,
+    v4,
+    v4Details,
+    v5,
+    v6,
+    tasks: newTasks,
+    openIds,
+    parseCount,
+    replyCount,
+    countMismatch,
+  }
 }
 
 // Runs one endless cycle.
@@ -239,7 +353,8 @@ export function verifyWindDown(snapshot, fresh, { splitSections, parseTasks }) {
 // @property {(child: { childSessionID: string, settlement: Promise<any> }) => Promise<{ ok: boolean, outcome?: any, reason?: string }>} settleWindDown
 // @property {() => { name: string, content: string }} reread  V1 re-resolve; throws multiple/not-a-file
 // @property {(text: string) => { count: number|null, noChange: boolean, nothingOpen: boolean }} interpretReply
-// @property {(content: string) => void} restoreSnapshot
+// @property {(content: string) => void} restoreSnapshot  writes the resolved todo file;
+//   used for snapshot restoration and for accepted-content newline normalisation
 // @property {(content: string) => Array} parseTasks
 // @property {(content: string) => Object} splitSections
 // @property {(io: { extraKickoffBlock: string, docSummariesText: string }) => Promise<{ newSessionID: string }>} performHandoff
@@ -457,13 +572,22 @@ export async function runEndlessCycle({
     const coreOk = verdict.v3 && verdict.v4 && verdict.v5 && verdict.v6
     if (!coreOk) {
       const failed = !verdict.v3 ? "V3" : !verdict.v4 ? "V4" : !verdict.v5 ? "V5" : "V6"
+      const rejected = writeRejectedWindDown(fresh.content, primarySessionID)
+      const rejectionLog = {
+        sessionID: primarySessionID,
+        failed,
+        rejectedContentPath: rejected.path,
+        ...(rejected.error ? { rejectedContentError: rejected.error } : {}),
+        v4: verdict.v4Details,
+      }
       try {
         restoreSnapshot(snapshot.content)
-        log("endless: wind-down rewrite rejected — the todo file was restored", {
-          sessionID: primarySessionID,
-          failed,
-        })
+        log("endless: wind-down rewrite rejected — the todo file was restored", rejectionLog)
       } catch (err) {
+        log("endless: wind-down rewrite rejected — the todo file could not be restored", {
+          ...rejectionLog,
+          restoreError: errMsg(err),
+        })
         toast({
           message: `endless mode: the todo file could not be restored after ${failed} at ${snapshot.fileName}: ${errMsg(err)}`,
           variant: "error",
@@ -485,6 +609,35 @@ export async function runEndlessCycle({
         replyCount: verdict.replyCount,
         parseCount: verdict.parseCount,
       })
+    }
+
+    // Keep the accepted bytes stable for the next cycle. The writer is the same
+    // dependency used for snapshot restoration; only a missing or extra final
+    // newline reaches this branch because V4 rejected every other difference.
+    const normalisedContent = normaliseAcceptedContent(fresh.content)
+    if (normalisedContent !== fresh.content) {
+      try {
+        restoreSnapshot(normalisedContent)
+        fresh = { ...fresh, content: normalisedContent }
+      } catch (err) {
+        const normaliseError = errMsg(err)
+        let restoreError = null
+        try {
+          restoreSnapshot(snapshot.content)
+        } catch (restoreErr) {
+          restoreError = errMsg(restoreErr)
+        }
+        log("endless: accepted wind-down rewrite could not be normalised — the todo file was restored", {
+          sessionID: primarySessionID,
+          normaliseError,
+          ...(restoreError ? { restoreError } : {}),
+        })
+        toast({
+          message: `endless mode: the accepted todo rewrite could not be normalised at ${snapshot.fileName}: ${normaliseError}`,
+          variant: "error",
+        })
+        return abandon("confirm", `accepted wind-down rewrite could not be normalised: ${normaliseError}`)
+      }
     }
 
     const openIdsLeft = verdict.openIds

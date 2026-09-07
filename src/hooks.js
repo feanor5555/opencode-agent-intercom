@@ -63,6 +63,8 @@ import {
   sessionAgentName,
   rememberPrimaryDirectory,
   primaryDirectoryOf,
+  beginToolCall,
+  endToolCall,
   CTX_TTL_MS,
 } from "./registry.js"
 import {
@@ -2005,7 +2007,7 @@ function nonEmptyLines(text) {
 // longer aborts: notification of the parent happens in contextLimitNotice
 // when the LLM-turn-based threshold is crossed; the guard only denies.
 export function createGuardToolExecute(client, permissionGuard) {
-  return async function guardToolExecute(input) {
+  const guard = async function guardToolExecute(input) {
     const sessionID = input?.sessionID
     if (!sessionID) return
 
@@ -2025,23 +2027,24 @@ export function createGuardToolExecute(client, permissionGuard) {
     // on request — so a subagent inside one long call is indistinguishable, on
     // events alone, from a hung LLM call, and the sweep reaps it mid-command.
     //
-    // Two stamps, from one clock read so they compare exactly:
+    // Two records, from one clock read so they compare exactly:
     //   lastActivityAt — the sign of life itself.
-    //   toolCallAt     — the start of the call, plus the tool's name. The sweep
-    //                    reads the two together: while no later event has moved
-    //                    lastActivityAt past toolCallAt, that call is still the
-    //                    last thing seen of this subagent, i.e. in flight, and
-    //                    the entry is measured against maxSubagentToolCallMs
-    //                    instead of the silence window.
+    //   toolCalls      — this call, under its callID, as IN FLIGHT. While the
+    //                    map is non-empty the subagent is working, and the
+    //                    sweep measures the entry against maxSubagentToolCallMs
+    //                    (from the oldest call's start) instead of the silence
+    //                    window. The call comes out again in
+    //                    recordToolCallFinished, on `tool.execute.after`.
     //
     // Done BEFORE every deny below, deliberately: a denied call is still the
     // model producing, and a subagent locked down to a text-only handover must
-    // not be reaped while it writes that handover.
+    // not be reaped while it writes that handover. A denied call never runs and
+    // never gets an `after`, so the in-flight record it made here is taken back
+    // out by the wrapper this guard is returned in — see createGuardToolExecute.
     if (entry) {
       const seenAt = Date.now()
       entry.lastActivityAt = seenAt
-      entry.toolCallAt = seenAt
-      entry.toolCallTool = input.tool
+      beginToolCall(entry, input.callID, input.tool, seenAt)
     }
 
     // A tracked subagent may run any tool — unless it has reached its context
@@ -2168,6 +2171,50 @@ export function createGuardToolExecute(client, permissionGuard) {
     }
     lastPrimaryTool.set(sessionID, input.tool)
   }
+
+  // The in-flight record the guard makes on entry is taken back out again on
+  // every throw, and this wrapper is the only place that can do it: a denied
+  // call never executes, so opencode never sends `tool.execute.after` for it,
+  // and the record would sit in the map for the life of the entry. Nothing
+  // would then read the subagent as anything but working — with
+  // `maxSubagentToolCallMs` at 0 that is a subagent no clock ever ends, and
+  // with a finite window it is a slot held for the whole of it over a call that
+  // ran for no time at all.
+  //
+  // The bump of `lastActivityAt` the guard made is deliberately KEPT: the
+  // denied call is still the model producing, and the silence window the entry
+  // falls back to here measures from that bump.
+  return async function guardToolExecuteTracked(input) {
+    try {
+      return await guard(input)
+    } catch (err) {
+      const entry = input?.sessionID ? entryForSession(input.sessionID) : undefined
+      if (entry) endToolCall(entry, input.callID)
+      throw err
+    }
+  }
+}
+
+// The other end of the in-flight record: opencode calls this once the tool has
+// produced its output, which is the first moment after a long call in which the
+// plugin hears anything about this session at all.
+//
+// Two effects, and both are needed. The call comes out of `entry.toolCalls`, so
+// a subagent that is no longer working goes back onto the silence window
+// instead of keeping the wide one for the rest of its run; and the return is
+// itself a sign of life, so the silence window it goes back onto is measured
+// from now rather than from the start of a call that may have taken minutes.
+//
+// Best-effort and total: an untracked session, an unknown callID and a second
+// `after` for the same call all end here as a no-op.
+export function recordToolCallFinished(input) {
+  const sessionID = input?.sessionID
+  if (!sessionID) return false
+  const entry = entryForSession(sessionID)
+  if (!entry) return false
+  endToolCall(entry, input.callID)
+  entry.lastActivityAt = Date.now()
+  return true
 }
 
 // Rewrites any pending tool-part in the message history to a completed denial.

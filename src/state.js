@@ -9,7 +9,7 @@
 // `chat.system.transform` hook runs, and they must see the same registry.
 
 // handle -> { handle, sessionID, agent, prompt, parentID, status, lifecycle,
-//             spawnedAt, retainedAt, lastActivityAt, toolCallAt, toolCallTool,
+//             spawnedAt, retainedAt, lastActivityAt, toolCalls,
 //             lastActivity, ctxTokens, lastTokensFetchAt, timedOut }
 //
 // `status` is what opencode reports the session is doing; `lifecycle` is what

@@ -39,10 +39,10 @@ import {
   LIFECYCLE_RUNNING,
 } from "../src/registry.js"
 import { resetTurnNotices } from "../src/hooks.js"
-import { sweepWatchdog, _stopWatchdogForTests } from "../src/watchdog.js"
+import { sweepWatchdog, watchdogLimit, _stopWatchdogForTests } from "../src/watchdog.js"
 import { resetProjectContext } from "../src/project.js"
 import { resetPermissionGuardCache } from "../src/config.js"
-import { setSettingsPath, resetSettings } from "../src/settings.js"
+import { getSettings, setSettingsPath, resetSettings } from "../src/settings.js"
 
 const PRIMARY = "ses_primary"
 const toolCtx = { sessionID: PRIMARY, agent: "orchestrator", messageID: "m1" }
@@ -241,6 +241,34 @@ test("reviveRetainedEntryLocked clears both teardown latches", async () => {
   assert.equal(restored.errored, false)
   assert.equal(restored.timedOut, false)
   assert.equal(entryLifecycle(restored), LIFECYCLE_RETAINED)
+})
+
+// A reuse is a new run, so nothing run 1 started is still in flight. A call
+// left in the map would put run 2 on the working window from its very first
+// tick — and name run 1's tool as the one that was cut off if that window then
+// fired.
+test("reviveRetainedEntryLocked clears the in-flight tool calls, and a failed reuse puts them back", async () => {
+  withSettings({ maxRetainedSubagents: 3, maxSubagents: 4 })
+  const { ctx, created } = makeCtx({ messages: assistantReply("FIRST", 20000) })
+  const hooks = await plugin(ctx)
+  const { sessionID } = await retainOne(hooks, created)
+
+  const held = entryForSession(sessionID)
+  held.toolCalls.set("c1", { tool: "bash", startedAt: Date.now() - 500_000 })
+
+  const revived = reviveRetainedEntryLocked(sessionID, { ctxTokens: 20000, packageTokens: 100 })
+  assert.ok(revived)
+  assert.equal(revived.entry.toolCalls.size, 0, "run 1's call is not run 2's")
+  assert.equal(
+    watchdogLimit(revived.entry, getSettings()).setting,
+    "maxSubagentAgeMs",
+    "run 2 starts on the silence window, like any other fresh run",
+  )
+
+  // The failed-prompt path changed nothing about the session, so the entry goes
+  // back exactly as it was held.
+  assert.equal(restoreRetainedEntryLocked(sessionID, revived.previous), true)
+  assert.equal(entryForSession(sessionID).toolCalls.get("c1")?.tool, "bash")
 })
 
 // ---- the sweep's marks are released when the teardown they stand for throws ----

@@ -1,15 +1,19 @@
 // What counts as a sign of life towards the inactivity watchdog.
 //
-// Three things count, and the sweep needs all three: any event on the session,
-// the start of any tool call, and opencode's own `session.status === "busy"`.
+// Two things count: any event on the session, and the start or the end of any
+// tool call. Both are stamps on `entry.lastActivityAt`.
 //
-// The first two are stamps on `entry.lastActivityAt`; the tool-call stamp also
-// says the call is IN FLIGHT, and that — like opencode's own `busy` — moves the
-// entry onto the second window, `maxSubagentToolCallMs`, because opencode
-// publishes nothing between the part that announces a tool call and the part
-// that reports its result and its own `bash` tool may block far longer than the
-// 90 s silence window. Both windows still kill: these tests pin each one at its
-// own value and pin which of the two applies.
+// A tool call says one thing more — that the subagent is WORKING — and it says
+// it for exactly as long as the call is IN FLIGHT: it goes into
+// `entry.toolCalls` on `tool.execute.before` and comes out on
+// `tool.execute.after`. Only that moves the entry onto the second window,
+// `maxSubagentToolCallMs`, because opencode publishes nothing between the part
+// that announces a tool call and the part that reports its result and its own
+// `bash` tool may block far longer than the 90 s silence window. `entry.status`
+// does NOT move it: the plugin seeds that field itself on every spawn, so a
+// branch on it would put every subagent on the wide window. Both windows still
+// kill: these tests pin each one at its own value and pin which of the two
+// applies.
 //
 // The event stamp is bumped by the event handler, from the session id it
 // resolves off the event payload. The opencode SDK puts that id in four
@@ -248,6 +252,20 @@ function tightToolCallWindow() {
   resetSettings()
 }
 
+// Moves the START of a call already in flight into the past, which is the only
+// clock the working window is measured against.
+function callStartedMsAgo(entry, callID, ms) {
+  const call = entry.toolCalls.get(callID)
+  assert.ok(call, `no call ${callID} in flight`)
+  call.startedAt = Date.now() - ms
+  return call
+}
+
+// An entry as watchdogLimit reads it, without a plugin run behind it.
+function inFlightEntry(startedAt = 500, tool = "bash") {
+  return { status: "busy", lastActivityAt: 500, toolCalls: new Map([["c1", { tool, startedAt }]]) }
+}
+
 test("the default tool-call window clears opencode's own bash ceiling", () => {
   // opencode permits a command timeout of at most 600 000 ms; a default at or
   // under that would reap a command opencode itself would have run to the end.
@@ -274,16 +292,87 @@ test("maxSubagentToolCallMs is read from the settings file and the env", () => {
   }
 })
 
+test("watchdogLimit: which window applies, from when, and which setting it comes from", () => {
+  const settings = { maxSubagentAgeMs: 90_000, maxSubagentToolCallMs: TOOL_CALL_MS }
+  assert.deepEqual(watchdogLimit(inFlightEntry(), settings), {
+    ms: TOOL_CALL_MS,
+    setting: "maxSubagentToolCallMs",
+    kind: "tool-call",
+    tool: "bash",
+    since: 500,
+  })
+  // Nothing in flight: the silence window, and no `since` — the sweep then
+  // measures from the entry's own last sign of life.
+  assert.deepEqual(watchdogLimit({ status: "busy", lastActivityAt: 900 }, settings), {
+    ms: 90_000,
+    setting: "maxSubagentAgeMs",
+    kind: "silence",
+  })
+  // An entry that never had the map at all reads as nothing in flight.
+  assert.equal(watchdogLimit({ lastActivityAt: 900 }, settings).kind, "silence")
+  assert.equal(watchdogLimit({ toolCalls: new Map() }, settings).kind, "silence")
+})
+
+test("watchdogLimit measures the working window from the OLDEST call in flight", () => {
+  const settings = { maxSubagentAgeMs: 90_000, maxSubagentToolCallMs: TOOL_CALL_MS }
+  const entry = inFlightEntry(1000, "bash")
+  entry.toolCalls.set("c2", { tool: "read", startedAt: 500 })
+  const limit = watchdogLimit(entry, settings)
+  assert.equal(limit.since, 500, "a newer call must not push the ceiling out")
+  assert.equal(limit.tool, "read", "and the tool named is the one that has been running longest")
+})
+
+// `entry.status` is written by this plugin — `createEntry` seeds "busy" on every
+// spawn — so a window that branched on it would be the window every subagent
+// gets, and the silence window would govern nothing.
+test("a freshly spawned entry with no tool call in flight is measured against maxSubagentAgeMs", async () => {
+  tightToolCallWindow()
+  const { entry, sessionID } = await spawnedEntry(120_000)
+  assert.equal(entry.status, "busy", "a spawned entry starts out busy")
+  assert.equal(entry.toolCalls.size, 0, "and with nothing in flight")
+
+  assert.equal(watchdogLimit(entry, getSettings()).setting, "maxSubagentAgeMs")
+  await sweepWatchdog()
+
+  assert.equal(entryForSession(sessionID), undefined, "the seeded busy must not widen the window")
+})
+
+test("opencode's own busy verdict does not widen the window either", async () => {
+  tightToolCallWindow()
+  const { hooks, entry, sessionID } = await spawnedEntry(120_000)
+
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID, status: { type: "busy" } } },
+  })
+  assert.equal(entry.status, "busy")
+  entry.lastActivityAt = Date.now() - 120_000 // the status event itself was activity
+
+  await sweepWatchdog()
+
+  assert.equal(entryForSession(sessionID), undefined, "busy is the whole of a turn, hang included")
+})
+
+test("a subagent that is NOT working is reaped at the ordinary window", async () => {
+  const { hooks, entry, sessionID } = await spawnedEntry(120_000)
+
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID, status: { type: "retry" } } },
+  })
+  entry.lastActivityAt = Date.now() - 120_000
+
+  await sweepWatchdog()
+
+  assert.equal(entryForSession(sessionID), undefined, "the silence window still kills")
+})
+
 test("a subagent inside a tool call outlives maxSubagentAgeMs", async () => {
   tightToolCallWindow()
   const { hooks, entry, sessionID } = await spawnedEntry()
 
   await hooks["tool.execute.before"]({ tool: "bash", sessionID, callID: "c1" })
-  // The call itself is now the last thing seen of it, and it has been running
-  // for longer than the 90 s silence window.
-  const startedAt = Date.now() - 150_000
-  entry.lastActivityAt = startedAt
-  entry.toolCallAt = startedAt
+  // The call has been running for longer than the 90 s silence window.
+  callStartedMsAgo(entry, "c1", 150_000)
+  entry.lastActivityAt = Date.now() - 150_000
 
   await sweepWatchdog()
 
@@ -296,94 +385,172 @@ test("a subagent inside a tool call IS killed past maxSubagentToolCallMs", async
   const { hooks, entry, sessionID } = await spawnedEntry()
 
   await hooks["tool.execute.before"]({ tool: "bash", sessionID, callID: "c1" })
-  const startedAt = Date.now() - (TOOL_CALL_MS + 10_000)
-  entry.lastActivityAt = startedAt
-  entry.toolCallAt = startedAt
+  callStartedMsAgo(entry, "c1", TOOL_CALL_MS + 10_000)
 
   await sweepWatchdog()
 
   assert.equal(entryForSession(sessionID), undefined, "a call in flight is not a licence to run forever")
 })
 
-test("watchdogLimit: which window applies, and which setting it comes from", () => {
-  const settings = { maxSubagentAgeMs: 90_000, maxSubagentToolCallMs: TOOL_CALL_MS }
-  const inFlight = { status: "retry", lastActivityAt: 500, toolCallAt: 500, toolCallTool: "bash" }
-  assert.deepEqual(watchdogLimit(inFlight, settings), {
-    ms: TOOL_CALL_MS,
-    setting: "maxSubagentToolCallMs",
-    kind: "tool-call",
-    tool: "bash",
+// The defect this replaced: "in flight" used to be `toolCallAt >=
+// lastActivityAt`, and ANY event for the session moved lastActivityAt past the
+// stamp — a part update, a republished session.status. The call was still
+// running; the entry silently fell back to the silence window and was reaped
+// mid-command at the next stretch of quiet.
+test("an event during a tool call does not end the call", async () => {
+  tightToolCallWindow()
+  const { hooks, entry, sessionID } = await spawnedEntry()
+
+  await hooks["tool.execute.before"]({ tool: "bash", sessionID, callID: "c1" })
+  callStartedMsAgo(entry, "c1", 150_000)
+  await hooks.event({
+    event: {
+      type: "message.part.updated",
+      properties: { part: { id: "prt_1", sessionID, messageID: "msg_1", type: "tool" } },
+    },
   })
-  // An event after the call started means the call is over: back to silence.
-  assert.deepEqual(watchdogLimit({ ...inFlight, lastActivityAt: 900 }, settings), {
-    ms: 90_000,
-    setting: "maxSubagentAgeMs",
-    kind: "silence",
-  })
-  assert.deepEqual(watchdogLimit({ status: "busy", lastActivityAt: 900 }, settings), {
-    ms: TOOL_CALL_MS,
-    setting: "maxSubagentToolCallMs",
-    kind: "busy",
-  })
-  assert.equal(watchdogLimit({ status: "idle", lastActivityAt: 900 }, settings).kind, "silence")
+  // The event landed 120 s ago; the call it landed during is still running.
+  entry.lastActivityAt = Date.now() - 120_000
+
+  assert.equal(watchdogLimit(entry, getSettings()).kind, "tool-call")
+  await sweepWatchdog()
+
+  assert.ok(entryForSession(sessionID), "an event during a call must not put the entry back on the silence window")
 })
 
-test("a subagent opencode still calls busy is measured against the tool-call window", async () => {
+// The other side of the same property: the wide window is a ceiling on the
+// call, not a lease the traffic during the call keeps renewing.
+test("the working window is not renewed by the events that arrive during the call", async () => {
   tightToolCallWindow()
-  const { entry, sessionID } = await spawnedEntry(120_000)
-  assert.equal(entry.status, "busy", "a spawned entry starts out busy")
+  const { hooks, entry, sessionID } = await spawnedEntry()
+
+  await hooks["tool.execute.before"]({ tool: "bash", sessionID, callID: "c1" })
+  callStartedMsAgo(entry, "c1", TOOL_CALL_MS + 10_000)
+  await hooks.event({
+    event: {
+      type: "message.part.updated",
+      properties: { part: { id: "prt_1", sessionID, messageID: "msg_1", type: "tool" } },
+    },
+  })
+  assert.ok(Date.now() - entry.lastActivityAt < 5000, "the event did bump the sign-of-life stamp")
 
   await sweepWatchdog()
 
-  assert.ok(entryForSession(sessionID), "opencode's own busy verdict must widen the window")
-  assert.notEqual(entry.timedOut, true)
+  assert.equal(entryForSession(sessionID), undefined, "the ceiling is counted from the call's start")
 })
 
-test("the wider window is not a bump — the entry stays as silent as it was", async () => {
+test("tool.execute.after ends the call and the entry goes back on the silence window", async () => {
   tightToolCallWindow()
-  const { entry, sessionID } = await spawnedEntry(120_000)
-  const silentSince = entry.lastActivityAt
+  const { hooks, entry, sessionID } = await spawnedEntry()
 
+  await hooks["tool.execute.before"]({ tool: "bash", sessionID, callID: "c1" })
+  callStartedMsAgo(entry, "c1", 150_000)
+  await hooks["tool.execute.after"](
+    { tool: "bash", sessionID, callID: "c1", args: {} },
+    { title: "bash", output: "done", metadata: {} },
+  )
+
+  assert.equal(entry.toolCalls.size, 0, "the call must come out of the map")
+  assert.ok(Date.now() - entry.lastActivityAt < 5000, "and its return is itself a sign of life")
+  assert.equal(watchdogLimit(entry, getSettings()).setting, "maxSubagentAgeMs")
+
+  entry.lastActivityAt = Date.now() - 120_000
   await sweepWatchdog()
-
-  assert.equal(entry.lastActivityAt, silentSince, "a working entry must not have its clock restarted")
-  assert.ok(entryForSession(sessionID))
+  assert.equal(entryForSession(sessionID), undefined, "a subagent no longer working keeps no wide window")
 })
 
-test("a stale busy that was never refreshed still hits the tool-call window", async () => {
+test("parallel tool calls each hold their own slot", async () => {
   tightToolCallWindow()
-  const { sessionID } = await spawnedEntry(TOOL_CALL_MS + 10_000)
+  const { hooks, entry, sessionID } = await spawnedEntry()
 
+  await hooks["tool.execute.before"]({ tool: "read", sessionID, callID: "c1" })
+  await hooks["tool.execute.before"]({ tool: "bash", sessionID, callID: "c2" })
+  assert.equal(entry.toolCalls.size, 2)
+
+  await hooks["tool.execute.after"](
+    { tool: "bash", sessionID, callID: "c2", args: {} },
+    { title: "bash", output: "done", metadata: {} },
+  )
+  assert.equal(watchdogLimit(entry, getSettings()).kind, "tool-call", "one call ending is not all of them")
+  assert.equal(watchdogLimit(entry, getSettings()).tool, "read")
+
+  await hooks["tool.execute.after"](
+    { tool: "read", sessionID, callID: "c1", args: {} },
+    { title: "read", output: "…", metadata: {} },
+  )
+  assert.equal(entry.toolCalls.size, 0)
+  assert.equal(watchdogLimit(entry, getSettings()).kind, "silence")
+})
+
+test("an `after` for a call nobody announced, or a second one, changes nothing", async () => {
+  const { hooks, entry, sessionID } = await spawnedEntry()
+
+  await hooks["tool.execute.after"](
+    { tool: "bash", sessionID, callID: "never-started", args: {} },
+    { title: "bash", output: "", metadata: {} },
+  )
+  assert.equal(entry.toolCalls.size, 0)
+  assert.ok(Date.now() - entry.lastActivityAt < 5000, "it is still a sign of life")
+
+  // And on a session this plugin does not track it must not throw.
+  await hooks["tool.execute.after"](
+    { tool: "bash", sessionID: PRIMARY, callID: "c1", args: {} },
+    { title: "bash", output: "", metadata: {} },
+  )
+})
+
+// A denied call throws out of the before-hook, so opencode never runs it and
+// never sends an `after` for it. Left in the map it would be an in-flight call
+// that nothing can ever end — with `maxSubagentToolCallMs` at 0, a subagent no
+// clock reaches at all.
+test("a denied tool call leaves nothing in flight", async () => {
+  const { hooks, entry, sessionID } = await spawnedEntry()
+
+  await assert.rejects(
+    () => hooks["tool.execute.before"]({ tool: "task", sessionID, callID: "c1" }),
+    /cannot spawn other agents/,
+  )
+
+  assert.equal(entry.toolCalls.size, 0, "a denied call is not a call in flight")
+  assert.equal(watchdogLimit(entry, getSettings()).setting, "maxSubagentAgeMs")
+
+  entry.lastActivityAt = Date.now() - 120_000
   await sweepWatchdog()
-
-  assert.equal(entryForSession(sessionID), undefined, "a busy entry must not be exempt forever")
+  assert.equal(entryForSession(sessionID), undefined, "so the silence window still reaches it")
 })
 
 test("maxSubagentToolCallMs = 0 lifts the ceiling for a working subagent alone", async () => {
   writeFileSync(settingsFile, JSON.stringify({ maxSubagentToolCallMs: 0 }))
   resetSettings()
-  const { entry, sessionID } = await spawnedEntry()
+  const { hooks, entry, sessionID } = await spawnedEntry()
 
+  await hooks["tool.execute.before"]({ tool: "bash", sessionID, callID: "c1" })
+  callStartedMsAgo(entry, "c1", 700_000)
   await sweepWatchdog()
   assert.ok(entryForSession(sessionID), "0 means no ceiling while it works")
 
-  // The same entry, no longer working: the silence window applies again.
-  entry.status = "retry"
+  // The same entry once that call has returned: the silence window applies
+  // again, untouched by the 0.
+  await hooks["tool.execute.after"](
+    { tool: "bash", sessionID, callID: "c1", args: {} },
+    { title: "bash", output: "done", metadata: {} },
+  )
+  entry.lastActivityAt = Date.now() - 120_000
   await sweepWatchdog()
   assert.equal(entryForSession(sessionID), undefined, "the silence watchdog is untouched by that 0")
 })
 
-test("a subagent that is NOT working is reaped at the ordinary window", async () => {
-  const { hooks, entry, sessionID } = await spawnedEntry(120_000)
-
-  // opencode's retry status: the session is not processing, and no tool call of
-  // its own is in flight, so nothing here says the silence is work.
-  await hooks.event({
-    event: { type: "session.status", properties: { sessionID, status: { type: "retry" } } },
-  })
-  entry.lastActivityAt = Date.now() - 120_000 // the status event itself was activity
-
-  await sweepWatchdog()
-
-  assert.equal(entryForSession(sessionID), undefined, "the silence window still kills")
+// A settings object with no tool-call window at all is read the way
+// childWaiterTimeoutMs reads it: no window wider than the silence one. The
+// alternative is `undefined` as the limit, which reaps a working entry on the
+// first tick and reports NaN seconds to the parent.
+test("a settings object without maxSubagentToolCallMs falls back to the silence window", () => {
+  const partial = { maxSubagentAgeMs: 90_000 }
+  assert.equal(watchdogLimit(inFlightEntry(), partial).ms, 90_000)
+  assert.equal(watchdogLimit({ lastActivityAt: 900 }, partial).ms, 90_000)
+  for (const bad of [{ maxSubagentAgeMs: 90_000, maxSubagentToolCallMs: null }, partial]) {
+    assert.ok(Number.isFinite(watchdogLimit(inFlightEntry(), bad).ms), "never NaN or undefined")
+  }
+  // An explicit 0 is a statement and is kept: no ceiling while it works.
+  assert.equal(watchdogLimit(inFlightEntry(), { maxSubagentAgeMs: 90_000, maxSubagentToolCallMs: 0 }).ms, 0)
 })

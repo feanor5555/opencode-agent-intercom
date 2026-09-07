@@ -252,14 +252,16 @@ function slotsNoticeAfterFinish(primaryID) {
 // work more room or to treat the subagent as hung, and the setting key is what
 // it would have to name to give it that room.
 //
-// What it does NOT say is that the subagent was inactive. The clock behind it
-// measures the plugin's own silence, and that silence has two causes it cannot
-// tell apart: a genuinely hung call, and a subagent working inside one long
-// tool call, which opencode publishes nothing during. Asserting inactivity puts
-// the first as a fact and sends the orchestrator off to re-dispatch identical
-// work over a run that was healthy. So the notice reports the silence, and
-// hands over the one piece of evidence that separates the two — what the
-// subagent was last seen doing — for the orchestrator to judge on.
+// `kind` is what the notice judges on, and it is a statement the plugin can
+// make: a subagent with a tool call in flight takes the `tool-call` window, so
+// a reap on the `silence` window is a reap of a subagent that had NOTHING of
+// its own running — the probable hang. The two are named as what they are.
+// What the notice still does not say is that the subagent was inactive: the
+// clock measures the plugin's own silence, not the subagent's idleness, and a
+// hung provider call is silence full of work that was paid for. So it reports
+// the silence, names which of the two windows ended it, and hands over what the
+// subagent was last seen doing as the evidence the orchestrator re-dispatches
+// on.
 export function timeoutNotice(entry, limit, silentMs, result) {
   const silentSec = Math.round(silentMs / 1000)
   const limitSec = Math.round(limit.ms / 1000)
@@ -268,23 +270,19 @@ export function timeoutNotice(entry, limit, silentMs, result) {
     limit.kind === "tool-call"
       ? `spent ${silentSec}s inside a single \`${limit.tool ?? "unknown"}\` tool call ${held} ` +
         `and was cut off`
-      : limit.kind === "busy"
-        ? `gave no sign of life for ${silentSec}s while opencode still reported its session busy ` +
-          `${held} and was cut off`
-        : `gave no sign of life for ${silentSec}s ${held} and was cut off`
+      : `gave no sign of life for ${silentSec}s ${held} and was cut off`
   const lastSeen = lastSeenPhrase(entry)
   const seen = lastSeen
     ? `Last seen doing: ${lastSeen}. `
     : `Nothing is known of what it was doing — no text and no tool call of its own has reached ` +
       `this plugin. `
   const judgement =
-    limit.kind === "silence"
-      ? `It may have hung, or it may have been inside a single long step — nothing reaches this ` +
-        `plugin while one tool call runs, so the two look alike from here. Judge from what it ` +
-        `was last doing before you cover the same ground again. `
-      : `It was still working when it was cut off, so this is a limit on how long one step may ` +
+    limit.kind === "tool-call"
+      ? `It was still working when it was cut off, so this is a limit on how long one step may ` +
         `take and not proof of a hang: raise \`${limit.setting}\` if that step legitimately ` +
         `needs longer. `
+      : `The clock ran out with no tool call of its own in flight, so this reads as a hung step ` +
+        `rather than a long one, and not as work that needed more room. `
   const recovered = result
     ? `\nWhat it produced before it was cut off — this is the only account of the work it ` +
       `managed, read it before you re-dispatch and do not have the same ground covered twice:\n${result}\n`

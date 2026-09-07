@@ -216,6 +216,60 @@ export function entryForSession(sessionID) {
   return registry.get(bySession.get(sessionID))
 }
 
+// ---- the in-flight tool calls of one entry -----------------------------------
+//
+// `entry.toolCalls` is the plugin's only knowledge of whether a subagent is
+// WORKING: opencode publishes no event at all between the part that announces a
+// tool call and the part that reports its result, so a subagent inside one long
+// call looks exactly like a hung one on the event stream. The three functions
+// below are the whole interface to that map, so the two hooks that own its ends
+// (`tool.execute.before` / `tool.execute.after`, hooks.js) and the one reader
+// (watchdogLimit, watchdog.js) cannot drift apart.
+//
+// Keyed by opencode's `callID`, so parallel calls each hold their own slot and
+// one finishing does not clear the others. An entry built without the map — a
+// hand-made fixture, an entry from an older shape — reads as "nothing in
+// flight" and is measured against the silence window.
+
+// Records the start of one tool call. `at` is the caller's single clock read,
+// so the stamp and the `lastActivityAt` bump beside it compare exactly.
+export function beginToolCall(entry, callID, tool, at = Date.now()) {
+  if (!entry?.toolCalls) return false
+  entry.toolCalls.set(toolCallKey(callID), { tool, startedAt: at })
+  return true
+}
+
+// Records that one tool call is over — it returned, or it was denied and will
+// never run. Unknown callIDs are a no-op: a call the guard never admitted, and
+// a second `after` for the same call, both land here.
+export function endToolCall(entry, callID) {
+  if (!entry?.toolCalls) return false
+  return entry.toolCalls.delete(toolCallKey(callID))
+}
+
+// The tool call this entry has had in flight the LONGEST, or undefined when it
+// has none. The oldest one is what the working window is measured against: a
+// ceiling counted from the newest call would be pushed out by every further
+// call the subagent starts, i.e. never fire.
+export function oldestToolCall(entry) {
+  const calls = entry?.toolCalls
+  if (!calls || calls.size === 0) return undefined
+  let oldest
+  for (const call of calls.values()) {
+    const startedAt = Number.isFinite(call?.startedAt) ? call.startedAt : 0
+    if (!oldest || startedAt < oldest.startedAt) oldest = { tool: call?.tool, startedAt }
+  }
+  return oldest
+}
+
+// opencode's hook types declare `callID` as a string on both ends, so the
+// fallback is only reached if that ever stops holding. Both ends use it, so a
+// call without an id still clears itself rather than being stranded in flight;
+// two such calls at once share the one slot, which the working window bounds.
+function toolCallKey(callID) {
+  return callID ?? "unknown"
+}
+
 // Categorizes a registry entry into one displayed state:
 //   "aborted"  — user/orchestrator killed it
 //   "idle"     — opencode-idle (a brief transient between session.idle firing
@@ -462,6 +516,10 @@ export function retainEntryLocked(sessionID, now = Date.now()) {
 //     stranding the answer and holding the concurrency slot for good;
 //   - `lastActivityAt` to now, so the run is measured from the reuse and the
 //     first watchdog tick after admission cannot reap it on run 1's silence;
+//   - `toolCalls` replaced by an empty map, for the same reason with the
+//     stronger consequence: run 1 ended, so nothing it started is still in
+//     flight, and a leftover call would put run 2 on the working window from
+//     its first tick and name run 1's tool as the one that was cut off;
 //   - `retainedAt` cleared: the window is over, and a window is per retention
 //     rather than per session — the next idle stamps a fresh one;
 //   - `runs` up by one, and `packageTokens` replaced by this follow-up's
@@ -495,6 +553,7 @@ export function reviveRetainedEntryLocked(
     ctxTokens: entry.ctxTokens,
     lastTokensFetchAt: entry.lastTokensFetchAt,
     lastActivityAt: entry.lastActivityAt,
+    toolCalls: entry.toolCalls,
     status: entry.status,
   }
   entry.lifecycle = LIFECYCLE_RUNNING
@@ -503,6 +562,7 @@ export function reviveRetainedEntryLocked(
   entry.errored = false
   entry.timedOut = false
   entry.lastActivityAt = now
+  entry.toolCalls = new Map()
   entry.retainedAt = undefined
   entry.runs = (entry.runs ?? 1) + 1
   entry.packageTokens = packageTokens || undefined
@@ -537,6 +597,7 @@ export function restoreRetainedEntryLocked(sessionID, previous) {
   entry.ctxTokens = previous.ctxTokens
   entry.lastTokensFetchAt = previous.lastTokensFetchAt
   entry.lastActivityAt = previous.lastActivityAt
+  if (previous.toolCalls) entry.toolCalls = previous.toolCalls
   entry.status = previous.status
   return true
 }
@@ -1656,14 +1717,16 @@ function createEntry(sessionID, agent, prompt, parentID, taskId, directory, pack
     // slot freed. Distinct from `lastActivity` (a short string snapshot of
     // what the subagent was last doing, used by the system-prompt snapshot).
     lastActivityAt: now,
-    // Wall-clock ms at which this subagent last STARTED a tool call, and the
-    // name of that tool, both stamped by guardToolExecute (hooks.js). While
-    // `toolCallAt >= lastActivityAt` that call is still the last thing seen of
-    // the subagent — opencode publishes nothing while one runs — and the sweep
-    // measures the entry against `maxSubagentToolCallMs` rather than the
-    // silence window. Undefined until the subagent's first tool call.
-    toolCallAt: undefined,
-    toolCallTool: undefined,
+    // The tool calls this subagent has IN FLIGHT right now: callID ->
+    // { tool, startedAt }. An entry goes in when guardToolExecute admits a call
+    // (hooks.js) and comes out when `tool.execute.after` reports its result, or
+    // at once when the guard denies the call, since a denied call never runs
+    // and never gets an `after`. A non-empty map is what the sweep reads as
+    // "this subagent is working": opencode publishes nothing while a call runs,
+    // so such an entry is measured against `maxSubagentToolCallMs`, from the
+    // START of its oldest call, rather than against the silence window. See
+    // watchdogLimit (watchdog.js). Empty until the subagent's first tool call.
+    toolCalls: new Map(),
     lastActivity: undefined,
     ctxTokens: undefined,
     // wall-clock timestamp of the most recent fetchSnapshot() that returned

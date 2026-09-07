@@ -112,8 +112,7 @@ const DEFAULT_MAX_PRIMARY_CONTEXT = 80000
 // (which keeps emitting events) is never tripped, short enough that a hung
 // LLM call doesn't silently pin a slot for the life of the process.
 // This is the window for a subagent with NOTHING in flight; one that is inside
-// a tool call, or that opencode still reports as busy, is measured against
-// maxSubagentToolCallMs instead.
+// a tool call is measured against maxSubagentToolCallMs instead.
 // One subagent is silent and healthy: one blocked on a live child of its own,
 // whose events all belong to the child's session. The sweep treats waiting on
 // a watchdogged child as activity (see isWaitingOnWatchdoggedChild), so this
@@ -121,12 +120,11 @@ const DEFAULT_MAX_PRIMARY_CONTEXT = 80000
 // The child-waiter's rescue ceiling is 4 × the wider of this and the
 // tool-call window; either window at 0 lifts that ceiling entirely — see childwait.js.
 const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
-// The same watchdog's window for a subagent that is WORKING: one whose last
-// sign of life was the start of a tool call, or whose session opencode still
-// reports as busy. opencode publishes nothing between the part that announces
-// a tool call and the part that reports its result, so a subagent inside one
-// long call is silent by construction and the window above says nothing about
-// it. 0 means no ceiling while it works — the silence watchdog still applies
+// The same watchdog's window for a subagent that is WORKING: one with a tool
+// call in flight, i.e. started and not yet returned. opencode publishes nothing
+// between the part that announces a tool call and the part that reports its
+// result, so a subagent inside one long call is silent by construction and the
+// window above says nothing about it. 0 means no ceiling while it works — the silence watchdog still applies
 // to every subagent that is not working.
 // 660 s is the default: opencode's own bash tool permits a command timeout of
 // at most 600 000 ms (its default is 120 000 ms), so this clears the longest
@@ -296,8 +294,8 @@ function envStr(name, def) {
 // exaApiKey is "" when unset (web_search falls back to Exa's anonymous tier).
 // maxSubagentAgeMs is the watchdog window for a subagent with nothing in
 // flight; 0 disables the watchdog. maxSubagentToolCallMs is the same
-// watchdog's window for one that is inside a tool call or that opencode still
-// reports as busy; 0 means no ceiling while it works.
+// watchdog's window for one that is inside a tool call; 0 means no ceiling
+// while it works.
 // maxPrimaryContext is the orchestrator primary-session context-refresh
 // threshold (tokens); 0 disables auto-handoff. agentContext is the per-agent
 // context budget map exactly as the file holds it (empty when the file names

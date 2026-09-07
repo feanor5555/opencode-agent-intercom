@@ -323,23 +323,26 @@ test("timeoutNotice without recovered text is byte-identical to the timeout line
     timeoutNotice(reapedEntry, SILENCE_LIMIT, 91000),
     '🔔 agent-intercom: subagent "coder#1" (coder, session ses_sub1) gave no sign of life for ' +
       "91s (limit 90s, maxSubagentAgeMs) and was cut off — slot freed. Nothing is known of what " +
-      "it was doing — no text and no tool call of its own has reached this plugin. It may have " +
-      "hung, or it may have been inside a single long step — nothing reaches this plugin while " +
-      "one tool call runs, so the two look alike from here. Judge from what it was last doing " +
-      "before you cover the same ground again. You may re-dispatch with spawn() if the work is " +
-      "still needed.",
+      "it was doing — no text and no tool call of its own has reached this plugin. The clock ran " +
+      "out with no tool call of its own in flight, so this reads as a hung step rather than a " +
+      "long one, and not as work that needed more room. You may re-dispatch with spawn() if the " +
+      "work is still needed.",
   )
 })
 
-// The reap cannot tell a hung call from a subagent inside one long tool call —
-// opencode publishes nothing during either — so the notice must not settle that
-// question for the orchestrator. It reports the silence and hands over the
-// evidence: what the entry was last seen doing.
-test("timeoutNotice does not assert inactivity and says what the subagent was last doing", () => {
+// A subagent inside a tool call is measured against the OTHER window, so a reap
+// on the silence window is a reap of one that had nothing of its own running.
+// The notice says so rather than hedging between the two: the hedge cost the
+// orchestrator an LLM turn to re-decide something the plugin already knew.
+// What it still does not assert is inactivity — the clock measures the
+// plugin's silence, not the subagent's idleness — and it still hands over what
+// the entry was last seen doing as the evidence to re-dispatch on.
+test("timeoutNotice reads a silence reap as a hang and says what the subagent was last doing", () => {
   const notice = timeoutNotice({ ...reapedEntry, lastActivity: "[tool: bash]" }, SILENCE_LIMIT, 91000)
   assert.match(notice, /gave no sign of life for 91s \(limit 90s, maxSubagentAgeMs\)/)
   assert.match(notice, /Last seen doing: \[tool: bash\]\./)
-  assert.match(notice, /may have hung, or it may have been inside a single long step/)
+  assert.match(notice, /no tool call of its own in flight, so this reads as a hung step/)
+  assert.doesNotMatch(notice, /look alike from here/)
   assert.doesNotMatch(notice, /inactivity/)
 })
 
@@ -356,16 +359,6 @@ test("timeoutNotice names the tool call that was in flight and the setting that 
   assert.match(notice, /still working when it was cut off/)
   assert.match(notice, /raise `maxSubagentToolCallMs`/)
   assert.doesNotMatch(notice, /inactivity/)
-})
-
-test("timeoutNotice separates a busy session from a call in flight", () => {
-  const notice = timeoutNotice(
-    reapedEntry,
-    { ms: 660000, setting: "maxSubagentToolCallMs", kind: "busy" },
-    670000,
-  )
-  assert.match(notice, /gave no sign of life for 670s while opencode still reported its session busy \(limit 660s, maxSubagentToolCallMs\)/)
-  assert.match(notice, /still working when it was cut off/)
 })
 
 test("lastSeenPhrase flattens the activity string and caps it", () => {

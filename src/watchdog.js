@@ -14,19 +14,19 @@
 //
 // Important: the threshold is SILENCE (time since the last sign of life), not
 // total lifetime. A long-running subagent that keeps showing signs of life is
-// healthy, so it never trips. Three things count as a sign of life, and the
-// sweep needs all three because opencode publishes nothing while one tool call
-// runs:
+// healthy, so it never trips. Two things count as a sign of life:
 //   - any event on the session — `lastActivityAt` is bumped by `handleEvent`
 //     in hooks.js;
-//   - the start of any tool call — bumped by `guardToolExecute`, also hooks.js;
-//   - opencode's own `session.status === "busy"`, held on the entry.
-// The last two say the subagent is WORKING, and a working subagent is measured
-// against `maxSubagentToolCallMs` (default 660 s, above the 600 000 ms ceiling
-// opencode's own bash tool allows) rather than `maxSubagentAgeMs` (default
-// 90 s), which is the window for one with nothing in flight. Neither is
-// unbounded: a session that died inside a tool call, or one whose seeded
-// `busy` was never refreshed, still frees its slot at the wider window.
+//   - the start and the end of any tool call — bumped by `guardToolExecute`
+//     and `recordToolCallFinished`, also hooks.js.
+// The tool call additionally says the subagent is WORKING, for as long as it is
+// in flight: it goes into `entry.toolCalls` on `tool.execute.before` and comes
+// out on `tool.execute.after`, and opencode publishes nothing in between, so
+// such an entry is measured against `maxSubagentToolCallMs` (default 660 s,
+// above the 600 000 ms ceiling opencode's own bash tool allows) rather than
+// `maxSubagentAgeMs` (default 90 s), which is the window for one with nothing
+// in flight. Neither is unbounded: a session that died inside a tool call still
+// frees its slot at the wider window, counted from that call's start.
 // See watchdogLimit.
 
 import { registry, aborted } from "./state.js"
@@ -37,6 +37,7 @@ import {
   entryForSession,
   entryLifecycle,
   isRetainedExpired,
+  oldestToolCall,
   LIFECYCLE_CLOSING,
   LIFECYCLE_RETAINED,
 } from "./registry.js"
@@ -153,11 +154,12 @@ export async function sweepWatchdog() {
         entry.lastActivityAt = now
         continue
       }
-      // Which of the two windows this entry is measured against — see
-      // watchdogLimit. A subagent that is working is measured against
-      // `maxSubagentToolCallMs`, one with nothing in flight against
-      // `maxSubagentAgeMs`; the limit that fires travels with the reap so the
-      // parent is told which one it was.
+      // Which of the two windows this entry is measured against, and from when
+      // — see watchdogLimit. A subagent with a tool call in flight is measured
+      // against `maxSubagentToolCallMs` from the start of that call (`since`),
+      // one with nothing in flight against `maxSubagentAgeMs` from its last
+      // sign of life; the limit that fires travels with the reap so the parent
+      // is told which one it was.
       //
       // NOT bumped like the child-wait exemption above: the bump there is safe
       // because the child is watchdogged on its own clock, whereas a working
@@ -165,7 +167,7 @@ export async function sweepWatchdog() {
       // ceiling out on every tick — i.e. never reap it.
       const limit = watchdogLimit(entry, settings)
       if (limit.ms <= 0) continue // this window switched off
-      const last = entry.lastActivityAt ?? entry.spawnedAt
+      const last = limit.since ?? entry.lastActivityAt ?? entry.spawnedAt
       const silentMs = now - last
       if (silentMs <= limit.ms) continue
 
@@ -274,39 +276,62 @@ export function isWaitingOnWatchdoggedChild(sessionID) {
   return false
 }
 
-// Which window one entry is measured against, and what to call it when it
-// fires. Three cases, two windows:
+// Which window one entry is measured against, what to call it when it fires,
+// and from when it is counted. Two cases, two windows:
 //
-//   tool-call — the subagent's last sign of life was the START of a tool call
-//               (`toolCallAt` not moved past by any later event). opencode
-//               publishes nothing while that call runs, so the silence is the
-//               call, not a hang: `maxSubagentToolCallMs`.
-//   busy      — no call in flight, but opencode still reports the session busy
-//               (`session.status`, onSessionStatus). Same window, same reason:
-//               the server says a turn is in flight and we cannot see it.
-//   silence   — nothing in flight and opencode does not call it busy. This is
-//               the case the dead-man's switch was built for:
-//               `maxSubagentAgeMs`.
+//   tool-call — the subagent has at least one tool call IN FLIGHT
+//               (`entry.toolCalls`, filled by `tool.execute.before` and emptied
+//               by `tool.execute.after`, hooks.js). opencode publishes nothing
+//               while a call runs, so the silence is the call, not a hang:
+//               `maxSubagentToolCallMs`, counted from the START of the oldest
+//               call in flight (`since`).
+//   silence   — nothing in flight. This is the case the dead-man's switch was
+//               built for: `maxSubagentAgeMs`, counted from the last sign of
+//               life.
+//
+// What is deliberately NOT a case: `entry.status === "busy"`. That field is
+// this plugin's own — `createEntry` seeds it on every spawn and
+// `reviveRetainedEntryLocked` on every reuse — so every running entry carries
+// it from birth, and a branch on it would put every subagent on the wide window
+// and leave the silence window governing nothing. opencode's own verdict
+// (`onSessionStatus`) writes the same field, and it holds `busy` for the whole
+// of a turn including the hung LLM call this watchdog exists to end, so even
+// the genuine value cannot separate working from hung. The in-flight map can:
+// it is written only where the plugin has actually seen a call start.
+//
+// `since` is what makes the wide window a ceiling rather than a renewable
+// lease. Events DO arrive during a tool call — the part that flips it to
+// running, a republished `session.status` — and each bumps `lastActivityAt`, so
+// a window counted from there would restart on every one of them and a call
+// that never returns would never be reaped. Counted from the call's own start
+// it fires at `maxSubagentToolCallMs` after that start, whatever else happens
+// in between, which is also what bounds a call whose `after` never comes.
 //
 // The descriptor travels with the reap so that the log, the wake notice and the
 // nested-spawn detail all name the limit that actually fired and its value —
 // a subagent cut off at 660 s reported against a 90 s window would read as a
 // timeout that should not have happened.
+//
+// A settings object carrying no tool-call window at all is read as "no window
+// wider than the silence one", exactly as childWaiterTimeoutMs reads it
+// (childwait.js): absent is not the same statement as an explicit 0, and
+// defaulting it to `undefined` would reap every working entry on the first tick
+// (`silentMs <= undefined` is false) and report a NaN limit to the parent.
 export function watchdogLimit(entry, settings = getSettings()) {
-  const toolCallAt = entry?.toolCallAt
-  const lastActivityAt = entry?.lastActivityAt ?? entry?.spawnedAt ?? 0
-  if (toolCallAt != null && toolCallAt >= lastActivityAt) {
+  const toolCallMs = Number.isFinite(settings?.maxSubagentToolCallMs)
+    ? settings.maxSubagentToolCallMs
+    : settings?.maxSubagentAgeMs
+  const oldest = oldestToolCall(entry)
+  if (oldest) {
     return {
-      ms: settings.maxSubagentToolCallMs,
+      ms: toolCallMs,
       setting: "maxSubagentToolCallMs",
       kind: "tool-call",
-      tool: entry.toolCallTool,
+      tool: oldest.tool,
+      since: oldest.startedAt,
     }
   }
-  if (entry?.status === "busy") {
-    return { ms: settings.maxSubagentToolCallMs, setting: "maxSubagentToolCallMs", kind: "busy" }
-  }
-  return { ms: settings.maxSubagentAgeMs, setting: "maxSubagentAgeMs", kind: "silence" }
+  return { ms: settings?.maxSubagentAgeMs, setting: "maxSubagentAgeMs", kind: "silence" }
 }
 
 // Performs the actual timeout for one entry: abort the opencode session,

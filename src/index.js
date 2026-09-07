@@ -56,6 +56,7 @@ import {
   createTransformMessages,
   createEventHandler,
   createGuardToolExecute,
+  recordToolCallFinished,
   rewritePendingTools,
 } from "./hooks.js"
 import { installAgents } from "./agents.js"
@@ -229,5 +230,19 @@ export default async (ctx) => {
     },
     event: createEventHandler(client),
     "tool.execute.before": createGuardToolExecute(client, permissionGuard),
+    // The end of a tool call, and the only event the plugin gets about a
+    // session that has been silent inside one: it takes the call out of the
+    // entry's in-flight map, which is what puts the subagent back on the
+    // silence window (see recordToolCallFinished, hooks.js).
+    //
+    // Wrapped like every other hook here: a throw out of this one would turn a
+    // tool call that succeeded into a failed one for the subagent that made it.
+    "tool.execute.after": async (input) => {
+      try {
+        recordToolCallFinished(input)
+      } catch (err) {
+        log("tool.execute.after hook error", err?.message ?? String(err))
+      }
+    },
   }
 }

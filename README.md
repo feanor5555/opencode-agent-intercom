@@ -540,10 +540,12 @@ exposes every runtime knob:
   `src/teardown.js`, whose window is a multiple of this one, stops running
   too. Default 90 s.
 - **`in tool (min) [-N+]`** — the same watchdog's window for a subagent that
-  is WORKING: one inside a tool call, or whose session opencode still reports
-  as busy. opencode publishes nothing between the part that announces a tool
-  call and the part that reports its result, so such a subagent is silent by
-  construction and the row above says nothing about it. Shown and stepped in
+  is WORKING: one with a tool call in flight, from the moment the call starts
+  until its result comes back. opencode publishes nothing between the part that
+  announces a tool call and the part that reports its result, so such a
+  subagent is silent by construction and the row above says nothing about it.
+  Counted from the START of the call, so it is a ceiling on the call rather
+  than a lease the events arriving during it keep renewing. Shown and stepped in
   whole minutes; writes `"maxSubagentToolCallMs"` in ms. `0` shows as `off`
   and means no ceiling at all while a subagent works — the silence window
   still governs every subagent that is not working. Default 11 min, which
@@ -724,7 +726,7 @@ is environment-variable-driven:
 | `OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS` | `2` | Nested `spawn` calls a single subagent run may start (the caller's one allowed target — `researcher` for the five non-web roles, `grounder` for `researcher`). `"0"` disables — the subagent must do the work itself. TUI file overrides via `"maxNestedSpawns"`. |
 | `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` | `100000` | Subagent context budget (tokens). `"0"` disables. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS` | `90000` | Watchdog window (ms) for a subagent with nothing in flight. `"0"` switches the inactivity watchdog off, and with it the orphan sweep whose window is a multiple of this one. TUI file overrides via `"maxSubagentAgeMs"`; the TUI's `silence (s)` row steps it in whole seconds. |
-| `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS` | `660000` | The same watchdog's window (ms) for a subagent inside a tool call, or one opencode still reports as busy. `"0"` means no ceiling while it works; the silence window still applies to every subagent that is not working. TUI file overrides via `"maxSubagentToolCallMs"`; the TUI's `in tool (min)` row steps it in whole minutes. |
+| `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS` | `660000` | The same watchdog's window (ms) for a subagent with a tool call in flight, counted from the start of that call. `"0"` means no ceiling while it works; the silence window still applies to every subagent that is not working. TUI file overrides via `"maxSubagentToolCallMs"`; the TUI's `in tool (min)` row steps it in whole minutes. |
 | `OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS` | `0` | How many finished subagents may be held as retained sessions in this process. `"0"` switches retention off — every subagent's session is deleted the moment its result is delivered, the one-shot behaviour. Recommended non-zero value: `3`. TUI file overrides. **Enabling retention needs an opencode restart** — the tool surface is resolved at plugin load, so the `reuse` tool only appears once the next instance boots with this set. Disabling takes effect at once. |
 | `OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS` | `3600000` | Retention window per held subagent, in ms. Clamped to a floor of `1`. The TUI's row steps in whole minutes with a one-minute floor. |
 | `OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT` | `70000` | Reuse ceiling for every agent type the `reuseContext` map does not name. `"0"` means that type is never reused at all. The TUI panel shows and edits the per-type map; the flat key is only what an untouched type inherits. |

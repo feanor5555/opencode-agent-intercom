@@ -34,8 +34,10 @@ import { capChars } from "./format.js"
 //      Dropping FIRST is also what keeps steps 4 and 5 simple: reparent and the
 //      in-flight list never meet a retained entry. Best-effort — a failed drop
 //      is logged and the handoff proceeds.
-//   1. Gather planned steps and the last user goal. (The in-flight subagent
-//      list is deliberately NOT gathered here — it is read AFTER the
+//   1. Gather planned steps for a plain handoff and the last user goal.
+//      Endless mode carries the todo file itself, so it leaves this summary
+//      section empty. (The in-flight subagent list is deliberately NOT
+//      gathered here — it is read AFTER the
 //      reparent in step 4, so the kickoff only announces subagents whose
 //      re-pointing has actually happened.)
 //   2. Create the new orchestrator session and bind it to the drain
@@ -177,12 +179,14 @@ async function performPrimaryHandoffInner(deps) {
   let reparented = 0
   let md
   try {
-    // 1. Gather planned steps + last user goal. getLastUserGoal may be async
-    // in production (it fetches the old primary's message history via the
-    // session API — the system.transform hook input carries NO `messages`
-    // field). Best-effort: a failed lookup yields an empty goal, never a
-    // failed handoff.
-    const steps = deps.getPlannedSteps(deps.directory)
+    // 1. Gather planned steps + last user goal. Endless kickoffs already
+    // carry the todo file verbatim, so repeating its planned steps in the
+    // handoff summary would duplicate the successor's source of truth.
+    // getLastUserGoal may be async in production (it fetches the old
+    // primary's message history via the session API — the system.transform
+    // hook input carries NO `messages` field). Best-effort: a failed lookup
+    // yields an empty goal, never a failed handoff.
+    const steps = deps.extraKickoffBlock ? [] : deps.getPlannedSteps(deps.directory)
     let goal = ""
     try {
       goal = (await deps.getLastUserGoal()) || ""

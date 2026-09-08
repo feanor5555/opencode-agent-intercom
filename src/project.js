@@ -307,17 +307,19 @@ export function readPrimarySummary(directory) {
 //
 // Parse heuristic (deliberately tolerant — the project may use either layout):
 //
-//   1. If the file contains a `## Offen` (German) heading, return the list
-//      items under it — everything between that heading and the next `## …`
-//      heading (or EOF). Items are de-bulleted (`- ` prefix stripped) and
-//      trimmed. Continuation lines (the indented `accept:` block under a
-//      `- T<n>: …` header) are kept as-is — they belong to the task and the
-//      new orchestrator needs to see the acceptance criterion.
+//   1. If the file contains a `## Offen` (German) or `## Open` (English)
+//      heading, return the list items under it — everything between that
+//      heading and the next `## …` heading (or EOF). Items are de-bulleted
+//      (`- ` prefix stripped) and trimmed. Continuation lines (the indented
+//      `accept:` block under a `- T<n>: …` header) are kept as-is — they
+//      belong to the task and the new orchestrator needs to see the
+//      acceptance criterion.
 //
-//   2. Otherwise, treat the whole file as the candidate list and return any
-//      non-empty markdown list item whose first character is `- ` or `* `.
-//      This handles the canonical `todofile.js` layout (`- T5: …` lines,
-//      flat top-to-bottom) AND a loose checkbox layout (`- [ ] …`).
+//   2. Otherwise, return only top-level markdown list items (`- ` or `* `)
+//      and their indented continuation lines. This handles the canonical
+//      `todofile.js` layout (`- T5: …` lines, flat top-to-bottom) AND a
+//      loose checkbox layout (`- [ ] …`) without treating prose from the
+//      whole document as a planned step.
 //
 //   3. If no todo file can be resolved, or it is unreadable or empty, return
 //      `[]` — same "graceful empty" contract as `readPrimarySummary` so the
@@ -354,8 +356,9 @@ export function readPlannedSteps(directory) {
 // without touching the filesystem.
 function extractPlannedStepLines(content) {
   const lines = content.split("\n")
-  // Step 1: find a `## Offen` section and bound it by the next `## ` heading.
-  const offenIdx = lines.findIndex((l) => /^##\s+Offen\s*$/i.test(l))
+  // Step 1: find an `## Offen` or `## Open` section and bound it by the
+  // next `## ` heading.
+  const offenIdx = lines.findIndex((l) => /^##\s+(?:Offen|Open)\s*$/i.test(l))
   let region
   if (offenIdx >= 0) {
     let endIdx = lines.length
@@ -368,17 +371,42 @@ function extractPlannedStepLines(content) {
     region = lines.slice(offenIdx + 1, endIdx)
     return region.map(stripBullet).filter(nonEmpty)
   }
-  // Step 2: no Offen heading — fall back to top-level list items across the
-  // whole file. Anything that starts with `- ` or `* ` (with optional leading
-  // whitespace — but we don't accept deeply-nested items; they're a different
-  // document). Continuation lines (the indented `accept:` block) are kept as
-  // their own strings, glued to their parent task by file order. Heading
-  // lines (`# …` / `## …`) are stripped — they're document structure, not
-  // tasks, and we don't want the title "TODO" appearing in the handoff
-  // summary.
-  return lines
-    .map(stripBullet)
-    .filter((s) => s.length > 0 && !/^#{1,6}\s/.test(s))
+  // Step 2: no planned-steps heading — keep only top-level list items and
+  // indented continuation lines. Prose and headings elsewhere in the file
+  // are document context, not planned steps, and must not be copied into the
+  // handoff summary. A deeper nested bullet is not a top-level task.
+  const steps = []
+  const bulletIndents = lines
+    .map((line) => /^(\s*)[-*]\s+/.exec(line))
+    .filter(Boolean)
+    .map((match) => match[1].length)
+  const baseIndent = bulletIndents.length > 0 ? Math.min(...bulletIndents) : null
+  let hasItem = false
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    if (/^#{1,6}\s/.test(trimmed)) {
+      hasItem = false
+      continue
+    }
+    const bullet = /^(\s*)[-*]\s+/.exec(line)
+    if (bullet) {
+      const indent = bullet[1].length
+      if (baseIndent !== null && indent > baseIndent) {
+        hasItem = false
+        continue
+      }
+      steps.push(stripBullet(line))
+      hasItem = true
+      continue
+    }
+    if (hasItem && /^\s+\S/.test(line)) {
+      steps.push(trimmed)
+      continue
+    }
+    hasItem = false
+  }
+  return steps.filter(nonEmpty)
 }
 
 // Strips a leading `- ` / `* ` / `- [ ] ` / `- [x] ` bullet (with optional

@@ -254,20 +254,47 @@ test("readPlannedSteps extracts list items under a `## Offen` heading", () => {
   }
 })
 
-test("readPlannedSteps falls back to top-level list items when no `## Offen` heading is present", () => {
+test("readPlannedSteps extracts list items under a `## Open` heading", () => {
   const dir = mkdtempSync(join(tmpdir(), "intercom-handoff-deps-"))
   try {
-    // Mirrors the canonical todofile.js layout: flat top-level `- T<n>: …`
-    // lines, no `## Offen` section heading. Everything in the file is treated
-    // as a planned step.
     writeFileSync(
       join(dir, "TODO.md"),
       [
         "# TODO",
         "",
+        "## Open",
+        "- T2: use the English heading",
+        "  accept: the open section is selected",
+        "",
+        "## Done",
+        "- T0: already finished",
+      ].join("\n"),
+    )
+
+    assert.deepEqual(readPlannedSteps(dir), [
+      "T2: use the English heading",
+      "accept: the open section is selected",
+    ])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("readPlannedSteps falls back to top-level list items when neither planned-steps heading is present", () => {
+  const dir = mkdtempSync(join(tmpdir(), "intercom-handoff-deps-"))
+  try {
+    // Mirrors the canonical todofile.js layout: flat top-level `- T<n>: …`
+    // lines, with prose that must not be mistaken for a planned step.
+    writeFileSync(
+      join(dir, "TODO.md"),
+      [
+        "# TODO",
+        "Context that is not a planned step.",
+        "",
         "- T1: add export endpoint",
         "  accept: GET /export returns 200 with JSON",
         "- T2: write tests for export",
+        "A closing note that is also not a planned step.",
       ].join("\n"),
     )
 

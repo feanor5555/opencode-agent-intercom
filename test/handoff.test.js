@@ -364,8 +364,10 @@ test("endless handoff suppresses the predecessor's stale goal from the summary",
   const fmt = deps._log.find((e) => e[0] === "formatPrimarySummary")[1]
   const message = deps._log.find((e) => e[0] === "promptAsync")[2]
   assert.equal(fmt.stand, "", "endless mode leaves the stale-goal stand section empty")
+  assert.deepEqual(fmt.plannedSteps, [], "endless mode does not repeat the todo steps")
   assert.doesNotMatch(message, new RegExp(staleGoal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
   assert.doesNotMatch(message, /Letztes Ziel:/)
+  assert.doesNotMatch(message, /- step A|\n- step B/, "summary carries no planned-step lines")
 })
 
 test("promptOldPrimaryForDocSummaries is called once, between createSession and promptAsync", async () => {

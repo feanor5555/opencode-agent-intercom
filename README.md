@@ -759,7 +759,10 @@ ceiling than the plain handoff threshold (`OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_C
 default 80 000 tokens), and the one in effect while endless mode is on. When
 the ceiling is reached the orchestrator is replaced by a fresh orchestrator
 session, which is told to work the project's todo file off; that fresh session
-reaches the ceiling in turn and is replaced again, and so on.
+reaches the ceiling in turn and is replaced again, and so on. A successor keeps
+its predecessor's session title unchanged, so the title carries no handoff marker
+or session id. The cycle-completion log records the new session id, while the
+sidebar context counter starts at zero for the fresh session.
 
 A cycle runs in this order:
 

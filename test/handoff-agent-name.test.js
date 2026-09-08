@@ -12,7 +12,11 @@
 import test, { beforeEach } from "node:test"
 import assert from "node:assert/strict"
 
-import { handoffAgentName, maybeRunPendingHandoff } from "../src/handoffwiring.js"
+import {
+  buildPrimaryHandoffDeps,
+  handoffAgentName,
+  maybeRunPendingHandoff,
+} from "../src/handoffwiring.js"
 import { installAgents, DEFAULT_AGENT } from "../src/agents.js"
 import { defaultAgentByDirectory, resetState } from "../src/state.js"
 import { markHandoffPending, recordSessionAgent } from "../src/registry.js"
@@ -94,6 +98,37 @@ test("an unreadable agent list falls back rather than throwing", async () => {
   assert.equal(await handoffAgentName(brokenClient), DEFAULT_AGENT)
 })
 
+
+test("a successor keeps the predecessor title and omits an absent title", async () => {
+  const created = []
+  let predecessorTitle = "the ongoing work"
+  const client = {
+    session: {
+      get: async () => ({ data: { title: predecessorTitle } }),
+      create: async (request) => {
+        created.push(request.body)
+        return { data: { id: `ses-successor-${created.length}` } }
+      },
+    },
+  }
+
+  const deps = await buildPrimaryHandoffDeps(
+    client,
+    "ses-predecessor",
+    "/tmp/handoff-title",
+    "orchestrator",
+  )
+  assert.equal(await deps.createSession({ agent: "orchestrator" }), "ses-successor-1")
+  assert.equal(created[0].title, predecessorTitle)
+
+  predecessorTitle = undefined
+  assert.equal(await deps.createSession({ agent: "orchestrator" }), "ses-successor-2")
+  assert.equal(
+    Object.hasOwn(created[1], "title"),
+    false,
+    "no predecessor title means no title field",
+  )
+})
 
 test("the summary prompt reuses the agent resolved for the handoff", async () => {
   const sessionID = "ses-agent-name-reuse"

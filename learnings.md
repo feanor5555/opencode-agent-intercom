@@ -487,9 +487,14 @@ authorization header and its address may be the placeholder.
 `selectTuiSession` (`src/client.js`) is built this way. The resolved address is
 logged once at load as `server url resolved` with a `placeholder` flag.
 
-## A screenshot of a successor session shows the predecessor's id, not its own
+## A successor session keeps the predecessor's title
 
-opencode's TUI renders no session id anywhere except inside the session title. A fresh successor created by the wind-down replacement is therefore told apart in a screenshot only by the title `orchestrator#<n> (handoff from ses_<predecessor>)` together with the sidebar's context counter standing at `0 tokens` / `0% used`. The predecessor's id is the id visible on the screen; the successor's id is not on the screen at all. A reviewer reading such a screenshot will conclude it shows the predecessor unless they are told this — which is the entire reason the wind-down replacement is verified by the sidebar counter resetting, not by the title.
+opencode's TUI renders no session id anywhere except inside the session title. A
+successor created by the wind-down replacement carries the predecessor's title
+unchanged, so the title identifies nothing about the handover. The successor is
+told apart by the log line `cycle … complete, new session ses_…` together with
+the sidebar's context counter starting at `0 tokens` / `0% used`; the predecessor
+and successor ids live only in the logs.
 
 ## The "default model" line in setup output and plugin debug is the *configured* default, not the model that actually served the run
 

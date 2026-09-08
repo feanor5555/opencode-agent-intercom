@@ -10,9 +10,9 @@
 //   Reported write — deleteSession, archiveSession, updateSessionTitle,
 //     abortSession: returns false, logs once, never retries. The caller reads
 //     a truthful boolean and proceeds either way.
-//   Best-effort read — getSessionDirectory, listSessions, fetchMessages,
-//     fetchSnapshot: returns the empty value (undefined / [] / [] / {}), logs
-//     once. Each reader has a degraded answer designed for it.
+//   Best-effort read — getSessionDirectory, getSessionTitle, listSessions,
+//     fetchMessages, fetchSnapshot: returns the empty value (undefined / [] / [] / {}),
+//     logs once. Each reader has a degraded answer designed for it.
 //
 // createChildSession stands beside them as a creator: it answers
 // `{ sessionID }` or `{ error }`, so a caller that has to report WHY nothing
@@ -281,8 +281,10 @@ export function unwrap(resp) {
 // sequence they are in the middle of. Nothing is returned on that path.
 export async function createChildSession(client, { parentID, title, directory }) {
   const op = "createChildSession (session.create)"
+  const body = { parentID }
+  if (title !== undefined) body.title = title
   const outcome = await attempt(op, () =>
-    client.session.create({ body: { parentID, title }, query: { directory } }),
+    client.session.create({ body, query: { directory } }),
   )
   if (!outcome.ok) {
     if (outcome.error?.kind === "indeterminate") throw outcome.error
@@ -409,6 +411,20 @@ export async function getSessionDirectory(client, sessionID) {
   const dir = outcome.data?.directory
   if (dir) sessionDirCache.set(sessionID, dir)
   return dir
+}
+
+// Best-effort read of a session's own title. Undefined means the session has
+// no title or the metadata could not be read; callers that create a successor
+// can then omit the title and let the server keep its default.
+export async function getSessionTitle(client, sessionID) {
+  if (!sessionID) return undefined
+  const op = "getSessionTitle (session.get)"
+  const outcome = await attempt(op, () => client.session.get({ path: { id: sessionID } }))
+  if (!outcome.ok) {
+    logFailure(op, outcome.error, { sessionID })
+    return undefined
+  }
+  return typeof outcome.data?.title === "string" ? outcome.data.title : undefined
 }
 
 export function forgetSessionDirectory(sessionID) {

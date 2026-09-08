@@ -48,6 +48,7 @@ import {
 import {
   fetchSnapshot,
   fetchMessages,
+  getSessionTitle,
   postNotice,
   showToast,
   deleteSession,
@@ -180,25 +181,26 @@ export async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, res
     // `undefined`; client.js exposes `createChildSession(client, { parentID,
     // title, directory })`, answering `{ sessionID }` or `{ error }`. We bridge
     // the two shapes here — a refused create has no `sessionID`, which is the
-    // `undefined` handoff.js's own guard is written for. CRITICAL: parentID is OMITTED
-    // on purpose so orchestrator2 is created as a ROOT/independent
-    // session in opencode — NOT a child of orchestrator1. If we
-    // passed parentID=sessionID, opencode would treat orchestrator2
-    // as a child and the subsequent deleteSession(orchestrator1)
-    // would CASCADE-DELETE orchestrator2 along with it, destroying
-    // the very session the handoff just created. The SDK's
-    // SessionCreateData declares parentID as optional (types.gen.d.ts
-    // SessionCreateData.body.parentID?: string), so omitting it gives
-    // us a root session — exactly what we want for a true handoff.
-    // Subagent reparenting uses the PLUGIN's own registry parentID
+    // `undefined` handoff.js's own guard is written for. A successor carries
+    // the predecessor's own title unchanged; when the predecessor has no title,
+    // `createChildSession` omits the field and opencode supplies its default.
+    // CRITICAL: parentID is OMITTED on purpose so the successor is created as a
+    // ROOT/independent session in opencode — NOT a child of the predecessor. If
+    // we passed parentID=sessionID, opencode would treat the successor as a
+    // child and deleting the predecessor would CASCADE-DELETE the successor
+    // along with it. The SDK's SessionCreateData declares parentID as optional,
+    // so omitting it gives us a root session — exactly what we want for a true
+    // handoff. Subagent reparenting uses the PLUGIN's own registry parentID
     // field and is unrelated to opencode's session tree.
-    createSession: async () =>
-      (
+    createSession: async () => {
+      const title = await getSessionTitle(client, sessionID)
+      return (
         await createChildSession(client, {
-          title: `orchestrator#${handoffGeneration(sessionID) + 1} (handoff from ${sessionID})`,
+          ...(title === undefined ? {} : { title }),
           directory: sessionDir,
         })
-      ).sessionID,
+      ).sessionID
+    },
     // handoff.js calls `promptAsync(sessionID, message)`; client.js
     // exposes `promptSession(client, { sessionID, agent, prompt })`.
     // We bridge: the kickoff message must set `agent` so opencode

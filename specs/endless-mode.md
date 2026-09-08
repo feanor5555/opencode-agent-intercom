@@ -751,11 +751,9 @@ in its context object, so the direct post needs no configuration.
 
 Two rejected alternatives, both of which this route makes unnecessary:
 
-- **Title match in the sidebar.** The sidebar receives `session.created`
-  (`tui/src/tui.tsx:861`) and could navigate when the new session's title matches the handoff
-  shape `orchestrator#<n> (handoff from <old id>)` (`src/handoffwiring.js:123`). Costs a
-  string contract between two separately versioned npm packages, and a title a user could
-  reproduce by hand.
+- **Title match in the sidebar.** A successor inherits the predecessor's own title unchanged,
+  so its title carries no handoff marker that the sidebar could match. A title is also user
+  controlled and can be reproduced by hand, so it cannot identify a successor reliably.
 - **A handoff-pointer file polled by the sidebar.** Explicit contract, but a fourth shared
   file and up to 30 s of latency on the existing timer (`tui/src/tui.tsx:406-409`).
 

@@ -216,8 +216,9 @@ test("every session it cannot positively attribute is left standing", async () =
     // no readable idle time: the age can be established for it, or it stays
     session("ses_no_time", { time: undefined }),
     session("ses_bad_time", { time: { updated: "yesterday" } }),
-    // the handoff's successor orchestrator: a child session, and a primary
-    session("ses_handoff", { title: "orchestrator#2 (handoff from ses_old_primary)" }),
+    // the handoff's successor orchestrator: a child session, and a primary;
+    // successors inherit their predecessor's ordinary title without a marker
+    session("ses_handoff", { title: "orchestrator" }),
     // a marked leftover, so the sweep is doing something at all
     session("ses_leaked"),
   ]

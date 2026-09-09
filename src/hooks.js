@@ -86,7 +86,14 @@ import {
   PACKAGE_WARN_SHARE,
   PACKAGE_REFUSE_SHARE,
 } from "./settings.js"
-import { nestedSpawnTargets, SPAWNABLE_ROLES, isSubagentRole, defaultAgentName } from "./agents.js"
+import {
+  nestedSpawnTargets,
+  SPAWNABLE_ROLES,
+  isSubagentRole,
+  defaultAgentName,
+  DEFAULT_AGENT,
+  SOLO_ROLE_HEADER_NAME,
+} from "./agents.js"
 import { resolveSpawnPermission } from "./config.js"
 import { overrideBlock, overrideToastText } from "./overrides.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
@@ -745,12 +752,20 @@ export function resolvePrimaryAgent(sessionID, output, directory) {
 // `# Role: Coder (Subagent)` etc. Returns the lowercased agent name, or null
 // if the header isn't found (rung 2 of resolvePrimaryAgent — the caller falls
 // through to the captured `default_agent`).
+//
+// The one header that does not name a role is the solo prompt's `# Role: Solo`
+// (SOLO_ROLE_HEADER_NAME, src/agents.js): solo mode replaces the primary's
+// PROMPT and leaves its name alone, so the word maps back to the role the
+// plugin installs the primary as — the same answer this rung gives for the
+// orchestration prompt, which is what makes a solo primary load the primary's
+// prompt-template file rather than a `solo.md` no role has.
 function detectAgentFromSystem(output) {
   if (!Array.isArray(output?.system) || output.system.length === 0) return null
   const head = output.system[0].slice(0, 200)
   const m = /^#\s*Role:\s*([A-Za-z]+)/m.exec(head)
   if (!m) return null
-  return m[1].toLowerCase()
+  const name = m[1].toLowerCase()
+  return name === SOLO_ROLE_HEADER_NAME ? DEFAULT_AGENT : name
 }
 
 // Reads the subagent's live context size and returns the block to inject when
@@ -935,6 +950,18 @@ async function notifyParentOfDenialLoop(client, entry) {
 // completion notice is then the only copy of a subagent's result and nothing
 // renders it, so the orchestrator is the channel to the user.
 //
+// In SOLO mode almost nothing in the block is true and what is left is the
+// hidden-postings sentence alone. The spawn budgets size packages for
+// subagents that are never started there, `maxSubagents` bounds a fleet that
+// does not exist, and the sizing sentence points at "the orchestration
+// protocol above", which is not injected in that mode (guideBlocks,
+// src/prompts.js) — a reference to a block the primary was never given. The
+// endless-pause sentence cannot be reached either: solo mode counts as endless
+// mode off, so no cycle runs and nothing pauses (endlessModeInEffect,
+// src/settings.js). With `showAgentcom` on, nothing is left and the block is
+// empty — the `{{limits}}` placeholder of a prompt file then substitutes to
+// nothing, which is what an empty block has always meant.
+//
 // `endlessPausedReason` carries the other conditional sentence: endless mode
 // stopped itself for THIS session (cycle ceiling, no progress, nothing left to
 // do). It is the state the orchestrator cannot infer — the mode reads as on
@@ -953,6 +980,13 @@ function formatLimitsNotice({
   delegatingRoles = new Set(),
 } = {}) {
   const s = getSettings()
+  if (soloModeActive()) {
+    if (s.showAgentcom) return ""
+    return (
+      "\n\n---\n📐 agent-intercom: what this plugin posts into your session is hidden from the " +
+      "user's screen. The user sees only what you write.\n---\n"
+    )
+  }
   const sub = s.maxSubagents > 0 ? `${s.maxSubagents}` : "unlimited"
   const snapshot = projectContext(sessionDir)
   const budgets = SPAWNABLE_ROLES

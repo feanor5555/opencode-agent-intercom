@@ -711,19 +711,24 @@ export function retentionActive() {
 // Whether this process runs in SOLO mode, decided at the first read and never
 // again — the discipline retentionOffered uses, and for the same reason.
 //
-// This is the ONE place the mode is turned into a branch. All four enforcement
+// This is the ONE place the mode is turned into a branch. All five enforcement
 // points read this function and nothing else:
-//   - the primary's deny map (src/agents.js, installAgents) — in solo mode the
-//     primary keeps its ordinary tools and is denied opencode's native `task`
-//     alone,
+//   - the primary's deny map, prompt and description (src/agents.js,
+//     installAgents) — in solo mode the primary keeps its ordinary tools, is
+//     denied opencode's native `task` alone, and is given the solo role prompt
+//     in place of the orchestration one,
 //   - the tool map (src/tools.js, createTools) — in solo mode the primary gets
 //     none of spawn / abort / list / reuse,
 //   - the primary-side runtime guard (src/hooks.js) — in solo mode it stops
-//     refusing everything but the orchestration tools,
+//     refusing everything but the orchestration tools, and the limits block it
+//     injects drops the spawn budgets,
 //   - the injected orchestration guide (src/prompts.js, guideBlocks) — in solo
-//     mode the primary is given none.
+//     mode the primary is given none,
+//   - endless mode (endlessModeInEffect below) — in solo mode it counts as off,
+//     because its cycle is the one path that starts a subagent without the
+//     primary asking for one.
 //
-// Latched because two of those four are settled once and cannot be revised
+// Latched because two of those five are settled once and cannot be revised
 // afterwards: opencode resolves the plugin's tool map and its agent config at
 // instance bootstrap. Read live, a mid-process switch would leave a primary
 // whose prompt describes one pattern, whose tool map carries the other, and
@@ -769,7 +774,21 @@ export function getForumBangs() {
 // further cycle, and the plain handoff owns its threshold again. What stays
 // different is that nothing was persisted — the pause dies with the session and
 // the next orchestrator has the mode available.
+//
+// In SOLO mode the answer is false whatever the switch says, and that is the
+// whole of what the mode does to endless mode: no cycle is armed and none runs.
+// The cycle is the one part of the plugin that reaches the spawn machinery
+// without the primary asking for it — it takes a wind-down turn out of the
+// primary that spawns a `planner`, and starts that child itself where the turn
+// does not (src/handoffwiring.js). A second agent is the one thing solo mode
+// cannot afford: it exists for a backend that serves one agent at a time (a
+// llama.cpp server at `parallel 1`), where the child would compete with the
+// primary it is winding down. The switch is not written — it stays the user's,
+// and it is theirs again the moment the mode is orchestrator — so this is the
+// same shape as a pause: the switch says one thing, the loop does not run, and
+// the sidebar's row says so (tui/src/endless-pause-file.ts).
 export function endlessModeInEffect({ endlessPaused = false } = {}) {
+  if (soloModeActive()) return false
   return getSettings().endlessMode && !endlessPaused
 }
 

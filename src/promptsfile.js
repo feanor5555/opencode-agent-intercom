@@ -44,13 +44,13 @@
 import { readFileSync, statSync, mkdirSync, writeFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { log, errMsg } from "./log.js"
-import { AGENTS, mayDelegate } from "./agents.js"
+import { AGENTS, mayDelegate, rolePrompt } from "./agents.js"
 import {
   PROMPT_CONTRACT,
   OUTLINE_DISABLED_AGENTS,
   delegationGuideNameFor,
 } from "./prompts.js"
-import { retentionOffered } from "./settings.js"
+import { retentionOffered, soloModeActive } from "./settings.js"
 import {
   classifyPromptFile,
   claimPromptFileScan,
@@ -352,7 +352,15 @@ function placeholderLegend(agent) {
   lines.push("{{guide}}          the plugin's guide blocks for this role")
   lines.push("{{project_md}}     project PROJECT.md content (agent-intercom injects)")
   if (isOrch) {
-    lines.push("{{limits}}         current maxSubagents + per-agent context budgets")
+    // What the token really substitutes to in this process. In solo mode the
+    // block carries no spawn budgets — there is nothing to spawn — and is empty
+    // unless the plugin has a runtime notice for the primary (hooks.js
+    // formatLimitsNotice).
+    lines.push(
+      soloModeActive()
+        ? "{{limits}}         the plugin's runtime notices, empty while there are none"
+        : "{{limits}}         current maxSubagents + per-agent context budgets",
+    )
   }
   return lines.map((l) => `   ${l}`).join("\n")
 }
@@ -363,8 +371,11 @@ function placeholderLegend(agent) {
 // editing.
 export function renderDefaultsFile(agent) {
   const isOrch = agent === "orchestrator"
-  const def = AGENTS[agent]
-  const role = stripVisualSeparators(def?.prompt ?? "").trim()
+  // The role prompt as this process really installs it: in solo mode the
+  // primary's is the solo one (agents.js rolePrompt), and a blank-slate file
+  // that showed the orchestration prompt instead would not be the current
+  // behaviour — it would be a prompt for tools this process does not register.
+  const role = stripVisualSeparators(rolePrompt(agent)).trim()
 
   const header =
     `<!--\n` +
@@ -404,8 +415,10 @@ export function renderDefaultsFile(agent) {
 // hook were not in the way. Read-only side-by-side comparison; the plugin
 // never reads these files at runtime.
 export function renderOpencodeDefaultFile(agent) {
-  const def = AGENTS[agent]
-  const role = stripVisualSeparators(def?.prompt ?? "").trim()
+  // Mode-resolved, for the reason renderDefaultsFile states: the file exists to
+  // be read next to the active prompt, and the active prompt of a solo primary
+  // is the solo one.
+  const role = stripVisualSeparators(rolePrompt(agent)).trim()
   const stripsAgentsMd = !HAS_AGENTS_MD.has(agent)
 
   const stripNotes = [
@@ -428,19 +441,27 @@ export function renderOpencodeDefaultFile(agent) {
   // takes it (hooks.js, `retention: retentionOffered()`): whether the reuse
   // block is appended was settled when opencode resolved the tool map, so a
   // reference file written mid-process names the block the role really gets
-  // rather than what the settings file happens to say this second.
+  // rather than what the settings file happens to say this second. The agent
+  // mode is latched the same way and answers the same question for the primary:
+  // in solo mode guideBlocks gives it NO block at all, so there is no name to
+  // print and the note says what is added instead — nothing.
+  const primaryGuideNames = soloModeActive()
+    ? ""
+    : ["ORCHESTRATION_GUIDE", ...(retentionOffered() ? ["ORCHESTRATION_REUSE_GUIDE"] : [])].join(
+        " + ",
+      )
   const guideNames =
     agent === "orchestrator"
-      ? ["ORCHESTRATION_GUIDE", ...(retentionOffered() ? ["ORCHESTRATION_REUSE_GUIDE"] : [])].join(
-          " + ",
-        )
+      ? primaryGuideNames
       : [
           "SUBAGENT_GUIDE_CORE",
           mayDelegate(agent) ? delegationGuideNameFor(agent) : "SUBAGENT_NO_SPAWN_GUIDE",
           ...(HAS_OUTLINE.has(agent) ? ["SUBAGENT_OUTLINE_GUIDE"] : []),
         ].join(" + ")
   const addNotes = [
-    `  - the agent-intercom guide block (${guideNames}) appended by the plugin`,
+    guideNames
+      ? `  - the agent-intercom guide block (${guideNames}) appended by the plugin`
+      : "  - no agent-intercom guide block: in solo mode the primary is given none",
     "  - {{project_md}} block (the full PROJECT.md content, agent-intercom injects)",
   ]
   if (mayDelegate(agent)) {

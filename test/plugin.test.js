@@ -1262,6 +1262,45 @@ test("the limits block tells the orchestrator its notices are hidden, only while
   assert.doesNotMatch(offOut.system.join(""), /hidden from the user's screen/)
 })
 
+test("solo mode: the limits block drops the spawn budgets and the sizing rule", async () => {
+  // In solo mode there is nothing to spawn, so a budget per agent type sizes
+  // packages that are never sent — and the sentence that told the orchestrator
+  // to use the figure pointed at "the orchestration protocol above", which is
+  // not injected in that mode at all (guideBlocks, src/prompts.js).
+  writeFileSync(settingsFile, JSON.stringify({ agentMode: "solo", maxSubagents: 3 }))
+  resetSettings()
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const out = { system: ["base prompt"] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, out)
+  const joined = out.system.join("")
+
+  assert.doesNotMatch(joined, /current limits/)
+  assert.doesNotMatch(joined, /maxSubagents/)
+  assert.doesNotMatch(joined, /Context budget per agent/)
+  assert.doesNotMatch(joined, /right-sized-chunks rule of the orchestration protocol/)
+  for (const agent of SPAWNABLE_ROLES) {
+    assert.doesNotMatch(joined, new RegExp(`${agent} \\d`), `${agent} carries no budget line`)
+  }
+})
+
+test("solo mode keeps the one sentence of the block that is still true", async () => {
+  // With `showAgentcom` off the plugin's own postings are invisible to the
+  // user, and that holds whoever does the work.
+  writeFileSync(settingsFile, JSON.stringify({ agentMode: "solo", showAgentcom: false }))
+  resetSettings()
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const out = { system: ["base prompt"] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_primary" }, out)
+  const joined = out.system.join("")
+
+  assert.match(joined, /hidden from the user's screen/)
+  assert.match(joined, /The user sees only what you write/)
+  assert.doesNotMatch(joined, /subagent/i, "there are none to relay for")
+  assert.doesNotMatch(joined, /maxSubagents/)
+})
+
 // The message the plugin hangs on a subagent's turn carries at most two things:
 // the over-budget STOP notice and, for a role that may delegate, the
 // nested-spawn quota left. Under the budget the first is absent, so a

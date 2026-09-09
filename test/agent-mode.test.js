@@ -11,16 +11,23 @@
 //    (tui/src/agent-mode.ts), and the two acceptance rules are pinned against
 //    each other below. The answer is LATCHED at
 //    the first read (settings.js `soloModeActive`) exactly as retention is,
-//    because two of the four things it decides — the tool map and the agent
+//    because two of the things it decides — the tool map and the agent
 //    config — are settled once, when opencode bootstraps the instance. A
 //    settings edit mid-process therefore changes nothing until a restart.
 //
-// 2. The four places the mode is a branch, each reading that one latched
+// 2. The five places the mode is a branch, each reading that one latched
 //    answer and no copy of the logic:
-//      - src/agents.js  installAgents      — the primary's deny map,
+//      - src/agents.js  installAgents      — the primary's deny map, its role
+//                                            prompt and its description,
 //      - src/tools.js   createTools        — spawn / abort / list / reuse,
 //      - src/hooks.js   guardToolExecute   — the primary-side runtime guard,
-//      - src/prompts.js guideBlocks        — the injected orchestration guide.
+//      - src/prompts.js guideBlocks        — the injected orchestration guide,
+//      - src/settings.js endlessModeInEffect — endless mode, which counts as off
+//                                            in solo mode because its cycle
+//                                            starts a subagent of its own.
+//    Two files that only DESCRIBE what the primary gets follow the same
+//    answer: src/promptsfile.js renders the reference and blank-slate prompt
+//    files, and src/hooks.js builds the injected limits block.
 //    What must NOT change with the mode is pinned beside each: opencode's
 //    native `task` stays denied to the primary on both branches, the subagent
 //    roles keep their maps, the subagent-side `task` deny stays unconditional,
@@ -45,9 +52,18 @@ import {
   resetSettings,
   dropSettingsCacheKeepingLatch,
 } from "../src/settings.js"
-import { AGENTS, SOLO_PRIMARY_PERMISSION, installAgents } from "../src/agents.js"
+import {
+  AGENTS,
+  SOLO_PRIMARY_PERMISSION,
+  SOLO_PRIMARY_DESCRIPTION,
+  installAgents,
+  rolePrompt,
+  roleDescription,
+} from "../src/agents.js"
+import { renderDefaultsFile, renderOpencodeDefaultFile } from "../src/promptsfile.js"
 import { createTools } from "../src/tools.js"
-import { createGuardToolExecute } from "../src/hooks.js"
+import { createGuardToolExecute, resolvePrimaryAgent } from "../src/hooks.js"
+import { endlessModeInEffect, primaryContextThreshold } from "../src/settings.js"
 import { guideBlocks, ORCHESTRATION_GUIDE, SUBAGENT_GUIDE_CORE } from "../src/prompts.js"
 import { resetState, registry, bySession } from "../src/state.js"
 // The sidebar's own copy of the two values: a separate npm package that cannot
@@ -347,4 +363,138 @@ test("solo mode changes nothing about the subagent guide blocks", () => {
   loadSolo()
   assert.equal(guideBlocks({ agent: "coder", delegates: false }), before)
   assert.ok(before.startsWith(SUBAGENT_GUIDE_CORE))
+})
+
+// ---- 2e. the primary's role prompt (src/agents.js) ---------------------------
+
+// What the solo primary is told, as installAgents installs it.
+const soloPrompt = () => rolePrompt("orchestrator")
+
+test("orchestrator mode: the primary is given the orchestration prompt", () => {
+  assert.equal(soloPrompt(), AGENTS.orchestrator.prompt)
+  assert.equal(roleDescription("orchestrator"), AGENTS.orchestrator.description)
+  assert.match(soloPrompt(), /Your only job is to delegate work to subagents/)
+})
+
+test("solo mode: the primary is given a prompt that says it works alone", () => {
+  loadSolo()
+  const prompt = soloPrompt()
+  assert.match(prompt, /^# Role: Solo\n/)
+  assert.match(prompt, /You do the work yourself, with your own tools\./)
+  assert.match(prompt, /There are no subagents and nothing to delegate to\./)
+})
+
+test("solo mode: nothing false about delegation survives in the primary's prompt", () => {
+  loadSolo()
+  const prompt = soloPrompt()
+  // The three statements the orchestration prompt makes that solo mode
+  // falsifies: the job IS delegation, the tools ARE spawn/abort/list, and there
+  // is a fleet to pick from.
+  assert.doesNotMatch(prompt, /only job is to delegate/)
+  assert.doesNotMatch(prompt, /spawn|abort\b|\blist\b/i)
+  for (const role of Object.keys(AGENTS)) {
+    if (role === "orchestrator") continue
+    assert.doesNotMatch(prompt, new RegExp(role, "i"), `${role} is not offered in solo mode`)
+  }
+})
+
+test("solo mode: the prompt says what is true and adds no method beyond it", () => {
+  loadSolo()
+  const body = soloPrompt().split("\n").filter((line) => line.trim() !== "")
+  assert.equal(body.length, 2, "a header and one sentence — the orchestrator one is not replaced by a longer one")
+  assert.ok(
+    soloPrompt().length < AGENTS.orchestrator.prompt.length,
+    "the solo prompt is at most as long as the orchestrator one",
+  )
+})
+
+test("solo mode: the installed entry carries the solo prompt and description", () => {
+  loadSolo()
+  const config = { agent: {} }
+  installAgents(config, { directory: fixtureDir, worktree: fixtureDir })
+  assert.equal(config.agent.orchestrator.prompt, soloPrompt())
+  assert.equal(config.agent.orchestrator.description, SOLO_PRIMARY_DESCRIPTION)
+  assert.doesNotMatch(
+    config.agent.orchestrator.description,
+    /Orchestrates only|Delegates to subagents/,
+    "the shipped description is the opposite of what a solo primary does",
+  )
+})
+
+test("solo mode changes no subagent's prompt or description", () => {
+  loadSolo()
+  const config = { agent: {} }
+  installAgents(config, { directory: fixtureDir, worktree: fixtureDir })
+  for (const [name, def] of Object.entries(AGENTS)) {
+    if (def.mode === "primary") continue
+    assert.equal(config.agent[name].prompt, def.prompt, `${name} keeps its prompt`)
+    assert.equal(config.agent[name].description, def.description, `${name} keeps its description`)
+  }
+})
+
+test("the solo prompt's header still identifies the primary by its own name", () => {
+  // Rung 2 of the primary identification chain reads the `# Role:` header, and
+  // the name it yields selects the prompt-template file. Solo mode replaces the
+  // PROMPT and leaves the role's name alone, so the header must not resolve to
+  // a "solo" agent — there is none.
+  loadSolo()
+  assert.equal(
+    resolvePrimaryAgent("ses_unseen_solo", { system: [soloPrompt()] }),
+    "orchestrator",
+  )
+})
+
+// ---- 2f. the reference files (src/promptsfile.js) ----------------------------
+
+// The guide-block line of the opencode-defaults reference file.
+const guideNote = (agent) =>
+  /\n {2}- (?:the agent-intercom guide block \(([^)]+)\) appended by the plugin|no agent-intercom guide block[^\n]*)/.exec(
+    renderOpencodeDefaultFile(agent),
+  )?.[0] ?? ""
+
+test("orchestrator mode: the reference file names the guide the primary really gets", () => {
+  assert.match(guideNote("orchestrator"), /agent-intercom guide block \(ORCHESTRATION_GUIDE\)/)
+  assert.match(renderDefaultsFile("orchestrator"), /Your only job is to delegate/)
+})
+
+test("solo mode: the reference files name no guide block and carry the solo prompt", () => {
+  loadSolo()
+  // guideBlocks returns "" for a solo primary, so there is no block to name.
+  assert.match(guideNote("orchestrator"), /no agent-intercom guide block/)
+  assert.doesNotMatch(guideNote("orchestrator"), /ORCHESTRATION_GUIDE/)
+  for (const render of [renderDefaultsFile, renderOpencodeDefaultFile]) {
+    const file = render("orchestrator")
+    assert.match(file, /# Role: Solo/)
+    assert.doesNotMatch(file, /Your only job is to delegate/)
+  }
+})
+
+test("solo mode leaves every subagent's reference file exactly as it was", () => {
+  const before = Object.keys(AGENTS)
+    .filter((a) => a !== "orchestrator")
+    .map((a) => [a, renderOpencodeDefaultFile(a), renderDefaultsFile(a)])
+  loadSolo()
+  for (const [agent, reference, defaults] of before) {
+    assert.equal(renderOpencodeDefaultFile(agent), reference, `${agent} reference file`)
+    assert.equal(renderDefaultsFile(agent), defaults, `${agent} blank-slate file`)
+  }
+})
+
+// ---- 2g. endless mode (src/settings.js) --------------------------------------
+
+test("solo mode: endless mode counts as off however the switch stands", () => {
+  loadWith({ agentMode: AGENT_MODE_SOLO, endlessMode: true, endlessContext: 250000, maxPrimaryContext: 80000 })
+  assert.equal(getSettings().endlessMode, true, "the user's switch is not written")
+  assert.equal(endlessModeInEffect(), false, "its cycle would start a subagent")
+  assert.equal(
+    primaryContextThreshold(),
+    80000,
+    "the plain handoff owns the threshold, as it does with the mode off",
+  )
+})
+
+test("orchestrator mode leaves the switch in charge", () => {
+  loadWith({ agentMode: AGENT_MODE_ORCHESTRATOR, endlessMode: true, endlessContext: 250000, maxPrimaryContext: 80000 })
+  assert.equal(endlessModeInEffect(), true)
+  assert.equal(primaryContextThreshold(), 250000)
 })

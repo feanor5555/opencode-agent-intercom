@@ -34,6 +34,8 @@ const { endlessPauseFilePath: pluginPausePath } = await import(
 )
 const {
   endlessRowCell,
+  endlessRowLive,
+  endlessRowNote,
   endlessRowState,
   parseEndlessPauses,
   pauseCause,
@@ -42,6 +44,7 @@ const {
   readEndlessPauses,
   setEndlessPausePath,
   PAUSE_NOTE_INDENT,
+  SOLO_ROW_CAUSE,
 } = await import("../tui/src/endless-pause-file.ts")
 
 setEndlessPausePath(pluginPausePath())
@@ -184,10 +187,11 @@ test("undefined session ids are skipped and an unpaused panel gets nothing", () 
 // The row itself
 // ---------------------------------------------------------------------------
 
-test("the three states of the row", () => {
+test("the four states of the row", () => {
   assert.equal(endlessRowState(true, undefined), "on")
   assert.equal(endlessRowState(false, undefined), "off")
   assert.equal(endlessRowState(true, pause()), "paused")
+  assert.equal(endlessRowState(true, undefined, true), "solo")
 })
 
 test("the switch being off outranks a pause left standing", () => {
@@ -223,4 +227,49 @@ test("the note is cut to the panel and is empty without a reason", () => {
 
 test("the note falls back to the standard panel width before the first layout", () => {
   assert.equal(pauseRowNote(NO_POINTS, undefined), `${PAUSE_NOTE_INDENT}no open points left`)
+})
+
+// ---------------------------------------------------------------------------
+// Solo mode: the plugin runs no cycle at all, and the row says so
+// ---------------------------------------------------------------------------
+
+test("solo mode outranks the switch and any pause: nothing runs there", () => {
+  // Endless mode counts as off for the whole process in solo mode
+  // (endlessModeInEffect, src/settings.js), so `[on]` would be the same
+  // misreading a pause used to produce.
+  assert.equal(endlessRowState(true, undefined, true), "solo")
+  assert.equal(endlessRowState(true, pause(), true), "solo")
+  assert.equal(endlessRowState(false, undefined, true), "solo")
+  assert.equal(endlessRowCell("solo"), "[off]")
+  assert.notEqual(endlessRowCell("solo"), endlessRowCell("on"))
+})
+
+test("the orchestrator pattern is unaffected by the new argument", () => {
+  assert.equal(endlessRowState(true, undefined, false), "on")
+  assert.equal(endlessRowState(true, pause(), false), "paused")
+  assert.equal(endlessRowState(false, pause(), false), "off")
+})
+
+test("the row is dead in solo mode and live everywhere else", () => {
+  // The switch it would write reaches no cycle in that process, and the mode
+  // row above is where the change is made — with the restart it names.
+  assert.equal(endlessRowLive("solo"), false)
+  for (const state of ["on", "off", "paused"]) {
+    assert.equal(endlessRowLive(state), true, state)
+  }
+})
+
+test("the note line names the cause in both states that owe one", () => {
+  assert.equal(endlessRowNote("solo", "", 44), `${PAUSE_NOTE_INDENT}${SOLO_ROW_CAUSE}`)
+  assert.equal(
+    endlessRowNote("paused", NO_POINTS, 44),
+    `${PAUSE_NOTE_INDENT}no open points left`,
+  )
+  assert.equal(endlessRowNote("on", NO_POINTS, 44), "", "a running loop explains nothing")
+  assert.equal(endlessRowNote("off", NO_POINTS, 44), "", "a switch that is off explains itself")
+})
+
+test("the solo note is cut to the panel like the pause cause", () => {
+  assert.equal(endlessRowNote("solo", "", 24), `${PAUSE_NOTE_INDENT}solo mode runs no…`)
+  assert.equal(endlessRowNote("solo", "", 4), "")
 })

@@ -70,7 +70,7 @@ import {
 import { registerChildWaiter, settleChildWaiter } from "./childwait.js"
 import { windDownSubagentPrompt } from "./prompts.js"
 import { createHash } from "node:crypto"
-import { getSettings } from "./settings.js"
+import { getSettings, soloModeActive } from "./settings.js"
 import { defaultAgentName, DEFAULT_AGENT } from "./agents.js"
 import { knownAgentKinds } from "./config.js"
 import { readPlannedSteps, formatPrimarySummary, writePrimarySummary } from "./project.js"
@@ -495,6 +495,17 @@ export async function maybeRunPendingEndless(client, sessionID) {
   // here, before the claim, so a cycle already executing is untouched.
   if (!endlessMode) {
     dropEndlessLatch(sessionID, "the mode was switched off before the cycle started")
+    return null
+  }
+  // Solo mode, at the executing end. The marking end already refuses to arm
+  // there — endlessModeInEffect is false for the whole process (src/settings.js)
+  // — so this is only reachable through a latch that predates the answer, and
+  // it is here for the same reason the switch and the pause are checked at both
+  // ends: the cycle takes a wind-down turn that has the primary spawn a
+  // `planner`, and starts that child itself where the turn does not. Neither
+  // may happen on a backend that serves one agent at a time.
+  if (soloModeActive()) {
+    dropEndlessLatch(sessionID, "solo mode runs no endless cycle")
     return null
   }
   // The same gate for the mode's own stop. scheduleEndlessIfNeeded already

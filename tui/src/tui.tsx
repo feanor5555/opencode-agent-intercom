@@ -40,9 +40,10 @@ import { debugLog } from "./debug-log.ts";
 import {
   type EndlessPause,
   endlessRowCell,
+  endlessRowLive,
+  endlessRowNote,
   endlessRowState,
   pauseForSession,
-  pauseRowNote,
   readEndlessPauses,
 } from "./endless-pause-file.ts";
 import { holdRepeat, stopHoldRepeat } from "./hold-repeat.ts";
@@ -1920,14 +1921,24 @@ function SubagentPanel(props: {
     syncWidth();
   };
 
-  // The state of the `endless mode` row, and the cause line under it while that
-  // state is `paused`. Both derive from the switch and the published pause, so
-  // the two rows can never disagree about which of the three the row is in.
+  // The state of the `endless mode` row, and the cause line under it while the
+  // row is in a state that owes one. Both derive from the same three inputs —
+  // the switch, the published pause and the agent mode — so the cell and its
+  // note can never disagree about which state the row is in.
+  //
+  // The agent mode is the file's, as the `mode` row's own cell is: the plugin
+  // latches it at load, so between a confirmed switch and the opencode restart
+  // that switch needs, this row is ahead of the running plugin by exactly the
+  // window the `mode` row names in its note.
   const endlessState = createMemo(() =>
-    endlessRowState(props.endlessMode(), props.endlessPause()),
+    endlessRowState(
+      props.endlessMode(),
+      props.endlessPause(),
+      props.agentMode() === "solo",
+    ),
   );
-  const endlessPauseNote = createMemo(() =>
-    pauseRowNote(props.endlessPause()?.reason ?? "", panelWidth()),
+  const endlessNote = createMemo(() =>
+    endlessRowNote(endlessState(), props.endlessPause()?.reason ?? "", panelWidth()),
   );
 
   // Whether the `mode` row is holding its switch question. Read against the
@@ -2283,11 +2294,15 @@ function SubagentPanel(props: {
               {"[+]"}
             </text>
           </box>
-          {/* Three states on one switch. `on` and `off` are the setting; `paused`
-              is the mode having stopped ITSELF for this session — the switch is
-              still on, nothing was written, and the row stays the switch it was:
-              off and on again is what clears the pause. Without this state a
-              paused session reads `[on]` with nothing happening. */}
+          {/* Four states on one switch. `on` and `off` are the setting;
+              `paused` is the mode having stopped ITSELF for this session — the
+              switch is still on, nothing was written, and the row stays the
+              switch it was: off and on again is what clears the pause. `solo`
+              is the plugin running the primary by itself, where no cycle runs
+              in the whole process; that row is dead, because the switch it
+              would write reaches nothing until the mode row above is switched
+              back and opencode restarted. Without the two extra states a
+              session with nothing happening reads `[on]`. */}
           <box flexDirection="row">
             <text fg={props.theme.textMuted}>{rowLabel("endless mode")}</text>
             <text
@@ -2298,16 +2313,19 @@ function SubagentPanel(props: {
                     ? props.theme.success
                     : props.theme.textMuted
               }
-              onMouseDown={props.onToggleEndless}
+              onMouseDown={() => {
+                if (endlessRowLive(endlessState())) props.onToggleEndless();
+              }}
             >
               {endlessRowCell(endlessState())}
             </text>
           </box>
-          {/* Which of the three stops it was, on the line under the switch: the
-              row itself has no width left for it. */}
-          <Show when={endlessState() === "paused" && endlessPauseNote() !== ""}>
+          {/* Why nothing is running, on the line under the switch: which of the
+              three stops it was, or that this process runs solo. The row itself
+              has no width left for it. */}
+          <Show when={endlessNote() !== ""}>
             <box flexDirection="row">
-              <text fg={props.theme.textMuted}>{endlessPauseNote()}</text>
+              <text fg={props.theme.textMuted}>{endlessNote()}</text>
             </box>
           </Show>
           <box flexDirection="row">

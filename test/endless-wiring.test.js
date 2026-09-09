@@ -128,6 +128,17 @@ test("the mode switched off drops the latched cycle instead of running it", asyn
   )
 })
 
+test("solo mode drops the latched cycle: it may start no subagent of its own", async () => {
+  // The cycle is the one path that reaches the spawn machinery without the
+  // primary asking: it takes a wind-down turn that spawns a `planner`, and
+  // starts that child itself where the turn does not. On the single-slot
+  // backend solo mode exists for, that child competes with the primary.
+  settings({ agentMode: "solo", endlessMode: true })
+  markEndlessPending(SID)
+  assert.equal(await maybeRunPendingEndless(noClient, SID), null)
+  assert.equal(hasEndlessPending(SID), false, "the latch is cleared, so the freeze lifts")
+})
+
 test("a cycle already executing is not stopped by the switch", async () => {
   settings({ endlessMode: false })
   markEndlessPending(SID)
@@ -177,6 +188,24 @@ test("the switch turned off between two turns drops the endless latch and hands 
 
   assert.equal(hasEndlessPending(SID), false, "the freeze lifts with the latch")
   assert.equal(hasHandoffPending(SID), true, "the plain handoff owns the threshold again")
+})
+
+test("solo mode arms the plain handoff, never the cycle — the switch is untouched", async () => {
+  // Endless mode counts as off in solo mode (endlessModeInEffect,
+  // src/settings.js), so the plain handoff owns the threshold exactly as it
+  // does with the switch off — and the switch itself is left where the user
+  // put it, because the mode wrote nothing.
+  const before = { agentMode: "solo", endlessMode: true, endlessContext: 1, maxPrimaryContext: 1 }
+  settings(before)
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+
+  await primaryTurn(hooks, 5000)
+
+  assert.equal(hasEndlessPending(SID), false, "no cycle is armed in solo mode")
+  assert.equal(hasHandoffPending(SID), true, "the plain handoff owns the threshold")
+  assert.deepEqual(created, [], "no subagent session was created")
+  assert.deepEqual(JSON.parse(readFileSync(settingsFile, "utf8")), before)
 })
 
 test("the switch turned on drops an unclaimed plain-handoff latch", async () => {

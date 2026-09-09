@@ -57,6 +57,30 @@ Before you spawn, tell the user in their language how you understood the task an
 Subagents have no memory of what other subagents did before them — pass on every fact they need (paths, prior-artifact paths, decisions) in the spawn prompt itself.
 Describe the WHAT precisely and leave the HOW to the subagent — they are specialists and know how to do their job.`
 
+// The primary's role prompt in SOLO mode, in place of ORCHESTRATOR_PROMPT.
+//
+// It says the one thing the mode changes and nothing more: there is nobody to
+// delegate to, so the agent works with its own tools. No method, no style rule
+// and no working instruction beyond that — solo mode does not put this plugin
+// in charge of how a plain agent works, and everything the orchestrator prompt
+// says past this point is about picking and briefing subagents that do not
+// exist here.
+//
+// The `# Role:` header names the MODE, not an installed agent: the primary
+// keeps its ordinary name in both modes, and the identification chain maps this
+// word back to it (SOLO_ROLE_HEADER_NAME below, hooks.js
+// detectAgentFromSystem).
+const SOLO_PROMPT = `# Role: Solo
+
+You do the work yourself, with your own tools. There are no subagents and nothing to delegate to.`
+
+// The word the solo prompt's `# Role:` header carries, lowercased as the header
+// parser reads it. Exported because that parser (hooks.js) has to recognise it:
+// the header is rung 2 of the primary identification chain, and a primary
+// identified as "solo" would be looking for a role of that name — there is
+// none. The prompt changes with the mode; the role's name does not.
+export const SOLO_ROLE_HEADER_NAME = "solo"
+
 // The six TODO-owning subagents (planner/coder/debugger/reviewer/documenter/
 // designer) share the same paragraph so behaviour stays consistent: read with
 // todos_open, add new tasks in feasibility order, edit to refine, remove on
@@ -297,6 +321,14 @@ function webAccessExcept(...allowed) {
 // are never registered at all (createTools, src/tools.js), so there is nothing
 // for a deny to name.
 export const SOLO_PRIMARY_PERMISSION = Object.freeze({ task: "deny" })
+
+// The primary's description in SOLO mode, in place of the orchestrator one.
+// opencode shows this line in its agent list, and the shipped text —
+// "Orchestrates only, performs no file or shell operations itself. Delegates to
+// subagents." — is the opposite of what a solo primary does with the tools this
+// mode leaves it.
+export const SOLO_PRIMARY_DESCRIPTION =
+  "Main agent. Does the work itself with its own tools; there are no subagents."
 
 // The 10 roles. `permission` maps tools a role must not have to `deny`; everything
 // else stays enabled by default (incl. the intercom tools and any MCP tools). The
@@ -632,12 +664,42 @@ function reportCollision(name, base, projectEntry, directory, worktree) {
 // The primary's map is the one that depends on the agent mode. In solo mode it
 // is SOLO_PRIMARY_PERMISSION — the primary keeps its ordinary tools — and in
 // the orchestrator pattern it is the role's own map, which denies everything
-// but the orchestration tools. Selected on `mode === "primary"` rather than on
-// the name, so the answer follows the role table and not a second copy of who
-// the primary is.
+// but the orchestration tools.
 function basePermissionFor(def) {
-  if (def.mode === "primary" && soloModeActive()) return { ...SOLO_PRIMARY_PERMISSION }
+  if (isSoloPrimary(def)) return { ...SOLO_PRIMARY_PERMISSION }
   return def.permission ? { ...def.permission } : undefined
+}
+
+// Whether this role definition is the primary of a process running in SOLO
+// mode — the one case in which the mode changes what a role is installed with.
+// Asked on `mode === "primary"` rather than on the name, so the answer follows
+// the role table and not a second copy of who the primary is.
+function isSoloPrimary(def) {
+  return def?.mode === "primary" && soloModeActive()
+}
+
+// The role prompt this agent is actually given, mode resolved. The primary is
+// the only role the mode touches: in solo mode it gets SOLO_PROMPT, which says
+// there is nothing to delegate to, instead of the orchestration prompt, which
+// says its only job is to delegate and that it has three tools and nothing
+// else. Every subagent keeps its own prompt in both modes.
+//
+// The reference-file renderers (src/promptsfile.js) read the prompt through
+// this function for the same reason the injection path does: a file that shows
+// the orchestration prompt to a solo primary describes an agent that does not
+// exist in this process.
+export function rolePrompt(agent) {
+  const def = AGENTS[agent]
+  if (!def) return ""
+  return isSoloPrimary(def) ? SOLO_PROMPT : def.prompt
+}
+
+// The description this agent is installed with, mode resolved on the same rule
+// as the prompt and the deny map.
+export function roleDescription(agent) {
+  const def = AGENTS[agent]
+  if (!def) return ""
+  return isSoloPrimary(def) ? SOLO_PRIMARY_DESCRIPTION : def.description
 }
 
 export function installAgents(config, { directory, worktree } = {}) {
@@ -648,7 +710,12 @@ export function installAgents(config, { directory, worktree } = {}) {
     // clone every session-instance of the plugin would share the same
     // permission map and a future per-session tweak would leak across
     // sessions.
-    const base = { ...def, permission: basePermissionFor(def) }
+    const base = {
+      ...def,
+      prompt: rolePrompt(name),
+      description: roleDescription(name),
+      permission: basePermissionFor(def),
+    }
     const projectEntry =
       config.agent[name] && typeof config.agent[name] === "object" && !Array.isArray(config.agent[name])
         ? config.agent[name]

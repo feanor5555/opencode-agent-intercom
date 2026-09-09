@@ -20,6 +20,11 @@
 // Nothing here throws into the TUI: an absent, unreadable or malformed file
 // reads as "nothing paused", which is the state the panel showed before this
 // existed.
+//
+// The row's states live here too, because the second thing that stops the loop
+// without touching the switch is the agent mode: in solo mode no cycle runs at
+// all, and the row says so the same way — the cell shows nothing running and
+// the line under it names the cause.
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -37,10 +42,18 @@ export interface EndlessPause {
   pid: number;
 }
 
-// What the `endless mode` row is in. `paused` is not a third setting: the
-// switch is still on, and switching it off and on again is what clears the
-// pause.
-export type EndlessRowState = "on" | "off" | "paused";
+// What the `endless mode` row is in. Neither `paused` nor `solo` is a setting
+// of its own: the switch is still whatever the user left it at.
+//
+// `paused` — the mode stopped ITSELF for this session; switching the row off
+//            and on again is what clears it.
+// `solo`   — the plugin runs the primary in solo mode (`agentMode`), where
+//            endless mode counts as off for the whole process: its cycle winds
+//            the primary down through a `planner` subagent, and solo mode
+//            exists for a backend that serves one agent at a time. Nothing is
+//            written to the switch and the row does not move it — the mode row
+//            above is where that is decided, and it takes an opencode restart.
+export type EndlessRowState = "on" | "off" | "paused" | "solo";
 
 let pausePath = join(
   homedir(),
@@ -132,22 +145,37 @@ export function pauseForSession(
   return undefined;
 }
 
-// What the row shows. A pause only reads as one while the switch is on: the
-// user's switch-off is the younger statement, and it is also what makes the
-// plugin clear the pause on the primary's next turn.
+// What the row shows. Solo mode answers first and answers for every session:
+// no cycle runs anywhere in that process, whatever the switch and whatever any
+// session did, so neither `on` nor `paused` can be the truth there. Below it a
+// pause only reads as one while the switch is on: the user's switch-off is the
+// younger statement, and it is also what makes the plugin clear the pause on
+// the primary's next turn.
 export function endlessRowState(
   endlessMode: boolean,
   pause: EndlessPause | undefined,
+  soloMode: boolean = false,
 ): EndlessRowState {
+  if (soloMode) return "solo";
   if (!endlessMode) return "off";
   return pause ? "paused" : "on";
 }
 
 // The cell text of the row, one width per state so the label column keeps its
-// place.
+// place. `solo` renders as `[off]`: nothing runs, which is what the cell says,
+// and the note line under it says why.
 export function endlessRowCell(state: EndlessRowState): string {
   if (state === "paused") return "[paused]";
   return state === "on" ? "[on] " : "[off]";
+}
+
+// Whether the row may still be clicked. In solo mode it may not: the switch it
+// writes reaches no cycle in this process, and a click that silently moved a
+// setting the row cannot show would be worse than a dead row. The row stays
+// rendered and stays muted — the same shape the effort row takes where its
+// ladder cannot be offered.
+export function endlessRowLive(state: EndlessRowState): boolean {
+  return state !== "solo";
 }
 
 // The cause a stop published, without the "— paused for this session" half that
@@ -166,4 +194,21 @@ export const PAUSE_NOTE_INDENT = ROW_NOTE_INDENT;
 
 export function pauseRowNote(reason: string, panelWidth?: number): string {
   return rowNoteLine(pauseCause(reason), panelWidth);
+}
+
+// The cause under a row in solo mode, in place of a pause's. Fixed text: it is
+// a property of the process, not of a session, and no reason travels with it.
+export const SOLO_ROW_CAUSE = "solo mode runs no cycle";
+
+// The note line under the `endless mode` row, whatever put it there: the
+// published cause while the mode paused itself, the fixed sentence in solo
+// mode, and nothing in the two states that need no explanation.
+export function endlessRowNote(
+  state: EndlessRowState,
+  reason: string,
+  panelWidth?: number,
+): string {
+  if (state === "solo") return rowNoteLine(SOLO_ROW_CAUSE, panelWidth);
+  if (state === "paused") return pauseRowNote(reason, panelWidth);
+  return "";
 }

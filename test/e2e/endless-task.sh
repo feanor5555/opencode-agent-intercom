@@ -288,14 +288,21 @@ SERVER_VERSION="(unknown)"
 CYCLE=0
 SLICE_FROM_LINE=0
 # The in-flight subagent's handle, taken from the plugin's own `spawned` line,
-# and the context figures the ceiling is armed from — all three per cycle.
+# the slice line that line stands on — the window every read about THAT
+# subagent starts at, because handle numbers are handed back and reused — and
+# the context figures the ceiling is armed from; all four per cycle.
 SPAWN_HANDLE=""
+SPAWN_SLICE_LINE=0
 MEASURED_CTX=""
 ARMED_CONTEXT=""
-# What a cycle hands to its work-off phase and to the cycle after it.
+# What a cycle hands to its work-off phase and to the cycle after it: the
+# successor session, the ids and file name its rewrite confirmed, the slice line
+# of that confirmation and a copy of the file as the confirmation left it.
 CYCLE_NEWSID=""
 CYCLE_SAVED_IDS=""
 CYCLE_SAVED_FILE=""
+CYCLE_SAVED_LINE=0
+CYCLE_CONFIRMED_TODO=""
 # The re-title, collected across the cycles and asserted once at the end: the
 # ids an accepted rewrite re-bound to a different title, the file evidence for
 # them, the plugin's own V6 observation line, and — per cycle — what the
@@ -352,18 +359,80 @@ refresh_slice() {
   tail -c "+$((LOG_OFFSET + 1))" "$DEBUG_LOG" > "$SLICE_FILE" 2>/dev/null || : > "$SLICE_FILE"
 }
 
-# The first line of the slice matching $1 that lies PAST the current cycle's
-# window start, as "<lineno>:<text>"; empty when there is none. Every wait,
-# count and ordering check in this driver goes through this pair of helpers, so
-# a line another cycle produced can never satisfy the cycle being asserted.
-slice_match_after() {
-  grep -nE -- "$1" "$SLICE_FILE" 2>/dev/null |
-    awk -F: -v from="$SLICE_FROM_LINE" '$1 > from { print; exit }'
+# The first line of the slice matching $2 that lies past slice line $1, as
+# "<lineno>:<text>"; empty when there is none. The window start is a parameter
+# because a cycle's own window is not always the right one: a step gated on a
+# single event of that cycle — the completion of the subagent it spawned — reads
+# from that event's own line instead.
+slice_match_from() {
+  grep -nE -- "$2" "$SLICE_FILE" 2>/dev/null |
+    awk -F: -v from="$1" '$1 > from { print; exit }'
 }
 
-slice_count_after() {
-  grep -nE -- "$1" "$SLICE_FILE" 2>/dev/null |
-    awk -F: -v from="$SLICE_FROM_LINE" '$1 > from' | grep -c .
+slice_count_from() {
+  grep -nE -- "$2" "$SLICE_FILE" 2>/dev/null |
+    awk -F: -v from="$1" '$1 > from' | grep -c .
+}
+
+# The same pair against the CURRENT cycle's window start. Every wait, count and
+# ordering check in this driver goes through these helpers, so a line another
+# cycle produced can never satisfy the cycle being asserted.
+slice_match_after() { slice_match_from "$SLICE_FROM_LINE" "$1"; }
+
+slice_count_after() { slice_count_from "$SLICE_FROM_LINE" "$1"; }
+
+# Every admission of the single-use wind-down permit that belongs to THIS
+# cycle's primary, in this cycle's window, one per line as "<lineno>:<text>".
+#
+# The permit is a per-session object (`armWindDown`, src/registry.js), so what
+# criterion (a) means is: this primary's permit admitted exactly one spawn. The
+# debug log is process-global (src/log.js) — every opencode instance on the
+# machine appends to the file this driver slices — and any other primary running
+# under the same global settings file arms and consumes a permit of its own.
+# Counted without the session, that correct line about a different permit is
+# read as this permit having been consumed twice.
+permit_admission_lines() {
+  grep -nE -- "spawn admitted: endless wind-down permit consumed .*\"sessionID\":\"$SID\"" \
+    "$SLICE_FILE" 2>/dev/null |
+    awk -F: -v from="$SLICE_FROM_LINE" '$1 > from'
+}
+
+# Writes to a todo file, past slice line $1, that this run did not make and that
+# name one of the ids in $2 (comma-separated) — one per line as
+# "<lineno>:<text>", empty when there is none.
+#
+# The plugin writes the driven todo file on exactly two paths, and both leave a
+# line: the wind-down confirmation, and the wake-path removal that rides on a
+# completion notice (`autoMarkTask` -> `removeTask`). Both carry the session
+# they belong to, so a line naming one of this cycle's ids under a session this
+# run never created is another primary editing the very file the removal
+# criterion then reads — the file's state can no longer be attributed to this
+# run, and the criterion says so instead of passing on whatever it finds.
+foreign_todo_writer_lines() {
+  local from="$1" ids="$2" line own session id
+  [ -n "$ids" ] || return 0
+  grep -nE -- "(endless: wind-down confirmed [0-9]+ open task\(s\)|notified primary of completion .*\"kind\":\"done\")" \
+    "$SLICE_FILE" 2>/dev/null |
+    awk -F: -v from="$from" '$1 > from' |
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      own=0
+      for session in $SESSION_IDS; do
+        [ -n "$session" ] || continue
+        case "$line" in
+          *"\"sessionID\":\"$session\""* | *"\"parentID\":\"$session\""*) own=1 ;;
+        esac
+      done
+      [ "$own" = 1 ] && continue
+      for id in $(printf '%s' "$ids" | tr ',' ' '); do
+        case "$line" in
+          *"$id"*)
+            printf '%s\n' "$line"
+            break
+            ;;
+        esac
+      done
+    done
 }
 
 # The slice's current length — a cycle's window start.
@@ -889,15 +958,28 @@ for message in reversed(messages):
 PY
 }
 
-# The completion notice for the handle this cycle's `spawned` line named:
-# "<lineno>:<text>" once the subagent has finished, nothing while it is still in
-# flight. Matched on the handle rather than on the parent, and scoped to the
-# cycle's own window — handles restart at #1 per role, so a bare handle match
-# would find the previous cycle's subagent.
+# The completion notice for the subagent this cycle spawned itself:
+# "<lineno>:<text>" once it has finished, nothing while it is still in flight.
+#
+# The handle alone does not identify it. `releaseHandle` (src/registry.js) hands
+# a handle number back when the freed handle is the current max, so the
+# successor's own work-off subagents — same role, same parent session, finished
+# before this spawn — carry the very handle string this spawn then gets, and a
+# handle match inside the cycle's window finds one of THOSE and reports the
+# subagent finished before it ever ran. Two things pin it instead:
+#
+#   * the window starts at this spawn's own `spawned` line ($SPAWN_SLICE_LINE),
+#     which no earlier holder of the handle can be past — and while this
+#     subagent holds the number, the counter cannot hand it out again;
+#   * the parent has to be this cycle's primary, because the debug log is
+#     process-global (src/log.js) and another opencode instance on the machine
+#     allocates its handles from a counter of its own.
 subagent_completion_line() {
   [ -n "$SPAWN_HANDLE" ] || return 0
+  [ "${SPAWN_SLICE_LINE:-0}" -gt 0 ] 2>/dev/null || return 0
   refresh_slice
-  slice_match_after "notified primary of completion .*\"handle\":\"$SPAWN_HANDLE\""
+  slice_match_from "$SPAWN_SLICE_LINE" \
+    "notified primary of completion .*\"handle\":\"$SPAWN_HANDLE\".*\"parentID\":\"$SID\""
 }
 
 # Criterion (b) asserts that the cycle waited for a subagent that was really in
@@ -954,7 +1036,8 @@ run_cycle() {
   CYCLE=$1
   local tag="cycle $CYCLE"
   CYCLE_NEWSID=""; CYCLE_SAVED_IDS=""; CYCLE_SAVED_FILE=""
-  SPAWN_HANDLE=""; MEASURED_CTX=""; ARMED_CONTEXT=""
+  CYCLE_SAVED_LINE=0; CYCLE_CONFIRMED_TODO=""
+  SPAWN_HANDLE=""; SPAWN_SLICE_LINE=0; MEASURED_CTX=""; ARMED_CONTEXT=""
 
   # Everything this cycle asserts is read past this line of the slice.
   SLICE_FROM_LINE=$(slice_lines)
@@ -1033,6 +1116,10 @@ run_cycle() {
   SPAWN_HANDLE=$(printf '%s' "$WAIT_LINE" | sed -E 's/.*"handle":"([^"]+)".*/\1/')
   [ -n "$SPAWN_HANDLE" ] && [ "$SPAWN_HANDLE" != "$WAIT_LINE" ] ||
     die "$tag: the \"spawned\" line carries no handle to gate on: $WAIT_LINE"
+  # Everything this cycle reads about THIS subagent is read past this line: the
+  # handle number was in use by an earlier subagent until shortly before it, and
+  # `subagent_completion_line` would otherwise find that one's completion.
+  SPAWN_SLICE_LINE=$WAIT_LINENO
   say "[$PREFIX] $tag subagent $SPAWN_HANDLE (session $child_id) in flight (slice line $WAIT_LINENO)"
 
   # Gate 1: still in flight before the ceiling is armed.
@@ -1153,6 +1240,15 @@ run_cycle() {
     saved_ids=$(printf '%s' "$save_line" | sed -E 's/.*\[([^]]*)\].*/\1/')
     saved_count=$(printf '%s' "$save_line" | sed -E 's/.*confirmed ([0-9]+) open task.*/\1/')
     saved_file=$(printf '%s' "$save_line" | sed -E 's/.*file=([^ ]+).*/\1/')
+    # The file as the confirmation left it, and the slice line that confirmation
+    # stands on. The work-off phase's removal criterion is asserted against
+    # exactly this state: what it must find on disk afterwards is this content
+    # with one task's lines taken out and nothing added — `removeTask`
+    # (src/todofile.js) splices lines and never writes any — so anything else in
+    # the file is a writer the run cannot account for.
+    CYCLE_SAVED_LINE=$line_saved
+    CYCLE_CONFIRMED_TODO="$OUT_DIR/$PREFIX.cycle$CYCLE.confirmed-todo.md"
+    cp "$PROJECT_DIR/$saved_file" "$CYCLE_CONFIRMED_TODO" 2>/dev/null || CYCLE_CONFIRMED_TODO=""
     if [ "$saved_count" = 0 ] || [ "$saved_ids" = "-" ] || [ -z "$saved_ids" ]; then
       saved_ids=""
       record "$tag (c) rewrite — the wind-down rewrite reached the todo file" 0 \
@@ -1257,34 +1353,32 @@ run_cycle() {
   # ---------- (a) the permit was consumed exactly once -----------------------
 
   # The conforming wind-down spawn is admitted through the single-use permit; a
-  # second permitted spawn would be refused. Observable as exactly one
-  # `spawn admitted: endless wind-down permit consumed` line in this cycle's
-  # window — the count is per cycle, not over the whole run.
+  # second permitted spawn would be refused. Observable as exactly one admission
+  # line for THIS primary in this cycle's window.
   refresh_slice
-  local admitted_count
-  admitted_count=$(slice_count_after "spawn admitted: endless wind-down permit consumed")
+  local admissions admitted_count
+  admissions=$(permit_admission_lines)
+  admitted_count=$(printf '%s' "$admissions" | grep -c .)
   if [ "$admitted_count" = 1 ]; then
-    local admit_line
-    admit_line=$(slice_match_after "spawn admitted: endless wind-down permit consumed")
     record "$tag (a) permit — the conforming wind-down spawn was admitted exactly once" 1 \
-      "one admission line: ${admit_line#*:}"
+      "one admission line: ${admissions#*:}"
   elif [ "$admitted_count" = 0 ]; then
     # The plugin's own fallback spawn (startWindDownSubagent) does not go through
     # the permit, so a confirmed rewrite with no admission means the orchestrator
     # never made the permitted spawn and the fallback wrote the file.
     local fallback
-    fallback=$(slice_match_after "endless: wind-down spawned by the plugin")
+    fallback=$(slice_match_after "endless: wind-down spawned by the plugin .*\"sessionID\":\"$SID\"")
     record "$tag (a) permit — the conforming wind-down spawn was admitted exactly once" 0 \
       "no admission line — ${fallback:+the plugin fallback wrote the file instead: ${fallback#*:}}${fallback:-the wind-down produced no permitted spawn}"
   else
     record "$tag (a) permit — the conforming wind-down spawn was admitted exactly once" 0 \
-      "$admitted_count admission lines in this cycle, expected exactly one — the single-use permit was consumed more than once"
+      "$admitted_count admission lines for $SID in this cycle, expected exactly one — the single-use permit was consumed more than once: $(printf '%s' "$admissions" | tr '\n' ' ')"
   fi
 
   # ---------- (d) the replacement -------------------------------------------
 
   local line_cycle=0 newsid=""
-  if wait_for_pattern "endless: cycle complete" "endless: cycle [0-9]+/[^ ]+ complete, new session ses_[A-Za-z0-9]+" "$STEP_TIMEOUT_S"; then
+  if wait_for_pattern "endless: cycle complete" "endless: cycle [0-9]+/[^ ]+ complete, new session ses_[A-Za-z0-9]+.*\"sessionID\":\"$SID\"" "$STEP_TIMEOUT_S"; then
     line_cycle=$WAIT_LINENO
     local cycle_line=$WAIT_LINE old_state new_ok
     newsid=$(printf '%s' "$cycle_line" | sed -E 's/.*new session ([A-Za-z0-9_]+).*/\1/')
@@ -1379,6 +1473,7 @@ PY
 # match the state on disk.
 observe_workoff() {
   local tag="cycle $CYCLE" newsid="$CYCLE_NEWSID" saved_ids="$CYCLE_SAVED_IDS" saved_file="$CYCLE_SAVED_FILE"
+  local confirmed_todo="$CYCLE_CONFIRMED_TODO" confirmed_line="$CYCLE_SAVED_LINE"
 
   # The kickoff prompt starts the successor's model turn asynchronously. The
   # capture follows that FIRST turn to its END — every tool call it makes, not
@@ -1426,10 +1521,28 @@ observe_workoff() {
     if wait_for_pattern "DONE removal" \
          "notified primary of completion .*\"parentID\":\"$newsid\".*\"kind\":\"done\",\"id\":\"T[0-9]+\"" \
          "$WORKOFF_TIMEOUT_S"; then
-      local removal_line=$WAIT_LINE removed_id open_now
+      local removal_line=$WAIT_LINE removed_id open_now foreign="" added=""
       removed_id=$(printf '%s' "$removal_line" | sed -E 's/.*"kind":"done","id":"(T[0-9]+)".*/\1/')
       open_now=$(sed -nE 's/^- (T[0-9]+):.*/\1/p' "$PROJECT_DIR/$saved_file" 2>/dev/null | tr '\n' ' ')
-      if ! printf ' %s ' "$(printf '%s' "$saved_ids" | tr ',' ' ')" | grep -q " $removed_id "; then
+      # Who else wrote this file between the confirmation and this read. Both
+      # halves are needed: the log names a foreign primary's own confirmation or
+      # removal on one of these ids, and the content comparison catches a writer
+      # that leaves no line at all — a removal only ever takes lines out, so a
+      # line on disk that the confirmed file did not carry did not come from the
+      # path this criterion asserts.
+      foreign=$(foreign_todo_writer_lines "$confirmed_line" "$saved_ids" | tr '\n' ' ')
+      if [ -n "$confirmed_todo" ] && [ -f "$confirmed_todo" ] && [ -f "$PROJECT_DIR/$saved_file" ]; then
+        added=$(awk 'NR==FNR { seen[$0]=1; next } !($0 in seen)' \
+          "$confirmed_todo" "$PROJECT_DIR/$saved_file" | grep -c .)
+        [ "$added" = 0 ] && added=""
+      fi
+      if [ -n "$foreign" ]; then
+        record "$tag (e) removal — a DONE: T<n> reply removed the task from the todo file" 0 \
+          "$PROJECT_DIR/$saved_file was written by a primary this run did not create, between the confirmation (slice line $confirmed_line) and this read, so the file's state cannot be attributed to this cycle's removal: $foreign— this cycle's own line: $removal_line"
+      elif [ -n "$added" ]; then
+        record "$tag (e) removal — a DONE: T<n> reply removed the task from the todo file" 0 \
+          "$PROJECT_DIR/$saved_file carries $added line(s) the confirmed rewrite did not ($confirmed_todo) — the wake-path removal only takes lines out, so something else rewrote the file and the removal cannot be read off it: $removal_line"
+      elif ! printf ' %s ' "$(printf '%s' "$saved_ids" | tr ',' ' ')" | grep -q " $removed_id "; then
         record "$tag (e) removal — a DONE: T<n> reply removed the task from the todo file" 0 \
           "the plugin removed $removed_id, which is not one of this cycle's saved ids $saved_ids — $removal_line"
       elif [ ! -f "$PROJECT_DIR/$saved_file" ]; then

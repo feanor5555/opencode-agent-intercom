@@ -23,7 +23,9 @@
 # server: it starts and stops its own on ENDLESS_PORT (default 4599), because a
 # cycle needs endless mode armed with a low threshold. It backs up and restores
 # ~/.config/opencode/agent-intercom.json and the todo file of the project it
-# drives. See its header for its own parameters.
+# drives. See its header for its own parameters. This script stops its own
+# server before starting that driver, so no session of the drivers above is
+# still alive under the low ceiling that driver arms globally.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
@@ -100,4 +102,20 @@ unset OPENCODE_AGENT_INTERCOM_LOG_REQUESTS
 "$HERE/run-task.sh" designer   "Generate a flat icon for a CLI orchestration tool — modern, minimal, dark theme. Save to designs/test-orchestrator-icon.jpg, 512x512." 08-designer
 "$HERE/run-task.sh" gitter     "Show me the style of the last 5 commits in this repo. Report subject style, language, and whether bodies are used. Do NOT make any new commit." 09-gitter
 "$HERE/multi-task.sh"
+
+# The suite server goes down HERE, before the last driver, not only in the EXIT
+# trap. endless-task.sh starts a server of its own, but it arms endless mode
+# through the GLOBAL settings file (~/.config/opencode/agent-intercom.json),
+# which every opencode instance on this machine reads, and it asserts on the
+# todo file of PROJECT_DIR — the directory this server's sessions were created
+# in. A session left alive here is a second primary under that same low ceiling:
+# a straggler subagent wakes it, its next turn crosses the threshold, and it
+# runs a wind-down cycle of its own that rewrites the very todo file the endless
+# driver reads and appends to the process-global debug log the driver slices.
+# Nothing below needs this server, so it is stopped rather than left to the
+# trap; e2e_server_stop is idempotent, so the trap's own call is then a no-op.
+echo ""
+echo "--- stopping the suite server before the endless driver ---"
+e2e_server_stop
+
 "$HERE/endless-task.sh"

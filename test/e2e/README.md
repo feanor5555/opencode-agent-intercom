@@ -24,7 +24,9 @@ that opencode upgrades don't shift the system-prompt composition.
 - `run-all.sh` — runs the 8 single-agent tests, the multi-agent test and the
   endless-mode cycles. Owns the server the first ten use: builds the TUI, starts
   a fresh `opencode serve` in the configured directory (default
-  `$HOME/testopencode`), and stops it again on the way out.
+  `$HOME/testopencode`), and stops it again before the endless driver, which
+  needs no server of this suite's and would be contaminated by its sessions —
+  and once more on the way out, for every path that does not reach that stop.
 - `lib/` — the Python evidence readers used by `endless-task.sh` (the kickoff
   ids, the successor's first turn, and the child session id of the driver's own
   spawn), plus their shared recursive payload walker.
@@ -50,6 +52,17 @@ would keep the previous one — then starts `opencode serve` on `RUN_ALL_PORT`
 process group again on the way out, including on a failing driver and on
 Ctrl-C. Every run therefore uses the plugin code in the working tree against the
 wired test project.
+
+That server is stopped **before `endless-task.sh` starts**, not only in the exit
+trap. The endless driver arms endless mode in the global settings file every
+opencode instance on the machine reads, and it asserts on the todo file of
+`PROJECT_DIR` — the directory this server's own sessions were created in. A
+session left alive there is a second primary under the same low ceiling: a
+straggler subagent wakes it, its next turn crosses the threshold, and it runs a
+wind-down cycle of its own that rewrites the todo file the endless driver reads
+and appends to the process-global debug log the driver slices. Nothing after the
+multi-agent driver uses the suite server, so it goes down there; the trap's own
+stop is then a no-op.
 
 ```bash
 cd ~/opencode-agent-intercom
@@ -205,7 +218,13 @@ session; from the second cycle on the primary is a successor still working its
 todo file off, so it spawns subagents of its own at the same time and neither
 the role nor the absence of a task-id prefix would pick the driver's subagent
 out. The subagent counts as in flight until `notified primary of completion`
-names that handle. It checks twice, once
+names that handle **under this primary, past the slice line of this spawn's own
+`spawned` line**. Neither qualifier is optional: `releaseHandle`
+(`src/registry.js`) hands a handle number back when the freed handle is the
+current max, so the successor's just-finished work-off subagents carry the very
+handle string this spawn then gets — with their completion already standing in
+the cycle's window — and the debug log is process-global, so another opencode
+instance allocates the same handle strings from a counter of its own. It checks twice, once
 before arming and once immediately before the crossing turn; a subagent that
 finished earlier ends the run as a **setup error (exit 2)** naming exactly that,
 because criterion (b) would otherwise be asserted over a cycle that had nothing
@@ -228,14 +247,14 @@ to, so a report says which cycle a failure sits in):
 |---|---|
 | trigger | `endless: scheduled` for the primary, with `ctx` and `threshold`, the threshold being the armed one |
 | (a) freeze | `spawn refused: endless cycle in progress` after a non-conforming post-trigger `spawn` |
-| (a) permit | `spawn admitted: endless wind-down permit consumed` appears **exactly once** — the single-use permit admits the one conforming wind-down spawn and a second is refused |
+| (a) permit | `spawn admitted: endless wind-down permit consumed` for this primary's own session appears **exactly once** — the single-use permit admits the one conforming wind-down spawn and a second is refused |
 | (b) quiesce | `notified primary of completion` appears **before** `endless: quiesced …, activeAtStart>=1`, and after the trigger line |
 | (c) rewrite | `endless: wind-down confirmed N open task(s) [T…] file=…`, every confirmed id present as `- T<n>:` in the todo file, exactly one todo file in the directory, and the `next-id` watermark above every confirmed id (no id reused) |
 | (c) carry-over | the accepted rewrite kept at least one id that already stood in the file when the cycle latched, and the evidence names which of those ids it re-titled |
 | (d) replacement | `endless: cycle K/M complete, new session …`; the new session is readable, the old one is readable **and** archived |
 | kickoff | the new session carries `## Endless mode — work off the todo file`, whose body is the todo file's own text, naming exactly the ids of (c) as `- T<n>:` lines |
 | (e) work-off | the successor's first turn contains a `spawn` tool call whose `input.prompt` carries the first saved task id as the first non-empty line (`T<n>:` / `T<n>.` / `T<n>-` …) and every further spawn prompt of that turn likewise carries a saved id; the turn's per-task spawn tally rides along as evidence |
-| (e) removal | a successor subagent's `DONE: T<n>` reply removes that task: `notified primary of completion` for the successor carrying `"kind":"done","id":"T<n>"`, the id one of (c)'s, and the line `- T<n>:` gone from the todo file on disk while the file itself stays |
+| (e) removal | a successor subagent's `DONE: T<n>` reply removes that task: `notified primary of completion` for the successor carrying `"kind":"done","id":"T<n>"`, the id one of (c)'s, and the line `- T<n>:` gone from the todo file on disk while the file itself stays — with no foreign primary having written that file since the confirmation and no line in it the confirmed rewrite did not carry |
 | order | the five cycle lines — scheduled, refused, quiesced, confirmed, complete — appear in that order in the debug-log slice |
 
 And once over the driven cycles together, after the last work-off phase:
@@ -304,7 +323,17 @@ own wake-path outcome (`autoMarkTask` → `removeTask`, `src/hooks.js`,
 completion` line as `"kind":"done","id":"T<n>"`, and then reads the todo file:
 the id must be one of (c)'s, the `- T<n>:` line must be gone, and the file
 itself must still be there. The log line without the file write would be a
-claim, the file without the line would not say who wrote it. This step waits on
+claim, the file without the line would not say who wrote it.
+
+It also has to be **this run's** removal that the file shows. Two guards say so,
+because the file is a shared path and the log a shared file: a wind-down
+confirmation or a wake-path removal naming one of this cycle's ids under a
+session the run never created is reported as another primary having written the
+file, and the file itself is compared against the copy taken when the rewrite
+was confirmed (`out/11-endless.cycle<k>.confirmed-todo.md`) — `removeTask` only
+splices lines out, so a line on disk that the confirmed file did not carry means
+some other writer rewrote it. Either way the criterion FAILS naming the evidence
+instead of passing on a state it cannot attribute. This step waits on
 a subagent finishing real work rather than on a line the cycle emits by itself,
 so it has its own bound, `WORKOFF_TIMEOUT_S` (600 s), instead of
 `STEP_TIMEOUT_S`.

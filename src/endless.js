@@ -683,6 +683,7 @@ export async function runEndlessCycle({
     log(
       `endless: cycle ${cycleNumber}/${maxCycles || "∞"} complete, new session ${result.newSessionID}, ` +
         `open tasks ${openIdsFound.length}→${openIdsLeft.length} completed=${completed ?? "-"}`,
+      { sessionID: primarySessionID },
     )
     if (stalledCycles >= ENDLESS_MAX_STALLED_CYCLES) {
       const stopped = stop(

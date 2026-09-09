@@ -159,6 +159,8 @@ function baseIo(overrides = {}) {
 // ---------------------------------------------------------------------------
 
 test("a confirmed wind-down replaces the primary and records the ids", async () => {
+  const logPath = join(cacheDir(), "debug.log")
+  const before = existsSync(logPath) ? readFileSync(logPath, "utf8").length : 0
   const io = baseIo()
   const res = await runEndlessCycle(io)
 
@@ -173,6 +175,13 @@ test("a confirmed wind-down replaces the primary and records the ids", async () 
   // The kickoff carries the confirmed file's own text and the reply.
   assert.ok(io._handoff.extraKickoffBlock.includes("do the thing"))
   assert.equal(io._handoff.docSummariesText, "## WIND-DOWN DONE — 2 open")
+
+  const delta = (existsSync(logPath) ? readFileSync(logPath, "utf8") : "").slice(before)
+  const completion = delta
+    .split("\n")
+    .find((line) => line.includes("endless: cycle 1/10 complete, new session ses-endless-cycle-new"))
+  assert.ok(completion, "the cycle completion was not logged")
+  assert.match(completion, /\"sessionID\":\"ses-endless-cycle\"/)
 })
 
 test("the drop runs before the quiesce wait", async () => {

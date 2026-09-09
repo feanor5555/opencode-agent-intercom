@@ -283,3 +283,165 @@ stale_precondition ${shellQuote(todo)}
   assert.match(out, /open ids: T104/)
   rmSync(dir, { recursive: true, force: true })
 })
+
+// ---------------------------------------------------------------------------
+// What the driver reads out of the plugin's debug log. That log is
+// process-global — every opencode instance on the machine appends to the file
+// the driver slices — and handle numbers are handed back and reused, so a
+// criterion matched on a bare handle or counted without a session is satisfied
+// by a line that belongs to another subagent or another primary. These tests
+// drive the readers over a fabricated slice, without a server.
+// ---------------------------------------------------------------------------
+
+// A slice file plus the driver's slice readers, run against it.
+function runSliceReader({ lines, body, vars = {} }) {
+  const dir = mkdtempSync(join(tmpdir(), "e2e-endless-slice-"))
+  const slice = join(dir, "slice.log")
+  writeFileSync(slice, lines.join("\n") + "\n")
+  const assignments = Object.entries(vars)
+    .map(([name, value]) => `${name}=${shellQuote(String(value))}`)
+    .join("\n")
+  const script = `SLICE_FILE=${shellQuote(slice)}
+${assignments}
+refresh_slice() { :; }
+${driverFunction("slice_match_from")}
+${driverFunction("slice_count_from")}
+slice_match_after() { slice_match_from "$SLICE_FROM_LINE" "$1"; }
+slice_count_after() { slice_count_from "$SLICE_FROM_LINE" "$1"; }
+${body}
+`
+  const result = spawnSync("bash", ["-c", script], { encoding: "utf8" })
+  assert.equal(result.status, 0, `stderr:\n${result.stderr}`)
+  rmSync(dir, { recursive: true, force: true })
+  return result.stdout
+}
+
+// The successor's own work-off subagent finishes and gives its handle number
+// back (`releaseHandle`, src/registry.js), so the subagent the driver spawns
+// next carries the very same handle string under the very same parent — with
+// its completion line already standing in the cycle's window.
+const REUSED_HANDLE_SLICE = [
+  'A spawned {"handle":"coder#4","sessionID":"ses_workoff","agent":"coder","taskId":"T104"}',
+  'B notified primary of completion {"handle":"coder#4","parentID":"ses_primary","taskOutcome":{"kind":"no-marker"}}',
+  'C deleted opencode session {"handle":"coder#4","sessionID":"ses_workoff"}',
+  'D spawned {"handle":"coder#4","sessionID":"ses_driver","agent":"coder"}',
+  'E notified primary of completion {"handle":"coder#4","parentID":"ses_elsewhere","taskOutcome":{"kind":"no-marker"}}',
+  'F notified primary of completion {"handle":"coder#4","parentID":"ses_primary","taskOutcome":{"kind":"done","id":"T101"}}',
+]
+
+test("the in-flight gate reads past its own spawn line, so a reused handle is not mistaken for it", () => {
+  const out = runSliceReader({
+    lines: REUSED_HANDLE_SLICE,
+    vars: {
+      SLICE_FROM_LINE: 0,
+      SPAWN_SLICE_LINE: 4,
+      SPAWN_HANDLE: "coder#4",
+      SID: "ses_primary",
+    },
+    body: `${driverFunction("subagent_completion_line")}\nsubagent_completion_line`,
+  })
+  // Line 2 carries the same handle and the same parent inside the same window;
+  // only line 6 belongs to the subagent spawned on line 4.
+  assert.match(out, /^6:/, `expected the completion after the spawn line, got: ${out}`)
+  assert.match(out, /"kind":"done","id":"T101"/)
+})
+
+test("the in-flight gate ignores another opencode instance's subagent of the same handle", () => {
+  const out = runSliceReader({
+    lines: REUSED_HANDLE_SLICE.slice(0, 5),
+    vars: {
+      SLICE_FROM_LINE: 0,
+      SPAWN_SLICE_LINE: 4,
+      SPAWN_HANDLE: "coder#4",
+      SID: "ses_primary",
+    },
+    body: `${driverFunction("subagent_completion_line")}\nsubagent_completion_line`,
+  })
+  // Line 5 is a completion for coder#4 under a parent this run never created:
+  // the driver's subagent is still in flight, so the gate reports nothing.
+  assert.equal(out, "", `expected no completion line, got: ${out}`)
+})
+
+test("the permit criterion counts the admissions of its own primary and no other's", () => {
+  const lines = [
+    'A spawn admitted: endless wind-down permit consumed {"sessionID":"ses_primary","agent":"planner"}',
+    'B endless: scheduled {"sessionID":"ses_primary","ctx":5703,"threshold":5117}',
+    'C spawn admitted: endless wind-down permit consumed {"sessionID":"ses_foreign","agent":"planner"}',
+    'D spawn admitted: endless wind-down permit consumed {"sessionID":"ses_primary","agent":"planner"}',
+  ]
+  const body = `${driverFunction("permit_admission_lines")}
+permit_admission_lines | grep -c .
+permit_admission_lines`
+  const out = runSliceReader({
+    lines,
+    vars: { SLICE_FROM_LINE: 1, SID: "ses_primary" },
+    body,
+  })
+  // Line 1 is this primary's, but before the window; line 3 is a second
+  // primary's own permit — counted, they read as a double consumption that
+  // never happened. Only line 4 belongs to this cycle.
+  assert.match(out, /^1\n/, `expected exactly one admission, got: ${out}`)
+  assert.match(out, /\n4:D spawn admitted/)
+})
+
+test("the replacement criterion accepts only this primary's cycle completion", () => {
+  const lines = [
+    'A endless: cycle 1/2 complete, new session ses_foreign, open tasks 4→3 completed=1 {"sessionID":"ses_foreign"}',
+    'B endless: cycle 1/2 complete, new session ses_primary, open tasks 4→3 completed=1 {"sessionID":"ses_primary"}',
+  ]
+  const pattern = String.raw`endless: cycle [0-9]+/[^ ]+ complete, new session ses_[A-Za-z0-9]+.*"sessionID":"$SID"`
+  const out = runSliceReader({
+    lines,
+    vars: { SLICE_FROM_LINE: 0, SID: "ses_primary" },
+    body: `slice_match_after ${shellQuote(pattern.replace("$SID", "ses_primary"))}`,
+  })
+  assert.match(out, /^2:/, `expected this primary's completion, got: ${out}`)
+  assert.match(out, /new session ses_primary/)
+
+  const replacement = DRIVER_SOURCE
+    .split("\n")
+    .find((line) => line.includes('if wait_for_pattern "endless: cycle complete"'))
+  assert.ok(replacement, "the replacement wait is missing")
+  assert.ok(
+    replacement.includes(String.raw`\"sessionID\":\"$SID\"`),
+    "the replacement wait does not scope completion to the primary session",
+  )
+})
+
+test("a foreign primary writing the driven todo file is reported, an own one is not", () => {
+  const lines = [
+    'A endless: wind-down confirmed 4 open task(s) [T101,T102,T103,T104] file=TODO.md {"sessionID":"ses_primary"}',
+    'B notified primary of completion {"handle":"coder#1","parentID":"ses_successor","taskOutcome":{"kind":"done","id":"T101"}}',
+    'C endless: wind-down confirmed 4 open task(s) [T101,T102,T103,T104] file=TODO.md {"sessionID":"ses_foreign"}',
+    'D notified primary of completion {"handle":"coder#2","parentID":"ses_foreign","taskOutcome":{"kind":"done","id":"T999"}}',
+    'E notified primary of completion {"handle":"coder#3","parentID":"ses_foreign","taskOutcome":{"kind":"done","id":"T102"}}',
+  ]
+  const out = runSliceReader({
+    lines,
+    vars: { SESSION_IDS: "ses_primary ses_successor" },
+    body: `${driverFunction("foreign_todo_writer_lines")}
+foreign_todo_writer_lines 1 "T101,T102,T103,T104"`,
+  })
+  const found = out.trim().split("\n").filter(Boolean).map((line) => line.slice(0, 1))
+  // 1 is before the window, 2 is this run's own removal, 4 names an id no cycle
+  // of this run confirmed; 3 and 5 are another primary editing these very ids.
+  assert.deepEqual(found, ["3", "5"], `unexpected foreign lines: ${out}`)
+})
+
+// ---------------------------------------------------------------------------
+// The suite driver's own share of the same contamination: its server outlives
+// the drivers that used it, and the endless driver arms endless mode through
+// the global settings file every instance on the machine reads.
+// ---------------------------------------------------------------------------
+
+test("run-all.sh stops its server before the endless driver, not only in the trap", () => {
+  const source = readFileSync(resolve(import.meta.dirname, "e2e/run-all.sh"), "utf8")
+  const multi = source.lastIndexOf('"$HERE/multi-task.sh"')
+  const endless = source.lastIndexOf('"$HERE/endless-task.sh"')
+  assert.ok(multi > 0 && endless > multi, "run-all.sh does not sequence multi-task before endless-task")
+  const stop = source.indexOf("e2e_server_stop", multi)
+  assert.ok(
+    stop > multi && stop < endless,
+    "no e2e_server_stop between the last driver that uses the suite server and endless-task.sh — a session left alive there runs a wind-down cycle of its own on the todo file the endless driver asserts on",
+  )
+})

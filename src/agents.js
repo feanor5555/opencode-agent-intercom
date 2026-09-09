@@ -733,6 +733,29 @@ export function installAgents(config, { directory, worktree } = {}) {
     if (base.permission || projectPermission) {
       merged.permission = { ...base.permission, ...projectPermission }
     }
+    // In SOLO mode a subagent role has no way of being started that the mode
+    // wants: the plugin registers no `spawn`, and opencode's native `task` is
+    // denied on both sides. What is left is the role definition itself, and
+    // `merged` above lets a project entry win on every top-level key — an
+    // `agent.planner.hidden = false` in a project `opencode.json` puts a
+    // fully-configured role back into opencode's `@` autocomplete and its
+    // agent switcher, where the user starts it as a session of its own.
+    //
+    // So the two keys that decide reachability are written AFTER the overlay,
+    // where no override reaches them. `disable` is opencode's own key and the
+    // decisive one: its config merge deletes the entry from the agent registry
+    // outright, so neither the switcher nor `task` can resolve the name.
+    // `hidden` is set with it because it is what keeps the name out of the
+    // autocomplete in any opencode that does not honour `disable`.
+    //
+    // The rest of the entry is left exactly as it was: the plugin reads its
+    // roles from AGENTS (rolePrompt, SPAWNABLE_ROLES, the reference files), not
+    // from the config it wrote, so nothing of the plugin's own loses its
+    // definition here.
+    if (soloModeActive() && def.mode === "subagent") {
+      merged.disable = true
+      merged.hidden = true
+    }
     config.agent[name] = merged
   }
   if (!config.default_agent) config.default_agent = DEFAULT_AGENT
@@ -756,6 +779,70 @@ export function installAgents(config, { directory, worktree } = {}) {
 
 function directoryKey(directory) {
   return typeof directory === "string" && directory.length > 0 ? directory : ""
+}
+
+// opencode's own hidden PRIMARY agents, each with its own system prompt, that
+// opencode starts on its own initiative rather than through a tool call:
+//
+//   title       — one turn per session, fired off the first user message to
+//                 name the session,
+//   summary     — registered in the same pass,
+//   compaction  — one turn whenever a session crosses the context threshold.
+//
+// Established from the installed binary (opencode 1.18.29,
+// ~/.opencode/bin/opencode), where all three are registered
+// `mode: "primary", hidden: true`.
+//
+// They matter because no tool call starts them: `tool.execute.before` never
+// runs for one, so not one of the plugin's enforcement points is on their path.
+// A `title` turn beside the primary's own turn is a second agent by the plain
+// reading of what solo mode is for.
+export const BUILTIN_AUTO_AGENTS = Object.freeze(["title", "summary", "compaction"])
+
+// Stops those turns for a SOLO-mode process. A no-op in the orchestrator
+// pattern, where a second agent is what the whole plugin is built to run.
+//
+// Two different switches, because opencode reads the two agents differently:
+//
+//   - `title` and `summary` are switched off through `config.agent[<name>]
+//     .disable`, an opencode config key of its own (the agent-entry schema
+//     declares `disable: optional(Boolean)`, and the config merge deletes the
+//     registry entry for it: `if(s.disable){delete r[n];continue}`). The title
+//     path then takes its own early return — it fetches the agent and gives up
+//     when the fetch is empty (`let he=yield*l.get("title");if(!he)return`).
+//     `summary` is registered in this binary but fetched nowhere: `title` and
+//     `compaction` are the only two names the registry is asked for by literal,
+//     so disabling it removes an entry nothing reaches and cannot break a path.
+//
+//   - `compaction` is switched off through `config.compaction.auto`, NOT
+//     through the agent entry. Its overflow test reads that key and answers
+//     "not overflowing" when it is false (`if(e.cfg.compaction?.auto===!1)
+//     return!1`), so the turn is never started. The agent entry must be left
+//     alone here: unlike the title path, the compaction path dereferences the
+//     fetch without a guard (`let m=yield*l.get("compaction"),q=m.model?…`), so
+//     `disable` there would turn an automatic compaction into a throw.
+//     Context relief in solo mode is the plugin's own primary handoff, which
+//     the mode already arms.
+//
+// The plugin wins over a project that set either key: in solo mode the backend
+// serves one agent at a time, so this is not a default to be overridden. Both
+// writes preserve every neighbouring key. Mutates `config` in place.
+export function suppressBuiltinAgentTurns(config) {
+  if (!config || typeof config !== "object") return
+  if (!soloModeActive()) return
+  if (!config.agent || typeof config.agent !== "object") config.agent = {}
+  for (const name of ["title", "summary"]) {
+    const existing =
+      config.agent[name] && typeof config.agent[name] === "object" && !Array.isArray(config.agent[name])
+        ? config.agent[name]
+        : null
+    config.agent[name] = { ...existing, disable: true }
+  }
+  const compaction =
+    config.compaction && typeof config.compaction === "object" && !Array.isArray(config.compaction)
+      ? config.compaction
+      : null
+  config.compaction = { ...compaction, auto: false }
 }
 
 // The name the primary of one project runs under: the `default_agent` captured

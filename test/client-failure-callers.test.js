@@ -107,7 +107,15 @@ function makeCtx({ messages = [], agentConfig = {} } = {}) {
   const notices = []
   const prompts = []
   const titles = []
-  const state = { messages, promptStatus: 0, createStatus: 0, deleteStatus: 0, updateStatus: 0 }
+  const aborts = []
+  const state = {
+    messages,
+    promptStatus: 0,
+    createStatus: 0,
+    deleteStatus: 0,
+    updateStatus: 0,
+    abortStatus: 0,
+  }
   const client = {
     session: {
       create: async () => {
@@ -128,7 +136,11 @@ function makeCtx({ messages = [], agentConfig = {} } = {}) {
         }
         return { data: undefined }
       },
-      abort: async () => ({ data: true }),
+      abort: async (opts) => {
+        aborts.push(opts?.path?.id)
+        if (state.abortStatus) return refusal(state.abortStatus, "InternalError")
+        return { data: true }
+      },
       delete: async (opts) => {
         deleted.push(opts?.path?.id)
         if (state.deleteStatus) return refusal(state.deleteStatus, "InternalError")
@@ -154,6 +166,7 @@ function makeCtx({ messages = [], agentConfig = {} } = {}) {
     notices,
     prompts,
     titles,
+    aborts,
     state,
   }
 }
@@ -349,6 +362,23 @@ test("the handoff wiring's deleteSession and archiveSession answer false on a re
   state.updateStatus = 0
   assert.equal(await deps.deleteSession("ses_orphan"), true)
   assert.equal(await deps.archiveSession(PRIMARY), true)
+})
+
+test("the handoff wiring carries an abortSession that really aborts and answers a boolean", async () => {
+  // handoff.js reaches for this where step 3 gave up on the old primary's final
+  // turn: the prompt was accepted by the server, so without a real abort that
+  // turn runs on beside the successor's kickoff. It is a REPORTED write like
+  // deleteSession and archiveSession — the handoff proceeds either way, so the
+  // boolean is what makes the log line at the site truthful.
+  const { client, state, aborts } = makeCtx()
+  const deps = await buildPrimaryHandoffDeps(client, PRIMARY, fixtureDir, "orchestrator")
+
+  assert.equal(typeof deps.abortSession, "function", "the deps must carry it at all")
+  assert.equal(await deps.abortSession(PRIMARY), true)
+  assert.deepEqual(aborts, [PRIMARY], "the abort reaches the session route with the old primary's id")
+
+  state.abortStatus = 500
+  assert.equal(await deps.abortSession(PRIMARY), false, "a refused abort is reported, not thrown")
 })
 
 // ---- the DOC_SUMMARY prompt (concept §4.4) -----------------------------------

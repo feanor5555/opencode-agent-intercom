@@ -122,6 +122,7 @@ import { capChars } from "./format.js"
 // @property {(fromID: string, toID: string) => Promise<number>} reparent
 // @property {(sessionID: string) => Promise<boolean>} deleteSession  used ONLY for the orphaned NEW session on the failure path (a root session with no children); reports whether the delete took effect, and the sequence proceeds either way
 // @property {(sessionID: string) => Promise<boolean>} archiveSession  retires the OLD primary in step 8 without opencode's recursive child-delete cascade; reports whether the archive took effect, and the sequence proceeds either way
+// @property {(sessionID: string) => Promise<boolean>} [abortSession]  stops the OLD primary's doc-summary turn where step 3 gave up on it, so no turn of its runs alongside the successor's kickoff; best-effort, and the sequence proceeds either way
 // @property {(sessionID: string) => void} forgetPrimary
 // @property {() => Promise<unknown>} [dropRetainedSubagents]  tear down every retained subagent before the sequence starts
 // @property {() => Promise<string>} promptOldPrimaryForDocSummaries
@@ -241,6 +242,28 @@ async function performPrimaryHandoffInner(deps) {
     } catch (err) {
       log("primary handoff: doc summaries failed, using fallback", errMsg(err))
       docSummaries = FALLBACK_DOC_SUMMARIES
+      // The helper gave up; the turn it started did not. The prompt was
+      // accepted by the server (promptSession returns once queued), so on a
+      // timeout — the ordinary outcome on a slow local backend — the old
+      // primary is still generating, and step 6 below starts a turn on the
+      // successor. That is two agents producing at once, which a backend
+      // serving one at a time (llama.cpp at `parallel 1`) cannot do; the
+      // successor's kickoff then queues behind a turn whose output nothing
+      // reads any more. Nothing else on this path stops it: step 8 archives
+      // the old session, which stamps a timestamp and aborts nothing.
+      //
+      // Unconditional, not solo-mode-only: the same overlap exists in the
+      // orchestrator pattern, where it merely costs less.
+      //
+      // Best-effort, like every other client call the deps carry: it answers
+      // whether the abort was confirmed and never throws, and the handoff
+      // proceeds either way. Optional in the deps so a test double that
+      // predates it still drives the sequence.
+      try {
+        await deps.abortSession?.(deps.primarySessionID)
+      } catch (abortErr) {
+        log("primary handoff: abort of the old primary failed", errMsg(abortErr))
+      }
     }
 
     // 4. Reparent BEFORE the kickoff is composed: the kickoff must only
@@ -275,10 +298,19 @@ async function performPrimaryHandoffInner(deps) {
       : inFlight.length > 0
         ? `Letztes Ziel: ${safeGoal} (${inFlight.length} Subagent(s) wurden re-parented)`
         : `Letztes Ziel: ${safeGoal}`
-    const notes = [
-      "Diese Subagents liefern jetzt an diese Session:",
-      ...inFlight.map((s) => `${s.handle} (${s.agent}): ${s.task}`),
-    ]
+    // The heading exists to introduce the list under it. With no subagent in
+    // flight there is no list, and the heading alone announces a section that
+    // cannot be filled — in solo mode, where `inFlight` is always empty and the
+    // primary's prompt names no subagent at all, it contradicts the role the
+    // successor is started in. The section itself stays (empty), which is the
+    // well-formed shape formatPrimarySummary is written for.
+    const notes =
+      inFlight.length > 0
+        ? [
+            "Diese Subagents liefern jetzt an diese Session:",
+            ...inFlight.map((s) => `${s.handle} (${s.agent}): ${s.task}`),
+          ]
+        : []
     md = deps.formatPrimarySummary({ stand, notes, plannedSteps: steps })
     deps.writePrimarySummary(deps.directory, md)
 

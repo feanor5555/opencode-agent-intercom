@@ -375,6 +375,23 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
   }
 
   async function spawnHandler(args, toolCtx) {
+    // The mode gate, before anything else this handler does. In solo mode the
+    // tool that reaches here is not registered (see createTools below), so on a
+    // correct instance this is unreachable — and that is exactly why it is
+    // here: the latch is authoritative in six places, and until now the one
+    // place that actually creates a session did not consult it. A refactor that
+    // moves the tool out of the non-solo arm, a project that re-adds it, or a
+    // future caller of this function directly would otherwise re-arm the whole
+    // spawn machinery — the nested-spawn checks, the cap, createChildSession —
+    // without a word.
+    if (soloModeActive()) {
+      log("spawn refused: solo mode", { sessionID: toolCtx?.sessionID, agent: String(args?.agent ?? "") })
+      return {
+        output:
+          "Spawn refused: solo mode runs one agent — you. There is no subagent to start; do the " +
+          "work yourself with your own tools.",
+      }
+    }
     // Who is calling? A session that has a registry entry is a subagent — the
     // classification the whole plugin uses — and its spawn is a NESTED one:
     // gated by the three checks below instead of by "subagents do not spawn",
@@ -1017,6 +1034,21 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
   // created, the handle is the one the orchestrator already knows, and the
   // gate below decides whether the session may be prompted at all.
   async function reuseHandler(args, toolCtx) {
+    // The same mode gate spawnHandler carries, and for the same reason: a reuse
+    // puts a held session back to work, which is a second agent producing
+    // beside the primary. Ahead of the retention question, because the mode
+    // decides regardless of how retention stands.
+    if (soloModeActive()) {
+      log("reuse refused: solo mode", {
+        sessionID: toolCtx?.sessionID,
+        subagent: String(args?.subagent ?? ""),
+      })
+      return {
+        output:
+          "Reuse refused: solo mode runs one agent — you. No subagent is ever held here; do the " +
+          "work yourself with your own tools.",
+      }
+    }
     const settings = getSettings()
     if (!retentionActive()) {
       // Logged like every other refusal in this handler. Without it this one

@@ -160,6 +160,46 @@ const PRIMARY_TOOLS = new Set([
   "reuse",
 ])
 
+// Every tool name established as starting an agent of its own. Read off the
+// installed opencode binary's builtin tool set (`bash`, `edit`, `write`,
+// `read`, `grep`, `glob`, `list`, `patch`, `todowrite`, `webfetch`,
+// `websearch`, `task`): `task` is the only one that opens a session, and it is
+// the entry point to opencode's own `general` and `explore` subagents.
+//
+// A set rather than a literal because both guard branches below have to refuse
+// the SAME names, and because the next agent-starting tool — a built-in
+// opencode adds, or one an MCP server brings — is then added in one place
+// instead of two. A name added here is denied to a subagent and to a solo
+// primary at once.
+export const AGENT_STARTING_TOOLS = new Set(["task"])
+
+// What a primary in SOLO mode may not run. The mode owns this set: solo mode
+// exists for a backend that serves one agent at a time (a llama.cpp server at
+// `parallel 1`), so nothing that could put a second agent on that slot may
+// pass.
+//
+// Two groups. Everything agent-starting, above — that is the requirement
+// itself. And the plugin's own four orchestration tools, which solo mode does
+// not register at all (createTools, src/tools.js): naming them here is what
+// makes the mode hold if any of them reappears in the schema by a route the
+// tool map does not decide — a project override, a refactor that moves one out
+// of the non-solo arm, a future caller of the handler.
+//
+// Deliberately a denylist and not the allowlist PRIMARY_TOOLS is: in solo mode
+// the primary IS the worker and runs its own tools, MCP tools included, so
+// there is no closed list of what it may do. What can be closed is the list of
+// what starts a second agent.
+// `list` is deliberately NOT a member, though it is one of the four
+// orchestration tools. The name is not the plugin's alone: `list` is also
+// opencode's own builtin directory lister, and in solo mode — where the
+// plugin's `list` is not registered — that builtin is what the name resolves
+// to. It is a working tool the solo primary needs and one
+// SOLO_PRIMARY_PERMISSION leaves it. Denying the name here would take a
+// directory listing away from the agent that has to do the work, and it would
+// buy nothing: `list` starts no agent, it reports on subagents that in this
+// mode do not exist.
+export const SOLO_DENIED_TOOLS = new Set([...AGENT_STARTING_TOOLS, "spawn", "reuse", "abort"])
+
 // The orchestration tools a primary may actually call right now, for the
 // refusal that names them. `reuse` is left out wherever retention is not in
 // effect: it is not registered at all where retention was off at load, and
@@ -2192,7 +2232,13 @@ export function createGuardToolExecute(client, permissionGuard) {
       // map, so a project override that dropped the schema-strip deny cannot
       // re-open it. The subagent reports any need for another agent in its
       // final reply; the orchestrator dispatches.
-      if (input.tool === "task") {
+      //
+      // Read from AGENT_STARTING_TOOLS rather than tested against the literal,
+      // so this deny and the solo primary's cannot drift apart over which names
+      // start an agent. NOT the solo set: the plugin's own `spawn` is a
+      // legitimate nested spawn for the roles NESTED_SPAWN_TARGETS names, and
+      // it is gated in its own handler.
+      if (AGENT_STARTING_TOOLS.has(input.tool)) {
         log("denied native task from subagent", { sessionID, agent: entry.agent })
         throw new Error(
           "agent-intercom: a subagent cannot spawn other agents. If this task needs another " +
@@ -2275,19 +2321,22 @@ export function createGuardToolExecute(client, permissionGuard) {
     // Not a tracked subagent -> a primary session.
     //
     // Solo mode first: there the primary is the only agent there is, so it runs
-    // its tools itself and nothing here refuses them. The one exception is
-    // opencode's native `task`, denied for the same reason the deny map denies
-    // it (SOLO_PRIMARY_PERMISSION, src/agents.js): it would start a second
-    // agent, and the mode exists for a backend that can serve one at a time.
-    // The schema strip already hides the tool; this is the runtime backstop
-    // that survives a project override re-adding it, and it is the primary's
-    // counterpart to the unconditional subagent-side deny above.
+    // its tools itself and nothing here refuses them — except what SOLO_DENIED_
+    // TOOLS names. That is opencode's native `task`, denied for the same reason
+    // the deny map denies it (SOLO_PRIMARY_PERMISSION, src/agents.js), plus the
+    // plugin's own spawn / reuse / abort, which solo mode does not register at
+    // all. A tool that reappears in the schema by a route the tool map does not
+    // decide — a project override, a refactor, a future direct caller — is
+    // refused here whatever put it there. This is the primary's counterpart to
+    // the unconditional subagent-side deny above, and the two read the same set
+    // for the names that start an agent, so they cannot drift.
     if (soloModeActive()) {
-      if (input.tool === "task") {
-        log("denied native task from solo primary", { sessionID })
+      if (SOLO_DENIED_TOOLS.has(input.tool)) {
+        log("denied second-agent tool from solo primary", { sessionID, tool: input.tool })
         throw new Error(
-          "agent-intercom: solo mode runs one agent — you. Starting another agent is not " +
-            "available here; do the work yourself with your own tools.",
+          `agent-intercom: solo mode runs one agent — you. \`${input.tool}\` would start or ` +
+            `address a second agent, which is not available here; do the work yourself with ` +
+            `your own tools.`,
         )
       }
       return

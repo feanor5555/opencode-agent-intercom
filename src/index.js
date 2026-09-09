@@ -59,7 +59,7 @@ import {
   recordToolCallFinished,
   rewritePendingTools,
 } from "./hooks.js"
-import { installAgents } from "./agents.js"
+import { installAgents, suppressBuiltinAgentTurns } from "./agents.js"
 import { recordSessionAgent } from "./registry.js"
 import { chatParamsHook } from "./llmparams.js"
 import { chatMessageHook, applyModelChoices, messageAgent } from "./llmmodel.js"
@@ -149,6 +149,18 @@ export default async (ctx) => {
         installAgents(config, { directory, worktree })
       } catch (err) {
         log("config hook error", err?.message ?? String(err))
+      }
+      // Solo mode only: stop opencode's own hidden `title`, `summary` and
+      // `compaction` agents from taking a turn. They start on opencode's own
+      // initiative and not through a tool call, so no guard of this plugin is
+      // on their path — this config write is the only place they can be
+      // reached. A no-op in the orchestrator pattern. Runs BEFORE
+      // applyModelChoices so a model choice stored for one of those names still
+      // lands on the entry this created.
+      try {
+        suppressBuiltinAgentTurns(config)
+      } catch (err) {
+        log("config builtin-agent hook error", err?.message ?? String(err))
       }
       // Make the per-agent model choice from ~/.config/opencode/llm-models.json
       // permanent: written into `config.agent[name].model` it also holds for

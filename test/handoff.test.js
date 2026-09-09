@@ -115,6 +115,12 @@ function makeDeps(overrides = {}) {
     archiveSession: async (sessionID) => {
       call("archiveSession", sessionID)
     },
+    // Only ever reached on the doc-summary failure path — the happy path must
+    // not abort the primary it is about to ask nothing more of.
+    abortSession: async (sessionID) => {
+      call("abortSession", sessionID)
+      return true
+    },
     forgetPrimary: (sessionID) => {
       call("forgetPrimary", sessionID)
     },
@@ -393,6 +399,75 @@ test("promptOldPrimaryForDocSummaries is called once, between createSession and 
   )
 })
 
+// ---- the old primary is stopped where its final turn was given up on --------
+//
+// The requirement behind these three: two agents must never be generating at
+// once. `promptOldPrimaryForDocSummaries` gives up after its own timeout, but
+// the prompt it sent was accepted by the server, so the old primary keeps
+// producing — and step 6 then starts the kickoff turn on the successor. On a
+// backend that serves one agent at a time (a llama.cpp server at `parallel 1`)
+// that is the failure case itself, reached with no LLM decision in it.
+// `archiveSession` cannot cover it: it stamps a timestamp and stops nothing.
+
+test("a doc-summary failure aborts the old primary BEFORE the successor is kicked off", async () => {
+  const deps = makeDeps()
+  deps.promptOldPrimaryForDocSummaries = async () => {
+    deps._log.push(["promptOldPrimaryForDocSummaries"])
+    throw new Error("doc summaries timed out after 120000 ms")
+  }
+
+  await performPrimaryHandoff(deps)
+
+  const idx = (name) => deps._log.findIndex((e) => e[0] === name)
+  const iAbort = idx("abortSession")
+  const iPrompt = idx("promptAsync")
+
+  assert.ok(iAbort >= 0, "the old primary's running turn must be aborted")
+  assert.deepEqual(deps._log[iAbort], ["abortSession", "primary-1"], "the OLD primary is the target")
+  assert.ok(iAbort < iPrompt, "the abort must land before the successor's kickoff turn starts")
+
+  // The handoff itself still completes: the abort is a stop, not a failure.
+  const message = deps._log.find((e) => e[0] === "promptAsync")[2]
+  assert.ok(message.includes("(nicht verfügbar"), "the kickoff carries the fallback doc summaries")
+  assert.ok(order(deps._log).includes("archiveSession"), "the sequence runs to the end")
+  assert.ok(!order(deps._log).includes("abortDrain"), "this is not a pre-kickoff failure")
+})
+
+test("the happy path never aborts the old primary", async () => {
+  const deps = makeDeps()
+  await performPrimaryHandoff(deps)
+  assert.ok(
+    !order(deps._log).includes("abortSession"),
+    "a primary that answered must not have its session aborted",
+  )
+})
+
+test("a refused abort does not stop the handoff — it is best-effort like every other client call", async () => {
+  for (const abortSession of [
+    async () => false,
+    async () => {
+      throw new Error("abort route unreachable")
+    },
+  ]) {
+    const deps = makeDeps()
+    deps.abortSession = abortSession
+    deps.promptOldPrimaryForDocSummaries = async () => {
+      throw new Error("doc summaries timed out")
+    }
+    const result = await performPrimaryHandoff(deps)
+    assert.equal(result.newSessionID, "orch2")
+    assert.ok(order(deps._log).includes("promptAsync"), "the successor is still kicked off")
+  }
+
+  // A deps object built before this dep existed still drives the sequence.
+  const legacy = makeDeps()
+  delete legacy.abortSession
+  legacy.promptOldPrimaryForDocSummaries = async () => {
+    throw new Error("doc summaries timed out")
+  }
+  assert.equal((await performPrimaryHandoff(legacy)).newSessionID, "orch2")
+})
+
 test("kickoff message embeds the raw text returned by promptOldPrimaryForDocSummaries", async () => {
   // Custom three-section text from the fake — proves the wire-through
   // (not a coincidence with the default fake's text).
@@ -560,8 +635,11 @@ test("EDGE CASE: empty inFlight + empty goal still produces a valid run", async 
     fmt.stand,
     "Letztes Ziel: (kein echtes Nutzer-Ziel in der Session-History gefunden — siehe Geplante Schritte / TODO.md)",
   )
-  assert.equal(fmt.notes.length, 1) // just the header line
-  assert.ok(fmt.notes[0].includes("Diese Subagents liefern jetzt"))
+  // With nothing in flight the notes block is EMPTY, not a lone heading: the
+  // heading exists to introduce a list, and announcing a section that cannot be
+  // filled costs tokens and, in solo mode, contradicts a primary prompt that
+  // names no subagent at all.
+  assert.deepEqual(fmt.notes, [])
   assert.deepEqual(fmt.plannedSteps, [])
 
   // Kickoff message still present, still embeds the three per-file

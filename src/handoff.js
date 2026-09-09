@@ -56,6 +56,11 @@ import { capChars } from "./format.js"
 //   4. Reparent all in-flight subagents of the old primary onto the new one
 //      — BEFORE the kickoff is composed, so announcement and delivery
 //      path cannot diverge.
+//   4b. Where step 3 gave up on the old primary, abort it (deps.abortSession)
+//      so its abandoned summary turn does not run alongside the successor's
+//      kickoff. Strictly after step 4, so it falls on a session the handoff
+//      can no longer fall back to and whose subtree is already empty — see
+//      the block itself.
 //   5. Read the in-flight list from the POST-reparent registry, build the
 //      summary (stand-up line, reparented-subagent notes, planned steps —
 //      all sections stay defined even when empty), format it as markdown
@@ -122,7 +127,7 @@ import { capChars } from "./format.js"
 // @property {(fromID: string, toID: string) => Promise<number>} reparent
 // @property {(sessionID: string) => Promise<boolean>} deleteSession  used ONLY for the orphaned NEW session on the failure path (a root session with no children); reports whether the delete took effect, and the sequence proceeds either way
 // @property {(sessionID: string) => Promise<boolean>} archiveSession  retires the OLD primary in step 8 without opencode's recursive child-delete cascade; reports whether the archive took effect, and the sequence proceeds either way
-// @property {(sessionID: string) => Promise<boolean>} [abortSession]  stops the OLD primary's doc-summary turn where step 3 gave up on it, so no turn of its runs alongside the successor's kickoff; best-effort, and the sequence proceeds either way
+// @property {(sessionID: string) => Promise<boolean>} [abortSession]  step 4b: stops the OLD primary's doc-summary turn where step 3 gave up on it, so no turn of its runs alongside the successor's kickoff; issued only after the reparent, when the old session has no child sessions left; best-effort, and the sequence proceeds either way
 // @property {(sessionID: string) => void} forgetPrimary
 // @property {() => Promise<unknown>} [dropRetainedSubagents]  tear down every retained subagent before the sequence starts
 // @property {() => Promise<string>} promptOldPrimaryForDocSummaries
@@ -235,6 +240,13 @@ async function performPrimaryHandoffInner(deps) {
     // the helper's specific shape.
     let docSummaries
     let historySummary = ""
+    // Set where step 3 gave up on the old primary. The helper stopped waiting;
+    // the turn it started did not stop. The prompt was accepted by the server
+    // (promptSession returns once queued), so on a timeout — the ordinary
+    // outcome on a slow local backend — the old primary is still generating.
+    // The abort that ends that turn is issued in step 4b, after the reparent,
+    // never here; see there for why the order is not free.
+    let predecessorStillGenerating = false
     try {
       const raw = await deps.promptOldPrimaryForDocSummaries()
       docSummaries = validateDocSummaries(raw)
@@ -242,34 +254,52 @@ async function performPrimaryHandoffInner(deps) {
     } catch (err) {
       log("primary handoff: doc summaries failed, using fallback", errMsg(err))
       docSummaries = FALLBACK_DOC_SUMMARIES
-      // The helper gave up; the turn it started did not. The prompt was
-      // accepted by the server (promptSession returns once queued), so on a
-      // timeout — the ordinary outcome on a slow local backend — the old
-      // primary is still generating, and step 6 below starts a turn on the
-      // successor. That is two agents producing at once, which a backend
-      // serving one at a time (llama.cpp at `parallel 1`) cannot do; the
-      // successor's kickoff then queues behind a turn whose output nothing
-      // reads any more. Nothing else on this path stops it: step 8 archives
-      // the old session, which stamps a timestamp and aborts nothing.
-      //
-      // Unconditional, not solo-mode-only: the same overlap exists in the
-      // orchestrator pattern, where it merely costs less.
-      //
-      // Best-effort, like every other client call the deps carry: it answers
-      // whether the abort was confirmed and never throws, and the handoff
-      // proceeds either way. Optional in the deps so a test double that
-      // predates it still drives the sequence.
-      try {
-        await deps.abortSession?.(deps.primarySessionID)
-      } catch (abortErr) {
-        log("primary handoff: abort of the old primary failed", errMsg(abortErr))
-      }
+      predecessorStillGenerating = true
     }
 
     // 4. Reparent BEFORE the kickoff is composed: the kickoff must only
     // announce subagents whose delivery re-pointing has actually happened.
     reparented = await deps.reparent(deps.primarySessionID, newID)
     reparentDone = true
+
+    // 4b. End the old primary's abandoned doc-summary turn, where step 3 gave
+    // up on it. Step 6 below starts a turn on the successor, and two agents
+    // producing at once is what a backend serving one at a time (llama.cpp at
+    // `parallel 1`) cannot do; the successor's kickoff would queue behind a
+    // turn whose output nothing reads any more. Nothing else on this path
+    // stops it: step 8 archives the old session, which stamps a timestamp and
+    // aborts nothing.
+    //
+    // AFTER the reparent of step 4, never inside the catch of step 3, for two
+    // reasons that hold independently of each other:
+    //
+    //   - The reparent is the last step that can still fail the handoff BACK
+    //     onto the old primary. A throw there reverts the sequence and leaves
+    //     that session live, with its subagents still under it, as the session
+    //     the run carries on in; an abort already issued would have stopped the
+    //     turn of the very session just fallen back to.
+    //   - It puts the old primary's subtree out of reach before the call. In
+    //     opencode 1.18.29 `session.abort` cancels the runner held under that
+    //     exact session id and walks no child sessions — unlike the delete
+    //     route, whose recursive child cascade is the whole reason step 8
+    //     archives rather than deletes — but the background-job cancellation it
+    //     runs first IS transitive over `metadata.parentSessionId`. Ordered
+    //     after the reparent, neither can reach what the successor now owns.
+    //
+    // Unconditional, not solo-mode-only: the same overlap exists in the
+    // orchestrator pattern, where it merely costs less.
+    //
+    // Best-effort, like every other client call the deps carry: it answers
+    // whether the abort was confirmed and never throws, and the handoff
+    // proceeds either way. Optional in the deps so a test double that
+    // predates it still drives the sequence.
+    if (predecessorStillGenerating) {
+      try {
+        await deps.abortSession?.(deps.primarySessionID)
+      } catch (abortErr) {
+        log("primary handoff: abort of the old primary failed", errMsg(abortErr))
+      }
+    }
 
     // 5. Build the summary from the POST-reparent registry state — the
     // in-flight list is read AFTER reparent, keyed by the NEW id, so

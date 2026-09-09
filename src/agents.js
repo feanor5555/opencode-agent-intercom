@@ -492,6 +492,7 @@ const OVERRIDABLE_FIELDS = [
   "model",
   "description",
   "mode",
+  "disable",
   "hidden",
   "color",
 ]
@@ -570,8 +571,9 @@ function locateAgentFile(directory, name, worktree) {
 // `permission` counts when the project's map sets a different value for at
 // least one tool key. `keptDenies` names the keys the plugin denies that the
 // project map did not take away — read off the MERGED map, so it says the same
-// thing on every re-run.
-function classifyCollision(base, projectEntry) {
+// thing on every re-run. `forcedFields` names fields this installation writes
+// after the project overlay; differences in those fields are not collisions.
+function classifyCollision(base, projectEntry, forcedFields = []) {
   const fields = []
   const projectPermission = permissionMap(projectEntry.permission)
   for (const field of OVERRIDABLE_FIELDS) {
@@ -591,7 +593,11 @@ function classifyCollision(base, projectEntry) {
   const keptDenies = Object.keys(base.permission ?? {}).filter(
     (tool) => base.permission[tool] === "deny" && merged[tool] === "deny",
   )
-  return { fields, keptDenies }
+  const forced = new Set(forcedFields)
+  return {
+    fields: fields.filter((field) => !forced.has(field)),
+    keptDenies,
+  }
 }
 
 // Records one collision in the override register and logs it. The log is the
@@ -612,9 +618,11 @@ function classifyCollision(base, projectEntry) {
 // instead would file every finding of a nested instance under the git root and
 // the block, filtering on the instance directory, would match none of them. The
 // worktree still reaches locateAgentFile, where it does belong: a nested
-// instance's agent file sits at the project root.
-function reportCollision(name, base, projectEntry, directory, worktree) {
-  const { fields, keptDenies } = classifyCollision(base, projectEntry)
+// instance's agent file sits at the project root. `forcedFields` is passed for
+// mode-specific keys that are written after the project overlay and therefore
+// cannot be displaced.
+function reportCollision(name, base, projectEntry, directory, worktree, forcedFields = []) {
+  const { fields, keptDenies } = classifyCollision(base, projectEntry, forcedFields)
   if (fields.length === 0) return
   const file = locateAgentFile(directory, name, worktree)
   const scope = directory ?? null
@@ -723,7 +731,11 @@ export function installAgents(config, { directory, worktree } = {}) {
     // The pre-existing entry IS the collision — opencode folds a markdown agent
     // and an `opencode.json` entry into `config.agent` before this hook runs.
     // Costs a handful of property reads and no request.
-    if (projectEntry) reportCollision(name, base, projectEntry, directory, worktree)
+    const forcedFields =
+      soloModeActive() && def.mode === "subagent" ? ["disable", "hidden"] : []
+    if (projectEntry) {
+      reportCollision(name, base, projectEntry, directory, worktree, forcedFields)
+    }
     // Plugin role as base, overlaid by whatever fields the project already set
     // (user wins per top-level key), except `permission`, where the plugin's
     // denies are the base and each tool key the project names wins over them.

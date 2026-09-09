@@ -50,6 +50,17 @@ const TUI_SETTINGS_HEADER = only('{" TUI settings"}')
 const LLM_HEADER = only('{" LLM params"}')
 const RESET_ROW = only('{"[reset current agent]"}')
 
+test("clicking the endless row disarms mode before its live toggle check", () => {
+  const start = source.indexOf('rowLabel("endless mode")')
+  const end = source.indexOf('rowLabel("endless (k)")', start)
+  assert.ok(start >= 0 && end > start, "the endless row bounds are present")
+  const rowSource = source.slice(start, end).replace(/\s+/g, " ")
+  const disarm = rowSource.indexOf("props.onDisarmAgentMode();")
+  const liveCheck = rowSource.indexOf("if (endlessRowLive(endlessState()))")
+  assert.ok(disarm >= 0, "the endless row disarms the pending mode question")
+  assert.ok(liveCheck > disarm, "the live-row guard follows the disarm")
+})
+
 test("the three per-agent ceilings sit in the LLM params body", () => {
   const effort = row("effort")
   const maxToken = row("max Token(k)")

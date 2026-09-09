@@ -166,12 +166,19 @@ const PRIMARY_TOOLS = new Set([
 // `websearch`, `task`): `task` is the only one that opens a session, and it is
 // the entry point to opencode's own `general` and `explore` subagents.
 //
-// A set rather than a literal because both guard branches below have to refuse
-// the SAME names, and because the next agent-starting tool — a built-in
-// opencode adds, or one an MCP server brings — is then added in one place
-// instead of two. A name added here is denied to a subagent and to a solo
+// One collection rather than a literal because both guard branches below have
+// to refuse the SAME names, and because the next agent-starting tool — a
+// built-in opencode adds, or one an MCP server brings — is then added in one
+// place instead of two. A name added here is denied to a subagent and to a solo
 // primary at once.
-export const AGENT_STARTING_TOOLS = new Set(["task"])
+//
+// A FROZEN array, not a Set: this is an enforcement authority read by the guard
+// below, and an exported mutable Set can be emptied by any importer — a test
+// that forgets to restore, a future module — at runtime. The membership test
+// runs against the private Set derived from it (`agentStartingTools`), which
+// nothing outside this module holds. Same shape as every other constant
+// collection here (SOLO_PRIMARY_PERMISSION, BUILTIN_AUTO_AGENTS, AGENT_MODES).
+export const AGENT_STARTING_TOOLS = Object.freeze(["task"])
 
 // What a primary in SOLO mode may not run. The mode owns this set: solo mode
 // exists for a backend that serves one agent at a time (a llama.cpp server at
@@ -198,7 +205,16 @@ export const AGENT_STARTING_TOOLS = new Set(["task"])
 // directory listing away from the agent that has to do the work, and it would
 // buy nothing: `list` starts no agent, it reports on subagents that in this
 // mode do not exist.
-export const SOLO_DENIED_TOOLS = new Set([...AGENT_STARTING_TOOLS, "spawn", "reuse", "abort"])
+//
+// Frozen for the same reason AGENT_STARTING_TOOLS is, and read through the
+// private `soloDeniedTools` below.
+export const SOLO_DENIED_TOOLS = Object.freeze([...AGENT_STARTING_TOOLS, "spawn", "reuse", "abort"])
+
+// The membership tests the two guard branches actually run. Private to this
+// module, so the exported authorities above stay frozen and there is still
+// exactly one place each name is written.
+const agentStartingTools = new Set(AGENT_STARTING_TOOLS)
+const soloDeniedTools = new Set(SOLO_DENIED_TOOLS)
 
 // The orchestration tools a primary may actually call right now, for the
 // refusal that names them. `reuse` is left out wherever retention is not in
@@ -784,6 +800,22 @@ export function resolvePrimaryAgent(sessionID, output, directory) {
     detectAgentFromSystem(output) ??
     defaultAgentName(directory)
   )
+}
+
+// The agent name a primary session runs under, resolved WITHOUT the system
+// prompt: rung 1 of resolvePrimaryAgent (the name recorded at `chat.message`)
+// and then rung 3 (this project's captured `default_agent`, under the scope the
+// transform remembered for the session). Rung 2 — reading the "# Role:" header —
+// needs the prompt output, which a tool-call guard does not have; it would in
+// any case answer what rung 3 answers for a primary this plugin installed, since
+// the solo header maps back to DEFAULT_AGENT (detectAgentFromSystem above).
+//
+// Used by the solo-mode permission re-check in the guard, where the question is
+// which key of `config.agent` the primary's deny map hangs under. A session with
+// no recorded name and no remembered scope falls to defaultAgentName(null) —
+// DEFAULT_AGENT, unless exactly one project has registered another.
+export function primaryAgentNameFor(sessionID) {
+  return sessionAgentName(sessionID) ?? defaultAgentName(primaryDirectoryOf(sessionID))
 }
 
 // Pulls the agent name out of an "# Role: <Name>" header in the role prompt.
@@ -2233,12 +2265,12 @@ export function createGuardToolExecute(client, permissionGuard) {
       // re-open it. The subagent reports any need for another agent in its
       // final reply; the orchestrator dispatches.
       //
-      // Read from AGENT_STARTING_TOOLS rather than tested against the literal,
-      // so this deny and the solo primary's cannot drift apart over which names
-      // start an agent. NOT the solo set: the plugin's own `spawn` is a
-      // legitimate nested spawn for the roles NESTED_SPAWN_TARGETS names, and
-      // it is gated in its own handler.
-      if (AGENT_STARTING_TOOLS.has(input.tool)) {
+      // Read from AGENT_STARTING_TOOLS (through its derived set) rather than
+      // tested against the literal, so this deny and the solo primary's cannot
+      // drift apart over which names start an agent. NOT the solo set: the
+      // plugin's own `spawn` is a legitimate nested spawn for the roles
+      // NESTED_SPAWN_TARGETS names, and it is gated in its own handler.
+      if (agentStartingTools.has(input.tool)) {
         log("denied native task from subagent", { sessionID, agent: entry.agent })
         throw new Error(
           "agent-intercom: a subagent cannot spawn other agents. If this task needs another " +
@@ -2331,13 +2363,38 @@ export function createGuardToolExecute(client, permissionGuard) {
     // the unconditional subagent-side deny above, and the two read the same set
     // for the names that start an agent, so they cannot drift.
     if (soloModeActive()) {
-      if (SOLO_DENIED_TOOLS.has(input.tool)) {
+      if (soloDeniedTools.has(input.tool)) {
         log("denied second-agent tool from solo primary", { sessionID, tool: input.tool })
         throw new Error(
           `agent-intercom: solo mode runs one agent — you. \`${input.tool}\` would start or ` +
             `address a second agent, which is not available here; do the work yourself with ` +
             `your own tools.`,
         )
+      }
+      // Defense in depth, the primary's counterpart to the subagent-side
+      // re-check further up, and it is only in solo mode that a primary needs
+      // one. Under the orchestrator pattern the allowlist below refuses
+      // everything outside PRIMARY_TOOLS, so a `permission.<tool> = "deny"` a
+      // project writes on the primary's entry can add nothing. Solo mode drops
+      // that allowlist — the primary IS the worker and runs its own tools — and
+      // leaves the deny with only the LLM-side schema strip behind it. If the
+      // strip is bypassed (a project override, an MCP plugin re-adding a tool,
+      // a future opencode change to how tools merge), this hard-denies.
+      //
+      // `permission.task` is skipped by checkToolPermission itself (config.js),
+      // so this does not collide with the unconditional `task` deny above.
+      if (permissionGuard) {
+        const agent = primaryAgentNameFor(sessionID)
+        const reason = await permissionGuard.checkToolPermission(agent, input.tool)
+        if (reason) {
+          log("denied tool call: per-agent permission deny", {
+            sessionID,
+            agent,
+            tool: input.tool,
+            reason,
+          })
+          throw new Error(`agent-intercom: ${reason}. This tool is in the agent's deny map.`)
+        }
       }
       return
     }

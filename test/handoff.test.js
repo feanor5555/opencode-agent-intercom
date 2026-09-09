@@ -433,6 +433,63 @@ test("a doc-summary failure aborts the old primary BEFORE the successor is kicke
   assert.ok(!order(deps._log).includes("abortDrain"), "this is not a pre-kickoff failure")
 })
 
+test("the abort lands AFTER the reparent — never while the subagents are still the old primary's children", async () => {
+  // Ordering, not a nicety. Until step 4 has run, every in-flight subagent is a
+  // CHILD session of the old primary, and the abort is the last thing the
+  // sequence does to that session before the successor takes over. Issued after
+  // the reparent it falls on a session with an empty subtree, so nothing the
+  // call reaches — its transitive background-job cancellation included — can
+  // touch a subagent the successor now owns.
+  const deps = makeDeps()
+  deps.promptOldPrimaryForDocSummaries = async () => {
+    deps._log.push(["promptOldPrimaryForDocSummaries"])
+    throw new Error("doc summaries timed out after 120000 ms")
+  }
+
+  await performPrimaryHandoff(deps)
+
+  const idx = (name) => deps._log.findIndex((e) => e[0] === name)
+  const iReparent = idx("reparent")
+  const iAbort = idx("abortSession")
+  const iPrompt = idx("promptAsync")
+
+  assert.ok(iReparent >= 0, "the reparent must have run")
+  assert.ok(iAbort >= 0, "the abort must have run")
+  assert.deepEqual(
+    deps._log[iReparent],
+    ["reparent", "primary-1", "orch2"],
+    "the reparent moves the subagents off the session that is about to be aborted",
+  )
+  assert.ok(
+    iReparent < iAbort,
+    `the reparent must precede the abort, got reparent=${iReparent} abort=${iAbort}`,
+  )
+  assert.ok(iAbort < iPrompt, "and the abort still precedes the successor's kickoff")
+})
+
+test("a failing reparent leaves the old primary un-aborted — the children are still under it", async () => {
+  // The pre-kickoff failure path. With the abort ordered after the reparent, a
+  // reparent that throws takes the abort with it: the handoff reverts and the
+  // OLD primary survives as the live session, with its subagents still hanging
+  // off it. Aborting it there would stop the session the run has just fallen
+  // back to.
+  const deps = makeDeps()
+  deps.promptOldPrimaryForDocSummaries = async () => {
+    throw new Error("doc summaries timed out")
+  }
+  deps.reparent = async (fromID, toID) => {
+    deps._log.push(["reparent", fromID, toID])
+    throw new Error("reparent route unreachable")
+  }
+
+  await assert.rejects(() => performPrimaryHandoff(deps), /reparent route unreachable/)
+  assert.ok(
+    !order(deps._log).includes("abortSession"),
+    "the surviving primary must not be aborted",
+  )
+  assert.ok(order(deps._log).includes("abortDrain"), "the buffer goes back to the old primary")
+})
+
 test("the happy path never aborts the old primary", async () => {
   const deps = makeDeps()
   await performPrimaryHandoff(deps)

@@ -2314,6 +2314,7 @@ function SubagentPanel(props: {
                     : props.theme.textMuted
               }
               onMouseDown={() => {
+                props.onDisarmAgentMode();
                 if (endlessRowLive(endlessState())) props.onToggleEndless();
               }}
             >

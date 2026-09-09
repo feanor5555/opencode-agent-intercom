@@ -42,6 +42,7 @@ import { join } from "node:path"
 
 import plugin from "../src/index.js"
 import { resetState, registry, bySession } from "../src/state.js"
+import { recordSessionAgent } from "../src/registry.js"
 import {
   AGENTS,
   BUILTIN_AUTO_AGENTS,
@@ -58,6 +59,7 @@ import {
 import { _stopWatchdogForTests } from "../src/watchdog.js"
 import { resetProjectContext } from "../src/project.js"
 import { resetPermissionGuardCache } from "../src/config.js"
+import { overrideFindings, resetOverrides } from "../src/overrides.js"
 import {
   AGENT_MODE_ORCHESTRATOR,
   AGENT_MODE_SOLO,
@@ -88,6 +90,7 @@ beforeEach(() => {
   resetTurnNotices()
   resetProjectContext()
   resetPermissionGuardCache()
+  resetOverrides()
   rmSync(settingsFile, { force: true })
   resetSettings()
 })
@@ -146,6 +149,24 @@ test("solo mode: a project entry cannot expose a subagent role", () => {
     assert.equal(config.agent[name].hidden, true, `${name}: the override must not expose it`)
     assert.equal(config.agent[name].disable, true, `${name}: the override must not re-enable it`)
   }
+})
+
+test("solo mode does not report forced reachability fields as overrides", () => {
+  loadSolo()
+  installed({ agent: { planner: { hidden: false, disable: false } } })
+  assert.deepEqual(overrideFindings(), [], "forced disable and hidden are not project overrides")
+})
+
+test("solo mode reports other fields without forced reachability fields", () => {
+  loadSolo()
+  installed({
+    agent: {
+      planner: { hidden: false, disable: false, prompt: "Project planner." },
+    },
+  })
+  const finding = overrideFindings().find((entry) => entry.agent === "planner")
+  assert.ok(finding, "the project prompt is still reported")
+  assert.deepEqual([...finding.fields], ["prompt"], "forced fields are omitted from the finding")
 })
 
 test("solo mode leaves everything else about a subagent entry alone", () => {
@@ -281,18 +302,46 @@ function trackSubagent(agent = "planner") {
   bySession.set(SUBAGENT, entry.handle)
 }
 
-test("the solo deny set is a set the mode owns, not a literal in a branch", () => {
+test("the solo deny list is one collection the mode owns, not a literal in a branch", () => {
   // The whole point of finding 3: the old guard refused one literal name and
-  // `return`ed on everything else. A set is what makes the next agent-starting
-  // tool one line instead of two edits in two files.
-  assert.ok(SOLO_DENIED_TOOLS instanceof Set)
-  assert.ok(AGENT_STARTING_TOOLS instanceof Set)
+  // `return`ed on everything else. One collection is what makes the next
+  // agent-starting tool one line instead of two edits in two files.
+  assert.ok(Array.isArray(SOLO_DENIED_TOOLS))
+  assert.ok(Array.isArray(AGENT_STARTING_TOOLS))
   for (const name of AGENT_STARTING_TOOLS) {
-    assert.ok(SOLO_DENIED_TOOLS.has(name), `${name} starts an agent, so solo mode denies it`)
+    assert.ok(SOLO_DENIED_TOOLS.includes(name), `${name} starts an agent, so solo mode denies it`)
   }
   for (const name of ["spawn", "reuse", "abort"]) {
-    assert.ok(SOLO_DENIED_TOOLS.has(name), `${name} must be refused however it got into the schema`)
+    assert.ok(
+      SOLO_DENIED_TOOLS.includes(name),
+      `${name} must be refused however it got into the schema`,
+    )
   }
+})
+
+test("neither deny list can be edited by an importer — they are frozen authorities", async () => {
+  // Both are the SOLE authority for a deny at a guard branch. Exported as
+  // mutable Sets, any importer — a test that forgets to restore, a future
+  // module — could `.add`/`.delete` the enforcement set at runtime. Frozen
+  // arrays, with the membership test running against private derived Sets.
+  assert.ok(Object.isFrozen(SOLO_DENIED_TOOLS), "the solo deny list must be frozen")
+  assert.ok(Object.isFrozen(AGENT_STARTING_TOOLS), "the agent-starting list must be frozen")
+
+  const soloBefore = [...SOLO_DENIED_TOOLS]
+  const startingBefore = [...AGENT_STARTING_TOOLS]
+  for (const list of [SOLO_DENIED_TOOLS, AGENT_STARTING_TOOLS]) {
+    assert.throws(() => list.push("read"), TypeError, "an added name would deny a working tool")
+    assert.throws(() => (list[0] = "read"), TypeError, "a replaced name would redirect the deny")
+    assert.throws(() => (list.length = 0), TypeError, "an emptied list would deny nothing at all")
+  }
+  assert.deepEqual([...SOLO_DENIED_TOOLS], soloBefore)
+  assert.deepEqual([...AGENT_STARTING_TOOLS], startingBefore)
+
+  // And the guard still holds after the attempts.
+  loadSolo()
+  const guard = guardOf()
+  assert.match(await refusal(guard, "task"), /solo mode runs one agent/)
+  assert.equal(await refusal(guard, "read"), "", "`read` was never added to the deny list")
 })
 
 test("solo mode: every name in the deny set is refused at the guard", async () => {
@@ -311,7 +360,7 @@ test("solo mode does NOT deny `list` — the name is opencode's directory lister
   // in solo mode — where the plugin's `list` is unregistered — that builtin is
   // what the name resolves to. It is a working tool the solo primary needs, and
   // it starts no agent.
-  assert.ok(!SOLO_DENIED_TOOLS.has("list"))
+  assert.ok(!SOLO_DENIED_TOOLS.includes("list"))
 })
 
 test("solo mode: the primary's own working tools still pass the guard", async () => {
@@ -336,6 +385,85 @@ test("the subagent-side deny reads the agent-starting set, not the solo one", as
     )
   }
   assert.equal(await refusal(guard, "spawn", SUBAGENT), "", "a nested spawn is decided in the handler")
+})
+
+// ---- the solo primary's per-agent permission deny ---------------------------
+//
+// Under the orchestrator pattern the primary allowlist (PRIMARY_TOOLS) answers
+// everything: nothing outside it gets through at all, so a project's
+// `agent.<primary>.permission.<tool> = "deny"` can add nothing. Solo mode drops
+// that allowlist — the primary IS the worker — and its denylist is four names,
+// which leaves such a deny standing on the LLM-side schema strip alone. These
+// pin the runtime re-check that puts the subagent side's defence in depth
+// behind it.
+
+function guardWithPermissions(decide) {
+  const asked = []
+  const guard = createGuardToolExecute(
+    {},
+    {
+      checkToolPermission: async (agent, tool) => {
+        asked.push([agent, tool])
+        return decide(agent, tool)
+      },
+    },
+  )
+  return { guard, asked }
+}
+
+test("solo mode: a per-agent permission deny is refused at the guard, not left to the schema strip", async () => {
+  loadSolo()
+  const { guard, asked } = guardWithPermissions((agent, tool) =>
+    tool === "webfetch" ? `agent "${agent}" is not permitted to call "${tool}" (permission.webfetch)` : null,
+  )
+
+  const message = await refusal(guard, "webfetch")
+  assert.match(message, /permission\.webfetch/, "the refusal carries the guard's own reason")
+  assert.match(message, /deny map/, "and names where the decision came from")
+  assert.equal(await refusal(guard, "read"), "", "a tool the map allows still passes")
+  assert.deepEqual(
+    asked,
+    [
+      ["orchestrator", "webfetch"],
+      ["orchestrator", "read"],
+    ],
+    "the check runs under the primary's own agent name, on every tool",
+  )
+})
+
+test("solo mode: the re-check runs under the name the session was recorded with", async () => {
+  // The deny map hangs under a key of `config.agent`, and a primary called
+  // something other than this plugin's default carries its own key.
+  loadSolo()
+  recordSessionAgent(PRIMARY, "build")
+  const { guard, asked } = guardWithPermissions(() => null)
+  await refusal(guard, "read")
+  assert.deepEqual(asked, [["build", "read"]])
+})
+
+test("solo mode: the mode's own deny answers before the permission map is consulted", async () => {
+  // A name that would start a second agent must produce the MODE's refusal —
+  // the requirement — and not a permission reason that a project could switch
+  // off by writing `"allow"`.
+  loadSolo()
+  const { guard, asked } = guardWithPermissions(() => "the map would have denied this too")
+  assert.match(await refusal(guard, "task"), /solo mode runs one agent/)
+  assert.deepEqual(asked, [], "the permission map is never asked about an agent-starting name")
+})
+
+test("solo mode: a guard built without a permission guard still admits the primary's tools", async () => {
+  // The guard is constructed with `null` wherever the config side is absent;
+  // the re-check is defence in depth, not a precondition.
+  loadSolo()
+  const guard = createGuardToolExecute({}, null)
+  assert.equal(await refusal(guard, "read"), "")
+})
+
+test("orchestrator mode: the primary allowlist answers, and the re-check is not reached", async () => {
+  loadWith({ agentMode: AGENT_MODE_ORCHESTRATOR })
+  const { guard, asked } = guardWithPermissions(() => null)
+  assert.match(await refusal(guard, "read"), /this is an orchestrator session/)
+  assert.deepEqual(asked, [], "nothing outside PRIMARY_TOOLS reaches a permission question")
 })
 
 // ===========================================================================

@@ -104,7 +104,7 @@ export function armingAfterAgentModeTimeout(
 
 // The width of the row's cell, the longer of the two values plus its brackets,
 // so the cell keeps its place while the row is armed and while it is not.
-export const AGENT_MODE_CELL_W = "[orchestrator]".length;
+export const AGENT_MODE_CELL_W = "[orchestrator?]".length;
 
 // What the row shows. Unarmed it is the value in effect; armed it is the value
 // the pending click would write, with the question mark that says the click has

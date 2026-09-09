@@ -237,14 +237,17 @@ export async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, res
     // reparented subagents.
     deleteSession: (sid) => deleteSession(client, sid),
     archiveSession: (sid) => archiveSession(client, sid),
-    // Step 3's escape hatch. `promptOldPrimaryForDocSummaries` gives up after
+    // Step 4b, the escape hatch for a step 3 that gave up.
+    // `promptOldPrimaryForDocSummaries` gives up after
     // DOC_SUMMARIES_TIMEOUT_MS, but the prompt it sent was accepted by the
     // server and the old primary keeps generating: without this the handoff
     // walks on and starts the kickoff turn on the successor while the
     // predecessor is still producing tokens. `archiveSession` (step 8) only
     // stamps a timestamp and stops nothing, so the abort has to be its own
-    // call. Reported like every other client call here — it answers a boolean
-    // and never throws.
+    // call. handoff.js issues it only AFTER the reparent, when the old session
+    // has an empty subtree and the handoff can no longer fall back onto it —
+    // see step 4b there. Reported like every other client call here — it
+    // answers a boolean and never throws.
     abortSession: (sid) => abortSession(client, sid),
     reparent: reparentSubagents,
     // Handoff delivery drain (registry.js): step 0 opens the buffer for the

@@ -48,6 +48,23 @@
 //                                               settings file if present.
 //   OPENCODE_AGENT_INTERCOM_PROJECT_CONTEXT     "1" (default) to prepend the project snapshot on
 //                                               spawn, "0" to disable it
+//   OPENCODE_AGENT_INTERCOM_AGENT_MODE         "orchestrator" (default) runs the primary as the
+//                                               orchestrator pattern this plugin enforces;
+//                                               "solo" runs the primary as a single agent that
+//                                               does the work itself, with no subagent of any
+//                                               kind starting (none of spawn/abort/list/reuse,
+//                                               opencode's native task denied, the plugin's
+//                                               subagent roles disabled, the hidden title and
+//                                               summary agents switched off, compaction.auto
+//                                               set to false, endless mode counting as off,
+//                                               and the orchestration guide and limits block
+//                                               not injected). Latched at plugin load — a
+//                                               change needs an opencode restart and holds
+//                                               across every further restart until it is
+//                                               switched back. Overridden by the settings
+//                                               file (`agentMode`) if present.
+//                                               ~/.config/opencode/agent-intercom.json carries
+//                                               "agentMode": "orchestrator" | "solo".
 
 import { createPermissionGuard } from "./config.js"
 import { createTools } from "./tools.js"

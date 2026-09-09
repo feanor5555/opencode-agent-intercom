@@ -169,9 +169,10 @@ test("the cell shows the value in effect, and the pending one while armed", () =
   // One width for every state, so the row does not jump as it is clicked.
   for (const mode of AGENT_MODES) {
     for (const armed of [false, true]) {
-      assert.ok(
-        agentModeRowCell(mode, armed).length >= AGENT_MODE_CELL_W,
-        `${mode}/${armed} is narrower than the cell`,
+      assert.equal(
+        agentModeRowCell(mode, armed).length,
+        AGENT_MODE_CELL_W,
+        `${mode}/${armed} does not fill the cell`,
       )
     }
   }

@@ -82,6 +82,7 @@ import {
   retentionOffered,
   retentionActive,
   retentionCapacity,
+  soloModeActive,
   PACKAGE_WARN_SHARE,
   PACKAGE_REFUSE_SHARE,
 } from "./settings.js"
@@ -137,6 +138,11 @@ export { timeoutSubagent } from "./watchdog.js"
 // delegated to a subagent. Pure orchestration: spawn / abort / list. Even
 // glob, grep, and TODO.md reads are delegated (to the planner), so the
 // orchestrator stays at the coordination layer.
+//
+// The ORCHESTRATOR pattern's list, and it governs a primary only there. In
+// solo mode none of these tools is registered and the primary is the worker,
+// so the guard below takes its other branch and this set gates nothing — see
+// soloModeActive (src/settings.js).
 const PRIMARY_TOOLS = new Set([
   "spawn",
   "abort",
@@ -2091,7 +2097,9 @@ function nonEmptyLines(text) {
 //  - hard-denies every tool call from a subagent that has hit its context
 //    budget, locking it down to a text-only handover, and
 //  - restricts primary sessions to the intercom tools only: a primary
-//    orchestrates and delegates, it does not do work itself.
+//    orchestrates and delegates, it does not do work itself. In SOLO mode that
+//    restriction does not apply — the primary is the worker there and keeps its
+//    tools; opencode's native `task` stays denied on both branches.
 //
 // Bound to a client so it can read live state, though the budget path no
 // longer aborts: notification of the parent happens in contextLimitNotice
@@ -2230,8 +2238,29 @@ export function createGuardToolExecute(client, permissionGuard) {
       return
     }
 
-    // Not a tracked subagent -> a primary session. It may only run the
-    // intercom tools (spawn/abort/list); everything else it must delegate.
+    // Not a tracked subagent -> a primary session.
+    //
+    // Solo mode first: there the primary is the only agent there is, so it runs
+    // its tools itself and nothing here refuses them. The one exception is
+    // opencode's native `task`, denied for the same reason the deny map denies
+    // it (SOLO_PRIMARY_PERMISSION, src/agents.js): it would start a second
+    // agent, and the mode exists for a backend that can serve one at a time.
+    // The schema strip already hides the tool; this is the runtime backstop
+    // that survives a project override re-adding it, and it is the primary's
+    // counterpart to the unconditional subagent-side deny above.
+    if (soloModeActive()) {
+      if (input.tool === "task") {
+        log("denied native task from solo primary", { sessionID })
+        throw new Error(
+          "agent-intercom: solo mode runs one agent — you. Starting another agent is not " +
+            "available here; do the work yourself with your own tools.",
+        )
+      }
+      return
+    }
+
+    // The orchestrator pattern: a primary may only run the intercom tools
+    // (spawn/abort/list); everything else it must delegate.
     if (!PRIMARY_TOOLS.has(input.tool)) {
       log("denied non-orchestration tool from primary", { sessionID, tool: input.tool })
       const hint =

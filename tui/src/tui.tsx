@@ -94,9 +94,20 @@ import {
   stepResultTokens,
   stepReuseContext,
   stepSetting,
+  readAgentMode,
+  toggleAgentMode,
   toggleEndlessMode,
   toggleShowAgentcom,
 } from "./settings-file.ts";
+import {
+  AGENT_MODE_CONFIRM_MS,
+  type AgentMode,
+  type ArmedAgentMode,
+  agentModeNoteLines,
+  agentModeRowCell,
+  decideAgentModeSwitch,
+  isAgentModeArmed,
+} from "./agent-mode.ts";
 
 const TUI_PLUGIN_ID = "agent-intercom.tui";
 const ELAPSED_TICK_MS = 1000;
@@ -448,6 +459,15 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const [endlessPauses, setEndlessPauses] = createSignal<
     ReadonlyMap<string, EndlessPause>
   >(readEndlessPauses());
+  // The orchestrator/solo switch. Its own signal rather than a member of
+  // `settings`: the plugin latches this key at load, so it is not one of the
+  // live settings (tui/src/settings-file.ts, readAgentMode).
+  const [agentMode, setAgentModeState] = createSignal<AgentMode>(readAgentMode());
+  // The `mode` row's pending question, undefined while the row is not armed.
+  // The switch costs an opencode restart, so no single click carries it out.
+  const [armedAgentMode, setArmedAgentMode] = createSignal<
+    ArmedAgentMode | undefined
+  >();
   const maxSubagents = (): number => settings().maxSubagents;
   const endlessMode = (): boolean => settings().endlessMode;
   const endlessContext = (): number => settings().endlessContext;
@@ -494,6 +514,55 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     showSettings(toggleShowAgentcom());
   };
 
+  // The `mode` row: orchestrator or solo, asked twice before it is written.
+  // Every other switch in this panel is live, so a click on it is cheap to take
+  // back; this one is latched by the plugin at load and the value written only
+  // reaches a restarted opencode, so the first click arms the row and the
+  // second one writes. The arming falls away on its own, on Escape, and on the
+  // next interaction elsewhere in the sidebar.
+  let agentModeTimer: ReturnType<typeof setTimeout> | undefined;
+  const disarmAgentMode = (): void => {
+    if (agentModeTimer) {
+      clearTimeout(agentModeTimer);
+      agentModeTimer = undefined;
+    }
+    if (armedAgentMode()) setArmedAgentMode(undefined);
+  };
+  const requestAgentModeSwitch = (): void => {
+    const decision = decideAgentModeSwitch(armedAgentMode(), Date.now());
+    disarmAgentMode();
+    if (decision.kind === "switch") {
+      const written = toggleAgentMode();
+      setAgentModeState(written);
+      // The row and its note say the same thing, but the row is gone from the
+      // eye the moment it is clicked, and this switch is the one change in the
+      // panel that does nothing until opencode is started again.
+      api.ui.toast({
+        variant: "info",
+        message: `agent mode: ${written} — takes effect after an opencode restart`,
+      });
+      return;
+    }
+    setArmedAgentMode(decision.armed);
+    // The question expires on its own, so a row left in the confirm state does
+    // not stay a single click away from a switch.
+    agentModeTimer = setTimeout(() => {
+      agentModeTimer = undefined;
+      setArmedAgentMode(undefined);
+    }, AGENT_MODE_CONFIRM_MS);
+  };
+  // Every other interaction in the sidebar is the user having moved on: the
+  // pending question goes with it, so a click that lands on the row later
+  // cannot confirm a question they left behind.
+  function alsoDisarmAgentMode<A extends unknown[]>(
+    fn: (...args: A) => void,
+  ): (...args: A) => void {
+    return (...args: A): void => {
+      disarmAgentMode();
+      fn(...args);
+    };
+  }
+
   // Section collapse state. Subagents-section is the workhorse and stays open
   // by default; tui-settings + LLM params are tucked away to keep the sidebar
   // compact.
@@ -518,6 +587,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const refreshFileState = (): void => {
     if (disposed) return;
     showSettings(readSettings());
+    setAgentModeState(readAgentMode());
     setLlmParams(readLlmParams());
     setLlmModels(readLlmModels());
     setEndlessPauses(readEndlessPauses());
@@ -1579,13 +1649,17 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             completedCount={() => completedFor(sessionID ?? "")}
             isPrimary={isPrimarySession}
             parentOfGone={parentOfGone}
-            onOpen={openSubagent}
-            onAbort={requestAbort}
+            onOpen={alsoDisarmAgentMode(openSubagent)}
+            onAbort={alsoDisarmAgentMode(requestAbort)}
             maxSubagents={maxSubagents}
             settings={settings}
-            onAdjustContext={adjustAgentContext}
-            onAdjustReuse={adjustReuseContext}
-            onAdjustResultTokens={adjustResultTokens}
+            onAdjustContext={alsoDisarmAgentMode(adjustAgentContext)}
+            onAdjustReuse={alsoDisarmAgentMode(adjustReuseContext)}
+            onAdjustResultTokens={alsoDisarmAgentMode(adjustResultTokens)}
+            agentMode={agentMode}
+            armedAgentMode={armedAgentMode}
+            onSwitchAgentMode={requestAgentModeSwitch}
+            onDisarmAgentMode={disarmAgentMode}
             endlessMode={endlessMode}
             endlessPause={() =>
               pauseForSession(endlessPauses(), [
@@ -1594,36 +1668,40 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
               ])
             }
             endlessContext={endlessContext}
-            onAdjust={adjustSetting}
-            onToggleEndless={toggleEndless}
+            onAdjust={alsoDisarmAgentMode(adjustSetting)}
+            onToggleEndless={alsoDisarmAgentMode(toggleEndless)}
             showAgentcom={showAgentcom}
-            onToggleShowAgentcom={toggleAgentcom}
+            onToggleShowAgentcom={alsoDisarmAgentMode(toggleAgentcom)}
             thinkingOn={thinkingOn}
-            onToggleThinking={toggleThinking}
+            onToggleThinking={alsoDisarmAgentMode(toggleThinking)}
             actionsOn={actionsOn}
-            onToggleActions={toggleActions}
+            onToggleActions={alsoDisarmAgentMode(toggleActions)}
             subagentsExpanded={subagentsExpanded}
-            onToggleSubagents={() => setSubagentsExpanded((v) => !v)}
+            onToggleSubagents={alsoDisarmAgentMode(() =>
+              setSubagentsExpanded((v) => !v),
+            )}
             tuiSettingsExpanded={tuiSettingsExpanded}
-            onToggleTuiSettings={toggleTuiSettings}
+            onToggleTuiSettings={alsoDisarmAgentMode(toggleTuiSettings)}
             promptsExpanded={promptsExpanded}
-            onTogglePrompts={() => setPromptsExpanded((v) => !v)}
+            onTogglePrompts={alsoDisarmAgentMode(() =>
+              setPromptsExpanded((v) => !v),
+            )}
             promptsFileCount={countPromptFiles}
-            onReloadPrompts={reloadPrompts}
+            onReloadPrompts={alsoDisarmAgentMode(reloadPrompts)}
             llmParams={llmParams}
             opencodeDefaults={opencodeDefaults}
             llmModels={llmModels}
             opencodeModels={opencodeModels}
             modelChoices={modelChoices}
-            onCycleLlmModel={cycleModel}
+            onCycleLlmModel={alsoDisarmAgentMode(cycleModel)}
             opencodeEfforts={opencodeEfforts}
-            onCycleLlmEffort={cycleEffort}
+            onCycleLlmEffort={alsoDisarmAgentMode(cycleEffort)}
             llmExpanded={llmExpanded}
-            onToggleLlm={toggleLlm}
+            onToggleLlm={alsoDisarmAgentMode(toggleLlm)}
             llmAgent={currentLlmAgent}
-            onCycleLlmAgent={cycleLlmAgent}
-            onAdjustLlmParam={adjustLlmParam}
-            onResetLlmAgent={resetLlmAgent}
+            onCycleLlmAgent={alsoDisarmAgentMode(cycleLlmAgent)}
+            onAdjustLlmParam={alsoDisarmAgentMode(adjustLlmParam)}
+            onResetLlmAgent={alsoDisarmAgentMode(resetLlmAgent)}
             theme={ctx.theme.current}
           />
         );
@@ -1666,6 +1744,16 @@ function SubagentPanel(props: {
   onAdjustContext: (delta: number) => void;
   onAdjustReuse: (delta: number) => void;
   onAdjustResultTokens: (delta: number) => void;
+  // The orchestrator/solo switch, the question pending over it, and the click
+  // that puts that question: the first click arms the row, the second switches.
+  // Unlike every other switch here this one is not live — the plugin latches it
+  // at load — which is why it is asked twice and why the row says so.
+  agentMode: () => AgentMode;
+  armedAgentMode: () => ArmedAgentMode | undefined;
+  onSwitchAgentMode: () => void;
+  // Takes the pending question back: the panel's keys count as the user having
+  // moved on, the way every other click in the sidebar does.
+  onDisarmAgentMode: () => void;
   endlessMode: () => boolean;
   // The self-stop pause published for this panel's primary, undefined while the
   // loop is not stopped. The switch stays `endlessMode`; this only says whether
@@ -1794,6 +1882,9 @@ function SubagentPanel(props: {
     } else {
       return;
     }
+    // Every key this panel handles is the user working somewhere else than the
+    // `mode` row, so the switch question it may be holding goes.
+    props.onDisarmAgentMode();
     event.preventDefault?.();
     event.stopPropagation?.();
   };
@@ -1838,6 +1929,15 @@ function SubagentPanel(props: {
   const endlessPauseNote = createMemo(() =>
     pauseRowNote(props.endlessPause()?.reason ?? "", panelWidth()),
   );
+
+  // Whether the `mode` row is holding its switch question. Read against the
+  // panel's own clock rather than the presence of the arming alone, so an
+  // expired question leaves the row on the next tick even if its timer never
+  // fired — the same reading the abort question's rows get.
+  const agentModeArmed = createMemo(() =>
+    isAgentModeArmed(props.armedAgentMode(), props.nowMs()),
+  );
+  const agentModeNote = createMemo(() => agentModeNoteLines(panelWidth()));
 
   const Row = (rowProps: { entry: SubagentEntry; depth: number }) => {
     const selected = createMemo(
@@ -2012,6 +2112,41 @@ function SubagentPanel(props: {
                 </text>
               </Show>
             </box>
+          </Show>
+          {/* Which pattern the plugin runs the primary agent in, above the
+              rows that govern the subagents that pattern spawns. The one
+              switch in this panel that does not take effect on the spot: the
+              plugin reads this key once, at load. So the row asks before it
+              writes — the first click arms it and the two lines under it name
+              the restart and ask for the confirmation, the second click
+              writes, and the question falls away by itself, on Escape, and on
+              anything else the user does in the sidebar. */}
+          <box flexDirection="row">
+            <text fg={props.theme.textMuted}>{rowLabel("mode")}</text>
+            <text
+              fg={
+                agentModeArmed()
+                  ? props.theme.warning
+                  : props.agentMode() === "solo"
+                    ? props.theme.info
+                    : props.theme.success
+              }
+              onMouseDown={props.onSwitchAgentMode}
+            >
+              {agentModeRowCell(props.agentMode(), agentModeArmed())}
+            </text>
+          </box>
+          {/* The armed row's question, on the lines under it: the row itself
+              has no width left for it, the way the endless pause's cause has
+              none. */}
+          <Show when={agentModeArmed()}>
+            <For each={agentModeNote()}>
+              {(line) => (
+                <box flexDirection="row">
+                  <text fg={props.theme.textMuted}>{line}</text>
+                </box>
+              )}
+            </For>
           </Show>
           <box flexDirection="row">
             <text fg={props.theme.textMuted}>{rowLabel("max subagents")}</text>

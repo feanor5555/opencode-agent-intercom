@@ -24,7 +24,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { FALLBACK_PANEL_W, truncate } from "./subagent-label.ts";
+import { ROW_NOTE_INDENT, rowNoteLine } from "./subagent-label.ts";
 
 // One published pause, as the panel uses it.
 export interface EndlessPause {
@@ -160,16 +160,10 @@ export function pauseCause(reason: string): string {
 
 // The second row under a paused switch: the cause, cut to what is left of the
 // panel beside its indent. Empty where there is nothing to name, and the row is
-// then not rendered at all.
-export const PAUSE_NOTE_INDENT = "    ";
+// then not rendered at all. The indent and the cut are the ones every note line
+// under a settings row uses (subagent-label.ts).
+export const PAUSE_NOTE_INDENT = ROW_NOTE_INDENT;
 
 export function pauseRowNote(reason: string, panelWidth?: number): string {
-  const cause = pauseCause(reason);
-  if (cause === "") return "";
-  const panel =
-    typeof panelWidth === "number" && panelWidth > 0
-      ? panelWidth
-      : FALLBACK_PANEL_W;
-  const budget = panel - PAUSE_NOTE_INDENT.length - 2;
-  return budget <= 0 ? "" : PAUSE_NOTE_INDENT + truncate(cause, budget);
+  return rowNoteLine(pauseCause(reason), panelWidth);
 }

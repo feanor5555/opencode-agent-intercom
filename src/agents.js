@@ -38,6 +38,9 @@ import { defaultAgentByDirectory } from "./state.js"
 // overrides.js imports nothing at all — the register is pure and locating the
 // offending file is this module's job, not the register's.
 import { recordAgentEntryOverride } from "./overrides.js"
+// settings.js imports log.js alone, so this closes no cycle either. The mode is
+// read through soloModeActive, the plugin's single branch point for it.
+import { soloModeActive } from "./settings.js"
 import { log } from "./log.js"
 
 const ORCHESTRATOR_PROMPT = `# Role: Orchestrator
@@ -277,6 +280,23 @@ function webAccessExcept(...allowed) {
   }
   return map
 }
+
+// The primary's deny map in SOLO mode, in place of the orchestrator map below.
+// One entry, and it is the whole difference the mode makes to the primary's
+// tools: in solo mode the primary IS the worker, so it keeps `read`, `edit`,
+// `bash`, `outline`, `glob`, `grep`, the TODO tools and the web tools.
+//
+// opencode's native `task` stays denied, exactly as it is denied in the
+// orchestrator pattern. It would start a second agent, and solo mode exists
+// for a backend that can serve one agent at a time (a llama.cpp server at
+// `parallel 1`), so a second agent is the one thing the mode cannot afford.
+// The bare-string `"deny"` is also what hides the tool from the LLM schema
+// (see config.js); the runtime backstop for the primary is in hooks.js.
+//
+// The plugin's own orchestration tools need no entry here: in solo mode they
+// are never registered at all (createTools, src/tools.js), so there is nothing
+// for a deny to name.
+export const SOLO_PRIMARY_PERMISSION = Object.freeze({ task: "deny" })
 
 // The 10 roles. `permission` maps tools a role must not have to `deny`; everything
 // else stays enabled by default (incl. the intercom tools and any MCP tools). The
@@ -606,6 +626,20 @@ function reportCollision(name, base, projectEntry, directory, worktree) {
 // the opencode config key that picks the startup primary (falls back to "build"
 // when unset), and the value that ends up there is captured for
 // defaultAgentName(). Mutates `config` in place.
+// The deny map one role is installed with, always a fresh object for the reason
+// installAgents states: every session-instance of the plugin must get its own.
+//
+// The primary's map is the one that depends on the agent mode. In solo mode it
+// is SOLO_PRIMARY_PERMISSION — the primary keeps its ordinary tools — and in
+// the orchestrator pattern it is the role's own map, which denies everything
+// but the orchestration tools. Selected on `mode === "primary"` rather than on
+// the name, so the answer follows the role table and not a second copy of who
+// the primary is.
+function basePermissionFor(def) {
+  if (def.mode === "primary" && soloModeActive()) return { ...SOLO_PRIMARY_PERMISSION }
+  return def.permission ? { ...def.permission } : undefined
+}
+
 export function installAgents(config, { directory, worktree } = {}) {
   if (!config || typeof config !== "object") return
   if (!config.agent || typeof config.agent !== "object") config.agent = {}
@@ -614,7 +648,7 @@ export function installAgents(config, { directory, worktree } = {}) {
     // clone every session-instance of the plugin would share the same
     // permission map and a future per-session tweak would leak across
     // sessions.
-    const base = { ...def, permission: def.permission ? { ...def.permission } : undefined }
+    const base = { ...def, permission: basePermissionFor(def) }
     const projectEntry =
       config.agent[name] && typeof config.agent[name] === "object" && !Array.isArray(config.agent[name])
         ? config.agent[name]

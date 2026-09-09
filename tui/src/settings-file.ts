@@ -5,6 +5,13 @@
 // ceiling, the per-type result ceiling and the agentcom visibility switch. Writing it here changes them
 // live, no opencode restart needed.
 //
+// The one key in this file that is NOT live is `agentMode`, the orchestrator/
+// solo switch: the plugin latches it at load, so a write reaches the running
+// instance only after an opencode restart. It is therefore kept out of
+// `Settings` and read and written on its own — readAgentMode, setAgentMode and
+// toggleAgentMode at the end of this module, the values and the row's
+// arm-and-confirm in agent-mode.ts.
+//
 // The watchdog is two windows over one subagent, and which of them applies is
 // decided by what the subagent is doing at that moment. `maxSubagentAgeMs` is
 // the window for one with NOTHING in flight — silence with no tool call open;
@@ -68,6 +75,12 @@
 // never shows a limit the plugin will not read.
 
 import { DEFAULT_AGENT_CONTEXT, type AgentContext } from "./agent-roles.ts";
+import {
+  type AgentMode,
+  DEFAULT_AGENT_MODE,
+  isAgentMode,
+  otherAgentMode,
+} from "./agent-mode.ts";
 import { createJsonObjectFile } from "./json-object-file.ts";
 
 // The context budget per agent type, in whole tokens. Only the types the user
@@ -427,6 +440,13 @@ export function effectiveResultTokens(
 // drops a bad entry and keeps the rest of the map, and a map left with nothing
 // is a key worth nothing.
 function pruneSettings(merged: Record<string, unknown>): Record<string, unknown> {
+  // agentMode is checked here rather than through SETTING_VALIDATORS: it is not
+  // a member of Settings (see readAgentMode below), and the same rule still
+  // holds for it — a value the plugin would not accept must not survive a write
+  // while the panel shows the default instead.
+  if ("agentMode" in merged && !isAgentMode(merged.agentMode)) {
+    delete merged.agentMode;
+  }
   for (const key of ["agentContext", "reuseContext", "resultTokens"] as const) {
     if (!(key in merged)) continue;
     const kept = filterAgentContext(merged[key]);
@@ -632,4 +652,63 @@ export function setShowAgentcom(value: boolean): Settings {
 // stale.
 export function toggleShowAgentcom(): Settings {
   return applySetting("showAgentcom", (current) => !current.showAgentcom);
+}
+
+// The agent mode this file carries, or the default where it carries none the
+// plugin would accept.
+//
+// Deliberately not a member of `Settings` and not part of `readSettings`. Every
+// key of that interface is one the plugin re-reads while it runs, which is what
+// lets the rows over them say "no opencode restart needed"; `agentMode` is
+// latched at plugin load and reaches the running instance only after a restart,
+// so it is read and written on its own and its row says so. `Settings` is also
+// compared key for key against the plugin's own resolution
+// (test/settings-defaults-parity.test.js), and a key resolved at another moment
+// does not belong in that comparison.
+//
+// Resolved file > default, with no env step: the plugin also honours
+// OPENCODE_AGENT_INTERCOM_AGENT_MODE and calls that env var the headless lever
+// (src/settings.js), so a mode set through it alone, with no key in the file,
+// is not what this row shows.
+export function readAgentMode(): AgentMode {
+  let raw: Record<string, unknown>;
+  try {
+    raw = file.readRaw();
+  } catch {
+    // Unreadable or unparsable: the default, which is what the plugin runs on
+    // for such a file.
+    return DEFAULT_AGENT_MODE;
+  }
+  return isAgentMode(raw.agentMode) ? raw.agentMode : DEFAULT_AGENT_MODE;
+}
+
+// Read, compute the new mode from that read, merge, write — the same
+// read-modify-write every setting goes through, so a hand edit to this key is
+// flipped from rather than overwritten and no other key is touched. Returns the
+// mode now on disk; an unreadable file or a failed write leaves the file as it
+// is and hands back what is on disk.
+function applyAgentMode(next: (current: AgentMode) => AgentMode): AgentMode {
+  let raw: Record<string, unknown>;
+  try {
+    raw = file.readRaw();
+  } catch {
+    return readAgentMode();
+  }
+  const current = isAgentMode(raw.agentMode) ? raw.agentMode : DEFAULT_AGENT_MODE;
+  const value = next(current);
+  if (!file.write(pruneSettings({ ...raw, agentMode: value }))) {
+    return readAgentMode();
+  }
+  return value;
+}
+
+// Sets the agent mode outright.
+export function setAgentMode(value: AgentMode): AgentMode {
+  return applyAgentMode(() => value);
+}
+
+// Flips the agent mode between its two values. What the `mode` row writes once
+// the user has confirmed the switch.
+export function toggleAgentMode(): AgentMode {
+  return applyAgentMode(otherAgentMode);
 }

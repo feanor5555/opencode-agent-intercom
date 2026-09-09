@@ -72,6 +72,7 @@ import {
   reuseCeilingFor,
   retentionOffered,
   retentionActive,
+  soloModeActive,
   PACKAGE_WARN_SHARE,
   PACKAGE_REFUSE_SHARE,
 } from "./settings.js"
@@ -1481,82 +1482,93 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
   // decided in one place.
   const retentionOn = retentionOffered()
 
+  // Solo mode: the primary does the work itself, so it gets none of the four
+  // orchestration tools — there is no subagent to start, stop, list or ask
+  // again. The machinery behind them is untouched and simply never reached.
+  // Read once here, from the plugin's single branch point for the mode, so
+  // the tool map and the texts that name it are decided on one answer.
+  const soloMode = soloModeActive()
+
   return {
-    spawn: tool({
-      description:
-        'Start a subagent non-blocking. Returns a handle ("researcher#1") for `abort`. You stay ' +
-        "responsive; you are woken automatically with the subagent's reply when it finishes. " +
-        "One-shot: a subagent replies once and is destroyed. For more work, spawn a fresh one. " +
-        "A reply starting with `Blocked:` is a decision handed up to you, not a failure to retry: " +
-        "decide about the problem and whether the task continues, then spawn a fresh subagent " +
-        "carrying that decision instead of re-sending the same prompt. " +
-        "Optional first-line prefix `T<n>:` (taken from TODO.md) opts in to wake-hook auto-tick — " +
-        "omit for ad-hoc questions and status checks.",
-      args: {
-        agent: z
-          .string()
-          .describe(`Subagent role — one of: ${SPAWNABLE_ROLES.join(", ")}`),
-        prompt: z.string().describe("Task for the subagent — name the outcome, not the steps"),
-        description: z.string().optional().describe("Short title for the subagent session"),
-      },
-      execute: guard("spawn", spawnHandler),
-    }),
-
-    abort: tool({
-      description:
-        "Stop a running subagent. Use ONLY when the user tells you to. Never on your own.",
-      args: {
-        subagent: z.string().describe('Handle ("researcher#1") or raw sessionID'),
-      },
-      execute: guard("abort", abortHandler),
-    }),
-
-    list: tool({
-      description:
-        "List your currently running subagents (handle, agent, status, age). Finished ones are gone " +
-        "(one-shot); their result already arrived in the wake notice." +
-        (retentionOn
-          ? " Subagents that are being held for a follow-up are listed separately as RETAINED, " +
-            "with the context they hold and the time left on them — those can be asked a " +
-            "follow-up with reuse()."
-          : ""),
-      args: {},
-      execute: guard("list", listHandler),
-    }),
-
-    // Only where retention is switched on. At `maxRetainedSubagents = 0` —
-    // the default — nothing is ever retained, so the tool would have nothing
-    // to address in any call it could ever receive; it is left out entirely
-    // rather than offered as a tool that always refuses, the same way the
-    // optional search tools are. Read once, at plugin load.
-    ...(retentionOn
-      ? {
-          reuse: tool({
+    ...(soloMode
+      ? {}
+      : {
+          spawn: tool({
             description:
-              'Put a follow-up to a subagent that has already finished and is being held (it is ' +
-              'listed as RETAINED by list()). Its session still holds the work it did, so a ' +
-              'question like "which of the two did you mean?" can be answered without re-briefing ' +
-              'anything — that is what this tool is for. The run behaves exactly like a spawn: it ' +
-              'runs in the background and you are woken with its reply. Refused when the ' +
-              "session's context is already too large to be handed more; the refusal says which " +
-              'rule refused and spawn is always the way forward.',
+              'Start a subagent non-blocking. Returns a handle ("researcher#1") for `abort`. You stay ' +
+              "responsive; you are woken automatically with the subagent's reply when it finishes. " +
+              "One-shot: a subagent replies once and is destroyed. For more work, spawn a fresh one. " +
+              "A reply starting with `Blocked:` is a decision handed up to you, not a failure to retry: " +
+              "decide about the problem and whether the task continues, then spawn a fresh subagent " +
+              "carrying that decision instead of re-sending the same prompt. " +
+              "Optional first-line prefix `T<n>:` (taken from TODO.md) opts in to wake-hook auto-tick — " +
+              "omit for ad-hoc questions and status checks.",
             args: {
-              subagent: z.string().describe('Handle of a RETAINED subagent ("researcher#1")'),
-              prompt: z
+              agent: z
                 .string()
-                .describe("Your follow-up — a question about the work it already did"),
-              mode: z
-                .enum([REUSE_QUESTION, REUSE_TASK])
-                .optional()
-                .describe(
-                  `"${REUSE_QUESTION}" (default) for a follow-up question; "${REUSE_TASK}" for a ` +
-                    `further related piece of work, which is admitted only at a much lower context`,
-                ),
+                .describe(`Subagent role — one of: ${SPAWNABLE_ROLES.join(", ")}`),
+              prompt: z.string().describe("Task for the subagent — name the outcome, not the steps"),
+              description: z.string().optional().describe("Short title for the subagent session"),
             },
-            execute: guard("reuse", reuseHandler),
-          }),
-        }
-      : {}),
+            execute: guard("spawn", spawnHandler),
+        }),
+
+        abort: tool({
+          description:
+            "Stop a running subagent. Use ONLY when the user tells you to. Never on your own.",
+          args: {
+            subagent: z.string().describe('Handle ("researcher#1") or raw sessionID'),
+          },
+          execute: guard("abort", abortHandler),
+        }),
+
+        list: tool({
+          description:
+            "List your currently running subagents (handle, agent, status, age). Finished ones are gone " +
+            "(one-shot); their result already arrived in the wake notice." +
+            (retentionOn
+              ? " Subagents that are being held for a follow-up are listed separately as RETAINED, " +
+                "with the context they hold and the time left on them — those can be asked a " +
+                "follow-up with reuse()."
+              : ""),
+          args: {},
+          execute: guard("list", listHandler),
+        }),
+
+        // Only where retention is switched on. At `maxRetainedSubagents = 0` —
+        // the default — nothing is ever retained, so the tool would have nothing
+        // to address in any call it could ever receive; it is left out entirely
+        // rather than offered as a tool that always refuses, the same way the
+        // optional search tools are. Read once, at plugin load.
+        ...(retentionOn
+          ? {
+              reuse: tool({
+                description:
+                  'Put a follow-up to a subagent that has already finished and is being held (it is ' +
+                  'listed as RETAINED by list()). Its session still holds the work it did, so a ' +
+                  'question like "which of the two did you mean?" can be answered without re-briefing ' +
+                  'anything — that is what this tool is for. The run behaves exactly like a spawn: it ' +
+                  'runs in the background and you are woken with its reply. Refused when the ' +
+                  "session's context is already too large to be handed more; the refusal says which " +
+                  'rule refused and spawn is always the way forward.',
+                args: {
+                  subagent: z.string().describe('Handle of a RETAINED subagent ("researcher#1")'),
+                  prompt: z
+                    .string()
+                    .describe("Your follow-up — a question about the work it already did"),
+                  mode: z
+                    .enum([REUSE_QUESTION, REUSE_TASK])
+                    .optional()
+                    .describe(
+                      `"${REUSE_QUESTION}" (default) for a follow-up question; "${REUSE_TASK}" for a ` +
+                        `further related piece of work, which is admitted only at a much lower context`,
+                    ),
+                },
+                execute: guard("reuse", reuseHandler),
+              }),
+            }
+          : {}),
+        }),
 
     todos_open: tool({
       description:

@@ -3,7 +3,12 @@
 // (subagent snapshot, context-budget notice) stay in
 // hooks.js because they depend on runtime state.
 
-import { PACKAGE_WARN_SHARE, PACKAGE_REFUSE_SHARE, resultCeilingFor } from "./settings.js"
+import {
+  PACKAGE_WARN_SHARE,
+  PACKAGE_REFUSE_SHARE,
+  resultCeilingFor,
+  soloModeActive,
+} from "./settings.js"
 import { percent } from "./format.js"
 // agents.js does not import this module, so this closes no cycle: the role
 // table is the one source of what a role may spawn, and the block that tells
@@ -352,13 +357,26 @@ export function replyCapBlock(agent) {
 // `retention` is the same kind of answer for the primary: it says whether this
 // process offers the `reuse` tool, and it defaults to false so that every
 // caller that does not resolve it gets the guide as it ships.
+//
+// In solo mode the primary is given NO guide at all. The orchestration
+// protocol describes tools it does not have and a delegation pattern it does
+// not run, and nothing takes its place: the blocks around it are each
+// self-delimited, so the assembled prompt is well formed without it, and the
+// mode needs no instruction of its own — an agent with its ordinary tools and
+// no orchestration tools needs no block to tell it so. The mode is read here
+// rather than passed in, because it is latched for the life of the process and
+// every caller would have to resolve the same answer. Subagents are untouched:
+// nothing spawns in solo mode, so no subagent prompt is ever assembled.
 export function guideBlocks({
   primary = false,
   agent = "",
   delegates = false,
   retention = false,
 } = {}) {
-  if (primary) return ORCHESTRATION_GUIDE + (retention ? ORCHESTRATION_REUSE_GUIDE : "")
+  if (primary) {
+    if (soloModeActive()) return ""
+    return ORCHESTRATION_GUIDE + (retention ? ORCHESTRATION_REUSE_GUIDE : "")
+  }
   return (
     SUBAGENT_GUIDE_CORE +
     // Exactly one of the two, always: the spawn rule is not in CORE because it

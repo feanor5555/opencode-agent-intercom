@@ -46,6 +46,14 @@
 // still receives its text verbatim. Nothing is suppressed — see
 // src/pluginmsg.js.
 //
+// The agent mode resolves the same way (file key `agentMode` > env
+// OPENCODE_AGENT_INTERCOM_AGENT_MODE > "orchestrator") and is the only key
+// whose value is a WORD: "orchestrator" for the delegation pattern this plugin
+// ships, "solo" for one agent that does the work itself. Either word exactly,
+// or the level below it stands. Unlike every other key it
+// is LATCHED at plugin load and a change needs an opencode restart — see
+// soloModeActive.
+//
 // The searxng engine bangs `forum_search` chains resolve from the file key
 // `forumBangs` alone (no env var). It is the only array-valued key and it
 // REPLACES the built-in set rather than extending it: the set describes one
@@ -67,7 +75,8 @@
 //       "maxRetainedSubagents": N, "retainedSubagentTtlMs": N,
 //       "maxReuseContext": N, "reuseContext": { "<agent>": N },
 //       "maxResultTokens": N, "resultTokens": { "<agent>": N },
-//       "showAgentcom": true|false }
+//       "showAgentcom": true|false,
+//       "agentMode": "orchestrator"|"solo" }
 
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
@@ -243,6 +252,27 @@ const DEFAULT_ENDLESS_MAX_CYCLES = 10
 // inherits. Exported for the same reason as the limits above — the TUI plugin
 // carries its own copy and test/settings-defaults-parity.test.js pins them.
 export const DEFAULT_SHOW_AGENTCOM = true
+
+// The two agent modes this plugin can run in, and the one it runs in when
+// nothing says otherwise.
+//
+//   orchestrator — the shipped pattern: the primary delegates and runs no work
+//                  tool of its own; the nine subagent roles do the work.
+//   solo         — one agent does everything itself: the primary keeps its
+//                  ordinary tools and gets none of the orchestration tools.
+//                  For a single-slot backend (a llama.cpp server at
+//                  `parallel 1`), where a second agent cannot run anyway.
+//
+// A string key, so it needs its own reader (envAgentMode): the numeric and
+// boolean readers above cannot express "one of these two words". Anything
+// else — a typo, a mode from a future version, a non-string — is not a mode
+// this build can run, so it resolves to the orchestrator pattern rather than
+// to something unpredictable. AGENT_MODES is the set itself, for a caller that
+// has to name both.
+export const AGENT_MODE_ORCHESTRATOR = "orchestrator"
+export const AGENT_MODE_SOLO = "solo"
+export const AGENT_MODES = Object.freeze([AGENT_MODE_ORCHESTRATOR, AGENT_MODE_SOLO])
+export const DEFAULT_AGENT_MODE = AGENT_MODE_ORCHESTRATOR
 const TTL_MS = 2000
 
 let settingsPath = join(homedir(), ".config", "opencode", "agent-intercom.json")
@@ -280,6 +310,27 @@ function envBool(name, def) {
   if (env === "1") return true
   if (env === "0") return false
   return def
+}
+
+// Whether a raw value names a mode: one of the two strings exactly, and
+// nothing else. Not case-folded and not trimmed, deliberately — the sidebar
+// carries the same predicate over the same file (`isAgentMode`,
+// tui/src/agent-mode.ts) and accepts those two strings alone, so a value it
+// would show as the default must not be a value this plugin acts on. A panel
+// reading `[orchestrator]` off a file the plugin runs as `solo` is worse than
+// a hand-typed `Solo` falling back to the shipped pattern.
+function isAgentMode(value) {
+  return value === AGENT_MODE_ORCHESTRATOR || value === AGENT_MODE_SOLO
+}
+
+// Reads an agent-mode env var, falling back to `def` for anything that names
+// no mode — the discipline the numeric and boolean readers use for a bad
+// value. Trimmed first, as every other env reader here trims: the env var is
+// the headless lever, and the sidebar reads no env var at all, so no second
+// reader of it exists to disagree with.
+function envAgentMode(name, def) {
+  const env = process.env[name]?.trim()
+  return isAgentMode(env) ? env : def
 }
 
 // Reads a non-empty string env var, falling back to `def` when unset/blank.
@@ -329,6 +380,9 @@ function envStr(name, def) {
 // directly.
 // showAgentcom shows the plugin's own postings in the transcript; while it is
 // off they are hidden from it and still left in the model's payload.
+// agentMode is "orchestrator" or "solo" and nothing else — read it through
+// soloModeActive rather than directly, which is where the mode becomes a
+// branch and where it is latched for the life of the process.
 export function getSettings() {
   const now = Date.now()
   if (cache && now - cachedAt < TTL_MS) return cache
@@ -373,6 +427,7 @@ export function getSettings() {
     endlessMaxCycles: envNum("OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES", DEFAULT_ENDLESS_MAX_CYCLES),
     maxNestedSpawns: envNum("OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS", DEFAULT_MAX_NESTED_SPAWNS),
     showAgentcom: envBool("OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM", DEFAULT_SHOW_AGENTCOM),
+    agentMode: envAgentMode("OPENCODE_AGENT_INTERCOM_AGENT_MODE", DEFAULT_AGENT_MODE),
   }
   try {
     const raw = JSON.parse(readFileSync(settingsPath, "utf8"))
@@ -485,6 +540,11 @@ export function getSettings() {
     }
     if (typeof raw?.showAgentcom === "boolean") {
       resolved.showAgentcom = raw.showAgentcom
+    }
+    // A value naming no mode leaves the env-or-default resolution standing,
+    // exactly as a bad boolean or a bad number does above.
+    if (isAgentMode(raw?.agentMode)) {
+      resolved.agentMode = raw.agentMode
     }
   } catch {
     // no file / unreadable -> env + defaults; not an error
@@ -648,6 +708,34 @@ export function retentionActive() {
   return retentionCapacity() > 0
 }
 
+// Whether this process runs in SOLO mode, decided at the first read and never
+// again — the discipline retentionOffered uses, and for the same reason.
+//
+// This is the ONE place the mode is turned into a branch. All four enforcement
+// points read this function and nothing else:
+//   - the primary's deny map (src/agents.js, installAgents) — in solo mode the
+//     primary keeps its ordinary tools and is denied opencode's native `task`
+//     alone,
+//   - the tool map (src/tools.js, createTools) — in solo mode the primary gets
+//     none of spawn / abort / list / reuse,
+//   - the primary-side runtime guard (src/hooks.js) — in solo mode it stops
+//     refusing everything but the orchestration tools,
+//   - the injected orchestration guide (src/prompts.js, guideBlocks) — in solo
+//     mode the primary is given none.
+//
+// Latched because two of those four are settled once and cannot be revised
+// afterwards: opencode resolves the plugin's tool map and its agent config at
+// instance bootstrap. Read live, a mid-process switch would leave a primary
+// whose prompt describes one pattern, whose tool map carries the other, and
+// whose guard enforces the third. Switching the mode therefore takes an
+// opencode restart, and every part of the plugin sees the same answer for the
+// life of the process.
+let soloModeLatch = null
+export function soloModeActive() {
+  if (soloModeLatch === null) soloModeLatch = getSettings().agentMode === AGENT_MODE_SOLO
+  return soloModeLatch
+}
+
 // The resolved searxng base URL (file > env > ""), trailing slashes stripped.
 // Empty string means searxng is disabled and web_search stays Exa-only.
 export function getSearxngUrl() {
@@ -709,8 +797,8 @@ export function settingsFilePath() {
 }
 
 // Drop the resolved cache so the next getSettings() reads the file again. The
-// retention latch is untouched — it is taken once at plugin load and is not a
-// resolved value. The agentcom watch (src/agentcomsync.js) calls this the
+// two latches — retention and the agent mode — are untouched: each is taken
+// once at plugin load and neither is a resolved value. The agentcom watch (src/agentcomsync.js) calls this the
 // moment fs.watch reports the settings file changed: that change is younger
 // than the TTL, and a cached answer would still be the value before the write.
 export function invalidateSettingsCache() {
@@ -725,17 +813,21 @@ export function setSettingsPath(p) {
 }
 
 // Test-only: invalidate the cache so the next getSettings() re-reads the file.
-// The retention latch goes with it: it is taken at plugin load, and a test that
-// swaps the settings under a fresh plugin has to get a fresh answer.
+// Both latches go with it — retention and the agent mode: each is taken at
+// plugin load, and a test that swaps the settings under a fresh plugin has to
+// get a fresh answer.
 export function resetSettings() {
   invalidateSettingsCache()
   retentionLatch = null
+  soloModeLatch = null
 }
 
 // Test-only name for invalidateSettingsCache, kept because what it records is
-// the intent at the call site: invalidate the cache and LEAVE the retention
-// latch standing, so a test can move `maxRetainedSubagents` under a process
-// that has already decided at load whether it offers the `reuse` tool at all.
+// the intent at the call site: invalidate the cache and LEAVE both latches —
+// retention and the agent mode — standing, so a test can move
+// `maxRetainedSubagents` or `agentMode` under a process that has already
+// decided at load whether it offers the `reuse` tool at all, and which pattern
+// it runs.
 // That combination — offered at load, switched off now, and its mirror image —
 // is the whole point of retentionCapacity, and resetSettings cannot express it.
 export function dropSettingsCacheKeepingLatch() {

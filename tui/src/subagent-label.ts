@@ -211,6 +211,24 @@ export function subagentLabelWidth(panelWidth?: number): number {
   return Math.max(0, panel - ROW_CHROME_W);
 }
 
+// The indent of a note line under a settings row: a note belongs to the row
+// above it and is set in from that row's own label column.
+export const ROW_NOTE_INDENT = "    ";
+
+// One note line under a settings row, cut to what is left of the panel beside
+// its indent — the endless pause's cause and the agent-mode row's confirm
+// question are both composed with this. Empty text stays empty, and the caller
+// then renders no line at all.
+export function rowNoteLine(text: string, panelWidth?: number): string {
+  if (text === "") return "";
+  const panel =
+    typeof panelWidth === "number" && panelWidth > 0
+      ? panelWidth
+      : FALLBACK_PANEL_W;
+  const budget = panel - ROW_NOTE_INDENT.length - 2;
+  return budget <= 0 ? "" : ROW_NOTE_INDENT + truncate(text, budget);
+}
+
 // The display name of a model, without the parenthesised part a pick-list label
 // carries: `Luna (gpt-5-luna)` is `Luna`. The label goes into parentheses of the
 // row's own, so anything that would nest a second pair is dropped; a label that

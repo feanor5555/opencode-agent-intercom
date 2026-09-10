@@ -86,10 +86,56 @@ test("openrouter takes a nested reasoning block", () => {
   })
 })
 
-test("every ladder step reaches the patch unchanged", () => {
+test("every ladder step that names an amount reaches the patch unchanged", () => {
   for (const effort of ["low", "medium", "high", "xhigh"]) {
     assert.deepEqual(effortOptions(effort, model("@ai-sdk/openai")), { reasoningEffort: effort })
+    assert.deepEqual(effortOptions(effort, model("@ai-sdk/openai-compatible")), {
+      reasoningEffort: effort,
+    })
   }
+})
+
+test("off switches thinking off through the chat template, openai-compatible only", () => {
+  // llama-server takes the amount of thinking as reasoningEffort but does not
+  // switch it off through that key — a top-level effort of "none" falls back
+  // to low there. `chat_template_kwargs` is the key that suppresses it, and it
+  // rides through output.options into the request body.
+  assert.deepEqual(effortOptions("off", model("@ai-sdk/openai-compatible")), {
+    chat_template_kwargs: { enable_thinking: false },
+  })
+  // No amount of thinking is named alongside it.
+  assert.equal(
+    "reasoningEffort" in effortOptions("off", model("@ai-sdk/openai-compatible")),
+    false,
+  )
+})
+
+test("off writes nothing for every other family", () => {
+  // "off" is not a value in reasoningEffort / effort / reasoning.effort /
+  // thinkingLevel; sending it there would be a string those providers reject.
+  // The step reaches such a provider through opencode's own variant merge
+  // alone, and only where the model's `variants` map named it in the first
+  // place.
+  for (const npm of [
+    "@ai-sdk/openai",
+    "@ai-sdk/azure",
+    "@ai-sdk/xai",
+    "@ai-sdk/anthropic",
+    "@ai-sdk/google-vertex-anthropic",
+    "@ai-sdk/google",
+    "@ai-sdk/google-vertex",
+    "@openrouter/ai-sdk-provider",
+  ]) {
+    assert.equal(effortOptions("off", model(npm)), null, npm)
+  }
+})
+
+test("off is refused where any other step would be", () => {
+  // The step is still gated on the model: no reasoning capability, no model,
+  // an unknown package.
+  assert.equal(effortOptions("off", model("@ai-sdk/openai-compatible", false)), null)
+  assert.equal(effortOptions("off", model("@ai-sdk/mistral")), null)
+  assert.equal(effortOptions("off", null), null)
 })
 
 test("an unknown provider package writes nothing", () => {
@@ -129,4 +175,11 @@ test("each call returns a fresh object the caller may mutate", () => {
   first.thinkingConfig.thinkingLevel = "tampered"
   const second = effortOptions("high", model("@ai-sdk/google"))
   assert.deepEqual(second, { thinkingConfig: { thinkingLevel: "high", includeThoughts: true } })
+})
+
+test("the off patch is a fresh nested object too", () => {
+  const first = effortOptions("off", model("@ai-sdk/openai-compatible"))
+  first.chat_template_kwargs.enable_thinking = true
+  const second = effortOptions("off", model("@ai-sdk/openai-compatible"))
+  assert.deepEqual(second, { chat_template_kwargs: { enable_thinking: false } })
 })

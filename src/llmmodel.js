@@ -99,16 +99,17 @@ export function resolveModelForAgent(agent) {
 
 // The reasoning-effort ladder steps that mean an override. `default` is stored
 // as the absence of a `variant` key, so it is not a member here.
-const EFFORT_VALUES = new Set(["low", "medium", "high", "xhigh"])
+const EFFORT_VALUES = new Set(["low", "medium", "high", "xhigh", "off"])
 
 // For an agent name, return the reasoning effort stored beside its model pair
-// — `"low"`, `"medium"`, `"high"` or `"xhigh"` — or null where the entry
-// carries no `variant`, or one outside that set. The closed set is what keeps a
-// hand-edited file from putting an arbitrary string into a provider request:
-// `chatParamsHook` merges the result through `src/reasoningeffort.js`, which
-// only knows these four. `xhigh` is not offered by every model; the panel keeps
-// it off the ladder of a model that does not name it, and a model that is sent
-// it anyway rejects it as it would any effort it does not take.
+// — `"low"`, `"medium"`, `"high"`, `"xhigh"` or `"off"` — or null where the
+// entry carries no `variant`, or one outside that set. The closed set is what
+// keeps a hand-edited file from putting an arbitrary string into a provider
+// request: `chatParamsHook` merges the result through
+// `src/reasoningeffort.js`, which only knows these five. `xhigh` and `off` are
+// not offered by every model; the panel keeps a step off the ladder of a model
+// that does not name it, and a model that is sent it anyway rejects it as it
+// would any effort it does not take.
 //
 // Independent of the model pair: an entry whose pair is unusable can still
 // carry an effort, and it then applies to whatever model opencode resolved.
@@ -200,8 +201,11 @@ export function applyModelChoices(config) {
       // the config. Neither is invented, and where there is no model at all
       // the store has no key to write.
       const ref = chosen ?? splitModelRef(agent.model)
-      // A `default` or absent effort is written as the name opencode itself
-      // stores for it, not as a deleted key.
+      // Every ladder step goes in under its own name, `off` included: the
+      // panel offers a step only against a model whose own `variants` map
+      // declares it, so the name is one opencode's TUI can resolve for that
+      // model. A `default` or absent effort is written as the name opencode
+      // itself stores for it, not as a deleted key.
       if (ref) primaries.push({ name, key: modelKey(ref.providerID, ref.modelID), variant: effort ?? DEFAULT_VARIANT })
     }
     if (!chosen) continue

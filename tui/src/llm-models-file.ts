@@ -27,12 +27,15 @@ export interface ModelRef {
 }
 
 // The reasoning-effort steps that mean an override, in cycle order. A model
-// offers a subset of them: which ones is `effortLadderFor`.
-const EFFORT_STEPS = ["low", "medium", "high", "xhigh"] as const;
+// offers a subset of them: which ones is `effortLadderFor`. `off` sits at the
+// end because it is not an amount of thinking but its absence — the step that
+// switches thinking off entirely.
+const EFFORT_STEPS = ["low", "medium", "high", "xhigh", "off"] as const;
 
 // The steps a model is taken to offer where it reports no variant list at all.
-// Every provider family the plugin maps takes low/medium/high; `xhigh` is
-// narrower than that and is offered only against a model that names it.
+// Every provider family the plugin maps takes low/medium/high; `xhigh` and
+// `off` are narrower than that and are offered only against a model that names
+// them.
 const ASSUMED_STEPS = ["low", "medium", "high"] as const;
 
 // Every value the effort row can cycle to, in cycle order, across all models.
@@ -48,7 +51,8 @@ export type EffortValue = (typeof EFFORT_LADDER)[number];
 // map as the provider list reports it — an empty list is a model that takes no
 // effort at all and leaves a ladder with nothing but "default" to land on,
 // while null/undefined is a model that reports no such map and falls back to
-// the assumed steps.
+// the assumed steps — which never include "off", so switching thinking off is
+// offered only against a model that names the step itself.
 export function effortLadderFor(
   supported: readonly string[] | null | undefined,
 ): EffortValue[] {

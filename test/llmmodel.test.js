@@ -403,7 +403,7 @@ test("removing an effort clears config.agent[name].variant", () => {
 })
 
 test("each ladder value is read back as it stands", () => {
-  for (const variant of ["low", "medium", "high", "xhigh"]) {
+  for (const variant of ["low", "medium", "high", "xhigh", "off"]) {
     writeModels({ coder: { providerID: "anthropic", modelID: "claude-x", variant } })
     assert.equal(resolveEffortForAgent("coder"), variant)
   }
@@ -418,6 +418,16 @@ test("xhigh survives the round trip beside its pair", () => {
   assert.deepEqual(resolveModelForAgent("coder"), { providerID: "xai", modelID: "grok-4.6" })
 })
 
+test("off reaches config.agent[name].variant like any other step", () => {
+  // The step that switches thinking off is a ladder member, so it travels the
+  // native route as well: opencode resolves it for the model that named it.
+  writeModels({ coder: { providerID: "anthropic", modelID: "claude-sonnet-4-5", variant: "off" } })
+  const config = freshConfig()
+  applyModelChoices(config)
+  assert.equal(resolveEffortForAgent("coder"), "off")
+  assert.equal(config.agent.coder.variant, "off")
+})
+
 test("an entry without a variant has no effort", () => {
   writeModels({ coder: { providerID: "anthropic", modelID: "claude-x" } })
   assert.equal(resolveEffortForAgent("coder"), null)
@@ -426,7 +436,7 @@ test("an entry without a variant has no effort", () => {
 test("a variant outside the ladder is not handed on", () => {
   // `default` is stored as the absence of the key; anything else is a
   // hand-edit and reads as no effort at all.
-  for (const variant of ["default", "ultra", "", "HIGH", " high", "xxhigh", "XHIGH", 3, null, {}, ["high"]]) {
+  for (const variant of ["default", "ultra", "", "HIGH", " high", "xxhigh", "XHIGH", "none", "OFF", " off", 3, null, {}, ["high"]]) {
     writeModels({ coder: { providerID: "anthropic", modelID: "claude-x", variant } })
     assert.equal(resolveEffortForAgent("coder"), null, `variant ${JSON.stringify(variant)}`)
   }

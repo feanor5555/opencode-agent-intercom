@@ -168,6 +168,17 @@ test("an entry with no variant at all also writes default", () => {
   assert.equal(readStore().variant["xai/grok-4.6"], "default")
 })
 
+test("off is written under its own name, not flattened to default", () => {
+  // The step is a ladder member and is offered only against a model whose own
+  // `variants` map names it, so the store gets a name that model resolves.
+  // Writing `default` here would make opencode's label disagree with the
+  // effort the plugin applies.
+  writeStore({ variant: { "xai/grok-4.6": "high" } })
+  writeModels({ orchestrator: { providerID: "xai", modelID: "grok-4.6", variant: "off" } })
+  applyModelChoices(freshConfig())
+  assert.equal(readStore().variant["xai/grok-4.6"], "off")
+})
+
 test("a variant outside the ladder writes default, not the hand-edited string", () => {
   writeModels({ orchestrator: { providerID: "xai", modelID: "grok-4.6", variant: "ultra" } })
   applyModelChoices(freshConfig())

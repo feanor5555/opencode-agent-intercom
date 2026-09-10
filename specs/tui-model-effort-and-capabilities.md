@@ -124,17 +124,18 @@ model and effort rows line their buttons up.
 **Value set — a per-model ladder built from the model's `variants` map:**
 
 The row's widest ladder, used when no model is resolved, is
-`default → low → medium → high → xhigh` — `default` is the absence of a stored
-value and stands in front of the four override steps in cycle order. For a
+`default → low → medium → high → xhigh → off` — `default` is the absence of a
+stored value and stands in front of the five override steps in cycle order,
+`off` is not an amount of thinking but its absence and stands at the end. For a
 resolved model, the row offers `default` plus every override step the model
 declares as a key in its `variants` map:
 
 - a model that reports no `variants` key at all (null) falls back to the
   assumed steps `low`/`medium`/`high` — the steps every mapped provider family
   takes, so the row still cycles on a model the provider list describes
-  without enumerating effort values;
+  without enumerating effort values. `xhigh` and `off` are never assumed;
 - a model that reports a `variants` map with at least one of `low`, `medium`,
-  `high`, `xhigh` as a key offers exactly that subset, in cycle order;
+  `high`, `xhigh`, `off` as a key offers exactly that subset, in cycle order;
 - a model whose `variants` map is empty, or whose
   `capabilities.reasoning !== true`, makes the row inert.
 
@@ -188,16 +189,17 @@ added anywhere for this.
 shape as its neighbours:
 
 ```ts
-export const EFFORT_LADDER = ["default", "low", "medium", "high", "xhigh"] as const;
+export const EFFORT_LADDER = ["default", "low", "medium", "high", "xhigh", "off"] as const;
 export function effortLadderFor(supported: readonly string[] | null | undefined): EffortValue[];
 export function cycleLlmVariant(agent: string, delta: number, model: ModelRef, ladder?: readonly EffortValue[]): LlmModels;
 ```
 
-`EFFORT_LADDER` is the widest ladder — `default` plus the four override steps —
+`EFFORT_LADDER` is the widest ladder — `default` plus the five override steps —
 and is what the row walks for an agent with no resolved model. `effortLadderFor`
 takes the key list of the resolved model's `variants` map (or null) and returns
 `["default", ...steps]` filtered to those steps the model declares; null falls
-back to the assumed `low`/`medium`/`high`. `cycleLlmVariant` takes the ladder
+back to the assumed `low`/`medium`/`high`, which carries neither `xhigh` nor
+`off`. `cycleLlmVariant` takes the ladder
 explicitly so the caller — `cycleEffort` (`tui/src/tui.tsx:676-682`) — passes
 the one `effortLadderFor` produced for the resolved model. It steps from the
 position the file holds at this moment, so an outside edit is stepped from
@@ -235,13 +237,14 @@ keeps returning the bare pair, and a sibling reads the effort off the same
 mtime-keyed cache (`:54-68`):
 
 ```js
-export function resolveEffortForAgent(agent)   // -> "low" | "medium" | "high" | "xhigh" | null
+export function resolveEffortForAgent(agent)   // -> "low" | "medium" | "high" | "xhigh" | "off" | null
 ```
 
 It returns null for anything not in that set, so a hand-edited file cannot put
-an arbitrary string into a request. `xhigh` is not offered by every model; the
-panel keeps it off the ladder of a model that does not name it, and a model
-that is sent it anyway rejects it as it would any effort it does not take.
+an arbitrary string into a request. `xhigh` and `off` are not offered by every
+model; the panel keeps a step off the ladder of a model that does not name it,
+and a model that is sent it anyway rejects it as it would any effort it does
+not take.
 
 ## 5. How the effort reaches the model call
 
@@ -259,7 +262,13 @@ ways:
 - **`chat.params` hook** — `chatParamsHook` (`src/llmparams.js`) translates the
   effort into the provider family's own option key and writes it through
   `output.options`, via `src/reasoningeffort.js`. This is the route that
-  covers provider families opencode's own `variants` map does not.
+  covers provider families opencode's own `variants` map does not. `off` is
+  the one step that is not an effort string: `@ai-sdk/openai-compatible` gets
+  `chat_template_kwargs: { enable_thinking: false }` and no `reasoningEffort`,
+  because a top-level effort of `none` does not switch llama-server's thinking
+  off while the chat-template switch does; every other family has no
+  established form for it and writes nothing, so `off` reaches such a provider
+  through the native variant alone.
 
 - **opencode's variant store** — `applyModelChoices` also calls
   `saveModelVariants` (`src/variantstore.js`) to seed opencode's own variant
@@ -269,8 +278,11 @@ ways:
   `config.agent[<name>].variant`. That store is keyed per model, so its
   entry takes the effort of the visible primary agent
   (`mode === "primary"` and not `hidden`; `default_agent` wins where two
-  visible primaries share a model). A `default`, absent or out-of-ladder
-  effort writes `DEFAULT_VARIANT = "default"`. Writes are atomic
+  visible primaries share a model). Every ladder step goes in under its own
+  name, `off` included — the panel offers a step only against a model whose
+  own `variants` map declares it, so the name is one opencode's TUI resolves
+  for that model. A `default`, absent or out-of-ladder effort writes
+  `DEFAULT_VARIANT = "default"`. Writes are atomic
   (temp file + rename in the same directory); a store that does not parse
   is left untouched; `saveModelVariants` is wrapped in a try/catch so every
   failure is swallowed and a load of the plugin cannot break.

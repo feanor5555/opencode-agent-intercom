@@ -222,14 +222,16 @@ test("dropping an agent that has nothing on disk leaves the file untouched", () 
 
 const OPUS = { providerID: "anthropic", modelID: "opus" }
 
-// The two ladders the panel builds from a model's variant names: one for a
-// model that takes the three common steps, one for a model that also names
-// xhigh. Passed to cycleLlmVariant exactly as the panel passes them.
+// The ladders the panel builds from a model's variant names: one for a model
+// that takes the three common steps, one for a model that also names xhigh,
+// one for a model that names every step including off. Passed to
+// cycleLlmVariant exactly as the panel passes them.
 const THREE_STEP = effortLadderFor(["low", "medium", "high"])
 const FOUR_STEP = effortLadderFor(["low", "medium", "high", "xhigh"])
+const FIVE_STEP = effortLadderFor(["low", "medium", "high", "xhigh", "off"])
 
-test("the ladder is the one the effort row cycles, default first", () => {
-  assert.deepEqual([...EFFORT_LADDER], ["default", "low", "medium", "high", "xhigh"])
+test("the ladder is the one the effort row cycles, default first and off last", () => {
+  assert.deepEqual([...EFFORT_LADDER], ["default", "low", "medium", "high", "xhigh", "off"])
 })
 
 test("a model's ladder is default plus the steps its variants name", () => {
@@ -257,6 +259,20 @@ test("a model that reports no variant map at all keeps the assumed steps", () =>
   for (const missing of [null, undefined]) {
     assert.deepEqual(effortLadderFor(missing), ["default", "low", "medium", "high"])
   }
+})
+
+test("off is offered only against a model whose variants name it", () => {
+  // Never assumed: a model that reports no variant map at all keeps the three
+  // steps and no way to switch thinking off, and one whose map names off gets
+  // the step at the end of its ladder, after xhigh.
+  for (const missing of [null, undefined]) {
+    assert.equal(effortLadderFor(missing).includes("off"), false)
+  }
+  assert.equal(THREE_STEP.includes("off"), false)
+  assert.equal(FOUR_STEP.includes("off"), false)
+  assert.deepEqual(FIVE_STEP, ["default", "low", "medium", "high", "xhigh", "off"])
+  // Position is the ladder's, not the order the model lists its variants in.
+  assert.deepEqual(effortLadderFor(["off", "high", "low"]), ["default", "low", "high", "off"])
 })
 
 test("an effort chosen in the panel is shown as it stands", () => {
@@ -358,6 +374,42 @@ test("xhigh is in the cycle only for a model whose variants name it", () => {
 
   // One more step off the top of that ladder is "default" again.
   assert.deepEqual(cycleLlmVariant("coder", 1, OPUS, FOUR_STEP), { coder: OPUS })
+})
+
+test("off is cycled to and out of like any other step", () => {
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "xhigh" } }))
+
+  // The step above xhigh on a ladder that names off.
+  const off = cycleLlmVariant("coder", 1, OPUS, FIVE_STEP)
+  assert.deepEqual(off, { coder: { ...OPUS, variant: "off" } })
+  assert.deepEqual(onDisk(), off)
+
+  // It is the last step, so one more lands on default and strips the key.
+  const wrapped = cycleLlmVariant("coder", 1, OPUS, FIVE_STEP)
+  assert.deepEqual(wrapped, { coder: OPUS })
+  assert.equal("variant" in wrapped.coder, false)
+
+  // And a step back from default lands on off, the top of that ladder.
+  assert.deepEqual(cycleLlmVariant("coder", -1, OPUS, FIVE_STEP), {
+    coder: { ...OPUS, variant: "off" },
+  })
+})
+
+test("a stored off survives the read that filters the file", () => {
+  // The round trip the row depends on: what the cycler wrote comes back as a
+  // stored effort rather than being dropped as a nonsense variant.
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "off" } }))
+  assert.deepEqual(readLlmModels(), { coder: { ...OPUS, variant: "off" } })
+})
+
+test("a stored off on a model that lost the step is stepped from as default", () => {
+  // The model was changed by hand to one without off while off stood in the
+  // file: the next step lands inside the ladder rather than nowhere.
+  writeFileSync(file, JSON.stringify({ coder: { ...OPUS, variant: "off" } }))
+
+  assert.deepEqual(cycleLlmVariant("coder", 1, OPUS, THREE_STEP), {
+    coder: { ...OPUS, variant: "low" },
+  })
 })
 
 test("a stored step the model's ladder lacks is stepped from as default", () => {

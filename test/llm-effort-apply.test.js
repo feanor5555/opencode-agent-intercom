@@ -104,6 +104,32 @@ test("a variant outside the ladder in the file writes nothing", () => {
   }
 })
 
+test("off reaches the request as chat_template_kwargs, with no effort beside it", () => {
+  // The whole point of the step: llama-server keeps thinking on for any effort
+  // string, so the hook has to carry the chat-template switch instead.
+  writeModels({ coder: { providerID: "local", modelID: "qwen3.8", variant: "off" } })
+  const output = freshOutput()
+  chatParamsHook({ agent: "coder", model: model("@ai-sdk/openai-compatible") }, output)
+  assert.deepEqual(output.options, { chat_template_kwargs: { enable_thinking: false } })
+})
+
+test("off writes no options object for a family that has no form for it", () => {
+  writeModels({ coder: { providerID: "openai", modelID: "gpt-5", variant: "off" } })
+  const output = freshOutput()
+  chatParamsHook({ agent: "coder", model: model() }, output)
+  assert.equal(output.options, undefined)
+})
+
+test("a chat_template_kwargs set by hand wins over the off step", () => {
+  // The params file is the escape hatch and keeps its precedence for this key
+  // as for every other one the ladder would write.
+  writeParams({ coder: { chat_template_kwargs: { enable_thinking: true } } })
+  writeModels({ coder: { providerID: "local", modelID: "qwen3.8", variant: "off" } })
+  const output = freshOutput()
+  chatParamsHook({ agent: "coder", model: model("@ai-sdk/openai-compatible") }, output)
+  assert.deepEqual(output.options, { chat_template_kwargs: { enable_thinking: true } })
+})
+
 test("a key the params file already set is not overwritten by the patch", () => {
   writeParams({ coder: { reasoningEffort: "minimal" } })
   writeModels({ coder: { providerID: "openai", modelID: "gpt-5", variant: "high" } })

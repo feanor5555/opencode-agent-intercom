@@ -28,7 +28,6 @@ import {
   ASK_WAIT_WATCHDOG_MARGIN_MS,
   askWaitMs,
   openAskFor,
-  openAsksFor,
   registerAskWaiter,
   settleAsk,
 } from "../src/agentmsg.js"
@@ -104,7 +103,6 @@ test("answerWaitMs 0 takes no wait, registers nothing and resolves not-waiting",
   assert.equal(ask.waitMs, 0)
   assert.equal(pendingAsks.size, 0, "no record, so no ending path has a waiter to settle")
   assert.equal(openAskFor("ses_sub"), undefined, "nothing is open that nobody waits on")
-  assert.deepEqual(openAsksFor("ses_primary"), [])
 
   const outcome = await ask.promise
   assert.equal(outcome.status, "not-waiting")
@@ -127,10 +125,6 @@ test("an answer settles the wait once and carries the text back", async () => {
     parentID: "ses_primary",
     waitMs: 5000,
   })
-  assert.deepEqual(openAsksFor("ses_primary"), [
-    { sessionID: "ses_sub", id: ask.id, question: "which lockfile?", askedAt: ask.askedAt, waitMs: 5000 },
-  ])
-  assert.deepEqual(openAsksFor("ses_other"), [], "another caller sees nothing of it")
 
   assert.equal(settleAsk("ses_sub", { status: "answered", answer: "the npm one" }), true)
   // Whoever gets there second is told so rather than silently overwriting.
@@ -143,7 +137,6 @@ test("an answer settles the wait once and carries the text back", async () => {
   assert.equal(typeof outcome.waitedMs, "number")
   assert.equal(pendingAsks.size, 0)
   assert.equal(openAskFor("ses_sub"), undefined)
-  assert.deepEqual(openAsksFor("ses_primary"), [])
 })
 
 test("the window expiring settles as unanswered and the run carries on", async () => {

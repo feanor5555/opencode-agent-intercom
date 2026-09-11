@@ -1414,9 +1414,10 @@ function fixedOverheadFor(agent, { projectMd, agentsMd, snapshot, delegatingRole
 // rather than another row, in the same words the `list` tool uses for it
 // (tools.js listHandler), and the prose above the rows stops asserting a
 // one-shot rule that no longer holds without exception. Both are gated on
-// retentionActive — offered at load and switched on now — so at
-// `maxRetainedSubagents = 0`, the default, where nothing is ever retained, this
-// block is byte for byte what it has always been.
+// retentionActive — offered at load and switched on now — which at the shipped
+// default of `maxRetainedSubagents = 2` is the live branch. Only under the
+// rollback `maxRetainedSubagents = 0`, where nothing is ever retained, is this
+// block byte for byte what it has always been.
 //
 // The minutes-left figure moves, and is rendered here rather than per step
 // because the whole block is memoised per user turn (snapshotForTurn). Whole

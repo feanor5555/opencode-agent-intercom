@@ -297,8 +297,9 @@ export async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, res
     // Handoff step 0b: the retained subagents of the primary being replaced go
     // before anything else happens. Their sessions are deleted, not merely
     // forgotten — nothing outside this plugin ever deletes a subagent session.
-    // A no-op in a process with `maxRetainedSubagents` at its default of 0,
-    // which retains nothing.
+    // Runs on every handoff at the shipped default of `maxRetainedSubagents:
+    // 2`; a no-op only under the rollback `maxRetainedSubagents: 0`, which
+    // retains nothing.
     dropRetainedSubagents: () => dropRetainedSubagents(client, { label: "handoff" }),
     // registry.forgetPrimary also clears the pending/in-progress handoff
     // flags for the old id — the success-path release.

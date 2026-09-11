@@ -35,6 +35,9 @@ import {
   isActiveEntry,
   entryLifecycle,
   reuseAdmission,
+  reviveRetainedEntryLocked,
+  restoreRetainedEntryLocked,
+  exchangeSnapshot,
   RETAIN_TASK_SHARE,
   REUSE_QUESTION,
   REUSE_TASK,
@@ -413,6 +416,48 @@ test("an accepted reuse re-prompts the same session under the same handle", asyn
   assert.equal(isActiveEntry(entry), true, "and it takes a slot again")
   assert.equal(countActiveSubagents(), 1)
   assert.equal(countRetainedSubagents(), 0)
+})
+
+// The exchange line of a wake notice speaks of ONE run. Left standing across a
+// reuse, run 2's notice would report run 1's messages and questions a second
+// time and name as never read a message the session has held in its context
+// since before run 2 started.
+test("an accepted reuse starts the mid-run counters over, and a failed one puts them back", async () => {
+  withSettings({ maxRetainedSubagents: 3, maxSubagents: 4 })
+  const { ctx, created } = makeCtx({ messages: assistantReply("R", 20000) })
+  const hooks = await plugin(ctx)
+  const { sessionID } = await retainOne(hooks, created)
+
+  // Run 1's traffic, as the channel left it on the held entry.
+  const held = entryForSession(sessionID)
+  held.messagesIn = [{ text: "use the HTTP API", sentAt: 1000, seen: false }]
+  held.asksOut = 2
+  held.asksAnswered = 1
+  held.asksUnanswered = 1
+
+  const revived = reviveRetainedEntryLocked(sessionID, { ctxTokens: 20000, packageTokens: 40 })
+  const entry = revived.entry
+  assert.deepEqual(entry.messagesIn, [], "run 2 starts with no message of its own")
+  assert.equal(entry.asksOut, 0)
+  assert.equal(entry.asksAnswered, 0)
+  assert.equal(entry.asksUnanswered, 0)
+  assert.deepEqual(exchangeSnapshot(entry), {
+    messages: 0,
+    unread: 0,
+    unreadAt: undefined,
+    asksOut: 0,
+    asksAnswered: 0,
+    asksUnanswered: 0,
+  })
+
+  // A reuse whose prompt never reached the session: no run started, so run 1's
+  // traffic is still the only traffic this session has had.
+  assert.equal(restoreRetainedEntryLocked(sessionID, revived.previous), true)
+  const back = entryForSession(sessionID)
+  assert.equal(back.messagesIn.length, 1)
+  assert.equal(back.asksOut, 2)
+  assert.equal(back.asksAnswered, 1)
+  assert.equal(back.asksUnanswered, 1)
 })
 
 test("the concurrency cap gates a revival exactly as it gates a spawn", async () => {

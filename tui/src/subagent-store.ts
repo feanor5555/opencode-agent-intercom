@@ -46,10 +46,10 @@
 // and unheld rows alike, and it is what keeps a row from outliving the session
 // it names.
 //
-// With `maxRetainedSubagents` at its default of 0 nothing about retention is
-// reachable: the plugin stamps no title, `decideRow` never returns a hold, no
-// row ever carries `retained`, and `reapRows` reaps on the session's absence
-// alone.
+// `maxRetainedSubagents` ships at 2, so retention is reachable by default.
+// Under the rollback `maxRetainedSubagents: 0` nothing about it is: the plugin
+// stamps no title, `decideRow` never returns a hold, no row ever carries
+// `retained`, and `reapRows` reaps on the session's absence alone.
 
 import { readRetentionStamp } from "./subagent-label.ts";
 

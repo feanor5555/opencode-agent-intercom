@@ -19,7 +19,7 @@ import { join } from "node:path"
 import plugin from "../src/index.js"
 import { resetState, pendingAsks } from "../src/state.js"
 import { entryForSession, upsertSession, trackPrimary } from "../src/registry.js"
-import { openAskFor, openAsksFor } from "../src/agentmsg.js"
+import { openAskFor } from "../src/agentmsg.js"
 import { timeoutSubagent, resetTurnNotices } from "../src/hooks.js"
 import { teardownSubagent } from "../src/teardown.js"
 import { resetProjectContext } from "../src/project.js"
@@ -95,7 +95,6 @@ test("the question is posted to the caller, the call blocks, and the answer is i
   assert.ok(open, "the question is registered while the call blocks")
   assert.equal(entry.pendingAsk.question, "which lockfile is authoritative?")
   assert.equal(entry.asksOut, 1)
-  assert.deepEqual(openAsksFor(PRIMARY).map((a) => a.sessionID), [SUB])
 
   assert.equal(posted.length, 1)
   assert.equal(posted[0].sessionID, PRIMARY)
@@ -138,6 +137,11 @@ test("answerWaitMs 0 delivers the question and returns at once", async () => {
   assert.equal(posted.length, 1, "the question still reaches the caller")
   assert.equal(entry.pendingAsk, undefined)
   assert.equal(pendingAsks.size, 0)
+  // No wait was taken, so nobody was given the chance to answer and nobody
+  // failed to: the run must not be reported as leaving a question unanswered.
+  assert.equal(entry.asksOut, 1, "the question is still counted as asked")
+  assert.equal(entry.asksUnanswered, 0, "a zero-wait question is charged to nobody")
+  assert.equal(entry.asksAnswered, 0)
 })
 
 test("a nested subagent is refused: its caller is blocked and could never answer", async () => {
@@ -238,6 +242,43 @@ test("a watchdog reap settles the question and the notice reports it", async () 
   assert.ok(notice, "the parent is woken with the timeout notice")
   assert.match(notice.text, /It had a question open to YOU/)
   assert.match(notice.text, /which lockfile\?/)
+})
+
+// The settlement path the spec names that nothing else here drives: the run
+// simply ends. It goes through the plugin's `event` hook rather than through a
+// helper, because what is pinned is the WIRING — settleAsk / clearAsk inside the
+// wake's critical section and `exchangeSnapshot` reaching `completionNotice` as
+// its 11th positional argument. A test that re-created the positional call would
+// stay green with an argument inserted before `exchange`.
+test("the idle wake settles the open question and reports the run's exchange", async () => {
+  const { ctx, posted } = makeCtx()
+  const hooks = await plugin(ctx)
+  const entry = register()
+
+  // Queued first: with a question open the same call would be read as its
+  // ANSWER, and this message has to stay unread for the notice to name it.
+  await hooks.tool.message.execute(
+    { subagent: "coder#1", text: "use the HTTP API, not the SQLite path" },
+    primaryCtx,
+  )
+  assert.equal(entry.messagesIn.length, 1)
+  assert.equal(entry.messagesIn[0].seen, false)
+
+  const asking = hooks.tool.ask.execute({ question: "which lockfile?" }, subCtx)
+  await untilAsking()
+  posted.length = 0
+
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: SUB } } })
+
+  const result = await asking
+  assert.match(result.output, /ended without an answer \(ended\)/)
+  assert.equal(pendingAsks.size, 0, "the run ending leaves no waiter behind")
+
+  const notice = posted.find((p) => p.sessionID === PRIMARY && /📨 exchange/.test(p.text))
+  assert.ok(notice, "the parent's wake notice carries the exchange line")
+  assert.match(notice.text, /📨 exchange: 1 message down, 1 unanswered/)
+  assert.match(notice.text, /was never read/)
+  assert.match(notice.text, /still inside a tool call when it finished/)
 })
 
 test("teardownSubagent is the catch-all: no ending path leaves a waiter behind", async () => {

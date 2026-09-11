@@ -9,7 +9,9 @@ dying. Current design only.
 
 Both are registered in the non-solo arm of `createTools` (`src/tools.js`), beside
 `spawn` / `abort` / `list` / `reuse`, and both handlers go through
-`guard(name, handler)`. `midRunMessaging` gates no registration — it is read live
+`guard(name, handler)`. The handlers themselves live in `src/midrun.js`, built by
+`createMidRunTools({ client, unknown })` — `createTools` keeps the two
+registrations and hands over the client and the shared unknown-handle refusal. `midRunMessaging` gates no registration — it is read live
 in each handler — so switching the channel off needs no opencode restart and the
 tools simply refuse while it is off.
 
@@ -93,10 +95,15 @@ outlive its session.
 | unknown or foreign handle | `message` | the handle, in the `abort` handler's wording |
 | the entry is not running | `message` | that it has finished, and the way forward: `reuse()` where retention is on, a fresh `spawn` where it is not |
 | the text is over `maxMessageTokens` | both | the figure it refused on |
+| the target is at its own context budget | `message` | the subagent's current context, its type's budget, and what the text would add — measured with `estimateTokens`, the unit every other budget figure is in, not with the `estimateReplyTokens` the ceiling row above uses |
 | `midRunMessaging` is off | both | the switch |
+| solo mode is active | `message` | that one agent runs and there is no subagent to say anything to. Unreachable on a correct instance — the tool is not registered in solo mode — and kept as the second gate behind a route the tool map does not decide |
 | the session write failed | `message` | the `promptSession` throw, verbatim, so the caller can retry |
+| the calling session is no tracked subagent | `ask` | that it was not spawned by an orchestrator, so the question would reach nobody |
 | the caller is itself a subagent | `ask` | that its caller is blocked and cannot answer |
-| a question is already open | `ask` | one at a time |
+| the text is empty | both | what to write instead |
+| a question is already open | `ask` | one at a time, quoting the open question |
+| the question notice never reached the caller | `ask` | the post error, and `Blocked:` as the way out |
 
 ## Ceilings
 
@@ -124,9 +131,23 @@ untouched by this feature.
 ## The exchange line
 
 `completionNotice` ends with `📨 exchange: 2 messages down, 1 question answered,
-1 unanswered`, read off `messagesIn` / `asksAnswered` / `asksUnanswered` inside
-the critical section that removes the entry. Absent for a run with no traffic, so
-an ordinary completion notice is unchanged.
+1 unanswered`, read off `messagesIn` / `asksOut` / `asksAnswered` /
+`asksUnanswered` by `exchangeSnapshot` inside the critical section that removes
+the entry. Absent for a run with no traffic, so an ordinary completion notice is
+unchanged.
+
+`asksOut` counts every question opened, `asksAnswered` and `asksUnanswered` only
+those a wait was taken on; a question delivered under `answerWaitMs: 0` ends
+`not-waiting` and `clearAsk` counts it as neither. The difference between the two
+is reported as its own clause — `1 question delivered without a wait` — rather
+than folded into the unanswered count, which would report an unanswered question
+on a run configured never to wait for one.
+
+All four figures are **per run**: an accepted `reuse` resets them
+(`reviveRetainedEntryLocked`), so run 2's wake reports run 2's traffic and does
+not name as unread a message the session has held in its context since run 1. A
+reuse whose prompt never reached the session puts them back
+(`restoreRetainedEntryLocked`).
 
 A message queued but never read (`seen` still false — `markMessagesSeen` is called
 from the one hook that fires per LLM request) is named explicitly: the caller was

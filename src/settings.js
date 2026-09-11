@@ -452,8 +452,9 @@ function envStr(name, def) {
 // own checks, and note that answerWaitMs is additionally clamped against the
 // watchdog's tool-call window (src/agentmsg.js).
 // maxRetainedSubagents is how many finished subagents may be held alive as
-// retained sessions at once; 0 (the default) switches retention off and every
-// subagent's session is deleted as soon as its result is delivered.
+// retained sessions at once; the shipped default is 2, so retention is on. The
+// rollback is 0, which switches retention off and has every subagent's session
+// deleted as soon as its result is delivered.
 // retainedSubagentTtlMs is how long one retained subagent is held before the
 // watchdog reaps it, floored at 1 ms — the window is never "forever".
 // reuseContext is the per-agent reuse ceiling exactly as the file holds it
@@ -814,6 +815,25 @@ export function compactionEnabledFor(agent) {
   const s = getSettings()
   if (Object.hasOwn(s.agentCompaction, agent)) return s.agentCompaction[agent]
   return s.compaction
+}
+
+// The window, in ms, a subagent with work in flight is measured against:
+// `maxSubagentToolCallMs` where the settings carry one, the silence window
+// `maxSubagentAgeMs` where they do not. Absent is not the same statement as an
+// explicit 0 — a settings object naming no tool-call window means "no window
+// wider than the silence one", while an explicit 0 means "no ceiling at all
+// while a subagent works" and is returned as the 0 it is.
+//
+// One function because two places have to agree on which window fires:
+// `watchdogLimit` (src/watchdog.js), which is what actually reaps, and
+// `askWaitMs` (src/agentmsg.js), which clamps a blocked `ask` to stay inside
+// that same window. A clamp measured against a different window than the one
+// that fires is not a clamp. It lives here rather than in either of them
+// because watchdog.js imports agentmsg.js, so neither could own it.
+export function workingWindowMs(settings = getSettings()) {
+  return Number.isFinite(settings?.maxSubagentToolCallMs)
+    ? settings.maxSubagentToolCallMs
+    : settings?.maxSubagentAgeMs
 }
 
 // Whether this process offers retention at all, decided at the first read and

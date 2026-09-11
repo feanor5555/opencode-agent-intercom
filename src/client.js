@@ -328,11 +328,16 @@ export async function createChildSession(client, { parentID, title, directory })
 // before the runner loop is entered. A session that is busy picks the message up
 // at its next step, an idle one simply keeps it. So the non-idempotency above
 // does not apply to such a send: a duplicate delivery costs a repeated
-// paragraph in the transcript, not a second run. Its retry policy is therefore
-// postNotice's — both failure kinds, no status narrowing — because there is
-// nothing left for the narrow policy to protect, and a steering message the
-// caller was told had been queued must not be lost to one blip. It is the
-// mid-run channel's delivery route and the only call site that passes it.
+// paragraph in the transcript, not a second run. So it widens the retry to
+// "indeterminate" as well — a steering message the caller was told had been
+// queued must not be lost to one blip, and there is nothing left for the
+// duplicate-prompt caution to protect. What it does NOT drop is the status
+// narrowing: a 4xx is as terminal here as anywhere — the session was deleted
+// underneath the send, or the body was rejected — and retrying it only delays
+// the refusal the orchestrator has to act on by the whole backoff. Retried are
+// a 5xx and a failure that carries no status at all, which is every
+// "indeterminate" one (`attempt` classes a statusless throw that way). It is
+// the mid-run channel's delivery route and the only call site that passes it.
 export async function promptSession(
   client,
   { sessionID, agent, prompt, hideable = false, noReply = false },
@@ -362,6 +367,7 @@ export async function promptSession(
           retries: postNoticeRetries,
           backoffMs: postNoticeRetryBackoffMs,
           retryKinds: ["refused", "indeterminate"],
+          shouldRetry: (err) => typeof err.status !== "number" || err.status >= 500,
           context: { sessionID, noReply: true },
         }
       : {

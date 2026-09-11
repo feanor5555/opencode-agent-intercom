@@ -37,6 +37,11 @@ import { forgetSessionDirectory } from "./client.js"
 // The pause map's published copy for the sidebar. A leaf module over log.js and
 // node:fs alone, so it adds no cycle here either.
 import { publishEndlessPause, unpublishEndlessPause } from "./endlesspause.js"
+// The frozen set of ask outcomes, so clearAsk classifies against the same list
+// the `ask` tool renders from. agentmsg.js imports state / settings / log and
+// nothing from here, so this adds no cycle either.
+import { ASK_OUTCOMES } from "./agentmsg.js"
+import { log } from "./log.js"
 
 // Re-export so callers (e.g. hooks.js in the next slice) can grab the mutex
 // from registry.js without having to know it lives in state.js.
@@ -360,21 +365,36 @@ export function openAsk(entry, ask) {
 // Closes the open question and counts how it ended. Returns false where there
 // was none, so every ending path may call it unconditionally and twice.
 //
-// `answered` is the one outcome that counts as answered; every other ending —
-// the window expiring, an abort, a watchdog reap, a teardown that named no
-// outcome — counts as unanswered, because from the subagent's side they are
-// the same thing: it asked and no answer came. The completion notice reports
-// the two figures as they stand here.
+// `outcome` is one of ASK_OUTCOMES (src/agentmsg.js) and the three-way split is
+// explicit:
+//
+//   answered    — counted as answered.
+//   not-waiting — counted as NEITHER. No wait was taken, so nobody was asked to
+//                 answer inside this run and nobody failed to: charging it to
+//                 asksUnanswered would report an unanswered question on a run
+//                 configured never to wait for one. `asksOut` still counts it,
+//                 and the exchange line reports the difference.
+//   everything else — the window expiring, an abort, a watchdog reap, a
+//                 teardown, a reset — counted as unanswered, because from the
+//                 subagent's side they are the same thing: it asked and no
+//                 answer came.
+//
+// An outcome outside the set is counted as unanswered and logged: it is a bug
+// at the call site, and the conservative count is the one that does not hide a
+// question the orchestrator left standing.
 export function clearAsk(entry, outcome) {
   if (!entry?.pendingAsk) return false
   entry.pendingAsk = undefined
+  if (!ASK_OUTCOMES.includes(outcome)) {
+    log("clearAsk: outcome outside ASK_OUTCOMES, counted as unanswered", { outcome })
+  }
   if (outcome === "answered") entry.asksAnswered = (entry.asksAnswered ?? 0) + 1
-  else entry.asksUnanswered = (entry.asksUnanswered ?? 0) + 1
+  else if (outcome !== "not-waiting") entry.asksUnanswered = (entry.asksUnanswered ?? 0) + 1
   return true
 }
 
 // The mid-run traffic of one run as the completion notice reports it:
-// `{ messages, unread, unreadAt, asksAnswered, asksUnanswered }`.
+// `{ messages, unread, unreadAt, asksOut, asksAnswered, asksUnanswered }`.
 //
 // Read off the entry in the same critical section that removes it, because the
 // entry is gone by the time the notice is composed. `unread` counts the
@@ -392,6 +412,7 @@ export function exchangeSnapshot(entry) {
     messages: messages.length,
     unread: unread.length,
     unreadAt: unread[0]?.sentAt,
+    asksOut: entry?.asksOut ?? 0,
     asksAnswered: entry?.asksAnswered ?? 0,
     asksUnanswered: entry?.asksUnanswered ?? 0,
   }
@@ -653,6 +674,12 @@ export function retainEntryLocked(sessionID, now = Date.now()) {
 //     its first tick and name run 1's tool as the one that was cut off;
 //   - `retainedAt` cleared: the window is over, and a window is per retention
 //     rather than per session — the next idle stamps a fresh one;
+//   - the mid-run channel's five fields — `messagesIn` and the three ask
+//     counters — back to empty and 0. They are what the exchange line of the
+//     completion notice reports, and that line speaks of one run: left
+//     standing, run 2's wake would report run 1's traffic a second time and
+//     name a message as never read that the session has had in its context
+//     since before this run started;
 //   - `runs` up by one, and `packageTokens` replaced by this follow-up's
 //     estimate, which is what the completion notice reports against the budget;
 //   - `ctxTokens` / `lastTokensFetchAt` taken from the snapshot the gate ran
@@ -686,6 +713,10 @@ export function reviveRetainedEntryLocked(
     lastActivityAt: entry.lastActivityAt,
     toolCalls: entry.toolCalls,
     status: entry.status,
+    messagesIn: entry.messagesIn,
+    asksOut: entry.asksOut,
+    asksAnswered: entry.asksAnswered,
+    asksUnanswered: entry.asksUnanswered,
   }
   entry.lifecycle = LIFECYCLE_RUNNING
   entry.status = "busy"
@@ -695,6 +726,10 @@ export function reviveRetainedEntryLocked(
   entry.lastActivityAt = now
   entry.toolCalls = new Map()
   entry.retainedAt = undefined
+  entry.messagesIn = []
+  entry.asksOut = 0
+  entry.asksAnswered = 0
+  entry.asksUnanswered = 0
   entry.runs = (entry.runs ?? 1) + 1
   entry.packageTokens = packageTokens || undefined
   if (Number.isFinite(ctxTokens) && ctxTokens > 0) {
@@ -730,6 +765,13 @@ export function restoreRetainedEntryLocked(sessionID, previous) {
   entry.lastActivityAt = previous.lastActivityAt
   if (previous.toolCalls) entry.toolCalls = previous.toolCalls
   entry.status = previous.status
+  // The mid-run counters go back with the rest: no run started, so run 1's
+  // traffic is still the only traffic this session has had, and it is still
+  // what the wake notice of run 1 was composed from.
+  entry.messagesIn = previous.messagesIn
+  entry.asksOut = previous.asksOut
+  entry.asksAnswered = previous.asksAnswered
+  entry.asksUnanswered = previous.asksUnanswered
   return true
 }
 
@@ -2140,9 +2182,13 @@ function createEntry(
     pendingAsk: undefined,
     // The questions this subagent has put up, and how those ended. Kept as
     // three counters rather than a list because they are read for one line of
-    // the completion notice and nothing else. Cumulative across the runs of a
-    // reused session, exactly as nestedSpawns / nestedRuns are, and labelled as
-    // cumulative where they are reported.
+    // the completion notice and nothing else. `asksOut` counts every question
+    // opened; `asksAnswered` and `asksUnanswered` how they ended, and their sum
+    // falls short of `asksOut` by exactly the questions that took no wait at
+    // all (`not-waiting`, see clearAsk). Per RUN, like messagesIn above and
+    // unlike nestedSpawns / nestedRuns: an accepted reuse resets all four
+    // (reviveRetainedEntryLocked), because the exchange line reports the run
+    // that just finished.
     asksOut: 0,
     asksAnswered: 0,
     asksUnanswered: 0,

@@ -75,8 +75,20 @@ test("a run with no mid-run traffic renders the completion notice it always did"
 })
 
 test("the exchange line reports messages down, answered and unanswered questions", () => {
-  const text = notice({ messages: 2, unread: 0, asksAnswered: 1, asksUnanswered: 1 })
+  const text = notice({ messages: 2, unread: 0, asksOut: 2, asksAnswered: 1, asksUnanswered: 1 })
   assert.match(text, /📨 exchange: 2 messages down, 1 question answered, 1 unanswered\./)
+})
+
+test("a question that took no wait is its own clause, not an unanswered one", () => {
+  // `answerWaitMs: 0`: the question was delivered and the call returned at once,
+  // so nobody was given the chance to answer it and nobody failed to.
+  const text = notice({ messages: 0, unread: 0, asksOut: 2, asksAnswered: 0, asksUnanswered: 0 })
+  assert.match(text, /📨 exchange: 2 questions delivered without a wait\./)
+  assert.doesNotMatch(text, /unanswered/)
+
+  // And it is countable beside the ones that did take a wait.
+  const mixed = notice({ messages: 0, unread: 0, asksOut: 2, asksAnswered: 0, asksUnanswered: 1 })
+  assert.match(mixed, /📨 exchange: 1 unanswered, 1 question delivered without a wait\./)
 })
 
 test("a message the subagent never read is named, with the time it was sent", () => {
@@ -92,6 +104,7 @@ test("exchangeSnapshot reads the entry the notice is composed from", () => {
   noteMessageIn(entry, "second", 2000)
   markMessagesSeen(entry)
   noteMessageIn(entry, "third", 3000)
+  entry.asksOut = 3
   entry.asksAnswered = 1
   entry.asksUnanswered = 2
 
@@ -99,6 +112,7 @@ test("exchangeSnapshot reads the entry the notice is composed from", () => {
     messages: 3,
     unread: 1,
     unreadAt: 3000,
+    asksOut: 3,
     asksAnswered: 1,
     asksUnanswered: 2,
   })
@@ -107,6 +121,7 @@ test("exchangeSnapshot reads the entry the notice is composed from", () => {
     messages: 0,
     unread: 0,
     unreadAt: undefined,
+    asksOut: 0,
     asksAnswered: 0,
     asksUnanswered: 0,
   })

@@ -28,7 +28,7 @@
 // running.
 
 import { pendingAsks } from "./state.js"
-import { getSettings } from "./settings.js"
+import { getSettings, workingWindowMs } from "./settings.js"
 import { log } from "./log.js"
 
 // How a question ended. The subagent's `ask` tool call renders its tool result
@@ -61,11 +61,10 @@ export const ASK_WAIT_WATCHDOG_MARGIN_MS = 60000
 //
 // Two numbers decide it. `answerWaitMs` is what the user asked for, and 0 there
 // means the question is delivered and the tool returns at once. Against it
-// stands the watchdog window the blocked call sits on, read exactly as
-// `watchdogLimit` reads it (src/watchdog.js) so the clamp is measured against
-// the window that will really fire: `maxSubagentToolCallMs` where the settings
-// carry one, the silence window where they do not — absent is not the same
-// statement as an explicit 0.
+// stands the watchdog window the blocked call sits on, resolved by the one
+// helper `watchdogLimit` (src/watchdog.js) resolves it with — `workingWindowMs`
+// in src/settings.js — so the clamp is measured against the window that will
+// really fire rather than against a second reading of the same two settings.
 //
 // An explicit 0 on that window means "no ceiling while a subagent works", so
 // there is nothing to clamp against and the requested wait stands unclamped.
@@ -78,9 +77,7 @@ export const ASK_WAIT_WATCHDOG_MARGIN_MS = 60000
 export function askWaitMs(settings = getSettings()) {
   const requested = settings?.answerWaitMs
   if (!Number.isFinite(requested) || requested <= 0) return 0
-  const windowMs = Number.isFinite(settings?.maxSubagentToolCallMs)
-    ? settings.maxSubagentToolCallMs
-    : settings?.maxSubagentAgeMs
+  const windowMs = workingWindowMs(settings)
   if (!Number.isFinite(windowMs) || windowMs <= 0) return requested
   const room = windowMs - ASK_WAIT_WATCHDOG_MARGIN_MS
   if (room <= 0) return 0
@@ -156,6 +153,11 @@ export function registerAskWaiter(sessionID, parentID, { question, id, timeoutMs
 
   const record = {
     sessionID,
+    // The caller as it stood when the question was asked. Used for the log line
+    // and carried back in the resolved outcome; it is NOT re-read by any
+    // routing decision, which is why an orchestrator handoff (reparentSubagents,
+    // src/registry.js) rewrites `parentID` on the registry entry and leaves this
+    // one as the historical record of who was asked.
     parentID,
     id: askId,
     question,
@@ -250,30 +252,4 @@ export function openAskFor(sessionID) {
     parentID: record.parentID,
     waitMs: record.waitMs,
   }
-}
-
-// Every question currently waiting on `parentID`, oldest first, each as
-// `{ sessionID, id, question, askedAt, waitMs }`. The direction the caller asks
-// in: which of my subagents have stopped and are waiting for me.
-//
-// A linear scan, like liveChildSessionIDs: one record per waiting subagent
-// across the whole process, bounded by the concurrency cap — single digits at
-// the very most, and a reverse index would be a second thing to keep in step
-// for no measurable gain. Map iteration is insertion order, so the result is in
-// the order the questions were asked.
-export function openAsksFor(parentID) {
-  if (!parentID) return []
-  const out = []
-  for (const record of pendingAsks.values()) {
-    if (record.parentID === parentID && !record.settled) {
-      out.push({
-        sessionID: record.sessionID,
-        id: record.id,
-        question: record.question,
-        askedAt: record.askedAt,
-        waitMs: record.waitMs,
-      })
-    }
-  }
-  return out
 }

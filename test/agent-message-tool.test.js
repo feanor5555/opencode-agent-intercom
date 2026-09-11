@@ -239,6 +239,31 @@ test("a subagent at its context budget is not pushed over it by a steering note"
   assert.equal(prompts.length, 0)
 })
 
+test("the budget gate is measured in the unit every other budget figure is in", async () => {
+  // 700 ASCII characters: 175 tokens to `estimateTokens`, the arithmetic every
+  // context budget in the plugin is done in, and 200 to the `estimateReplyTokens`
+  // that decides where a REPLY is cut. At 810 of an 1000-token budget the text
+  // fits under the first and not under the second, so the gate refusing here
+  // would be refusing earlier than the budget it names.
+  const { ctx, prompts } = makeCtx()
+  const hooks = await plugin(ctx)
+  const entry = register()
+  settings({ maxContext: 1000 })
+  entry.ctxTokens = 810
+  const text = "x".repeat(700)
+
+  const res = await hooks.tool.message.execute({ subagent: "coder#1", text }, toolCtx)
+  assert.match(res.output, /Queued for "coder#1"/)
+  assert.equal(prompts.length, 1)
+
+  // And one token over the budget in that same unit is refused, quoting the
+  // estimateTokens figure rather than the reply one.
+  entry.ctxTokens = 826
+  const refused = await hooks.tool.message.execute({ subagent: "coder#1", text }, toolCtx)
+  assert.match(refused.output, /826 tokens of its 1.0k coder budget, and 175 more would put it over/)
+  assert.equal(prompts.length, 1, "nothing further was written to the session")
+})
+
 test("with a question open the text is its answer: the waiter settles and nothing is sent", async () => {
   const { ctx, prompts } = makeCtx()
   const hooks = await plugin(ctx)

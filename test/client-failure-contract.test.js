@@ -507,9 +507,10 @@ test("createChildSession: a thrown transport error still propagates to the calle
 //
 // `noReply: true` asks opencode to PERSIST the message and start no turn. That
 // makes the send idempotent in the only sense that matters — a duplicate costs
-// a repeated paragraph, not a second run — so its retry policy is postNotice's
-// (both failure kinds) rather than the narrow 5xx-only one the turn-starting
-// send has to keep.
+// a repeated paragraph, not a second run — so it widens the retry to the
+// indeterminate failure the turn-starting send must refuse. What it keeps is the
+// status narrowing: a 4xx is terminal here as everywhere, and retrying it would
+// only delay the refusal the orchestrator has to act on.
 
 test("promptSession: noReply travels in the body and only where it is asked for", async () => {
   const client = fakeClient("session", "promptAsync", async () => ({
@@ -537,11 +538,27 @@ test("promptSession: a noReply send retries a thrown transport error too", async
   assert.equal(calls, 3, "1 initial attempt + 2 retries of the indeterminate failure")
 })
 
-test("promptSession: a noReply send retries a refused 4xx the narrow policy would not", async () => {
-  const client = fakeClient("session", "promptAsync", async (n) =>
-    n < 3 ? envelope(429, "TooManyRequestsError", "slow down") : { data: undefined, response: { status: 204 } },
+test("promptSession: a noReply send does not retry a terminal 4xx", async () => {
+  // The session was deleted underneath the send. No number of retries can make
+  // it exist again, so the backoff would only delay the refusal the caller has
+  // to act on.
+  const client = fakeClient("session", "promptAsync", async () =>
+    envelope(404, "NotFoundError", "session not found"),
   )
-  await promptSession(client, { sessionID: "ses_p", prompt: "steer", noReply: true })
+  await assert.rejects(
+    () => promptSession(client, { sessionID: "ses_p", prompt: "steer", noReply: true }),
+    (err) => err.status === 404 && err.kind === "refused",
+  )
+  assert.equal(client.calls.length, 1, "refused once, no retry")
+})
+
+test("promptSession: a noReply send retries a 5xx", async () => {
+  const client = fakeClient("session", "promptAsync", async (n) =>
+    n < 3
+      ? envelope(503, "UnavailableError", "try later")
+      : { data: undefined, response: { status: 204 } },
+  )
+  await promptSession(client, { sessionID: "ses_p5", prompt: "steer", noReply: true })
   assert.equal(client.calls.length, 3)
 })
 

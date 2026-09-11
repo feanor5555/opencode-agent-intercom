@@ -30,7 +30,7 @@
 // See watchdogLimit.
 
 import { registry, aborted } from "./state.js"
-import { getSettings, retentionCapacity } from "./settings.js"
+import { getSettings, retentionCapacity, workingWindowMs } from "./settings.js"
 import { abortSession, fetchSnapshot } from "./client.js"
 import {
   countRetainedSubagents,
@@ -332,11 +332,11 @@ export function isWaitingOnWatchdoggedChild(sessionID) {
 // wider than the silence one", exactly as childWaiterTimeoutMs reads it
 // (childwait.js): absent is not the same statement as an explicit 0, and
 // defaulting it to `undefined` would reap every working entry on the first tick
-// (`silentMs <= undefined` is false) and report a NaN limit to the parent.
+// (`silentMs <= undefined` is false) and report a NaN limit to the parent. That
+// reading is `workingWindowMs` (src/settings.js), shared with the clamp
+// `askWaitMs` puts on a blocked `ask` so the two cannot drift apart.
 export function watchdogLimit(entry, settings = getSettings()) {
-  const toolCallMs = Number.isFinite(settings?.maxSubagentToolCallMs)
-    ? settings.maxSubagentToolCallMs
-    : settings?.maxSubagentAgeMs
+  const toolCallMs = workingWindowMs(settings)
   const oldest = oldestToolCall(entry)
   if (oldest) {
     return {

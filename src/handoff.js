@@ -168,10 +168,12 @@ async function performPrimaryHandoffInner(deps) {
   // 0b. Drop the retained subagents of the primary that is being replaced. A
   // retained entry must not outlive its primary: the new orchestrator never
   // saw the work such a session holds, and an entry left behind would keep a
-  // handle pointing at the archived old primary. Best-effort and optional —
-  // a caller that retains nothing (every test harness, and every process with
-  // `maxRetainedSubagents` at its default of 0) passes no such dep, and a drop
-  // that throws must not cost the primary its handoff.
+  // handle pointing at the archived old primary. At the shipped default of
+  // `maxRetainedSubagents: 2` the dep is wired and this step runs on every
+  // handoff. Best-effort and optional all the same — a caller that retains
+  // nothing (every test harness, and every process rolled back to
+  // `maxRetainedSubagents: 0`) passes no such dep, and a drop that throws must
+  // not cost the primary its handoff.
   if (deps.dropRetainedSubagents) {
     try {
       await deps.dropRetainedSubagents()

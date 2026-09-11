@@ -159,27 +159,39 @@ export function askNotice(entry, ask) {
 // The tail line that reports the mid-run traffic of a finished run, and the one
 // place a steering attempt that was never read is named.
 //
-// `exchange` is `{ messages, unread, unreadAt, asksAnswered, asksUnanswered }`,
-// read off the registry entry inside the critical section that removes it.
-// Absent — the empty string — for a run with no traffic at all, which is every
-// run that never used the channel, so an ordinary completion notice is
-// byte-identical to what it has always been.
+// `exchange` is `{ messages, unread, unreadAt, asksOut, asksAnswered,
+// asksUnanswered }`, read off the registry entry inside the critical section
+// that removes it. Absent — the empty string — for a run with no traffic at
+// all, which is every run that never used the channel, so an ordinary
+// completion notice is byte-identical to what it has always been.
 //
 // A message queued but never read is the one thing this line must not leave
 // implicit: the orchestrator was told it had been queued, and if it finished
 // inside the tool call it was in when the message arrived, that steering simply
 // did not happen. Silence there would let the orchestrator believe a correction
 // landed that never did.
+//
+// The second is a question that took no wait: `asksOut` counts every question
+// opened, `asksAnswered` and `asksUnanswered` only those that could be waited
+// on, so the difference between them is exactly the questions delivered under
+// `answerWaitMs: 0`. Reported as its own clause rather than folded into the
+// unanswered count, which would accuse the orchestrator of ignoring a question
+// this run never gave it the chance to answer.
 function exchangeNotice(exchange) {
   const messages = exchange?.messages ?? 0
+  const asked = exchange?.asksOut ?? 0
   const answered = exchange?.asksAnswered ?? 0
   const unanswered = exchange?.asksUnanswered ?? 0
-  if (messages === 0 && answered === 0 && unanswered === 0) return ""
+  const unwaited = Math.max(0, asked - answered - unanswered)
+  if (messages === 0 && answered === 0 && unanswered === 0 && unwaited === 0) return ""
   const parts = []
   if (messages > 0) parts.push(`${messages} message${messages === 1 ? "" : "s"} down`)
   if (answered > 0) parts.push(`${answered} question${answered === 1 ? "" : "s"} answered`)
   if (unanswered > 0) {
     parts.push(`${unanswered} unanswered`)
+  }
+  if (unwaited > 0) {
+    parts.push(`${unwaited} question${unwaited === 1 ? "" : "s"} delivered without a wait`)
   }
   const unread = exchange?.unread ?? 0
   const when = exchange?.unreadAt ? new Date(exchange.unreadAt).toTimeString().slice(0, 5) : ""

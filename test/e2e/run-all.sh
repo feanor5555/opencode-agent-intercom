@@ -1,6 +1,8 @@
 #!/bin/bash
-# Runs all 8 single-agent end-to-end tests, the multi-agent test and the
-# endless-mode cycle, writes captures under ./out.
+# Runs all 8 single-agent end-to-end tests, the multi-agent test, the two
+# mid-run-channel drivers and the endless-mode cycle, writes captures under
+# ./out. The mid-run drivers assert; a failed criterion of theirs does not stop
+# the suite but decides its exit code at the end.
 #
 # It owns the server the message-tree drivers use: it builds the TUI half of the
 # plugin, starts a fresh `opencode serve` in the configured project, exports
@@ -103,6 +105,15 @@ unset OPENCODE_AGENT_INTERCOM_LOG_REQUESTS
 "$HERE/run-task.sh" gitter     "Show me the style of the last 5 commits in this repo. Report subject style, language, and whether bodies are used. Do NOT make any new commit." 09-gitter
 "$HERE/multi-task.sh"
 
+# The two mid-run-channel drivers. Unlike everything above they ASSERT and exit
+# non-zero on a failed criterion, so their status is collected instead of
+# ending the suite here: the endless cycle below still has to run, and its own
+# server has to be started and stopped whatever these two found. The collected
+# status is what this script exits on at the very end.
+MIDRUN_FAILED=""
+"$HERE/message-task.sh" || MIDRUN_FAILED="$MIDRUN_FAILED message-task.sh(exit $?)"
+"$HERE/ask-task.sh" || MIDRUN_FAILED="$MIDRUN_FAILED ask-task.sh(exit $?)"
+
 # The suite server goes down HERE, before the last driver, not only in the EXIT
 # trap. endless-task.sh starts a server of its own, but it arms endless mode
 # through the GLOBAL settings file (~/.config/opencode/agent-intercom.json),
@@ -119,3 +130,10 @@ echo "--- stopping the suite server before the endless driver ---"
 e2e_server_stop
 
 "$HERE/endless-task.sh"
+
+# The mid-run drivers' verdict, held back above so the endless cycle still ran.
+if [ -n "$MIDRUN_FAILED" ]; then
+  echo ""
+  echo "mid-run driver(s) failed:$MIDRUN_FAILED — see $OUTDIR/13-message.report.txt and $OUTDIR/14-ask.report.txt" >&2
+  exit 1
+fi

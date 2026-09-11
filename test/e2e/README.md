@@ -21,17 +21,33 @@ that opencode upgrades don't shift the system-prompt composition.
 - `nested-task.sh` — nested-delegation harness. Drives one nested spawn
   (orchestrator → coder → researcher) and asserts it; see "Nested delegation"
   below.
+- `message-task.sh` — mid-run MESSAGE harness. Spawns a subagent on three slow
+  shell steps, waits until its session really shows a running tool call, has the
+  orchestrator `message(...)` it, and asserts the delivery moment off the
+  subagent's own session: the framed block landed inside that call, sits between
+  two steps of the same run, the next step began once the call returned, and no
+  tool call started after it. See "The mid-run channel" below.
+- `ask-task.sh` — mid-run ASK harness. Spawns a subagent whose task cannot start
+  before one decision, lets it `ask`, answers from the orchestrator, and asserts
+  that the answer came back as the output of the subagent's own `ask` call.
 - `todo-driver.mjs` — TODO.md auto-tracking harness. Drives DONE and BLOCKED
   markers through the wake hook and checks the resulting file.
-- `run-all.sh` — runs the 8 single-agent tests, the multi-agent test and the
-  endless-mode cycles. Owns the server the first ten use: builds the TUI, starts
+- `run-all.sh` — runs the 8 single-agent tests, the multi-agent test, the two
+  mid-run drivers and the endless-mode cycles. The mid-run drivers are the only
+  ones in it that assert: a failed criterion of theirs does not stop the suite —
+  the endless cycle still runs — but it decides the suite's exit code at the
+  end. Owns the server the first ten use: builds the TUI, starts
   a fresh `opencode serve` in the configured directory (default
   `$HOME/testopencode`), and stops it again before the endless driver, which
   needs no server of this suite's and would be contaminated by its sessions —
   and once more on the way out, for every path that does not reach that stop.
 - `lib/` — the Python evidence readers used by `endless-task.sh` (the kickoff
   ids, the successor's first turn, and the child session id of the driver's own
-  spawn), plus their shared recursive payload walker.
+  spawn), plus their shared recursive payload walker; `midrun-message.py` and
+  `midrun-ask.py`, the readers the two mid-run drivers decide on, covered
+  without a server by `test/e2e-midrun-readers.test.js`; and
+  `midrun-common.sh`, the report lines, session calls, capture and debug-log
+  slice those two share.
 - `server-lifecycle.sh` — sourced library, not a driver. Holds the four server
   steps `run-all.sh` and `endless-task.sh` share: `e2e_build_tui`,
   `e2e_server_start`, `e2e_server_wait_ready`, `e2e_server_stop`, plus
@@ -419,6 +435,58 @@ writes the settings file, `endlessMode` stays the user's own switch
 `~/.config/opencode/agent-intercom.json` and the driven project's todo file,
 deletes every session of every cycle, removes the fixture directory, and stops
 the server's process group.
+
+## The mid-run channel
+
+`message-task.sh` and `ask-task.sh` are the only proof of the two claims in
+`specs/mid-run-messaging.md` that no unit test can reach: WHEN a message queued
+into a busy session is read, and that a caller's answer comes back as the result
+of the subagent's own `ask` call.
+
+Both use the server `run-all.sh` owns — they start none of their own and write
+no setting — and both take the driver env contract `OPENCODE_URL`,
+`PROJECT_DIR`, `OUT_DIR`, `E2E_MODEL`. Standalone:
+
+```bash
+OPENCODE_URL=http://127.0.0.1:4567 bash test/e2e/message-task.sh
+OPENCODE_URL=http://127.0.0.1:4567 bash test/e2e/ask-task.sh
+```
+
+They exit `0` when every criterion passed, `1` on a failed one, `2` on a setup
+error, and each writes `out/13-message.report.txt` resp. `out/14-ask.report.txt`
+with one `PASS` / `FAIL` line per criterion and the evidence that decided it.
+The evidence itself is read off the live session by `lib/midrun-message.py` and
+`lib/midrun-ask.py`.
+
+The message driver makes the timing certain instead of hoping for it: the
+subagent's baseline task is three `sleep 30; echo STEP-n-DONE` commands, and the
+driver only prompts the orchestrator to send once the subagent's session really
+shows a `running` tool part. The steered reply is a line the subagent has to
+COMPOSE (`STEERED-STEP-<n>-DONE`), because any literal spelled out in the
+steering text stands in both transcripts whatever the subagent did.
+
+Both drivers need the plugin's debug log (`~/.cache/opencode-agent-intercom/
+debug.log`): the spawned subagent's session id is read out of it, and it is
+read from the byte the driver found rather than truncated. They end their
+capture loop on either way a run ends — the session deleted, or the plugin
+notifying the primary of the completion, which is what happens while retention
+holds the session.
+
+What a green run establishes, from the run of 2026-09-11 against opencode
+1.18.30 with `E2E_MODEL=xai/grok-4.6`:
+
+- the framed message landed 13 s into a `bash` call that ran 30 s, and the
+  subagent's next step began **9 ms after that call returned** — the delivery
+  moment is the next step boundary, and a step, not a turn: the session was
+  never re-prompted (two user messages), and no tool call started after the
+  message although two baseline commands were still outstanding;
+- the subagent's `ask` call stayed open 7494 ms with zero steps and zero other
+  tool calls inside that window, and the orchestrator's answer came back as that
+  call's own output.
+
+What they do NOT cover: a message into a subagent that is BETWEEN steps, a
+question left to expire unanswered, and the clamp of `answerWaitMs` against
+`maxSubagentToolCallMs`. Each run names those in its report as `NOT ASSERTED`.
 
 ## Nested delegation
 

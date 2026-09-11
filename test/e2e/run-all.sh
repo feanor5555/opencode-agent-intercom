@@ -10,15 +10,26 @@
 # way out — on success, on failure and on interrupt. So the run always tests the
 # code in the tree, never whatever build a long-running server happens to carry.
 #
+# The server runs on a THROWAWAY configuration this script builds
+# (config-isolation.sh): a temporary HOME whose ~/.config/opencode carries the
+# machine's providers, this plugin wired, and an llm-models.json that pins every
+# agent to E2E_MODEL. The machine's own ~/.config/opencode is read once and
+# never written — no driver of this suite changes an opencode setting of the
+# machine. Each driver then audits what actually answered and fails the suite on
+# any other model.
+#
 # Prerequisites:
 #   1. curl, python3, jq, npm, setsid and an `opencode` on PATH.
-#   2. A local LLM provider opencode can reach (defaults to localhost:8080).
+#   2. A provider serving E2E_MODEL, configured in the machine's
+#      ~/.config/opencode/opencode.json (carried into the isolated config).
 #
 # Env:
 #   RUN_ALL_PORT           4567   port for the server this script starts
 #   PROJECT_DIR            $HOME/testopencode by default — the project
 #                          sessions are created against, passed on to the drivers
 #   OUT_DIR                ./out  captures, server log and pid file
+#   E2E_MODEL              cliproxy/gpt-5.6-luna — the model every agent is
+#                          pinned to and the only one a turn may answer on
 #   SERVER_START_TIMEOUT_S 60     readiness probe budget
 #
 # endless-task.sh runs last and is the one driver that does NOT use this
@@ -35,6 +46,8 @@ PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
 # Build the TUI, start the server, wait for it, stop it — shared with
 # endless-task.sh.
 . "$HERE/server-lifecycle.sh"
+# The throwaway configuration the server runs on, and the model audit.
+. "$HERE/config-isolation.sh"
 
 PORT=${RUN_ALL_PORT:-4567}
 PROJECT=${PROJECT_DIR:-$HOME/testopencode}
@@ -52,10 +65,21 @@ export OPENCODE_URL
 export PROJECT_DIR="$PROJECT"
 export OUT_DIR="$OUTDIR"
 
+# The pin, resolved and refused before anything starts. Exported, so every
+# driver below runs on the same one.
+e2e_resolve_model || exit 2
+
 if curl -fsS -m 3 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
   echo "something already answers on $OPENCODE_URL — stop it, or set RUN_ALL_PORT to a free port" >&2
   exit 2
 fi
+
+# The throwaway configuration this suite's server runs on. Built before the
+# wiring checks, which then read it rather than the machine's: from here on
+# every path this script and the drivers it sequences resolve — the plugin
+# entry, the settings, the model pin — is one of these files. It is removed in
+# cleanup(), and the machine's ~/.config/opencode is left exactly as it was.
+e2e_iso_create "$PLUGIN_ROOT" '{"maxSubagents":8,"maxContext":130000,"endlessMode":false,"agentMode":"orchestrator"}' || exit 2
 
 # The server picks this plugin up from the global opencode config or from the
 # project it runs in. Checked before anything is started: with neither wired,
@@ -80,6 +104,9 @@ cleanup() {
   echo ""
   echo "--- stopping the suite server ---"
   e2e_server_stop
+  # After the server, never before: the process reads its configuration while
+  # it runs, and endless-task.sh below builds and removes one of its own.
+  e2e_iso_remove
   exit $code
 }
 trap cleanup EXIT

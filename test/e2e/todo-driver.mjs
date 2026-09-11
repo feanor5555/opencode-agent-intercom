@@ -10,15 +10,19 @@
 //     loaded. A `file:` pointer only takes effect for the project that carries
 //     it, so start `opencode serve` from a project whose opencode.json holds
 //     the pointer, or wire the plugin globally.
-//   - A provider serving E2E_MODEL (default xai/grok-4.6), plus per-role
-//     models in the machine's global ~/.config/opencode/llm-models.json.
-//     Single-spawn turns; budget ~5-15 min wall-clock per scenario depending
-//     on the model.
+//   - A provider serving E2E_MODEL (default cliproxy/gpt-5.6-luna). The model
+//     an agent actually runs is the one in the llm-models.json of the HOME the
+//     server was started with, not the one this driver names in its prompt
+//     (applyModelChoices, src/llmmodel.js): start that server through
+//     test/e2e/run-all.sh, or with the isolated configuration
+//     test/e2e/config-isolation.sh builds, or its agents run on the machine's
+//     own per-role choices. Single-spawn turns; budget ~5-15 min wall-clock
+//     per scenario depending on the model.
 //
 // Usage:
 //   node test/e2e/todo-driver.mjs [baseUrl] [projectDir]
 //   defaults: http://localhost:4567   /tmp/intercom-todo-e2e-<ts>
-//   E2E_MODEL: xai/grok-4.6 (provider/model for every primary prompt)
+//   E2E_MODEL: cliproxy/gpt-5.6-luna (provider/model for every primary prompt)
 //
 // Exit code 0 = all scenarios passed; 1 = any failure.
 
@@ -34,7 +38,7 @@ setGlobalDispatcher(new Agent({ headersTimeout: 30 * 60 * 1000, bodyTimeout: 30 
 const baseUrl = process.argv[2] || "http://localhost:4567"
 const projectDir =
   process.argv[3] || mkdtempSync(join(tmpdir(), "intercom-todo-e2e-"))
-const modelRef = process.env.E2E_MODEL || "xai/grok-4.6"
+const modelRef = process.env.E2E_MODEL || "cliproxy/gpt-5.6-luna"
 const modelSlash = modelRef.indexOf("/")
 if (modelSlash <= 0 || modelSlash === modelRef.length - 1) {
   console.error(`E2E_MODEL must be a provider/model pair (got: ${modelRef})`)
@@ -78,8 +82,8 @@ function writeTodo() {
 }
 
 // The session directory here is a fresh /tmp dir OUTSIDE serve-cwd. The
-// primary prompt carries E2E_MODEL explicitly, while spawned subagents resolve
-// their per-role models from the machine's global llm-models.json.
+// primary prompt carries E2E_MODEL explicitly; what each agent really runs on
+// is the llm-models.json of the HOME its server was started with.
 
 // Headless opencode hangs on every tool that defaults to "ask" because there
 // is no one to approve — write/edit/bash/webfetch all sit in state=running
@@ -239,7 +243,7 @@ writeTodo()
 writePermissiveConfig()
 console.log(
   `seeded TODO.md (3 open tasks: T1, T2, R1) + permissive opencode.json` +
-    ` (primary model ${modelRef}; spawned subagents use global llm-models.json)`,
+    ` (primary model ${modelRef}; every agent's real model comes from the server's llm-models.json)`,
 )
 
 const primary = u(

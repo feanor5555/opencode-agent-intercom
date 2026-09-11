@@ -48,6 +48,16 @@ that opencode upgrades don't shift the system-prompt composition.
   without a server by `test/e2e-midrun-readers.test.js`; and
   `midrun-common.sh`, the report lines, session calls, capture and debug-log
   slice those two share.
+- `config-isolation.sh` — sourced library, not a driver. Builds the throwaway
+  opencode configuration a run is carried out in (`e2e_resolve_model`,
+  `e2e_iso_create`, `e2e_iso_remove`), and audits what answered
+  (`e2e_model_audit`, `e2e_audit_subagent_sids`, `e2e_audit_fetch_sessions`).
+  See "What a run touches" below. Covered by
+  `test/e2e-config-isolation.test.js`, which builds a configuration against a
+  fake machine config and drives the audit over fixture captures.
+- `lib/model-audit.py` — the audit's reader: every assistant message in the
+  captures it is given, tallied by the `providerID`/`modelID` opencode stamps
+  on it. Exit `0` all on the pin, `1` any other model, `2` nothing to audit.
 - `server-lifecycle.sh` — sourced library, not a driver. Holds the four server
   steps `run-all.sh` and `endless-task.sh` share: `e2e_build_tui`,
   `e2e_server_start`, `e2e_server_wait_ready`, `e2e_server_stop`, plus
@@ -144,15 +154,78 @@ which is what keeps subagent reads on real paths (see "Known caveats").
 `ENDLESS_PROJECT_DIR` and `NESTED_PROJECT_DIR`.
 
 The setup the drivers are written against:
-- `~/.config/opencode/agent-intercom.json` → `maxSubagents: 8, maxContext: 130000`
+- `agent-intercom.json` → `maxSubagents: 8, maxContext: 130000`, written into
+  the run's own throwaway configuration, never into the machine's
 - `opencode serve` started in `$HOME/testopencode`
-- `E2E_MODEL` defaults to `xai/grok-4.6`; `grok-4.6` is configured under the
-  `xai` and `cliproxy` providers on this machine
-- the model for every spawned subagent is read from the machine's global
-  `~/.config/opencode/llm-models.json`; the drivers do not pin subagent models
+- `E2E_MODEL` defaults to `cliproxy/gpt-5.6-luna` — Luna, as configured under
+  the `cliproxy` provider on this machine. Every agent, the primary and the
+  nine subagent roles alike, is pinned to it; `gpuserver/Qwen3.8 Flash Next` is
+  refused outright, whatever `E2E_MODEL` says
 - Multi-agent test: 4 subagent spawns (planner / coder / reviewer / gitter), all
   status=completed, ~6:26 min wall-clock, 92 messages, produces `bytes()` in
   `src/format.js` plus 5 unit tests in `test/plugin.test.js`
+
+## What a run touches, and what it does not
+
+**No run changes an opencode setting of this machine.** Every driver that owns
+a server builds a throwaway `HOME` first (`e2e_iso_create`) and starts the
+server with it, so the whole of `~/.config/opencode` the server sees is the
+run's own: `opencode.json`, `tui.json`, `llm-models.json` and
+`agent-intercom.json` are written fresh under `$TMPDIR/e2e-opencode-home.*` and
+removed with it at the end. The machine's own `~/.config/opencode` is read
+exactly once — for the provider block, the `AGENTS.md`, the config-directory
+`node_modules` and the search credentials — and never written. `endless-task.sh`
+arms its ceiling in the isolated `agent-intercom.json`, not in the machine's.
+
+`HOME` and not `XDG_CONFIG_HOME` is the lever, because the plugin resolves its
+own three files through `os.homedir()` (`src/llmmodel.js`, `src/settings.js`,
+`src/llmparams.js`) and would otherwise keep reading the machine's
+`llm-models.json` under any `XDG_CONFIG_HOME`.
+
+Three paths stay shared on purpose:
+
+| path | why |
+|---|---|
+| `~/.local/share/opencode` | symlinked in: `auth.json` and `opencode.db`. A fresh one has no provider credentials and no run could authenticate. Sessions are created and deleted there, as they always were. |
+| `~/.cache/opencode-agent-intercom` | symlinked in, so the plugin's `debug.log` stays where every driver slices it. A cache is not a setting. |
+| the driven project (`PROJECT_DIR`) | the drivers work on real files there; each puts back what it seeded (`endless-task.sh`'s todo file and fixture directory). |
+
+And one that deliberately is not: `~/.local/state/opencode/model.json`,
+opencode's per-model variant store, which `applyModelChoices` writes
+(`src/variantstore.js`). The isolated home gets a state directory of its own, so
+a run cannot rewrite the effort the machine shows in its TUI.
+
+**No run uses `gpuserver/Qwen3.8 Flash Next`.** `e2e_resolve_model` refuses that
+pair before anything starts, and `E2E_MODEL` reaches the agents the only way it
+can: through the isolated `llm-models.json`. The model a driver names in its
+POST does **not** decide what answers — `applyModelChoices` (`src/llmmodel.js`)
+writes the file's entry into `config.agent[<name>].model` at instance bootstrap
+and that wins; a live run was answered by Qwen although the request named
+another model. The isolated file therefore pins the ten plugin roles and the
+opencode built-ins that can answer a turn, with no `variant` key, and the
+isolated `opencode.json` carries `model` and `small_model` for anything not
+named there at all.
+
+**Every driver then checks what really answered.** opencode stamps
+`providerID`/`modelID` on every assistant message, so `e2e_model_audit` reads
+them back over the run's captures — the primary sessions and every subagent
+session the driver snapshotted while it was alive (`run-task.sh` and
+`multi-task.sh` take those snapshots in their settle loop, off the session ids
+the plugin's `spawned` lines name). A turn on another model fails the driver:
+`run-task.sh` and `multi-task.sh` exit non-zero, which ends `run-all.sh`; the
+asserting drivers record it as a failed `model-pin` criterion. An audit that
+finds no assistant message at all fails too — an empty capture must not pass.
+
+The one thing the audit cannot see is a subagent session that was deleted
+before any snapshot reached it; for those the pin and the isolated
+configuration are the evidence, and nothing in the audit's output claims
+otherwise.
+
+A driver that uses a server it does not own — `run-task.sh`, `multi-task.sh`,
+`message-task.sh`, `ask-task.sh`, `todo-driver.mjs` — builds no configuration:
+it inherits the `E2E_ISO_*` variables `run-all.sh` exports. Started standalone
+against a server somebody else launched, it audits that server's answers but
+cannot isolate its configuration — that belongs to whoever starts it.
 
 ## Endless mode
 
@@ -283,6 +356,7 @@ And once over the driven cycles together, after the last work-off phase:
 |---|---|
 | re-title | some cycle's accepted rewrite kept an id and gave it a **different** title; the evidence quotes the old and the new one |
 | re-title (V6) | `endless: wind-down task title changed — V6 observation` names that id in that cycle's window — the plugin saw the change and accepted the rewrite instead of rejecting it |
+| model-pin | every assistant message in the run's captures names `E2E_MODEL` — no turn of any cycle ran on another model |
 
 **The carry-over criterion is what closes the vacuous-pass hole.** When a cycle
 latches, the driver copies the todo file to `out/11-endless.cycle<k>.pre-todo.md`
@@ -433,8 +507,8 @@ runtime pause on the successor session and nothing else — the plugin never
 writes the settings file, `endlessMode` stays the user's own switch
 (`src/endless.js`). The driver backs up and restores
 `~/.config/opencode/agent-intercom.json` and the driven project's todo file,
-deletes every session of every cycle, removes the fixture directory, and stops
-the server's process group.
+deletes every session of every cycle, removes the fixture directory, stops the
+server's process group and removes its isolated home.
 
 ## The mid-run channel
 
@@ -443,8 +517,8 @@ the server's process group.
 into a busy session is read, and that a caller's answer comes back as the result
 of the subagent's own `ask` call.
 
-Both use the server `run-all.sh` owns — they start none of their own and write
-no setting — and both take the driver env contract `OPENCODE_URL`,
+Both use the server `run-all.sh` owns — they start none of their own, write no
+setting and build no configuration — and both take the driver env contract `OPENCODE_URL`,
 `PROJECT_DIR`, `OUT_DIR`, `E2E_MODEL`. Standalone:
 
 ```bash
@@ -473,7 +547,7 @@ notifying the primary of the completion, which is what happens while retention
 holds the session.
 
 What a green run establishes, from the run of 2026-09-11 against opencode
-1.18.30 with `E2E_MODEL=xai/grok-4.6`:
+1.18.30 with `E2E_MODEL=xai/grok-4.6` (the pin at the time):
 
 - the framed message landed 13 s into a `bash` call that ran 30 s, and the
   subagent's next step began **9 ms after that call returned** — the delivery
@@ -521,6 +595,7 @@ preflight/setup error. Captures and report land in `out/12-nested.*`.
 | gone | both subagent sessions answer `404` afterwards |
 | clean | no `subagent timed out (inactivity)`, no `subagent llm error`, no `FOREIGN KEY` in the server log |
 | todo | the project's todo file is byte-identical — a nested spawn carries no task id |
+| model-pin | every assistant message of the three captured sessions names `E2E_MODEL` |
 
 Not asserted, and reported as such: the nested quota's own refusal (it needs a
 caller that exhausts `maxNestedSpawns`; `test/nested-delegation.test.js` covers

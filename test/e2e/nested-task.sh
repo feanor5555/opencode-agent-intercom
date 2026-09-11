@@ -35,7 +35,7 @@
 #
 # Unlike endless-task.sh it changes NOTHING outside its own out-dir: no settings
 # key is written, so there is nothing to restore. It reads
-# ~/.config/opencode/agent-intercom.json only to print the resolved setup and to
+# the isolated agent-intercom.json only to print the resolved setup and to
 # refuse a configuration in which the scenario cannot happen.
 #
 # Opt-in, exactly like the other drivers here: it talks to a real opencode,
@@ -69,7 +69,7 @@
 #   POLL_S             2     log poll cadence
 #   PROBE_S            1     liveness probe cadence during the blocked window
 #   OUT_DIR            ./out captures and the report
-#   E2E_MODEL          xai/grok-4.6            provider/model for every primary prompt
+#   E2E_MODEL          cliproxy/gpt-5.6-luna   the pin: every agent runs on it
 #   KEEP_SERVER        0     1 leaves the server running
 #   E2E_TUI_BUILT      0     1 skips the TUI build
 #
@@ -83,8 +83,9 @@
 # run changed it — which is itself a failed criterion), and the server.
 #
 # Prerequisites: curl, python3, setsid, npm, stat, an `opencode` on PATH, a
-# provider serving E2E_MODEL, and per-role models in the machine's global
-# ~/.config/opencode/llm-models.json.
+# provider serving E2E_MODEL, configured in the machine's opencode.json — the
+# driver carries that provider block into the isolated configuration it builds
+# and pins every agent to E2E_MODEL there.
 #
 # NOT `set -e`: a failed criterion must be reported with its evidence and the
 # cleanup must still run, so failures are recorded rather than aborted on.
@@ -96,17 +97,16 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # Building the TUI, starting the server, waiting for it and stopping it again
 # are shared with run-all.sh and endless-task.sh.
 . "$HERE/server-lifecycle.sh"
+# The throwaway configuration this driver's server runs on, and the model audit.
+. "$HERE/config-isolation.sh"
 
 PROJECT_DIR=${NESTED_PROJECT_DIR:-$HOME/testopencode}
 PORT=${NESTED_PORT:-4602}
 BASE=$(e2e_server_url "$PORT")
-MODEL=${E2E_MODEL:-xai/grok-4.6}
-MODEL_PROVIDER=${MODEL%%/*}
-MODEL_ID=${MODEL#*/}
-[ -n "$MODEL_PROVIDER" ] && [ "$MODEL_ID" != "$MODEL" ] && [ -n "$MODEL_ID" ] || {
-  echo "E2E_MODEL must be a provider/model pair (got: $MODEL)" >&2
-  exit 2
-}
+e2e_resolve_model || exit 2
+MODEL="$E2E_MODEL_REF"
+MODEL_PROVIDER="$E2E_MODEL_PROVIDER"
+MODEL_ID="$E2E_MODEL_ID"
 CALLER_ROLE=${NESTED_CALLER:-coder}
 WRONG_TARGET=${NESTED_WRONG_TARGET:-planner}
 DENIED_ROLE=${NESTED_DENIED_ROLE:-designer}
@@ -119,8 +119,10 @@ PROBE_S=${PROBE_S:-1}
 OUT_DIR=${OUT_DIR:-$HERE/out}
 KEEP_SERVER=${KEEP_SERVER:-0}
 
-SETTINGS_FILE="$HOME/.config/opencode/agent-intercom.json"
-DEBUG_LOG="$HOME/.cache/opencode-agent-intercom/debug.log"
+# Both are resolved once the isolated configuration exists — the settings file
+# is the one inside it, the debug log the shared cache's.
+SETTINGS_FILE=""
+DEBUG_LOG=$(e2e_debug_log)
 
 mkdir -p "$OUT_DIR" || { echo "cannot create $OUT_DIR" >&2; exit 2; }
 # Absolute from here on: the server runs with the project directory as its
@@ -397,7 +399,12 @@ cleanup() {
     say "KEEP_SERVER=1 — leaving pid $E2E_SERVER_PID (pgid $E2E_SERVER_PGID) running on $BASE"
   else
     e2e_server_stop
+    # Only once the server that reads it is gone; a kept server keeps its
+    # configuration, and the path is named so it can be removed by hand.
+    e2e_iso_remove
   fi
+  [ "$KEEP_SERVER" = 1 ] && [ -n "${E2E_ISO_HOME:-}" ] &&
+    say "KEEP_SERVER=1 — its isolated configuration stays at $E2E_ISO_HOME"
 
   refresh_slice
   say "debug-log slice: $SLICE_FILE"
@@ -421,6 +428,14 @@ command -v opencode >/dev/null || die "opencode is not on PATH"
 [ -d "$PROJECT_DIR" ] || die "NESTED_PROJECT_DIR does not exist: $PROJECT_DIR"
 
 PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
+
+# The throwaway configuration: every agent on the pin, this plugin wired, the
+# machine's providers carried over, and the machine's own ~/.config/opencode
+# neither written nor read again. Built before the wiring checks, which read it.
+e2e_iso_create "$PLUGIN_ROOT" '{"maxSubagents":8,"maxContext":130000,"endlessMode":false,"agentMode":"orchestrator"}' ||
+  die "could not build the isolated opencode configuration"
+SETTINGS_FILE="$E2E_ISO_SETTINGS_FILE"
+
 e2e_plugin_wired "$PLUGIN_ROOT" "$PROJECT_DIR" ||
   die "$PLUGIN_ROOT is wired nowhere the server would read it — name it in the plugin array of ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json for every directory, or of $PROJECT_DIR/opencode.json for this project alone, or drop a loader into $PROJECT_DIR/.opencode/plugin/ — as it stands the run would observe a server without this plugin"
 
@@ -596,8 +611,9 @@ project dir         $PROJECT_DIR   (opencode.json names the plugin by absolute p
 server              opencode serve --port $PORT --hostname 127.0.0.1   (cwd = project dir)
 server pid / pgid   $E2E_SERVER_PID / $E2E_SERVER_PGID
 opencode version    $SERVER_VERSION
-primary model       $MODEL   (sent on every driver prompt; spawned subagents use the global llm-models.json choices)
-settings file       $SETTINGS_FILE   (read, never written)
+primary model       $MODEL   (every agent is pinned to it in the isolated llm-models.json; asserted per turn below)
+isolated config     $E2E_ISO_OPENCODE_DIR   (the machine's ~/.config/opencode is not written)
+settings file       $SETTINGS_FILE   (inside the isolated config)
 resolved settings   maxNestedSpawns=$MAX_NESTED_SPAWNS maxSubagentAgeMs=$MAX_SUBAGENT_AGE_MS endlessMode=$ENDLESS_MODE endlessContext=$ENDLESS_CONTEXT
 delegating caller   $CALLER_ROLE   (spawns "researcher", must block)
 refused target      $WRONG_TARGET   (asked for first, must be refused)
@@ -1020,6 +1036,16 @@ else
     record "todo — the nested run ticked nothing: still no todo file in the project" 0 \
       "the run created $(echo "$TODO_AFTER" | tr '\n' ' ') in $PROJECT_DIR"
   fi
+fi
+
+# What answered. The orchestrator, the blocked caller and the child were all
+# captured above — the two subagent sessions while they were still alive — so
+# this reads every turn of the run. `applyModelChoices` (src/llmmodel.js) beats
+# the model a POST names, so the request alone would say nothing.
+if e2e_model_audit "$PREFIX" /dev/null "$OUT_DIR/$PREFIX".*.messages.json > /dev/null 2>&1; then
+  record "model-pin — every turn ran on the pinned model" 1 "$E2E_AUDIT_LINE"
+else
+  record "model-pin — every turn ran on the pinned model" 0 "$E2E_AUDIT_LINE"
 fi
 
 note_uncovered "the nested quota's own refusal (maxNestedSpawns exhausted)" \

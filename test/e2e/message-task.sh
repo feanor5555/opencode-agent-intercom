@@ -67,7 +67,7 @@
 #   OPENCODE_URL     http://localhost:4567  the running server
 #   PROJECT_DIR      $HOME/testopencode     sessions are created against it
 #   OUT_DIR          ./out                  captures and the report
-#   E2E_MODEL        xai/grok-4.6           provider/model for every primary prompt
+#   E2E_MODEL        cliproxy/gpt-5.6-luna  the pin: every agent runs on it
 #   MIDRUN_AGENT     debugger               the role that gets messaged; it needs
 #                    the `bash` tool for the slow steps
 #   MIDRUN_MARKER    MIDRUN-MESSAGE-OK      the literal the UN-steered baseline
@@ -391,5 +391,9 @@ mr_note "which baseline step it was in when the message landed" \
   "${ACTED_LINE:-not named — the steered line is missing}"
 mr_note_uncovered "a message into a subagent that is between steps" \
   "this run sends into a tool call on purpose; the between-steps wording of the tool answer is covered by the unit suite alone"
+
+# What answered. Both sessions of this run were captured above, so the audit
+# reads the subagent's turns as well as the orchestrator's.
+mr_model_audit
 
 mr_verdict

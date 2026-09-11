@@ -20,6 +20,8 @@
 #   E2E_TUI_BUILT     1 once the TUI has been built in this process tree;
 #                     exported, so a driver started by another driver that
 #                     already built does not build a second time
+#   E2E_SERVER_ENV    the environment assignments the server process is started
+#                     with, set by config-isolation.sh
 #
 # Functions that set these globals must be called directly in the current shell, never in a
 # pipeline, command substitution, or other subshell: otherwise the state is lost and
@@ -38,6 +40,12 @@ E2E_SERVER_PGID=""
 E2E_SERVER_BASE=""
 E2E_SERVER_LOG=""
 E2E_TUI_BUILT=${E2E_TUI_BUILT:-0}
+# Assignments put in front of the server process, one `KEY=VALUE` per element.
+# `config-isolation.sh` fills it with the throwaway HOME and the XDG variables
+# derived from it, so the server reads the configuration a driver built for it
+# and not the machine's. Empty here: a caller that isolates nothing starts the
+# server in the environment it has itself.
+E2E_SERVER_ENV=()
 
 e2e_say() { printf '%s\n' "$*"; }
 e2e_fail() { printf '%s\n' "$*" >&2; }
@@ -92,7 +100,7 @@ e2e_require_caller_shell() {
 # tool with nothing saying why.
 e2e_plugin_wired() {
   local plugin_root="$1" project_dir="$2" config_home f
-  config_home="${XDG_CONFIG_HOME:-${HOME:-}/.config}/opencode"
+  config_home="${E2E_ISO_CONFIG_HOME:-${XDG_CONFIG_HOME:-${HOME:-}/.config}}/opencode"
   for f in "$project_dir"/opencode.json{,c} "$config_home"/opencode.json{,c}; do
     if [ -f "$f" ] && grep -qF "$plugin_root" "$f"; then
       return 0
@@ -129,7 +137,7 @@ e2e_plugin_wired() {
 e2e_tui_plugin_wired() {
   local plugin_root="$1" project_dir="$2" config_home f
   local -a absent=() unwired=()
-  config_home="${XDG_CONFIG_HOME:-${HOME:-}/.config}/opencode"
+  config_home="${E2E_ISO_CONFIG_HOME:-${XDG_CONFIG_HOME:-${HOME:-}/.config}}/opencode"
   for f in "$config_home"/tui.json{,c} "$project_dir"/tui.json{,c} \
            "$project_dir"/.opencode/tui.json{,c}; do
     if [ ! -f "$f" ]; then
@@ -234,7 +242,12 @@ e2e_server_start() {
   : > "$log_file"
   rm -f "$pid_file"
 
-  setsid bash -c "cd '$project_dir' || exit 1; echo \$\$ > '$pid_file'; exec opencode serve --port $port --hostname 127.0.0.1" \
+  # `env` replaces itself with the bash below, and that bash replaces itself
+  # with opencode, so the pid written into the pid file is still the server's
+  # own. With E2E_SERVER_ENV empty this is `setsid env bash -c …`, which runs
+  # the same shell in the same environment.
+  setsid env "${E2E_SERVER_ENV[@]}" \
+    bash -c "cd '$project_dir' || exit 1; echo \$\$ > '$pid_file'; exec opencode serve --port $port --hostname 127.0.0.1" \
     >> "$log_file" 2>&1 < /dev/null &
 
   for _ in $(seq 1 50); do
@@ -263,7 +276,7 @@ e2e_server_start() {
     e2e_fail "server start: could not read the process group of pid $E2E_SERVER_PID"
     return 1
   fi
-  e2e_say "server starting: pid $E2E_SERVER_PID / pgid $E2E_SERVER_PGID on $E2E_SERVER_BASE (cwd $project_dir, log $log_file)"
+  e2e_say "server starting: pid $E2E_SERVER_PID / pgid $E2E_SERVER_PGID on $E2E_SERVER_BASE (cwd $project_dir, log $log_file${E2E_ISO_HOME:+, HOME $E2E_ISO_HOME})"
   return 0
 }
 

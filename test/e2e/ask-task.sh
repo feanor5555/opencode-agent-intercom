@@ -54,7 +54,7 @@
 #   OPENCODE_URL     http://localhost:4567  the running server
 #   PROJECT_DIR      $HOME/testopencode     sessions are created against it
 #   OUT_DIR          ./out                  captures and the report
-#   E2E_MODEL        xai/grok-4.6           provider/model for every primary prompt
+#   E2E_MODEL        cliproxy/gpt-5.6-luna  the pin: every agent runs on it
 #   ASK_AGENT        planner                the role that asks
 #   ASK_ANSWER_MARKER ASK-ANSWER-ALPHA      the literal the orchestrator is told
 #                    to answer with; it is looked for inside the `ask` call's own
@@ -303,5 +303,9 @@ mr_note "what the subagent did after the answer" \
   "$A_assistants_after_ask step(s), $A_tools_after_ask tool call(s) — tool calls of the whole run: ${A_tool_names:-none}"
 mr_note_uncovered "the unanswered path and the clamp" \
   "a question left to expire, and the clamp against maxSubagentToolCallMs, are covered by the unit suite alone — this run answers inside the window"
+
+# What answered. Both sessions of this run were captured above, so the audit
+# reads the subagent's turns as well as the orchestrator's.
+mr_model_audit
 
 mr_verdict

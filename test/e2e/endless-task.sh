@@ -186,7 +186,7 @@
 #   SERVER_START_TIMEOUT_S 60                  readiness probe budget
 #   POLL_S             2                       log poll cadence
 #   OUT_DIR            ./out                   captures and backups
-#   E2E_MODEL           xai/grok-4.6            provider/model for every primary prompt
+#   E2E_MODEL           cliproxy/gpt-5.6-luna   the pin: every agent runs on it
 #   KEEP_SERVER        0                       1 leaves the server running
 #   E2E_TUI_BUILT      0                       1 skips the TUI build; run-all.sh
 #                      exports it after building once for the whole suite
@@ -196,7 +196,8 @@
 #   1  at least one criterion failed
 #   2  preflight or setup error — nothing was asserted
 #
-# What it changes and puts back: ~/.config/opencode/agent-intercom.json (the
+# What it changes and puts back, all inside its own throwaway HOME: the
+# isolated agent-intercom.json (the
 # four endless keys; backed up and restored — the plugin itself never writes
 # that file, a self-stop such as the cycle ceiling only pauses the mode for the
 # session at runtime, src/endless.js), the todo file of the driven project —
@@ -206,8 +207,9 @@
 # cycle, and the server.
 #
 # Prerequisites: curl, python3, setsid, npm, an `opencode` on PATH, a provider
-# serving E2E_MODEL, and per-role models in the machine's global
-# ~/.config/opencode/llm-models.json.
+# serving E2E_MODEL, configured in the machine's opencode.json — the driver
+# carries that provider block into the isolated configuration it builds and pins
+# every agent to E2E_MODEL there.
 #
 # NOT `set -e`: a failed criterion must be reported with its evidence and the
 # cleanup must still run, so failures are recorded rather than aborted on.
@@ -219,17 +221,16 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # Building the TUI, starting the server, waiting for it and stopping it again
 # are shared with run-all.sh.
 . "$HERE/server-lifecycle.sh"
+# The throwaway configuration this driver's server runs on, and the model audit.
+. "$HERE/config-isolation.sh"
 
 PROJECT_DIR=${ENDLESS_PROJECT_DIR:-$HOME/testopencode}
 PORT=${ENDLESS_PORT:-4599}
 BASE=$(e2e_server_url "$PORT")
-MODEL=${E2E_MODEL:-xai/grok-4.6}
-MODEL_PROVIDER=${MODEL%%/*}
-MODEL_ID=${MODEL#*/}
-[ -n "$MODEL_PROVIDER" ] && [ "$MODEL_ID" != "$MODEL" ] && [ -n "$MODEL_ID" ] || {
-  echo "E2E_MODEL must be a provider/model pair (got: $MODEL)" >&2
-  exit 2
-}
+e2e_resolve_model || exit 2
+MODEL="$E2E_MODEL_REF"
+MODEL_PROVIDER="$E2E_MODEL_PROVIDER"
+MODEL_ID="$E2E_MODEL_ID"
 ENDLESS_CYCLES=${ENDLESS_CYCLES:-2}
 ENDLESS_CONTEXT=${ENDLESS_CONTEXT:-}
 ENDLESS_CONTEXT_CEILING=${ENDLESS_CONTEXT_CEILING:-100000000}
@@ -249,8 +250,11 @@ POLL_S=${POLL_S:-2}
 OUT_DIR=${OUT_DIR:-$HERE/out}
 KEEP_SERVER=${KEEP_SERVER:-0}
 
-SETTINGS_FILE="$HOME/.config/opencode/agent-intercom.json"
-DEBUG_LOG="$HOME/.cache/opencode-agent-intercom/debug.log"
+# The settings file this driver arms endless mode in is the one inside the
+# isolated configuration below, not the machine's: a cycle needs a threshold
+# every opencode instance would otherwise read. Resolved once that exists.
+SETTINGS_FILE=""
+DEBUG_LOG=$(e2e_debug_log)
 
 # The directory the seeded tasks operate on. It is named for this driver, is
 # created by it and is removed again in cleanup. The work-off gates the driver
@@ -735,6 +739,14 @@ cleanup() {
     fi
   fi
 
+  # The whole isolated configuration, once the server that read it is gone and
+  # the settings restore above has run inside it.
+  if [ "$KEEP_SERVER" = 1 ]; then
+    [ -n "${E2E_ISO_HOME:-}" ] && say "KEEP_SERVER=1 — its isolated configuration stays at $E2E_ISO_HOME"
+  else
+    e2e_iso_remove
+  fi
+
   refresh_slice
   say "debug-log slice: $SLICE_FILE"
   say "server log:      $SERVER_LOG"
@@ -765,6 +777,16 @@ if [ "$ENDLESS_MAX_CYCLES" -lt "$ENDLESS_CYCLES" ] 2>/dev/null; then
 fi
 
 PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
+
+# The throwaway configuration this run is carried out in: every agent pinned to
+# the model, endless mode on, the machine's providers carried over, and the
+# machine's own ~/.config/opencode neither written nor read again. Built before
+# the wiring checks and before the settings are read, both of which resolve
+# against it.
+e2e_iso_create "$PLUGIN_ROOT" '{"maxSubagents":8,"maxContext":130000,"endlessMode":true,"agentMode":"orchestrator"}' ||
+  die "could not build the isolated opencode configuration"
+SETTINGS_FILE="$E2E_ISO_SETTINGS_FILE"
+
 e2e_plugin_wired "$PLUGIN_ROOT" "$PROJECT_DIR" ||
   die "$PLUGIN_ROOT is wired nowhere the server would read it — name it in the plugin array of ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json for every directory, or of $PROJECT_DIR/opencode.json for this project alone, or drop a loader into $PROJECT_DIR/.opencode/plugin/ — as it stands the run would observe a server without this plugin"
 
@@ -797,6 +819,9 @@ fi
 
 # ---------- settings -------------------------------------------------------
 
+# The backup and the restore below run over the isolated file, which is removed
+# with its home at the end anyway; they are kept because the driver reads the
+# file back between cycles and a half-written arming has to be recoverable.
 if [ -f "$SETTINGS_FILE" ]; then
   SETTINGS_EXISTED=1
   cp "$SETTINGS_FILE" "$SETTINGS_BAK" || die "could not back up $SETTINGS_FILE"
@@ -906,9 +931,10 @@ project dir         $PROJECT_DIR   (opencode.json names the plugin by absolute p
 server              opencode serve --port $PORT --hostname 127.0.0.1   (cwd = project dir)
 server pid / pgid   $E2E_SERVER_PID / $E2E_SERVER_PGID
 opencode version    $SERVER_VERSION
-primary model       $MODEL   (sent on every driver prompt; spawned subagents use the global llm-models.json choices)
+primary model       $MODEL   (every agent is pinned to it in the isolated llm-models.json)
 cycles driven       $ENDLESS_CYCLES in sequence, each from the file and the session the one before it left
-settings file       $SETTINGS_FILE   (backup: $SETTINGS_BAK, existed=$SETTINGS_EXISTED)
+isolated config     $E2E_ISO_OPENCODE_DIR   (the machine's ~/.config/opencode is not written)
+settings file       $SETTINGS_FILE   (inside it; backup: $SETTINGS_BAK, existed=$SETTINGS_EXISTED)
 settings written    endlessMode=true endlessQuiesceTimeoutMs=$ENDLESS_QUIESCE_TIMEOUT_MS endlessMaxCycles=$ENDLESS_MAX_CYCLES
 endless ceiling     held at $ENDLESS_CONTEXT_CEILING between cycles, then ${ARMED_CONTEXT:-(armed per cycle after its spawn turn)}   (ENDLESS_CONTEXT=${ENDLESS_CONTEXT:-derive from the measured context}, margin $ENDLESS_CONTEXT_MARGIN, settings-cache wait ${SETTINGS_TTL_WAIT_S}s)
 debug log           $DEBUG_LOG   (read from byte $LOG_OFFSET)
@@ -1643,6 +1669,20 @@ else
     "no driven cycle re-titled an id it carried over, so the id-rebinding path was never reached: $CARRYOVER_SUMMARY${STALE_PRECONDITION:+ — staleness in front of the last cycle: $STALE_PRECONDITION}"
   record "re-title (V6) — the plugin logged the title change and still accepted the rewrite" 0 \
     "not reachable: no carried-over id was re-titled in any driven cycle"
+fi
+
+# ---------- the model -------------------------------------------------------
+
+# What answered, over every session this run captured. The pin lives in the
+# isolated llm-models.json because `applyModelChoices` (src/llmmodel.js) writes
+# that file's entry into `config.agent[<name>].model` and beats the model each
+# prompt names.
+say ""
+if e2e_model_audit "$PREFIX" /dev/null "$OUT_DIR/$PREFIX".*messages.json \
+     "$OUT_DIR/$PREFIX".successor-first-turn.json > /dev/null 2>&1; then
+  record "model-pin — every captured turn ran on the pinned model" 1 "$E2E_AUDIT_LINE"
+else
+  record "model-pin — every captured turn ran on the pinned model" 0 "$E2E_AUDIT_LINE"
 fi
 
 # ---------- what this driver does not assert -------------------------------

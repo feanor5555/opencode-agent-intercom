@@ -35,6 +35,9 @@
 #
 # Requires: curl, python3.
 
+# The model pin, the isolated configuration's paths and the model audit.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/config-isolation.sh"
+
 MR_PREFIX=""
 MR_BASE=""
 MR_PROJECT_DIR=""
@@ -44,7 +47,7 @@ MR_ASSERTED=0
 MR_FAILURES=0
 MR_MODEL_PROVIDER=""
 MR_MODEL_ID=""
-MR_DEBUG_LOG="$HOME/.cache/opencode-agent-intercom/debug.log"
+MR_DEBUG_LOG=$(e2e_debug_log)
 MR_SLICE_FILE=""
 MR_LOG_OFFSET=0
 MR_LOG_TRUNCATED=0
@@ -109,11 +112,9 @@ mr_init() {
   MR_SLICE_FILE="$MR_OUT_DIR/$MR_PREFIX.debug-slice.log"
   : > "$MR_REPORT_FILE"
 
-  local model=${E2E_MODEL:-xai/grok-4.6}
-  MR_MODEL_PROVIDER=${model%%/*}
-  MR_MODEL_ID=${model#*/}
-  [ -n "$MR_MODEL_PROVIDER" ] && [ "$MR_MODEL_ID" != "$model" ] && [ -n "$MR_MODEL_ID" ] ||
-    mr_die "E2E_MODEL must be a provider/model pair (got: $model)"
+  e2e_resolve_model || mr_die "E2E_MODEL does not name a usable model"
+  MR_MODEL_PROVIDER="$E2E_MODEL_PROVIDER"
+  MR_MODEL_ID="$E2E_MODEL_ID"
 
   for tool in curl python3; do
     command -v "$tool" >/dev/null || mr_die "$tool is not on PATH"
@@ -133,7 +134,7 @@ mr_init() {
 # Usage: mr_check_settings
 mr_check_settings() {
   local line
-  line=$(python3 - "$HOME/.config/opencode/agent-intercom.json" <<'PY'
+  line=$(python3 - "$(e2e_opencode_config_dir)/agent-intercom.json" <<'PY'
 import json, os, sys
 
 try:
@@ -185,7 +186,7 @@ PY
   read -r MR_MID_RUN MR_ANSWER_WAIT_MS MR_MAX_MESSAGE_TOKENS MR_MAX_TOOL_CALL_MS MR_ENDLESS_MODE MR_ENDLESS_CONTEXT MR_AGENT_MODE <<< "$line"
   [ -n "${MR_AGENT_MODE:-}" ] || mr_die "could not resolve the plugin settings — python3 returned: '$line'"
   [ "$MR_MID_RUN" = true ] ||
-    mr_die "midRunMessaging is off in ~/.config/opencode/agent-intercom.json — neither message nor ask is registered, so there is no channel to observe"
+    mr_die "midRunMessaging is off in $(e2e_opencode_config_dir)/agent-intercom.json — neither message nor ask is registered, so there is no channel to observe"
   [ "$MR_AGENT_MODE" = orchestrator ] ||
     mr_die "agentMode is \"$MR_AGENT_MODE\" — in solo mode no subagent starts and neither tool is registered"
   if [ "$MR_ENDLESS_MODE" = true ] && [ "$MR_ENDLESS_CONTEXT" -gt 0 ] && [ "$MR_ENDLESS_CONTEXT" -lt 40000 ]; then
@@ -371,4 +372,20 @@ try:
 except Exception:
     sys.exit(1)
 PY
+}
+
+# ---------- the model audit -------------------------------------------------
+
+# Which model answered, asserted as a criterion of the run: every assistant
+# message of every session this driver captured — the orchestrator's and the
+# subagent's, the latter snapshotted while it was alive — has to name the pin.
+# `applyModelChoices` (src/llmmodel.js) beats the model a POST names, so the
+# request alone says nothing about what ran.
+mr_model_audit() {
+  local ok=0
+  if e2e_model_audit "$MR_PREFIX" /dev/null "$MR_OUT_DIR/$MR_PREFIX".*.messages.json \
+       "$MR_OUT_DIR/$MR_PREFIX".audit-*.json > /dev/null 2>&1; then
+    ok=1
+  fi
+  mr_record "model-pin" "$ok" "$E2E_AUDIT_LINE"
 }

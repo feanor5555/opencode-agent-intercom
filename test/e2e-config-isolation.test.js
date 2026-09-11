@@ -27,7 +27,7 @@ function machineConfig(dir, extra = {}) {
     join(cfg, "opencode.json"),
     JSON.stringify({
       plugin: ["/somewhere/else"],
-      provider: { cliproxy: { npm: "@ai-sdk/openai-compatible", models: { "gpt-5.6-luna": {} } } },
+      provider: { openai: { npm: "@ai-sdk/openai-compatible", models: { "gpt-5.6-luna": {} } } },
       model: "gpuserver/Qwen3.8 Flash Next",
       agent: { coder: { model: "gpuserver/Qwen3.8 Flash Next", variant: "xhigh" } },
       ...extra.config,
@@ -72,7 +72,7 @@ E2E_MODEL="gpuserver/Qwen3.8 Flash Next" e2e_resolve_model && echo BANNED_ACCEPT
 E2E_MODEL="nothingusable" e2e_resolve_model && echo PAIR_ACCEPTED || echo PAIR_REFUSED
 E2E_MODEL="xai/grok-4.6" e2e_resolve_model && echo "OVERRIDE=$E2E_MODEL_REF"
 `)
-  assert.match(r.stdout, /DEFAULT=cliproxy\/gpt-5\.6-luna\/cliproxy\/gpt-5\.6-luna/)
+  assert.match(r.stdout, /DEFAULT=openai\/gpt-5\.6-luna\/openai\/gpt-5\.6-luna/)
   assert.match(r.stdout, /BANNED_REFUSED/)
   assert.match(r.stderr, /no end-to-end run may use that model/)
   assert.match(r.stdout, /PAIR_REFUSED/)
@@ -94,16 +94,16 @@ echo "ENV=\${E2E_SERVER_ENV[*]}"
 
   const models = JSON.parse(readFileSync(join(iso, "llm-models.json"), "utf8"))
   for (const name of ["orchestrator", "planner", "coder", "researcher", "grounder", "gitter", "title", "summary"]) {
-    assert.deepEqual(models[name], { providerID: "cliproxy", modelID: "gpt-5.6-luna" }, `${name} is not pinned`)
+    assert.deepEqual(models[name], { providerID: "openai", modelID: "gpt-5.6-luna" }, `${name} is not pinned`)
   }
   // A reasoning effort is a setting of the machine's, not of the run.
   for (const entry of Object.values(models)) assert.ok(!("variant" in entry))
 
   const config = JSON.parse(readFileSync(join(iso, "opencode.json"), "utf8"))
   assert.deepEqual(config.plugin, [PLUGIN_ROOT], "the plugin under test has to be the wired one")
-  assert.equal(config.model, "cliproxy/gpt-5.6-luna")
-  assert.equal(config.small_model, "cliproxy/gpt-5.6-luna")
-  assert.ok(config.provider.cliproxy, "the machine's providers have to be carried over")
+  assert.equal(config.model, "openai/gpt-5.6-luna")
+  assert.equal(config.small_model, "openai/gpt-5.6-luna")
+  assert.ok(config.provider.openai, "the machine's providers have to be carried over")
   assert.ok(!("model" in config.agent.coder), "a per-agent model of the machine's must not survive")
   assert.ok(!("variant" in config.agent.coder))
 
@@ -197,7 +197,7 @@ function capture(dir, name, models) {
   return path
 }
 
-function audit(files, expect = "cliproxy/gpt-5.6-luna") {
+function audit(files, expect = "openai/gpt-5.6-luna") {
   return spawnSync(
     "python3",
     [AUDIT, "--expect", expect, "--banned", "gpuserver/Qwen3.8 Flash Next", "--label", "t", ...files],
@@ -208,20 +208,20 @@ function audit(files, expect = "cliproxy/gpt-5.6-luna") {
 test("the model audit passes only when every assistant message names the pin", () => {
   const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
   const good = capture(dir, "good.json", [
-    ["cliproxy", "gpt-5.6-luna"],
-    ["cliproxy", "gpt-5.6-luna"],
+    ["openai", "gpt-5.6-luna"],
+    ["openai", "gpt-5.6-luna"],
   ])
   const r = audit([good])
   assert.equal(r.status, 0, r.stdout + r.stderr)
   assert.match(r.stdout, /2 assistant message\(s\) over 1 capture\(s\)/)
-  assert.match(r.stdout, /every one answered by cliproxy\/gpt-5\.6-luna=2/)
+  assert.match(r.stdout, /every one answered by openai\/gpt-5\.6-luna=2/)
   rmSync(dir, { recursive: true, force: true })
 })
 
 test("the model audit fails on a foreign model and names the banned one as such", () => {
   const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
   const mixed = capture(dir, "mixed.json", [
-    ["cliproxy", "gpt-5.6-luna"],
+    ["openai", "gpt-5.6-luna"],
     ["gpuserver", "Qwen3.8 Flash Next"],
     ["xai", "grok-4.6"],
   ])

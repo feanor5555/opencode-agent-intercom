@@ -54,7 +54,7 @@
 #   OPENCODE_URL     http://localhost:4567  the running server
 #   PROJECT_DIR      $HOME/testopencode     sessions are created against it
 #   OUT_DIR          ./out                  captures and the report
-#   E2E_MODEL        cliproxy/gpt-5.6-luna  the pin: every agent runs on it
+#   E2E_MODEL        openai/gpt-5.6-luna  the pin: every agent runs on it
 #   ASK_AGENT        planner                the role that asks
 #   ASK_ANSWER_MARKER ASK-ANSWER-ALPHA      the literal the orchestrator is told
 #                    to answer with; it is looked for inside the `ask` call's own

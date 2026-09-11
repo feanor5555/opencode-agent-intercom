@@ -28,7 +28,7 @@
 #   PROJECT_DIR            $HOME/testopencode by default — the project
 #                          sessions are created against, passed on to the drivers
 #   OUT_DIR                ./out  captures, server log and pid file
-#   E2E_MODEL              cliproxy/gpt-5.6-luna — the model every agent is
+#   E2E_MODEL              openai/gpt-5.6-luna — the model every agent is
 #                          pinned to and the only one a turn may answer on
 #   SERVER_START_TIMEOUT_S 60     readiness probe budget
 #

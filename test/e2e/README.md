@@ -157,9 +157,9 @@ The setup the drivers are written against:
 - `agent-intercom.json` → `maxSubagents: 8, maxContext: 130000`, written into
   the run's own throwaway configuration, never into the machine's
 - `opencode serve` started in `$HOME/testopencode`
-- `E2E_MODEL` defaults to `cliproxy/gpt-5.6-luna` — Luna, as configured under
-  the `cliproxy` provider on this machine. Every agent, the primary and the
-  nine subagent roles alike, is pinned to it; `gpuserver/Qwen3.8 Flash Next` is
+- `E2E_MODEL` defaults to `openai/gpt-5.6-luna` — Luna, reached natively through
+  the `openai` provider with ChatGPT OAuth. Every agent, the primary and the nine
+  subagent roles alike, is pinned to it; `gpuserver/Qwen3.8 Flash Next` is
   refused outright, whatever `E2E_MODEL` says
 - Multi-agent test: 4 subagent spawns (planner / coder / reviewer / gitter), all
   status=completed, ~6:26 min wall-clock, 92 messages, produces `bytes()` in

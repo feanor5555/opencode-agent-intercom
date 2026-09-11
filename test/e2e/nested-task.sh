@@ -69,7 +69,7 @@
 #   POLL_S             2     log poll cadence
 #   PROBE_S            1     liveness probe cadence during the blocked window
 #   OUT_DIR            ./out captures and the report
-#   E2E_MODEL          cliproxy/gpt-5.6-luna   the pin: every agent runs on it
+#   E2E_MODEL          openai/gpt-5.6-luna   the pin: every agent runs on it
 #   KEEP_SERVER        0     1 leaves the server running
 #   E2E_TUI_BUILT      0     1 skips the TUI build
 #

@@ -186,7 +186,7 @@
 #   SERVER_START_TIMEOUT_S 60                  readiness probe budget
 #   POLL_S             2                       log poll cadence
 #   OUT_DIR            ./out                   captures and backups
-#   E2E_MODEL           cliproxy/gpt-5.6-luna   the pin: every agent runs on it
+#   E2E_MODEL           openai/gpt-5.6-luna   the pin: every agent runs on it
 #   KEEP_SERVER        0                       1 leaves the server running
 #   E2E_TUI_BUILT      0                       1 skips the TUI build; run-all.sh
 #                      exports it after building once for the whole suite

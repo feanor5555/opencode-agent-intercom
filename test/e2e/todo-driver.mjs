@@ -10,7 +10,7 @@
 //     loaded. A `file:` pointer only takes effect for the project that carries
 //     it, so start `opencode serve` from a project whose opencode.json holds
 //     the pointer, or wire the plugin globally.
-//   - A provider serving E2E_MODEL (default cliproxy/gpt-5.6-luna). The model
+//   - A provider serving E2E_MODEL (default openai/gpt-5.6-luna). The model
 //     an agent actually runs is the one in the llm-models.json of the HOME the
 //     server was started with, not the one this driver names in its prompt
 //     (applyModelChoices, src/llmmodel.js): start that server through
@@ -22,7 +22,7 @@
 // Usage:
 //   node test/e2e/todo-driver.mjs [baseUrl] [projectDir]
 //   defaults: http://localhost:4567   /tmp/intercom-todo-e2e-<ts>
-//   E2E_MODEL: cliproxy/gpt-5.6-luna (provider/model for every primary prompt)
+//   E2E_MODEL: openai/gpt-5.6-luna (provider/model for every primary prompt)
 //
 // Exit code 0 = all scenarios passed; 1 = any failure.
 
@@ -38,7 +38,7 @@ setGlobalDispatcher(new Agent({ headersTimeout: 30 * 60 * 1000, bodyTimeout: 30 
 const baseUrl = process.argv[2] || "http://localhost:4567"
 const projectDir =
   process.argv[3] || mkdtempSync(join(tmpdir(), "intercom-todo-e2e-"))
-const modelRef = process.env.E2E_MODEL || "cliproxy/gpt-5.6-luna"
+const modelRef = process.env.E2E_MODEL || "openai/gpt-5.6-luna"
 const modelSlash = modelRef.indexOf("/")
 if (modelSlash <= 0 || modelSlash === modelRef.length - 1) {
   console.error(`E2E_MODEL must be a provider/model pair (got: ${modelRef})`)

@@ -23,7 +23,7 @@
 #                   inside the session's project (opencode 1.15 stalls reads
 #                   outside the session directory on a permission prompt).
 #   OUT_DIR         default ./out (created if missing)
-#   E2E_MODEL       default cliproxy/gpt-5.6-luna (provider/model for this run)
+#   E2E_MODEL       default openai/gpt-5.6-luna (provider/model for this run)
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/config-isolation.sh"

@@ -63,9 +63,9 @@
 # Requires: python3, curl, cp, mktemp.
 
 # The model every driver runs on unless E2E_MODEL names another. Luna, as
-# configured on this machine: provider `cliproxy`, model `gpt-5.6-luna`
-# (~/.config/opencode/opencode.json, "Luna (gpt-5.6-luna)").
-E2E_DEFAULT_MODEL="cliproxy/gpt-5.6-luna"
+# configured on this machine: provider `openai`, model `gpt-5.6-luna`
+# (OpenAI ChatGPT OAuth, reached natively by opencode).
+E2E_DEFAULT_MODEL="openai/gpt-5.6-luna"
 
 # The model no run may use, whatever the rest of the machine is configured
 # with. Named here so the refusal reads as itself in a driver's output.

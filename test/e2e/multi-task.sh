@@ -8,7 +8,7 @@
 #   OPENCODE_URL    default http://localhost:4567
 #   PROJECT_DIR     default $HOME/testopencode
 #   OUT_DIR         default ./out
-#   E2E_MODEL       default cliproxy/gpt-5.6-luna (provider/model for this run)
+#   E2E_MODEL       default openai/gpt-5.6-luna (provider/model for this run)
 #
 # It uses a server somebody else owns and writes no configuration of its own;
 # the isolation of that server's configuration belongs to whoever starts it.

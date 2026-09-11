@@ -47,6 +47,10 @@
 #
 #   - SEEDS the todo file with several ids inside the markers before cycle 1,
 #     so even the first cycle rewrites a file that already carries entries;
+#   - gives CYCLE 1 one of those entries as real work (T105, ungated and last in
+#     the list), carried out by a subagent of its own before the trigger, so its
+#     wind-down has a finished entry to take out of the file instead of a
+#     session that did nothing;
 #   - arranges those entries so that ONE task landing makes ANOTHER task's title
 #     stale — T101 produces `merged.md`, which is exactly the thing T104's title
 #     still says is outstanding — which is the live shape that makes a wind-down
@@ -54,11 +58,13 @@
 #   - keeps that stale entry ALIVE past the work-off phase that would otherwise
 #     eat it. This is what the first two-cycle run could not do: its stale entry
 #     was worked off inside cycle 1 and cycle 2 met a file without it. Every
-#     seeded task except T101 is GATED on a flag file under the fixture
+#     seeded task except T101 and T105 is GATED on a flag file under the fixture
 #     directory that no subagent may create — a subagent that finds its gate
 #     absent reports blocked and the plugin leaves the task in the file — and
 #     the driver opens exactly ONE gate per cycle, after that cycle's rewrite is
-#     confirmed and before its work-off. So the list cannot drain: cycle k's
+#     confirmed and before its work-off. T105 needs no gate either: it is gone
+#     from the file by the time cycle 1's work-off starts, because cycle 1 did
+#     it itself and its own wind-down deleted the entry. So the list cannot drain: cycle k's
 #     work-off can finish the one task whose gate the driver just opened and
 #     nothing else, and the stale entry, whose gate is never opened, is still
 #     open when the last cycle winds down;
@@ -71,11 +77,22 @@
 #
 # How each cycle is sequenced, and why in this order:
 #
-#   turn 1  the primary reads the todo file and names its open points
-#           (context grows; from cycle 2 on it is asked which entry the last
-#           completion has made stale AND for the corrected title line that
-#           entry must carry now — that answer is what the wind-down hand-over
-#           carries into the file)
+#   turn 1  the cycle's own work, and the context the ceiling is derived from.
+#           A primary holds no file tool at all, so cycle 1 DELEGATES: one
+#           subagent carries out the seeded entry T105, writes its artefact and
+#           reports the entry finished plus the ids left open. That report is
+#           what the cycle hands over, and a finished entry is what the
+#           wind-down turns into a rewrite. Without it cycle 1 winds down having
+#           done nothing, the wind-down subagent rightly changes no byte, and
+#           V3 (src/endless.js) then holds only if the primary happens to close
+#           with `— no change` instead of `— <n> open` — the model's choice, not
+#           the plugin's behaviour, and the six criteria after (c) report their
+#           own unreachability when it goes the other way.
+#           From cycle 2 on the work is the predecessor's work-off, already
+#           done, and the turn instead asks which entry the last completion has
+#           made stale AND for the corrected title line that entry must carry
+#           now — that answer is what the wind-down hand-over carries into the
+#           file.
 #   turn 2  the primary spawns ONE sleeping subagent and ends its turn
 #           → the driver waits for the plugin's own `spawned` line and takes the
 #             handle from it; that handle is the in-flight state everything below
@@ -260,6 +277,13 @@ DEBUG_LOG=$(e2e_debug_log)
 # created by it and is removed again in cleanup. The work-off gates the driver
 # opens are flag files inside it, so they go with it.
 FIXTURE_NAME=e2e-endless-fixture
+
+# The artefact cycle 1's own work turn has a subagent produce, and the seeded
+# entry that work completes. Cycle 1 is the one cycle with no predecessor to
+# inherit finished work from, so it does the work itself — see the note above
+# seed_todo_file.
+FIRST_WORK_FILE=line-counts.md
+FIRST_WORK_ID=T105
 
 # The seeded file carries a gate task for these cycles. Cycle 1 needs none —
 # T101 is finishable from the start — so the gates cover cycles 2 and 3.
@@ -575,6 +599,19 @@ task_title() {
 # reached: human prose outside the markers, four ids inside them and a watermark
 # above all of them.
 #
+# T105 is cycle 1's OWN work, and the reason cycle 1 has anything to rewrite.
+# A cycle whose session only spawned a sleeper and answered "ceiling check" has
+# nothing finished and nothing newly open to hand over, so the wind-down
+# subagent correctly leaves the file byte-identical — and V3 (src/endless.js)
+# then holds only if the primary happens to close with the `— no change` form
+# instead of `— <n> open`, which is the model's choice and not the plugin's
+# behaviour. Cycle 1 therefore really carries T105 out before it winds down
+# (`drive_first_cycle_work`): the artefact lands on disk, the subagent reports
+# the entry finished, and the hand-over has the one thing the wind-down turns
+# into a rewrite — a finished entry to delete. It is deliberately NOT gated and
+# deliberately LAST in the list: the work turn names it by its artefact, while a
+# successor working the file top to bottom still meets T101 first.
+#
 # T101 and T104 are the pair that makes a wind-down subagent re-title a
 # surviving id, which is what reaches V6: T101 produces `merged.md`, and T104's
 # title still says it is waiting for T101 to produce exactly that file. Once
@@ -582,7 +619,7 @@ task_title() {
 # and only its second half — the owner's release — is left, so the correct
 # rewrite keeps the id and changes the title.
 #
-# WHY EVERY TASK BUT T101 IS GATED. A stale entry is only worth anything if it
+# WHY T102, T103 AND T104 ARE GATED. A stale entry is only worth anything if it
 # is still open when a LATER cycle winds down, and a successor works its file
 # off in the meantime: the first two-cycle run watched the stale entry be
 # completed and removed inside cycle 1. Each of T102, T103 and T104 therefore
@@ -620,7 +657,10 @@ before the first cycle and removed again when the run ends.
 - T104: Waiting on T101 to produce e2e-endless-fixture/merged.md; once it is there and e2e-endless-fixture/owner.flag has been written, copy merged.md to e2e-endless-fixture/released.md
   accept: e2e-endless-fixture/released.md holds the merged text. owner.flag is written by the run's owner and by nobody else — while it is absent, do not create it and report blocked so this task stays open.
   link: e2e-endless-fixture/merged.md
-<!-- intercom: next-id T105 -->
+- T105: Write e2e-endless-fixture/line-counts.md, holding one line per note file in e2e-endless-fixture/ in the form "<file name>: <number of lines>"
+  accept: e2e-endless-fixture/line-counts.md carries one line per notes-*.md file with that file's line count, and the note files are unchanged
+  link: e2e-endless-fixture/notes-a.md
+<!-- intercom: next-id T106 -->
 <!-- intercom:end -->
 
 ## Notes
@@ -656,6 +696,111 @@ open_workoff_gate() {
   else
     say "[$PREFIX] WARNING: could not open the work-off gate $flag — cycle $k's work-off has nothing it can finish"
   fi
+}
+
+# Idle again: the newest message of the primary is an assistant message that has
+# finished. Used after a wake notice, whose turn the plugin starts on its own —
+# the driver's next prompt would otherwise be queued behind a turn it did not
+# drive, and the capture it takes would be short of what that turn added.
+# Prints `idle` or the reason it is not; never fails the run by itself.
+wait_primary_idle() {
+  local timeout="$1" deadline state
+  deadline=$(( $(date +%s) + timeout ))
+  while :; do
+    curl -s -m 30 "$BASE/session/$SID/message" > "$OUT_DIR/$PREFIX.cycle$CYCLE.idle-probe.json"
+    state=$(python3 - "$OUT_DIR/$PREFIX.cycle$CYCLE.idle-probe.json" <<'PY'
+import json, sys
+try:
+    payload = json.load(open(sys.argv[1]))
+except Exception as err:
+    print(f"the message list was unreadable: {err}"); raise SystemExit
+messages = payload.get("data") if isinstance(payload, dict) else payload
+if not isinstance(messages, list) or not messages:
+    print("the session carries no message yet"); raise SystemExit
+info = messages[-1].get("info") if isinstance(messages[-1], dict) else None
+if not isinstance(info, dict):
+    print("the newest message carries no info"); raise SystemExit
+if info.get("role") != "assistant":
+    print("the newest message is a user message — its turn has not answered yet"); raise SystemExit
+if not (info.get("time") or {}).get("completed"):
+    print("the newest assistant message is still being written"); raise SystemExit
+print("idle")
+PY
+)
+    [ "$state" = idle ] && { printf 'idle'; return 0; }
+    if [ "$(date +%s)" -ge "$deadline" ] || ! e2e_server_alive; then
+      printf '%s' "$state"
+      return 1
+    fi
+    sleep "$POLL_S"
+  done
+}
+
+# Cycle 1's real work, and the only thing that makes its wind-down a rewrite
+# rather than a no-op. The primary holds no file tool at all (PRIMARY_TOOLS,
+# src/hooks.js), so a fresh session cannot even read the todo file: everything
+# it knows about the work comes from the subagents it starts. This turn starts
+# ONE, which carries out the seeded entry FIRST_WORK_ID and reports it finished
+# together with the ids left open — that report is the hand-over the wind-down
+# subagent turns into a deletion, and it is also what cycle 1's turn 1 was
+# supposed to establish and could not.
+#
+# The spawn prompt deliberately carries NO `T<n>:` prefix. `extractTaskId`
+# (src/tools.js) would read one as a task-tracked spawn, and the `DONE: T<n>`
+# marker would then have the plugin itself remove the entry on the wake path
+# (`autoMarkTask`, src/hooks.js) — the file would change before the cycle even
+# latches and the wind-down would again be left with nothing to write.
+#
+# Every failure here is a SETUP error: a cycle 1 that reaches the trigger with
+# nothing finished asserts (c) over the model's choice of closing line, which is
+# exactly what this driver stopped doing.
+drive_first_cycle_work() {
+  local marker="endless-e2e-work-c1-$$"
+  local artefact="$PROJECT_DIR/$FIXTURE_NAME/$FIRST_WORK_FILE"
+  local work_prompt="Read this project's $TODO_NAME. Exactly one entry between the lines <!-- intercom:begin --> and <!-- intercom:end --> asks for a line-count file under $FIXTURE_NAME/; carry out that entry and no other one. Write $FIXTURE_NAME/$FIRST_WORK_FILE with one line per file whose name begins with notes- in that directory, each line reading the file name, then a colon, then that file's number of lines. Create nothing else — no flag file, no merged.md, no count.txt, no index.md, no released.md — and change no file that is already there. Marker for the run that started you: $marker. Then reply with exactly two lines: the first reading 'finished: ' then the id of the entry you carried out, then ' — $FIXTURE_NAME/$FIRST_WORK_FILE written'; the second reading 'still open: ' then the ids of the other entries between those two lines, comma-separated."
+  local turn="Call spawn(\"$SPAWN_AGENT\", \"$work_prompt\") exactly once, passing that prompt through unchanged, and end your turn as soon as it returns. Do not poll, do not call list(), do not spawn a second subagent. When that subagent reports back to you, start no further work and spawn nothing: reply with at most two lines saying which todo entry it finished and which entries are still open."
+
+  local work_window
+  work_window=$(slice_lines)
+  post_prompt "$turn" "$OUT_DIR/$PREFIX.cycle$CYCLE.turn1.json"
+  say "[$PREFIX] cycle $CYCLE turn 1 (the work turn) posted $(date +%H:%M:%S)"
+
+  POLL_URL="$BASE/session/$SID/message"
+  local child_read child_rest child_verdict child_id
+  child_read=$(poll_verdict "$OUT_DIR/$PREFIX.cycle$CYCLE.work-spawn-call.json" \
+    "$HERE/lib/spawn-child.py" "$marker")
+  child_rest=${child_read#*|}
+  child_verdict=${child_rest%%|*}
+  child_id=${child_rest#*|}
+  [ "$child_verdict" = pass ] ||
+    die "cycle $CYCLE: no spawn tool call carrying the work marker $marker on $SID within ${STEP_TIMEOUT_S}s — the cycle's own work never started, so its wind-down would have nothing finished to hand over ($child_id)"
+
+  local outer_from=$SLICE_FROM_LINE work_handle="" work_line=0
+  SLICE_FROM_LINE=$work_window
+  if ! wait_for_pattern "spawned" "spawned .*\"sessionID\":\"$child_id\"" "$STEP_TIMEOUT_S"; then
+    SLICE_FROM_LINE=$outer_from
+    die "cycle $CYCLE: the work spawn of $child_id produced no \"spawned\" line within ${STEP_TIMEOUT_S}s ($WAIT_REASON)"
+  fi
+  work_handle=$(printf '%s' "$WAIT_LINE" | sed -E 's/.*"handle":"([^"]+)".*/\1/')
+  work_line=$WAIT_LINENO
+  SLICE_FROM_LINE=$work_line
+  if ! wait_for_pattern "the work subagent finished" \
+       "notified primary of completion .*\"handle\":\"$work_handle\".*\"parentID\":\"$SID\"" \
+       "$WORKOFF_TIMEOUT_S"; then
+    SLICE_FROM_LINE=$outer_from
+    die "cycle $CYCLE: the work subagent $work_handle (session $child_id) did not report back within ${WORKOFF_TIMEOUT_S}s ($WAIT_REASON)"
+  fi
+  SLICE_FROM_LINE=$outer_from
+
+  [ -f "$artefact" ] ||
+    die "cycle $CYCLE: the work subagent $work_handle reported back but $artefact is not there — nothing was finished, so the wind-down would meet a file that already says everything and the (c) rewrite would turn on the primary's choice of closing line again"
+
+  local idle
+  idle=$(wait_primary_idle "$STEP_TIMEOUT_S") ||
+    say "[$PREFIX] cycle $CYCLE the primary is not idle after the wake notice ($idle) — the turns below may queue behind it"
+  say "[$PREFIX] cycle $CYCLE work done: $work_handle wrote $artefact, primary $idle $(date +%H:%M:%S)"
+  printf 'work                cycle %s: %s wrote %s (%s) — the finished entry %s the wind-down hand-over carries\n' \
+    "$CYCLE" "$work_handle" "$artefact" "$child_id" "$FIRST_WORK_ID" >> "$REPORT_FILE"
 }
 
 # The state a cycle after the first needs in front of it for the re-title to be
@@ -955,7 +1100,7 @@ settings written    endlessMode=true endlessQuiesceTimeoutMs=$ENDLESS_QUIESCE_TI
 endless ceiling     held at $ENDLESS_CONTEXT_CEILING between cycles, then ${ARMED_CONTEXT:-(armed per cycle after its spawn turn)}   (ENDLESS_CONTEXT=${ENDLESS_CONTEXT:-derive from the measured context}, margin $ENDLESS_CONTEXT_MARGIN, settings-cache wait ${SETTINGS_TTL_WAIT_S}s)
 debug log           $DEBUG_LOG   (read from byte $LOG_OFFSET)
 todo baseline       $TODO_BASELINE   (backup: $TODO_BAK)
-fixture             $PROJECT_DIR/$FIXTURE_NAME   (seeded=$TODO_SEEDED; T101 produces merged.md, which T104's title still calls outstanding; every task but T101 is gated on a flag file, and the driver opens cycle<k>.flag after cycle k's rewrite is confirmed)
+fixture             $PROJECT_DIR/$FIXTURE_NAME   (seeded=$TODO_SEEDED; T101 produces merged.md, which T104's title still calls outstanding; $FIRST_WORK_ID is cycle 1's own work, carried out before its trigger so that cycle has something finished to hand over; T102 and T103 are gated on a flag file, and the driver opens cycle<k>.flag after cycle k's rewrite is confirmed)
 in-flight subagent  spawn("$SPAWN_AGENT", sleep ${SUBAGENT_SLEEP_S}s) -> handle ${SPAWN_HANDLE:-(spawned in the turn 2 of each cycle)}
 timeouts            turn=${TURN_TIMEOUT_S}s step=${STEP_TIMEOUT_S}s quiesce=${QUIESCE_WAIT_S}s work-off=${WORKOFF_TIMEOUT_S}s start=${SERVER_START_TIMEOUT_S}s poll=${POLL_S}s
 out dir             $OUT_DIR
@@ -1106,7 +1251,25 @@ run_cycle() {
   # title is what re-binds a pre-existing id.
   local turn1
   if [ "$CYCLE" = 1 ]; then
-    turn1="Read ./$TODO_NAME in this project. Then name, one line each, the three open tasks you would take first and what would still be left of the others afterwards. Read that one file, call no other tool — do not spawn, do not list — and end your turn."
+    # Cycle 1 has no predecessor whose work-off it could inherit, and its
+    # primary cannot open the todo file itself, so this turn DELEGATES the
+    # cycle's work: one subagent carries out the seeded entry FIRST_WORK_ID,
+    # reports it finished and names what is left open. Without it the cycle
+    # winds down having done nothing, the wind-down subagent correctly changes
+    # no byte, and V3 then depends on which closing line the primary picks.
+    if [ "$TODO_SEEDED" = 1 ]; then
+      drive_first_cycle_work
+      say "[$PREFIX] $tag turn 1 (work + open points) done $(date +%H:%M:%S)"
+      turn1=""
+    else
+      # SEED_TODO=0: the file is the caller's own and the driver knows no entry
+      # in it to have carried out. The cycle is driven as before and the note
+      # says what that costs.
+      say "[$PREFIX] $tag SEED_TODO=0 — no work is driven before the trigger, so this cycle's wind-down may find nothing to write"
+      printf 'work                cycle %s: none — SEED_TODO=0 leaves the driver no entry it could have carried out, so (c) rewrite depends on the wind-down finding something to change in a file this run did not seed\n' \
+        "$CYCLE" >> "$REPORT_FILE"
+      turn1="Name, one line each, what you would have a subagent do first in this project and what would be left afterwards. Call no tool at all — do not spawn, do not list — and end your turn."
+    fi
   else
     # The staleness the seed arranges is a fact about the file by now; it is
     # recorded here so a failed re-title criterion can say whether the cycle was
@@ -1120,8 +1283,11 @@ run_cycle() {
     fi
     turn1="Read ./$TODO_NAME in this project. Then state, one line each: which task id a subagent of yours has just completed; which remaining task's title still describes work that has already landed; and the corrected one-line title that task must carry from now on, keeping its id and written out in full in the form \"- T<n>: <title>\". Read that one file, call no other tool — do not spawn, do not list — and end your turn."
   fi
-  post_prompt "$turn1" "$OUT_DIR/$PREFIX.cycle$CYCLE.turn1.json"
-  say "[$PREFIX] $tag turn 1 (open points) done $(date +%H:%M:%S)"
+  # Empty only where the work turn above already drove turn 1 and captured it.
+  if [ -n "$turn1" ]; then
+    post_prompt "$turn1" "$OUT_DIR/$PREFIX.cycle$CYCLE.turn1.json"
+    say "[$PREFIX] $tag turn 1 (open points) done $(date +%H:%M:%S)"
+  fi
 
   # Turn 2 — the in-flight subagent, spawned as late as the sequence allows and
   # in its own short turn, so its flight overlaps the trigger rather than the

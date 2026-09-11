@@ -178,7 +178,7 @@ test("the seeded todo file parses as the plugin parses it, with the watermark ab
   const split = splitSections(content)
   assert.equal(split.valid, true)
   const tasks = parseTasks(content)
-  assert.deepEqual(tasks.map((t) => t.id), ["T101", "T102", "T103", "T104"])
+  assert.deepEqual(tasks.map((t) => t.id), ["T101", "T102", "T103", "T104", "T105"])
   for (const task of tasks) {
     assert.ok(task.text.trim() !== "", `${task.id} has an empty title`)
     assert.ok(task.accept, `${task.id} carries no accept line`)
@@ -203,12 +203,19 @@ test("the seed pairs the task that produces merged.md with the one whose title s
   rmSync(dir, { recursive: true, force: true })
 })
 
-test("every seeded task but the first is gated on a flag no subagent may write", async () => {
+test("every seeded task but the work-off head and cycle 1's own work is gated on a flag no subagent may write", async () => {
   const { dir, content } = runSeed()
   const { parseTasks } = await import("../src/todofile.js")
   const tasks = parseTasks(content)
   assert.equal(/\.flag/.test(tasks[0].text), false, "T101 must be finishable without a gate")
-  for (const task of tasks.slice(1)) {
+  // T105 is cycle 1's own work: the driver has a subagent carry it out before
+  // the first trigger, so its wind-down has a finished entry to delete. A gate
+  // on it would leave that cycle with nothing done and V3 back on the model's
+  // choice of closing line.
+  const firstWork = tasks[tasks.length - 1]
+  assert.equal(firstWork.id, "T105")
+  assert.equal(/\.flag/.test(firstWork.text), false, "T105 must be finishable without a gate")
+  for (const task of tasks.slice(1, -1)) {
     assert.match(task.text, /\.flag/, `${task.id} names no gate in its title`)
     assert.match(task.accept, /written by the run's owner and by nobody else/, `${task.id} does not forbid its subagent to open the gate`)
     assert.match(task.accept, /report blocked/, `${task.id} does not tell its subagent to report blocked`)
@@ -217,6 +224,28 @@ test("every seeded task but the first is gated on a flag no subagent may write",
   assert.match(tasks[1].text, /cycle2\.flag/)
   assert.match(tasks[2].text, /cycle3\.flag/)
   assert.match(tasks[3].text, /owner\.flag/)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+// The work turn of cycle 1, pinned where the driver would otherwise drift away
+// from the entry it carries out: the artefact it demands, the entry that asks
+// for it, and the absence of a `T<n>:` prefix in the spawn prompt — one would
+// make the spawn task-tracked and have the plugin itself remove the entry on
+// the wake path, leaving the wind-down nothing to write again.
+test("cycle 1's work turn carries out the seeded entry and spawns it untracked", async () => {
+  const { dir, content } = runSeed()
+  const { parseTasks } = await import("../src/todofile.js")
+  const byId = new Map(parseTasks(content).map((t) => [t.id, t]))
+  assert.match(byId.get("T105").text, /line-counts\.md/)
+  assert.match(DRIVER_SOURCE, /^FIRST_WORK_FILE=line-counts\.md$/m)
+  assert.match(DRIVER_SOURCE, /^FIRST_WORK_ID=T105$/m)
+  const work = driverFunction("drive_first_cycle_work")
+  assert.match(work, /\$FIXTURE_NAME\/\$FIRST_WORK_FILE/)
+  const prompt = /local work_prompt="([^"]*)"/.exec(work)
+  assert.ok(prompt, "drive_first_cycle_work builds no work prompt")
+  assert.equal(/(^|[.;] )T\d+[:.]/.test(prompt[1]), false, "the work prompt carries a task-id prefix")
+  // It must fail the run rather than assert over a cycle that did nothing.
+  assert.match(work, /\[ -f "\$artefact" \] \|\|\n\s*die /)
   rmSync(dir, { recursive: true, force: true })
 })
 

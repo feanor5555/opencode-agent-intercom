@@ -12,12 +12,22 @@ that opencode upgrades don't shift the system-prompt composition.
   polls until the orchestrator session settles, dumps the full message tree.
 - `multi-task.sh` — multi-agent harness. Drives a planner → coder → reviewer
   → gitter pipeline that adds `bytes(n)` to `src/format.js`.
-- `endless-task.sh` — endless-mode harness. Seeds the driven project's todo
-  file, then drives two endless cycles in sequence — the second from the file
-  and the session the first left behind — asserts each cycle's steps in order
-  and, once over the cycles together, that a carried-over task id was re-titled;
-  see "Endless mode" below. Its seed and its work-off gates are covered by
-  `test/e2e-endless-task.test.js`, which runs them without a server.
+- `endless-task.sh` — endless-mode harness. Arms endless mode in the global
+  settings file every opencode instance reads and drives `ENDLESS_CYCLES` (2)
+  cycles in sequence — each cycle on the session and the file its predecessor
+  left. Cycle 1 has no predecessor to inherit finished work from, so its own
+  turn delegates: one subagent carries out the seeded entry `T105`, writes the
+  artefact, and reports the entry finished together with the ids left open. That
+  hand-over is what the wind-down turns into a rewrite, and a finished entry
+  is what makes it one — a cycle whose session only spawned a sleeper and
+  answered "ceiling check" meets a wind-down subagent that correctly leaves
+  the file byte-identical, and the six criteria after (c) report their own
+  unreachability. From cycle 2 on the work is the predecessor's work-off and
+  the turn instead asks which entry the last completion has made stale and for
+  the corrected title line. The driver then asserts each cycle's steps in
+  order and, once over the cycles together, that a carried-over task id was
+  re-titled; see "Endless mode" below. Its seed and its work-off gates are
+  covered by `test/e2e-endless-task.test.js`, which runs them without a server.
 - `nested-task.sh` — nested-delegation harness. Drives one nested spawn
   (orchestrator → coder → researcher) and asserts it; see "Nested delegation"
   below.
@@ -27,9 +37,15 @@ that opencode upgrades don't shift the system-prompt composition.
   subagent's own session: the framed block landed inside that call, sits between
   two steps of the same run, the next step began once the call returned, and no
   tool call started after it. See "The mid-run channel" below.
-- `ask-task.sh` — mid-run ASK harness. Spawns a subagent whose task cannot start
-  before one decision, lets it `ask`, answers from the orchestrator, and asserts
-  that the answer came back as the output of the subagent's own `ask` call.
+- `ask-task.sh` — mid-run ASK harness. Spawns a subagent whose whole task is
+  to report ONE word that ONLY THE CALLER HOLDS: the variant name stands
+  nowhere in the subagent's prompt, in no file and in no candidate list it
+  could pick from, so the `ask` call is the only way to the word and a
+  subagent that does not ask cannot finish the task at all. The same turn
+  tells the orchestrator what to answer, so the run measures the channel and
+  not the model's taste, and forbids it to put that word into the spawn
+  prompt. The driver then asserts that the answer came back as the output of
+  the subagent's own `ask` call.
 - `todo-driver.mjs` — TODO.md auto-tracking harness. Drives DONE and BLOCKED
   markers through the wake hook and checks the resulting file.
 - `run-all.sh` — runs the 8 single-agent tests, the multi-agent test, the two

@@ -17,10 +17,18 @@
 #
 # The scenario, in one subagent run:
 #
-#   1. the orchestrator spawns a `planner` whose task cannot start before one
-#      decision — ALPHA or BETA — and which is told to `ask` for it;
+#   1. the orchestrator spawns a `planner` whose whole task is to report ONE
+#      word that ONLY THE CALLER HOLDS: the variant name stands nowhere in the
+#      subagent's prompt, in no file and in no candidate list it could pick
+#      from, so the `ask` call is the only way to the word and a subagent that
+#      does not ask cannot finish the task at all. An earlier version handed it
+#      the pair "ALPHA or BETA" and asked it to `ask` which one — a model that
+#      simply picked one finished without ever using the channel, and the run
+#      then measured the model's taste instead of the plugin;
 #   2. the same turn tells the orchestrator what to answer, so the run measures
-#      the CHANNEL and not the model's taste: `message(handle, "Use ALPHA: …")`;
+#      the CHANNEL and not the model's taste: `message(handle, "Use ALPHA: …")`,
+#      and forbids it to put that word into the spawn prompt, which would put
+#      the word into the subagent's reach without the channel;
 #   3. what came back is read off the subagent's own session — the `ask` call's
 #      output, its span, and what happened inside that span — and off the wake
 #      notice the orchestrator got.
@@ -91,6 +99,8 @@ SETTLE_TIMEOUT_S=${SETTLE_TIMEOUT_S:-420}
 # What the answer decides, and the line the subagent composes out of it. The
 # decided word is spelled out in the answer; the composed line is not, so
 # finding CHOSE-ALPHA anywhere proves a subagent that read the answer wrote it.
+# The word itself is deliberately absent from the subagent's own prompt below —
+# that is what leaves the channel as the only route to it.
 DECISION=ALPHA
 CHOSE_LINE="CHOSE-$DECISION"
 SID=""
@@ -141,8 +151,8 @@ fi
 
 mr_debug_start
 
-SUB_TASK="This is a deliberate test of the plugin's ask channel, not a planning job. Do exactly these three steps and nothing else. Step 1: call ask('Write the plan for variant $DECISION or for variant BETA? Answer with one of the two words.') exactly once and wait for its result. Step 2: make no other tool call at all — do not read, write or edit any file and do not search. Step 3: reply with exactly one line and nothing else: the word CHOSE, then a hyphen, then the single word the answer told you to use."
-TURN1="Call spawn(\"$AGENT\", \"$SUB_TASK\") exactly once, passing that prompt through unchanged, then end your turn. That subagent will put ONE question to you. When it does, answer it in that same turn with message(\"<its handle>\", \"Use $DECISION: $ANSWER_MARKER\") and nothing else: do not spawn anything for it, do not abort it, do not call list(), and do not report the question to me as a result."
+SUB_TASK="This is a deliberate test of the plugin's ask channel, not a planning job. Your whole task is to report ONE word: the variant name this run is to use. You do not have that word and you cannot work it out. It is not in this prompt, it stands in no file of this project, there is no list of candidates to choose from, and the only place it exists is with the caller who started you — the caller's answer will name it directly after the word Use. A word you invent, guess or take from anywhere else is wrong and fails this run, and so is ending your turn without it. Do exactly these three steps and nothing else. Step 1: call ask('Which variant is this run to use? Answer with the single variant word.') exactly once and wait for its result. Step 2: make no other tool call at all — do not read, write or edit any file, do not search, do not spawn. Step 3: reply with exactly one line and nothing else: the word CHOSE, then a hyphen, then the single variant word the answer named, spelled exactly as the answer spells it."
+TURN1="Call spawn(\"$AGENT\", \"$SUB_TASK\") exactly once, passing that prompt through unchanged, then end your turn. Put nothing else into that prompt — above all not the word $DECISION and not the text of the answer below, which the subagent must receive from you through its question and no other way. That subagent will put ONE question to you. When it does, answer it in that same turn with message(\"<its handle>\", \"Use $DECISION: $ANSWER_MARKER\") and nothing else: do not spawn anything for it, do not abort it, do not call list(), and do not report the question to me as a result."
 
 SID=$(mr_new_session "$MR_PREFIX")
 [ -n "$SID" ] || mr_die "the server did not return a session id"

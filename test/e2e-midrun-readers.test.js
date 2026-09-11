@@ -7,7 +7,7 @@
 
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { spawnSync } from "node:child_process"
@@ -162,4 +162,38 @@ test("midrun-ask: a run that never asked is not read as one that did", { skip: !
   assert.equal(figures.ask_calls, "0")
   assert.equal(figures.answer_prefix, "0")
   assert.equal(figures.tool_names, "read")
+})
+
+// ---------------------------------------------------------------------------
+// What makes the ask driver's question unavoidable. The criteria are read off
+// the captured session by the reader above; whether the subagent asks AT ALL is
+// decided by the task the driver hands it. A prompt that carries the candidate
+// words lets a model pick one and finish without ever using the channel — the
+// run then measures the model's taste. The invariant pinned here: the word the
+// answer decides stands nowhere in the subagent's own prompt, and the
+// orchestrator is told not to carry it into the spawn.
+// ---------------------------------------------------------------------------
+
+const ASK_DRIVER = readFileSync(resolve(import.meta.dirname, "e2e/ask-task.sh"), "utf8")
+
+function askDriverLine(name) {
+  const m = new RegExp(`^${name}="((?:[^"\\\\]|\\\\.)*)"$`, "m").exec(ASK_DRIVER)
+  assert.ok(m, `ask-task.sh carries no ${name} assignment on one line`)
+  return m[1]
+}
+
+test("ask-task.sh: the subagent's task names no candidate word it could pick instead of asking", () => {
+  const task = askDriverLine("SUB_TASK")
+  assert.match(task, /ask\('/, "the task does not tell the subagent to call ask")
+  assert.equal(/ALPHA|BETA/.test(task), false, "the subagent's task carries a candidate word")
+  assert.equal(task.includes("$DECISION"), false, "the subagent's task interpolates the decided word")
+  assert.match(task, /no list of candidates/)
+  assert.match(task, /only place it exists is with the caller/)
+})
+
+test("ask-task.sh: the orchestrator is forbidden to carry the answer into the spawn prompt", () => {
+  const turn = askDriverLine("TURN1")
+  assert.match(turn, /Put nothing else into that prompt/)
+  assert.match(turn, /not the word \$DECISION/)
+  assert.match(turn, /message\(\\"<its handle>\\", \\"Use \$DECISION: \$ANSWER_MARKER\\"\)/)
 })

@@ -21,6 +21,8 @@ that opencode upgrades don't shift the system-prompt composition.
 - `nested-task.sh` — nested-delegation harness. Drives one nested spawn
   (orchestrator → coder → researcher) and asserts it; see "Nested delegation"
   below.
+- `todo-driver.mjs` — TODO.md auto-tracking harness. Drives DONE and BLOCKED
+  markers through the wake hook and checks the resulting file.
 - `run-all.sh` — runs the 8 single-agent tests, the multi-agent test and the
   endless-mode cycles. Owns the server the first ten use: builds the TUI, starts
   a fresh `opencode serve` in the configured directory (default
@@ -128,8 +130,10 @@ which is what keeps subagent reads on real paths (see "Known caveats").
 The setup the drivers are written against:
 - `~/.config/opencode/agent-intercom.json` → `maxSubagents: 8, maxContext: 130000`
 - `opencode serve` started in `$HOME/testopencode`
-- llama-server: omnicoder (`Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf`)
-  with reasoning on, the params from `start-qwen.sh`
+- `E2E_MODEL` defaults to `xai/grok-4.6`; `grok-4.6` is configured under the
+  `xai` and `cliproxy` providers on this machine
+- the model for every spawned subagent is read from the machine's global
+  `~/.config/opencode/llm-models.json`; the drivers do not pin subagent models
 - Multi-agent test: 4 subagent spawns (planner / coder / reviewer / gitter), all
   status=completed, ~6:26 min wall-clock, 92 messages, produces `bytes()` in
   `src/format.js` plus 5 unit tests in `test/plugin.test.js`

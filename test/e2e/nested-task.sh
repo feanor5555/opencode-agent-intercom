@@ -69,6 +69,7 @@
 #   POLL_S             2     log poll cadence
 #   PROBE_S            1     liveness probe cadence during the blocked window
 #   OUT_DIR            ./out captures and the report
+#   E2E_MODEL          xai/grok-4.6            provider/model for every primary prompt
 #   KEEP_SERVER        0     1 leaves the server running
 #   E2E_TUI_BUILT      0     1 skips the TUI build
 #
@@ -81,8 +82,9 @@
 # out), the todo file of the driven project (backed up, and restored only if the
 # run changed it — which is itself a failed criterion), and the server.
 #
-# Prerequisites: curl, python3, setsid, npm, stat, an `opencode` on PATH, and a
-# model provider the project resolves.
+# Prerequisites: curl, python3, setsid, npm, stat, an `opencode` on PATH, a
+# provider serving E2E_MODEL, and per-role models in the machine's global
+# ~/.config/opencode/llm-models.json.
 #
 # NOT `set -e`: a failed criterion must be reported with its evidence and the
 # cleanup must still run, so failures are recorded rather than aborted on.
@@ -98,6 +100,13 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 PROJECT_DIR=${NESTED_PROJECT_DIR:-$HOME/testopencode}
 PORT=${NESTED_PORT:-4602}
 BASE=$(e2e_server_url "$PORT")
+MODEL=${E2E_MODEL:-xai/grok-4.6}
+MODEL_PROVIDER=${MODEL%%/*}
+MODEL_ID=${MODEL#*/}
+[ -n "$MODEL_PROVIDER" ] && [ "$MODEL_ID" != "$MODEL" ] && [ -n "$MODEL_ID" ] || {
+  echo "E2E_MODEL must be a provider/model pair (got: $MODEL)" >&2
+  exit 2
+}
 CALLER_ROLE=${NESTED_CALLER:-coder}
 WRONG_TARGET=${NESTED_WRONG_TARGET:-planner}
 DENIED_ROLE=${NESTED_DENIED_ROLE:-designer}
@@ -136,7 +145,6 @@ ASSERTED=0
 WAIT_LINE=""
 WAIT_LINENO=0
 WAIT_REASON=""
-RESOLVED_MODEL="(unresolved)"
 SERVER_VERSION="(unknown)"
 MAX_NESTED_SPAWNS=2
 MAX_SUBAGENT_AGE_MS=90000
@@ -520,10 +528,6 @@ e2e_server_wait_ready "$SERVER_START_TIMEOUT_S" "$OUT_DIR/$PREFIX.health.json" |
   die "opencode on $BASE did not become ready — see $SERVER_LOG"
 
 SERVER_VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","(no version field)"))' "$OUT_DIR/$PREFIX.health.json" 2>/dev/null || echo "(unparsed)")
-# The model the PROJECT resolves, not a provider's own default: /config/providers
-# reports one default per provider, none of which is what the sessions run on.
-RESOLVED_MODEL=$(curl -fsS -m 10 "$BASE/config" 2>/dev/null |
-  python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("model") or "(no model in config)", "/ small:", d.get("small_model") or "(none)")' 2>/dev/null || echo "(unresolved)")
 
 # The grant itself, as the running server resolves it. `GET /agent` returns each
 # agent with its permission rules flattened, so a `spawn`+`deny` rule is exactly
@@ -592,7 +596,7 @@ project dir         $PROJECT_DIR   (opencode.json names the plugin by absolute p
 server              opencode serve --port $PORT --hostname 127.0.0.1   (cwd = project dir)
 server pid / pgid   $E2E_SERVER_PID / $E2E_SERVER_PGID
 opencode version    $SERVER_VERSION
-default model       $RESOLVED_MODEL
+primary model       $MODEL   (sent on every driver prompt; spawned subagents use the global llm-models.json choices)
 settings file       $SETTINGS_FILE   (read, never written)
 resolved settings   maxNestedSpawns=$MAX_NESTED_SPAWNS maxSubagentAgeMs=$MAX_SUBAGENT_AGE_MS endlessMode=$ENDLESS_MODE endlessContext=$ENDLESS_CONTEXT
 delegating caller   $CALLER_ROLE   (spawns "researcher", must block)
@@ -621,7 +625,7 @@ fi
 post_prompt() {
   local sid="$1" text="$2" outfile="$3"
   local body
-  body=$(python3 -c 'import json,sys; print(json.dumps({"agent":"orchestrator","parts":[{"type":"text","text":sys.argv[1]}]}))' "$text")
+  body=$(python3 -c 'import json,sys; print(json.dumps({"agent":"orchestrator","model":{"providerID":sys.argv[2],"modelID":sys.argv[3]},"parts":[{"type":"text","text":sys.argv[1]}]}))' "$text" "$MODEL_PROVIDER" "$MODEL_ID")
   curl -s --max-time "$TURN_TIMEOUT_S" -X POST "$BASE/session/$sid/message" \
     -H 'content-type: application/json' -d "$body" > "$outfile" 2>&1
 }

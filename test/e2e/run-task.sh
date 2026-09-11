@@ -12,6 +12,7 @@
 #                   inside the session's project (opencode 1.15 stalls reads
 #                   outside the session directory on a permission prompt).
 #   OUT_DIR         default ./out (created if missing)
+#   E2E_MODEL       default xai/grok-4.6 (provider/model for this run)
 set -e
 AGENT="$1"
 TASK="$2"
@@ -20,6 +21,13 @@ PREFIX="$3"
 BASE=${OPENCODE_URL:-http://localhost:4567}
 PROJECT=${PROJECT_DIR:-$HOME/testopencode}
 OUTDIR=${OUT_DIR:-$(dirname "$0")/out}
+MODEL=${E2E_MODEL:-xai/grok-4.6}
+MODEL_PROVIDER=${MODEL%%/*}
+MODEL_ID=${MODEL#*/}
+[ -n "$MODEL_PROVIDER" ] && [ "$MODEL_ID" != "$MODEL" ] && [ -n "$MODEL_ID" ] || {
+  echo "E2E_MODEL must be a provider/model pair (got: $MODEL)" >&2
+  exit 2
+}
 mkdir -p "$OUTDIR"
 
 PROMPT_TEXT=$(jq -Rn --arg t "spawn(\"$AGENT\", \"$TASK\") — that is your entire task. Do not do anything else. End the turn after spawn returns." '$t')
@@ -28,11 +36,11 @@ T0=$(date +%s)
 SID=$(curl -s -X POST "$BASE/session?directory=$PROJECT" -H 'content-type: application/json' \
   -d "{\"title\":\"$PREFIX\"}" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 echo "$SID" > "$OUTDIR/$PREFIX.sid"
-echo "[$PREFIX] primary=$SID start $(date +%H:%M:%S)"
+echo "[$PREFIX] primary=$SID model=$MODEL start $(date +%H:%M:%S)"
 
 curl -s --max-time 600 -X POST "$BASE/session/$SID/message" \
   -H 'content-type: application/json' \
-  -d "{\"agent\":\"orchestrator\",\"parts\":[{\"type\":\"text\",\"text\":$PROMPT_TEXT}]}" \
+  -d "{\"agent\":\"orchestrator\",\"model\":{\"providerID\":\"$MODEL_PROVIDER\",\"modelID\":\"$MODEL_ID\"},\"parts\":[{\"type\":\"text\",\"text\":$PROMPT_TEXT}]}" \
   > "$OUTDIR/$PREFIX.orch-initial.json" 2>&1
 T1=$(date +%s)
 echo "[$PREFIX] orchestrator initial turn done $(date +%H:%M:%S) ($((T1-T0))s)"

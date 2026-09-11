@@ -8,6 +8,7 @@
 #   OPENCODE_URL    default http://localhost:4567
 #   PROJECT_DIR     default $HOME/testopencode
 #   OUT_DIR         default ./out
+#   E2E_MODEL       default xai/grok-4.6 (provider/model for this run)
 #
 # Expected outcome: 90+ messages, four spawn calls (planner, coder, reviewer,
 # gitter) all status=completed, bytes() exists in src/format.js, 5 new tests in
@@ -16,6 +17,13 @@ set -e
 BASE=${OPENCODE_URL:-http://localhost:4567}
 PROJECT=${PROJECT_DIR:-$HOME/testopencode}
 OUTDIR=${OUT_DIR:-$(dirname "$0")/out}
+MODEL=${E2E_MODEL:-xai/grok-4.6}
+MODEL_PROVIDER=${MODEL%%/*}
+MODEL_ID=${MODEL#*/}
+[ -n "$MODEL_PROVIDER" ] && [ "$MODEL_ID" != "$MODEL" ] && [ -n "$MODEL_ID" ] || {
+  echo "E2E_MODEL must be a provider/model pair (got: $MODEL)" >&2
+  exit 2
+}
 PREFIX=10-multi
 mkdir -p "$OUTDIR"
 
@@ -25,11 +33,11 @@ T0=$(date +%s)
 SID=$(curl -s -X POST "$BASE/session?directory=$PROJECT" -H 'content-type: application/json' \
   -d "{\"title\":\"$PREFIX\"}" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 echo "$SID" > "$OUTDIR/$PREFIX.sid"
-echo "[$PREFIX] primary=$SID start $(date +%H:%M:%S)"
+echo "[$PREFIX] primary=$SID model=$MODEL start $(date +%H:%M:%S)"
 
 curl -s --max-time 1200 -X POST "$BASE/session/$SID/message" \
   -H 'content-type: application/json' \
-  -d "{\"agent\":\"orchestrator\",\"parts\":[{\"type\":\"text\",\"text\":$PROMPT_TEXT}]}" \
+  -d "{\"agent\":\"orchestrator\",\"model\":{\"providerID\":\"$MODEL_PROVIDER\",\"modelID\":\"$MODEL_ID\"},\"parts\":[{\"type\":\"text\",\"text\":$PROMPT_TEXT}]}" \
   > "$OUTDIR/$PREFIX.initial.json" 2>&1
 T1=$(date +%s); echo "[$PREFIX] orch initial done $(date +%H:%M:%S) ($((T1-T0))s)"
 

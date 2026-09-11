@@ -10,13 +10,15 @@
 //     loaded. A `file:` pointer only takes effect for the project that carries
 //     it, so start `opencode serve` from a project whose opencode.json holds
 //     the pointer, or wire the plugin globally.
-//   - A local LLM reachable (the test uses whatever omnicoder /v1 endpoint
-//     opencode detected). Single-spawn turns; budget ~5-15 min wall-clock per
-//     scenario depending on the model.
+//   - A provider serving E2E_MODEL (default xai/grok-4.6), plus per-role
+//     models in the machine's global ~/.config/opencode/llm-models.json.
+//     Single-spawn turns; budget ~5-15 min wall-clock per scenario depending
+//     on the model.
 //
 // Usage:
 //   node test/e2e/todo-driver.mjs [baseUrl] [projectDir]
 //   defaults: http://localhost:4567   /tmp/intercom-todo-e2e-<ts>
+//   E2E_MODEL: xai/grok-4.6 (provider/model for every primary prompt)
 //
 // Exit code 0 = all scenarios passed; 1 = any failure.
 
@@ -32,6 +34,16 @@ setGlobalDispatcher(new Agent({ headersTimeout: 30 * 60 * 1000, bodyTimeout: 30 
 const baseUrl = process.argv[2] || "http://localhost:4567"
 const projectDir =
   process.argv[3] || mkdtempSync(join(tmpdir(), "intercom-todo-e2e-"))
+const modelRef = process.env.E2E_MODEL || "xai/grok-4.6"
+const modelSlash = modelRef.indexOf("/")
+if (modelSlash <= 0 || modelSlash === modelRef.length - 1) {
+  console.error(`E2E_MODEL must be a provider/model pair (got: ${modelRef})`)
+  process.exit(2)
+}
+const model = {
+  providerID: modelRef.slice(0, modelSlash),
+  modelID: modelRef.slice(modelSlash + 1),
+}
 
 // This checkout, resolved from the driver's own location: test/e2e/ -> repo root.
 const pluginRoot = fileURLToPath(new URL("../../", import.meta.url)).replace(/\/$/, "")
@@ -65,41 +77,21 @@ function writeTodo() {
   writeFileSync(join(projectDir, "TODO.md"), TODO_SEED)
 }
 
-// The session directory here is a fresh /tmp dir OUTSIDE serve-cwd. A foreign
-// directory does NOT inherit serve-cwd's providers, so opencode 1.17+ throws
-// HTTP 500 (`No providers are available`) on the FIRST prompt unless this dir
-// resolves a provider+model before that prompt. We therefore look up the
-// server's default provider/model at runtime and pin it into the written
-// opencode.json (see CLAUDE.md footgun "Session mit ?directory=<pfad> wirft
-// beim ersten Prompt HTTP 500"). The config must exist before the first prompt
-// — a later write can't heal an already "no providers"-cached directory.
-async function resolveModel() {
-  try {
-    const cfg = u(await client.config.providers())
-    const firstDefault = Object.entries(cfg?.default || {})[0]
-    if (firstDefault) return `${firstDefault[0]}/${firstDefault[1]}`
-    for (const p of cfg?.providers || []) {
-      const m = Object.keys(p.models || {})[0]
-      if (m) return `${p.id}/${m}`
-    }
-  } catch {
-    /* fall through — rely on the ambient config chain */
-  }
-  return null
-}
+// The session directory here is a fresh /tmp dir OUTSIDE serve-cwd. The
+// primary prompt carries E2E_MODEL explicitly, while spawned subagents resolve
+// their per-role models from the machine's global llm-models.json.
 
 // Headless opencode hangs on every tool that defaults to "ask" because there
 // is no one to approve — write/edit/bash/webfetch all sit in state=running
 // until a 3-minute timeout. Pre-authorise everything in the test project so
 // the coder/planner can actually do their work.
-function writePermissiveConfig(model) {
+function writePermissiveConfig() {
   writeFileSync(
     join(projectDir, "opencode.json"),
     JSON.stringify(
       {
         $schema: "https://opencode.ai/config.json",
         plugin: [`file:${pluginRoot}`],
-        ...(model ? { model } : {}),
         permission: {
           edit: "allow",
           bash: "allow",
@@ -156,7 +148,7 @@ async function turn(primaryID, label, text) {
   const t0 = Date.now()
   const r = await client.session.prompt({
     path: { id: primaryID },
-    body: { agent: "orchestrator", parts: [{ type: "text", text }] },
+    body: { agent: "orchestrator", model, parts: [{ type: "text", text }] },
   })
   const dt = ((Date.now() - t0) / 1000).toFixed(0)
   if (r?.error) {
@@ -244,11 +236,10 @@ if (!existsSync(projectDir)) {
   process.exit(2)
 }
 writeTodo()
-const pinnedModel = await resolveModel()
-writePermissiveConfig(pinnedModel)
+writePermissiveConfig()
 console.log(
   `seeded TODO.md (3 open tasks: T1, T2, R1) + permissive opencode.json` +
-    (pinnedModel ? ` (model ${pinnedModel})` : ` (no model resolved — relying on ambient config)`),
+    ` (primary model ${modelRef}; spawned subagents use global llm-models.json)`,
 )
 
 const primary = u(

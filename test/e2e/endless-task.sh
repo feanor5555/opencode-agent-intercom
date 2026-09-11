@@ -186,6 +186,7 @@
 #   SERVER_START_TIMEOUT_S 60                  readiness probe budget
 #   POLL_S             2                       log poll cadence
 #   OUT_DIR            ./out                   captures and backups
+#   E2E_MODEL           xai/grok-4.6            provider/model for every primary prompt
 #   KEEP_SERVER        0                       1 leaves the server running
 #   E2E_TUI_BUILT      0                       1 skips the TUI build; run-all.sh
 #                      exports it after building once for the whole suite
@@ -204,8 +205,9 @@
 # none — the fixture directory the seeded tasks work on, every session of every
 # cycle, and the server.
 #
-# Prerequisites: curl, python3, setsid, npm, an `opencode` on PATH, and a model
-# provider that the project resolves.
+# Prerequisites: curl, python3, setsid, npm, an `opencode` on PATH, a provider
+# serving E2E_MODEL, and per-role models in the machine's global
+# ~/.config/opencode/llm-models.json.
 #
 # NOT `set -e`: a failed criterion must be reported with its evidence and the
 # cleanup must still run, so failures are recorded rather than aborted on.
@@ -221,6 +223,13 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 PROJECT_DIR=${ENDLESS_PROJECT_DIR:-$HOME/testopencode}
 PORT=${ENDLESS_PORT:-4599}
 BASE=$(e2e_server_url "$PORT")
+MODEL=${E2E_MODEL:-xai/grok-4.6}
+MODEL_PROVIDER=${MODEL%%/*}
+MODEL_ID=${MODEL#*/}
+[ -n "$MODEL_PROVIDER" ] && [ "$MODEL_ID" != "$MODEL" ] && [ -n "$MODEL_ID" ] || {
+  echo "E2E_MODEL must be a provider/model pair (got: $MODEL)" >&2
+  exit 2
+}
 ENDLESS_CYCLES=${ENDLESS_CYCLES:-2}
 ENDLESS_CONTEXT=${ENDLESS_CONTEXT:-}
 ENDLESS_CONTEXT_CEILING=${ENDLESS_CONTEXT_CEILING:-100000000}
@@ -281,7 +290,6 @@ WAIT_LINE=""
 WAIT_LINENO=0
 WAIT_REASON=""
 POLL_URL=""
-RESOLVED_MODEL="(unresolved)"
 SERVER_VERSION="(unknown)"
 # The cycle currently being driven, and the line of the debug-log slice its
 # window starts after. Every read of the slice is scoped to that window.
@@ -886,8 +894,6 @@ e2e_server_wait_ready "$SERVER_START_TIMEOUT_S" "$OUT_DIR/$PREFIX.health.json" |
   die "opencode on $BASE did not become ready — see $SERVER_LOG"
 
 SERVER_VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","(no version field)"))' "$OUT_DIR/$PREFIX.health.json" 2>/dev/null || echo "(unparsed)")
-RESOLVED_MODEL=$(curl -fsS -m 10 "$BASE/config/providers" 2>/dev/null |
-  python3 -c 'import json,sys; d=json.load(sys.stdin); dflt=d.get("default") or {}; print(next((f"{k}/{v}" for k,v in dflt.items()), "(no default)"))' 2>/dev/null || echo "(unresolved)")
 
 # ---------- the setup, printed so a run can be reproduced -------------------
 
@@ -900,7 +906,7 @@ project dir         $PROJECT_DIR   (opencode.json names the plugin by absolute p
 server              opencode serve --port $PORT --hostname 127.0.0.1   (cwd = project dir)
 server pid / pgid   $E2E_SERVER_PID / $E2E_SERVER_PGID
 opencode version    $SERVER_VERSION
-default model       $RESOLVED_MODEL   (the model that actually served a run is read off ~/.local/share/opencode/log/opencode.log, not from this line)
+primary model       $MODEL   (sent on every driver prompt; spawned subagents use the global llm-models.json choices)
 cycles driven       $ENDLESS_CYCLES in sequence, each from the file and the session the one before it left
 settings file       $SETTINGS_FILE   (backup: $SETTINGS_BAK, existed=$SETTINGS_EXISTED)
 settings written    endlessMode=true endlessQuiesceTimeoutMs=$ENDLESS_QUIESCE_TIMEOUT_MS endlessMaxCycles=$ENDLESS_MAX_CYCLES
@@ -920,7 +926,7 @@ print_setup | tee -a "$REPORT_FILE"
 post_prompt() {
   local text="$1" outfile="$2"
   local body
-  body=$(python3 -c 'import json,sys; print(json.dumps({"agent":"orchestrator","parts":[{"type":"text","text":sys.argv[1]}]}))' "$text")
+  body=$(python3 -c 'import json,sys; print(json.dumps({"agent":"orchestrator","model":{"providerID":sys.argv[2],"modelID":sys.argv[3]},"parts":[{"type":"text","text":sys.argv[1]}]}))' "$text" "$MODEL_PROVIDER" "$MODEL_ID")
   curl -s --max-time "$TURN_TIMEOUT_S" -X POST "$BASE/session/$SID/message" \
     -H 'content-type: application/json' -d "$body" > "$outfile" 2>&1
 }

@@ -63,6 +63,10 @@ afterEach(() => {
 // The one notice part the sweep works on, and a client that hands it back with
 // whatever flag the last PATCH left on it. Stateful on purpose: a flip back has
 // nothing to write unless the first flip's write is what the session now holds.
+//
+// The PATCH goes through the client's own transport, which is the route the
+// sweep takes; a bare `fetch` here fails the test, because on an interactive
+// TUI instance that address is a placeholder nothing is bound to.
 function fixture() {
   const calls = []
   let synthetic = false
@@ -87,12 +91,17 @@ function fixture() {
         ],
       }),
     },
+    _client: {
+      patch: async ({ url, body }) => {
+        synthetic = body.synthetic === true
+        calls.push({ url, method: "PATCH", synthetic })
+        return { data: {}, request: {}, response: { status: 200 } }
+      },
+      getConfig: () => ({ baseUrl: URL_BASE }),
+    },
   }
-  globalThis.fetch = async (url, init) => {
-    const body = JSON.parse(init.body)
-    synthetic = body.synthetic === true
-    calls.push({ url, method: init.method, synthetic })
-    return { ok: true, status: 200 }
+  globalThis.fetch = async (url) => {
+    throw new Error(`bare fetch must not be used, but was called for ${url}`)
   }
   return { client, calls }
 }
@@ -145,7 +154,11 @@ test("a write to the settings file sweeps without waiting for the tick", async (
     "the flip has to reach the sweep through the watch alone",
   )
   assert.equal(calls[0].method, "PATCH")
-  assert.equal(calls[0].url, `${URL_BASE}/session/${SID}/message/msg_1/part/prt_a`)
+  assert.equal(
+    calls[0].url,
+    `/session/${SID}/message/msg_1/part/prt_a`,
+    "the part route is relative — the client transport prepends its own base URL",
+  )
 })
 
 test("a file REPLACED rather than rewritten is still noticed", async () => {

@@ -15,6 +15,15 @@
 // annotated experimental, so a missing or refused route has to degrade to
 // leaving the notices as they are.
 //
+// The route is taken through the CLIENT'S OWN TRANSPORT, not through a bare
+// `fetch` at `serverUrl`: on an interactive TUI instance that address is
+// opencode's placeholder `http://localhost:4096` with nothing bound to it, so
+// a sweep going that way could never have written a single part there. The bare
+// `fetch` survives only for a client shape that exposes no transport at all.
+// The three-way per-part outcome is read off `attempt`'s failure `kind`: an
+// answered status is "refused", a request nothing answered is "unreachable",
+// and both end the sweep alike while nothing has been written yet.
+//
 // Run: node --test --test-timeout=4000 test/agentcom-retroactive.test.js
 
 import test, { beforeEach, afterEach } from "node:test"
@@ -28,6 +37,7 @@ import {
   applyAgentcomVisibility,
   forgetSessionDirectory,
   isIntercomNoticePart,
+  partRoute,
   promptSession,
   setServerUrl,
 } from "../src/client.js"
@@ -88,20 +98,51 @@ function noticePart(id, { synthetic = false, messageID = "msg_1", text = "🔔 a
   }
 }
 
-// A client whose messages() returns the given message list, in the
-// { data: [...] } envelope the SDK wraps responses in.
-function clientWith(messages) {
-  return { session: { messages: async () => ({ data: messages }) } }
-}
-
-// Records every PATCH and answers each with `status`.
-function captureFetch(calls, { status = 200, statuses } = {}) {
+// The client's own `patch` transport, recording every call and answering it the
+// way the generated SDK client does when it was built WITHOUT `throwOnError`:
+// a 2xx resolves `{ data, request, response }`, anything else resolves
+// `{ error, request, response }` carrying the status. `throws` makes it reject
+// instead, which is the transport-level failure — no response was seen.
+function transportPatch(calls, { status = 200, statuses, throws = false } = {}) {
   let n = 0
-  globalThis.fetch = async (url, init) => {
+  return async ({ url, body, headers }) => {
     const code = statuses ? (statuses[n] ?? statuses.at(-1)) : status
     n++
+    calls.push({ url, method: "PATCH", body, headers })
+    if (throws) throw new Error("ECONNREFUSED")
+    if (code >= 200 && code < 300) return { data: {}, request: {}, response: { status: code } }
+    return { error: { name: "BadRequestError" }, request: {}, response: { status: code } }
+  }
+}
+
+// A client whose messages() returns the given message list, in the
+// { data: [...] } envelope the SDK wraps responses in, and whose transport
+// records the sweep's PATCHes into `calls` — the root-client shape, which keeps
+// the transport on `_client`.
+function clientWith(messages, calls = [], options = {}) {
+  return {
+    session: { messages: async () => ({ data: messages }) },
+    _client: {
+      patch: transportPatch(calls, options),
+      getConfig: () => ({ baseUrl: URL_BASE }),
+    },
+  }
+}
+
+// A `fetch` that fails the test if anything calls it: the transport route must
+// not fall back to the placeholder address.
+function forbidFetch() {
+  globalThis.fetch = async (url) => {
+    throw new Error(`bare fetch must not be used, but was called for ${url}`)
+  }
+}
+
+// Records every bare-`fetch` PATCH and answers each with `status` — the last
+// resort, for a client shape carrying no transport.
+function captureFetch(calls, { status = 200 } = {}) {
+  globalThis.fetch = async (url, init) => {
     calls.push({ url, method: init.method, body: JSON.parse(init.body) })
-    return { ok: code >= 200 && code < 300, status: code }
+    return { ok: status >= 200 && status < 300, status }
   }
 }
 
@@ -126,7 +167,7 @@ test("the marker decides what the sweep may touch", () => {
 
 test("hiding patches every visible notice part and leaves everything else alone", async () => {
   const calls = []
-  captureFetch(calls)
+  forbidFetch()
   const client = clientWith([
     {
       info: { role: "user" },
@@ -142,7 +183,7 @@ test("hiding patches every visible notice part and leaves everything else alone"
         { id: "prt_tool", sessionID: SID, messageID: "msg_2", type: "tool", tool: "spawn", metadata: { agentIntercom: true } },
       ],
     },
-  ])
+  ], calls)
 
   const outcome = await applyAgentcomVisibility(client, SID, { hidden: true })
 
@@ -151,8 +192,14 @@ test("hiding patches every visible notice part and leaves everything else alone"
   assert.equal(calls[0].method, "PATCH")
   assert.equal(
     calls[0].url,
-    `${URL_BASE}/session/${SID}/message/msg_1/part/prt_visible`,
-    "the part route carries all three ids",
+    partRoute(SID, "msg_1", "prt_visible"),
+    "the part route carries all three ids, relative to the client's base URL",
+  )
+  assert.equal(calls[0].url, `/session/${SID}/message/msg_1/part/prt_visible`)
+  assert.equal(
+    calls[0].headers?.["Content-Type"],
+    "application/json",
+    "the body is sent as JSON",
   )
   // The route's payload schema is the whole Part with additionalProperties:false —
   // the body must be the part as stored, with the one field replaced.
@@ -169,11 +216,11 @@ test("hiding patches every visible notice part and leaves everything else alone"
 
 test("showing again patches the hidden parts back with synthetic false", async () => {
   const calls = []
-  captureFetch(calls)
+  forbidFetch()
   const client = clientWith([
     { info: { role: "user" }, parts: [noticePart("prt_a", { synthetic: true })] },
     { info: { role: "user" }, parts: [noticePart("prt_b", { synthetic: true, messageID: "msg_2" })] },
-  ])
+  ], calls)
 
   const outcome = await applyAgentcomVisibility(client, SID, { hidden: false })
 
@@ -192,10 +239,10 @@ test("showing again patches the hidden parts back with synthetic false", async (
 
 test("nothing stale means no request at all", async () => {
   const calls = []
-  captureFetch(calls)
+  forbidFetch()
   const client = clientWith([
     { info: { role: "user" }, parts: [noticePart("prt_a", { synthetic: true })] },
-  ])
+  ], calls)
 
   const outcome = await applyAgentcomVisibility(client, SID, { hidden: true })
 
@@ -203,35 +250,66 @@ test("nothing stale means no request at all", async () => {
   assert.equal(calls.length, 0)
 })
 
-test("without a server URL the sweep writes nothing and reports nothing done", async () => {
+test("a client with a transport needs no server URL at all", async () => {
+  // The interactive TUI: opencode reports the placeholder nothing is bound to,
+  // or nothing at all, and the client transport is the only route there is.
+  setServerUrl("")
+  const calls = []
+  forbidFetch()
+  const client = clientWith([{ info: { role: "user" }, parts: [noticePart("prt_a")] }], calls)
+
+  const outcome = await applyAgentcomVisibility(client, SID, { hidden: true })
+
+  assert.deepEqual(outcome, { stale: 1, patched: 1, failed: 0, aborted: false })
+  assert.equal(calls[0].url, `/session/${SID}/message/msg_1/part/prt_a`)
+})
+
+test("no transport and no server URL is the one case that writes nothing", async () => {
   setServerUrl("")
   const calls = []
   captureFetch(calls)
-  const client = clientWith([{ info: { role: "user" }, parts: [noticePart("prt_a")] }])
+  const client = { session: { messages: async () => ({ data: [{ info: { role: "user" }, parts: [noticePart("prt_a")] }] }) } }
 
   const outcome = await applyAgentcomVisibility(client, SID, { hidden: true })
 
   assert.deepEqual(outcome, { stale: 0, patched: 0, failed: 0, aborted: false })
   assert.equal(calls.length, 0)
+})
+
+test("a client without a transport still reaches a listening server directly", async () => {
+  const calls = []
+  captureFetch(calls)
+  const client = { session: { messages: async () => ({ data: [{ info: { role: "user" }, parts: [noticePart("prt_a")] }] }) } }
+
+  const outcome = await applyAgentcomVisibility(client, SID, { hidden: true })
+
+  assert.deepEqual(outcome, { stale: 1, patched: 1, failed: 0, aborted: false })
+  assert.equal(calls[0].method, "PATCH")
+  assert.equal(
+    calls[0].url,
+    `${URL_BASE}/session/${SID}/message/msg_1/part/prt_a`,
+    "the last resort prefixes serverUrl itself",
+  )
+  assert.equal(calls[0].body.synthetic, true)
 })
 
 test("a session id of nothing is a no-op", async () => {
   const calls = []
-  captureFetch(calls)
-  const outcome = await applyAgentcomVisibility(clientWith([]), "", { hidden: true })
+  forbidFetch()
+  const outcome = await applyAgentcomVisibility(clientWith([], calls), "", { hidden: true })
   assert.deepEqual(outcome, { stale: 0, patched: 0, failed: 0, aborted: false })
   assert.equal(calls.length, 0)
 })
 
 test("a route that is not there costs one request and leaves the notices as they are", async () => {
   const calls = []
-  captureFetch(calls, { status: 404 })
+  forbidFetch()
   const client = clientWith([
     {
       info: { role: "user" },
       parts: [noticePart("prt_a"), noticePart("prt_b"), noticePart("prt_c")],
     },
-  ])
+  ], calls, { status: 404 })
 
   const outcome = await applyAgentcomVisibility(client, SID, { hidden: true })
 
@@ -243,15 +321,35 @@ test("a route that is not there costs one request and leaves the notices as they
   assert.equal(calls.length, 1, "no burst of doomed requests")
 })
 
+test("a status the client resolved rather than threw still counts as a refusal", async () => {
+  // The client is built without `throwOnError`, so a 401 comes back as an
+  // envelope and not as a rejection. Reading it as a transport failure would
+  // mislabel a server that answered — and it is the label the log carries.
+  const calls = []
+  forbidFetch()
+  const client = clientWith([
+    { info: { role: "user" }, parts: [noticePart("prt_a"), noticePart("prt_b")] },
+  ], calls, { status: 401 })
+
+  const outcome = await applyAgentcomVisibility(client, SID, { hidden: true })
+
+  assert.deepEqual(
+    outcome,
+    { stale: 2, patched: 0, failed: 1, aborted: true },
+    "a denied auth ends the sweep exactly as an absent route does",
+  )
+  assert.equal(calls.length, 1)
+})
+
 test("a refusal after a part HAS been written costs only that part", async () => {
   const calls = []
-  captureFetch(calls, { statuses: [200, 400, 200] })
+  forbidFetch()
   const client = clientWith([
     {
       info: { role: "user" },
       parts: [noticePart("prt_a"), noticePart("prt_b"), noticePart("prt_c")],
     },
-  ])
+  ], calls, { statuses: [200, 400, 200] })
 
   const outcome = await applyAgentcomVisibility(client, SID, { hidden: true })
 
@@ -260,25 +358,29 @@ test("a refusal after a part HAS been written costs only that part", async () =>
 })
 
 test("a transport failure is swallowed rather than thrown at the notice path", async () => {
-  let attempts = 0
-  globalThis.fetch = async () => {
-    attempts++
-    throw new Error("ECONNREFUSED")
-  }
+  const calls = []
+  forbidFetch()
   const client = clientWith([
     { info: { role: "user" }, parts: [noticePart("prt_a"), noticePart("prt_b")] },
-  ])
+  ], calls, { throws: true })
 
   const outcome = await applyAgentcomVisibility(client, SID, { hidden: true })
 
-  assert.deepEqual(outcome, { stale: 2, patched: 0, failed: 1, aborted: true })
-  assert.equal(attempts, 1)
+  assert.deepEqual(
+    outcome,
+    { stale: 2, patched: 0, failed: 1, aborted: true },
+    "a request nothing answered ends the sweep the same way a refusal does",
+  )
+  assert.equal(calls.length, 1)
 })
 
 test("an unreadable message list leaves the sweep with nothing to do", async () => {
   const calls = []
-  captureFetch(calls)
-  const client = { session: { messages: async () => { throw new Error("timeout") } } }
+  forbidFetch()
+  const client = {
+    session: { messages: async () => { throw new Error("timeout") } },
+    _client: { patch: transportPatch(calls) },
+  }
 
   const outcome = await applyAgentcomVisibility(client, SID, { hidden: true })
 
@@ -288,10 +390,10 @@ test("an unreadable message list leaves the sweep with nothing to do", async () 
 
 test("the sweep is bounded and keeps the newest parts", async () => {
   const calls = []
-  captureFetch(calls)
+  forbidFetch()
   const total = MAX_VISIBILITY_PATCHES + 50
   const parts = Array.from({ length: total }, (_, i) => noticePart(`prt_${i}`))
-  const client = clientWith([{ info: { role: "user" }, parts }])
+  const client = clientWith([{ info: { role: "user" }, parts }], calls)
 
   const outcome = await applyAgentcomVisibility(client, SID, { hidden: true })
 
@@ -308,10 +410,10 @@ test("the sweep is bounded and keeps the newest parts", async () => {
 
 test("the first observation only records — nothing has flipped yet", async () => {
   const calls = []
-  captureFetch(calls)
+  forbidFetch()
   setShowAgentcom(false)
   primarySessions.add(SID)
-  const client = clientWith([{ info: { role: "user" }, parts: [noticePart("prt_a")] }])
+  const client = clientWith([{ info: { role: "user" }, parts: [noticePart("prt_a")] }], calls)
 
   const result = await syncAgentcomVisibility(client)
 
@@ -321,11 +423,11 @@ test("the first observation only records — nothing has flipped yet", async () 
 
 test("switching the switch off hides what is already on screen", async () => {
   const calls = []
-  captureFetch(calls)
+  forbidFetch()
   setShowAgentcom(true)
   primarySessions.add(SID)
   primarySessions.add("ses_other_primary")
-  const client = clientWith([{ info: { role: "user" }, parts: [noticePart("prt_a")] }])
+  const client = clientWith([{ info: { role: "user" }, parts: [noticePart("prt_a")] }], calls)
 
   await syncAgentcomVisibility(client)
   setShowAgentcom(false)
@@ -341,11 +443,11 @@ test("switching the switch off hides what is already on screen", async () => {
 
 test("switching it back on brings the hidden notices back", async () => {
   const calls = []
-  captureFetch(calls)
+  forbidFetch()
   setShowAgentcom(false)
   const client = clientWith([
     { info: { role: "user" }, parts: [noticePart("prt_a", { synthetic: true })] },
-  ])
+  ], calls)
 
   await syncAgentcomVisibility(client, { sessions: [SID] })
   setShowAgentcom(true)
@@ -358,9 +460,9 @@ test("switching it back on brings the hidden notices back", async () => {
 
 test("an unchanged switch sweeps nothing", async () => {
   const calls = []
-  captureFetch(calls)
+  forbidFetch()
   setShowAgentcom(true)
-  const client = clientWith([{ info: { role: "user" }, parts: [noticePart("prt_a")] }])
+  const client = clientWith([{ info: { role: "user" }, parts: [noticePart("prt_a")] }], calls)
 
   await syncAgentcomVisibility(client, { sessions: [SID] })
   const second = await syncAgentcomVisibility(client, { sessions: [SID] })
@@ -373,9 +475,13 @@ test("an unchanged switch sweeps nothing", async () => {
 
 test("a sweep that could not write is not retried on every tick", async () => {
   const calls = []
-  captureFetch(calls, { status: 404 })
+  forbidFetch()
   setShowAgentcom(true)
-  const client = clientWith([{ info: { role: "user" }, parts: [noticePart("prt_a")] }])
+  const client = clientWith(
+    [{ info: { role: "user" }, parts: [noticePart("prt_a")] }],
+    calls,
+    { status: 404 },
+  )
 
   await syncAgentcomVisibility(client, { sessions: [SID] })
   setShowAgentcom(false)
@@ -389,15 +495,24 @@ test("a sweep that could not write is not retried on every tick", async () => {
 
 test("one session's failure does not cost the others their sweep", async () => {
   const calls = []
+  forbidFetch()
   let n = 0
-  globalThis.fetch = async (url, init) => {
-    n++
-    if (n === 1) throw new Error("ECONNREFUSED")
-    calls.push({ url, body: JSON.parse(init.body) })
-    return { ok: true, status: 200 }
-  }
   setShowAgentcom(true)
-  const client = clientWith([{ info: { role: "user" }, parts: [noticePart("prt_a")] }])
+  const client = {
+    session: {
+      messages: async () => ({
+        data: [{ info: { role: "user" }, parts: [noticePart("prt_a")] }],
+      }),
+    },
+    _client: {
+      patch: async ({ url, body }) => {
+        n++
+        if (n === 1) throw new Error("ECONNREFUSED")
+        calls.push({ url, method: "PATCH", body })
+        return { data: {}, request: {}, response: { status: 200 } }
+      },
+    },
+  }
 
   await syncAgentcomVisibility(client, { sessions: ["ses_a", "ses_b"] })
   setShowAgentcom(false)
@@ -409,7 +524,7 @@ test("one session's failure does not cost the others their sweep", async () => {
 
 test("a session this process posted into is swept even before it calls a tool", async () => {
   const calls = []
-  captureFetch(calls)
+  forbidFetch()
   setShowAgentcom(true)
   const posted = []
   const swept = []
@@ -424,6 +539,7 @@ test("a session this process posted into is swept even before it calls a tool", 
         return { data: undefined }
       },
     },
+    _client: { patch: transportPatch(calls) },
   }
 
   // The handoff kickoff: a hideable prompt into a brand-new orchestrator
@@ -463,9 +579,9 @@ test("the watch starts once per process and never holds it open", () => {
 
 test("the watch seeds from the value in effect at start", async () => {
   const calls = []
-  captureFetch(calls)
+  forbidFetch()
   setShowAgentcom(false)
-  const client = clientWith([{ info: { role: "user" }, parts: [noticePart("prt_a")] }])
+  const client = clientWith([{ info: { role: "user" }, parts: [noticePart("prt_a")] }], calls)
 
   startAgentcomVisibilityWatch(client, { intervalMs: 60000 })
   const result = await syncAgentcomVisibility(client, { sessions: [SID] })

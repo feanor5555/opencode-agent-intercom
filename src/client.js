@@ -746,12 +746,18 @@ let serverUrlLogged = false
 
 // The generated SDK client's underlying HTTP client — the transport every
 // namespace method routes through. The root client keeps it on `_client`, the
-// v2 client on `client`; both expose `post({ url, body, headers, throwOnError })`
-// and `getConfig()`. Undefined for a client shape that has neither, which is
-// what the bare-`fetch` fallback is left for.
-export function lowLevelClient(client) {
+// v2 client on `client`; both expose one function per HTTP verb, each taking
+// `{ url, body, headers, throwOnError }`, plus `getConfig()`. Undefined for a
+// client shape that has neither, which is what the bare-`fetch` fallback is
+// left for.
+//
+// `method` names the verb the caller needs — "post" for a route post, "patch"
+// for the part route. A candidate that cannot serve that verb is not a
+// transport for this caller, so a shape carrying only some of the verbs falls
+// back rather than throwing at the call.
+export function lowLevelClient(client, method = "post") {
   for (const candidate of [client?._client, client?.client]) {
-    if (candidate && typeof candidate.post === "function") return candidate
+    if (candidate && typeof candidate[method] === "function") return candidate
   }
   return undefined
 }
@@ -812,31 +818,111 @@ export function isIntercomNoticePart(part) {
   )
 }
 
+// The experimental part route, relative to the server's base URL:
+// `PATCH /session/{sessionID}/message/{messageID}/part/{partID}`. Relative
+// because that is what the client's own transport takes — it prepends its
+// configured base URL itself. The bare-`fetch` fallback prefixes `serverUrl`.
+export function partRoute(sessionID, messageID, partID) {
+  return (
+    `/session/${encodeURIComponent(sessionID)}` +
+    `/message/${encodeURIComponent(messageID)}/part/${encodeURIComponent(partID)}`
+  )
+}
+
 // PATCHes one part's `synthetic` flag. The body is the WHOLE part with the one
 // field replaced: the route's payload schema is `Part` with
 // `additionalProperties: false`, i.e. a complete valid part, not a diff.
 //
+// Two routes to the one endpoint, in the order selectTuiSession established:
+//
+//   1. the resolved client's own transport (`lowLevelClient(client, "patch")`).
+//      This is the route that reaches an interactive TUI instance: it carries
+//      the auth and directory headers and, where the instance runs no HTTP
+//      listener, the in-process dispatch. See the serverUrl block above.
+//   2. a bare `fetch` at `serverUrl`, ONLY for a client shape that exposes no
+//      transport at all. It carries no authorization header and its address may
+//      be opencode's placeholder, so it is a last resort, not a fallback: a
+//      transport that answered with a refusal is not retried through it, since
+//      the same server would refuse the same body twice and the second request
+//      would double the sweep's cost per part.
+//
 // Returns "ok", or the kind of failure, so the caller can tell "this one part
-// could not be written" from "this server has no such route".
-async function patchPartSynthetic(part, sessionID, hidden) {
-  const url =
-    `${serverUrl}/session/${encodeURIComponent(part.sessionID ?? sessionID)}` +
-    `/message/${encodeURIComponent(part.messageID)}/part/${encodeURIComponent(part.id)}`
+// could not be written" from "this server has no such route". The three-way
+// outcome is read off `attempt`'s failure `kind` on the transport route:
+//
+//   "refused"     — the server answered with a status >= 400, or the client
+//                   resolved an error envelope (`kind: "refused"`). The route
+//                   is missing, the body was rejected, or auth was denied.
+//   "unreachable" — nothing was seen to answer: a thrown transport error, an
+//                   envelope carrying no status at all (`kind:
+//                   "indeterminate"`), or no route to the server at all.
+//
+// Both end the sweep the same way while nothing has been written yet — see
+// applyAgentcomVisibility — so the split serves the log, not the bound.
+//
+// The transport call deliberately does NOT ask for `throwOnError`: a thrown
+// value carries no status, so `attempt` can only class it "indeterminate",
+// and the resolved envelope is what keeps a refusal distinguishable from an
+// unreachable server.
+async function patchPartSynthetic(client, part, sessionID, hidden) {
+  const partSessionID = part.sessionID ?? sessionID
+  const route = partRoute(partSessionID, part.messageID, part.id)
+  const body = { ...part, sessionID: partSessionID, synthetic: hidden }
+
+  const transport = lowLevelClient(client, "patch")
+  if (transport) {
+    const op = "applyAgentcomVisibility (client route patch)"
+    const outcome = await attempt(op, () =>
+      transport.patch({
+        url: route,
+        body,
+        headers: { "Content-Type": "application/json" },
+      }),
+    )
+    if (outcome.ok) return "ok"
+    const reason = outcome.error?.kind === "refused" ? "refused" : "unreachable"
+    log("agentcom visibility patch failed", {
+      route,
+      via: "client",
+      reason,
+      partID: part.id,
+      status: outcome.error?.status,
+      kind: outcome.error?.kind,
+      err: errMsg(outcome.error),
+    })
+    return reason
+  }
+
+  if (!serverUrl) {
+    log("agentcom visibility patch skipped: no route to the server", { partID: part.id })
+    return "unreachable"
+  }
+  const url = `${serverUrl}${route}`
   try {
     const res = await fetch(url, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        ...part,
-        sessionID: part.sessionID ?? sessionID,
-        synthetic: hidden,
-      }),
+      body: JSON.stringify(body),
     })
     if (res?.ok) return "ok"
-    log("agentcom visibility patch refused", { status: res?.status, partID: part.id })
+    log("agentcom visibility patch refused", { url, status: res?.status, partID: part.id })
     return "refused"
   } catch (err) {
-    log("agentcom visibility patch failed", { partID: part.id, err: errMsg(err) })
+    log("agentcom visibility patch failed", {
+      url,
+      via: "fetch",
+      reason: "unreachable",
+      // The class the message names — "timeout", "unreachable", "error" — is
+      // finer than the outcome and is what separates a dead address from a
+      // request that never came back.
+      transport: transportReason(err),
+      // The placeholder address is unreachable by design, so a connect failure
+      // against it says the client transport was missing, not that the server
+      // is down.
+      placeholder: serverUrl === PLACEHOLDER_SERVER_URL,
+      partID: part.id,
+      err: errMsg(err),
+    })
     return "unreachable"
   }
 }
@@ -851,25 +937,29 @@ async function patchPartSynthetic(part, sessionID, hidden) {
 // and leaves it on screen. It is never set here.)
 //
 // The route is `PATCH /session/{sessionID}/message/{messageID}/part/{partID}`.
-// The plugin's v1 client carries no `part` namespace, so this posts to
-// `serverUrl` directly, the way selectTuiSession does for `/tui/select-session`.
-// The mutation publishes `message.part.updated` carrying the whole part, which
-// is what reaches a drawn TUI without a resync — nothing more has to be pushed
-// from here.
+// The plugin's v1 client carries no `part` namespace, so patchPartSynthetic
+// addresses the route by hand — through the client's own transport, the way
+// selectTuiSession does for `/tui/select-session`, and only through a bare
+// `fetch` at `serverUrl` for a client that exposes no transport. The mutation
+// publishes `message.part.updated` carrying the whole part, which is what
+// reaches a drawn TUI without a resync — nothing more has to be pushed from
+// here.
 //
 // BEST-EFFORT THROUGHOUT, and deliberately so: the route sits in a group
 // annotated "Experimental HttpApi session routes" at version 0.0.1, so its
 // path, its payload and its existence carry no compatibility promise across
 // opencode releases. Every failure is logged and swallowed, nothing is thrown
 // at the caller, and the outcome of a server that does not answer this route is
-// that the notices stay exactly as they were posted — today's behaviour. The
-// first failure while nothing has been written yet ends the sweep, so a missing
-// route or a dead server costs one request rather than one per part; a failure
-// after a part HAS been written is a per-part problem and the rest still runs.
+// that the notices stay exactly as they were posted. The first failure while
+// nothing has been written yet ends the sweep — REFUSED and UNREACHABLE alike,
+// because neither says the next part would fare better — so a missing route, a
+// denied auth or a dead server costs one request rather than one per part; a
+// failure after a part HAS been written is a per-part problem and the rest
+// still runs.
 //
-// UNVERIFIED, the same gap selectTuiSession's direct post has: the request
-// carries no authorization header. A server that demands one refuses the PATCH,
-// and the notices then stay as they are.
+// The transport route carries the client's authorization and directory headers.
+// Only the bare-`fetch` last resort is without them, and that one is reached
+// solely by a client shape that has no transport at all.
 //
 // Returns { stale, patched, failed, aborted }: how many parts needed the flag
 // changed, how many were changed, how many attempts failed, and whether the
@@ -877,8 +967,12 @@ async function patchPartSynthetic(part, sessionID, hidden) {
 export async function applyAgentcomVisibility(client, sessionID, { hidden } = {}) {
   const outcome = { stale: 0, patched: 0, failed: 0, aborted: false }
   if (!sessionID) return outcome
-  if (!serverUrl) {
-    log("agentcom visibility sweep skipped: no server URL")
+  // A client that carries its own transport needs no serverUrl at all — on an
+  // interactive TUI instance that address is the placeholder and the transport
+  // is the only route there is. Only a client without one leaves the bare
+  // `fetch`, and without an address that has nowhere to go either.
+  if (!lowLevelClient(client, "patch") && !serverUrl) {
+    log("agentcom visibility sweep skipped: no route to the server", { sessionID })
     return outcome
   }
   const messages = await fetchMessages(client, sessionID)
@@ -896,7 +990,7 @@ export async function applyAgentcomVisibility(client, sessionID, { hidden } = {}
   }
   outcome.stale = stale.length
   for (const part of stale.slice(0, MAX_VISIBILITY_PATCHES)) {
-    const result = await patchPartSynthetic(part, sessionID, hidden)
+    const result = await patchPartSynthetic(client, part, sessionID, hidden)
     if (result === "ok") {
       outcome.patched++
       continue

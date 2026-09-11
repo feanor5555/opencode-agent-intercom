@@ -149,6 +149,21 @@ test("lowLevelClient finds the transport under both generated client shapes", ()
   assert.equal(lowLevelClient(undefined), undefined)
 })
 
+test("lowLevelClient answers for the verb the caller names", () => {
+  const post = async () => ({})
+  const patch = async () => ({})
+  // The agentcom visibility sweep needs PATCH, not POST — a shape that serves
+  // only one of the two must not be handed over for the other.
+  assert.equal(lowLevelClient({ _client: { post, patch } }, "patch")?.patch, patch)
+  assert.equal(lowLevelClient({ client: { post, patch } }, "patch")?.patch, patch)
+  assert.equal(
+    lowLevelClient({ _client: { post } }, "patch"),
+    undefined,
+    "a transport without the verb is not one for this caller",
+  )
+  assert.equal(lowLevelClient({ _client: { patch } }), undefined, "the default verb stays post")
+})
+
 test("without the typed method the route goes through the client, not through serverUrl", async () => {
   const posted = []
   forbidFetch()

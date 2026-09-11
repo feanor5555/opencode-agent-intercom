@@ -407,10 +407,15 @@ the retry loop built on it; the `kind` split is what makes a retry safe for a
 non-idempotent write.
 
 **A bare `await client.*` in `src/client.js` is a defect by construction.**
-The direct-fetch paths in that module (`patchPartSynthetic`, and the direct-post
-fallback of `selectTuiSession`) read their own responses and are not SDK calls.
-The SDK branch of `selectTuiSession` and `showToast` use `attempt` like every
-other SDK call.
+The bare-`fetch` last resorts in that module (the fallbacks of
+`patchPartSynthetic` and `selectTuiSession`, for a client shape that exposes no
+transport) read their own responses and are not SDK calls. The SDK branches of
+`selectTuiSession`, the transport route of `patchPartSynthetic` and `showToast`
+use `attempt` like every other SDK call. `patchPartSynthetic` deliberately does
+not ask its transport call for `throwOnError`: the resolved envelope carries the
+status, so `attempt` can class a refusal as `"refused"` rather than as the
+status-less `"indeterminate"` a thrown value would give — that split is the
+visibility sweep's `refused`/`unreachable` outcome.
 
 Three contracts sit on top, and no fourth: a required write throws once its
 retry policy is spent (`postNotice`, `promptSession`), a reported write returns
@@ -476,16 +481,19 @@ Every call through `client` works; a bare `fetch` at `serverUrl` gets
 the url?"). Under `opencode serve --port N` the same `serverUrl` is the real
 address and a bare post does connect — which is why this only bites in the TUI.
 
-Consequence for any route the generated typed client has no method for: post it
+Consequence for any route the generated typed client has no method for: send it
 through the client's own transport (`client._client` on a root-style client,
-`client.client` on a v2 one; both expose `post({ url, body, headers,
-throwOnError })` and `getConfig()`). That carries the base URL, the
-`x-opencode-directory` header, the auth headers and the in-process dispatch. A
-bare `fetch` at `serverUrl` is the last resort, not the fallback: it carries no
-authorization header and its address may be the placeholder.
+`client.client` on a v2 one; both expose one function per HTTP verb —
+`post`/`patch`/… taking `{ url, body, headers, throwOnError }` — and
+`getConfig()`). The url is RELATIVE: the transport prepends its own base URL.
+That carries the base URL, the `x-opencode-directory` header, the auth headers
+and the in-process dispatch. A bare `fetch` at `serverUrl` is the last resort,
+not the fallback: it carries no authorization header and its address may be the
+placeholder.
 
-`selectTuiSession` (`src/client.js`) is built this way. The resolved address is
-logged once at load as `server url resolved` with a `placeholder` flag.
+`selectTuiSession` and `patchPartSynthetic` (`src/client.js`, the latter behind
+the retroactive `show agentcom` sweep) are built this way. The resolved address
+is logged once at load as `server url resolved` with a `placeholder` flag.
 
 ## A successor session keeps the predecessor's title
 

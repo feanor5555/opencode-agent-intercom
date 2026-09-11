@@ -279,17 +279,31 @@ export function isWaitingOnWatchdoggedChild(sessionID) {
 }
 
 // Which window one entry is measured against, what to call it when it fires,
-// and from when it is counted. Two cases, two windows:
+// and from when it is counted. Three cases, two windows:
 //
-//   tool-call — the subagent has at least one tool call IN FLIGHT
-//               (`entry.toolCalls`, filled by `tool.execute.before` and emptied
-//               by `tool.execute.after`, hooks.js). opencode publishes nothing
-//               while a call runs, so the silence is the call, not a hang:
-//               `maxSubagentToolCallMs`, counted from the START of the oldest
-//               call in flight (`since`).
-//   silence   — nothing in flight. This is the case the dead-man's switch was
-//               built for: `maxSubagentAgeMs`, counted from the last sign of
-//               life.
+//   tool-call  — the subagent has at least one tool call IN FLIGHT
+//                (`entry.toolCalls`, filled by `tool.execute.before` and emptied
+//                by `tool.execute.after`, hooks.js). opencode publishes nothing
+//                while a call runs, so the silence is the call, not a hang:
+//                `maxSubagentToolCallMs`, counted from the START of the oldest
+//                call in flight (`since`).
+//   compaction — the plugin is compacting this subagent's session
+//                (`entry.compactingSince`, src/compaction.js). Same statement as
+//                the tool-call case and the same window: it is work in flight,
+//                opencode publishes nothing useful about it, and a compaction of
+//                a large session outlasts the 90 s silence window comfortably —
+//                without this case the sweep would reap the entry in the middle
+//                of the very relief it was given. Counted from the start of the
+//                compaction, so the window is a ceiling on it and not a lease
+//                the events of the compaction turn could keep renewing.
+//   silence    — nothing in flight. This is the case the dead-man's switch was
+//                built for: `maxSubagentAgeMs`, counted from the last sign of
+//                life.
+//
+// The order of the three: a tool call in flight wins, because it is the case
+// with a `tool` name to report and the compaction latch can only be set on an
+// entry whose crossing found none. A compaction beats silence for the reason
+// the tool call does.
 //
 // What is deliberately NOT a case: `entry.status === "busy"`. That field is
 // this plugin's own — `createEntry` seeds it on every spawn and
@@ -331,6 +345,14 @@ export function watchdogLimit(entry, settings = getSettings()) {
       kind: "tool-call",
       tool: oldest.tool,
       since: oldest.startedAt,
+    }
+  }
+  if (entry?.compactingSince) {
+    return {
+      ms: toolCallMs,
+      setting: "maxSubagentToolCallMs",
+      kind: "compaction",
+      since: entry.compactingSince,
     }
   }
   return { ms: settings?.maxSubagentAgeMs, setting: "maxSubagentAgeMs", kind: "silence" }

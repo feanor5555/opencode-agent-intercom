@@ -8,8 +8,8 @@
 //   Required write — postNotice, promptSession: throws once its retry policy
 //     is spent. The caller has a failure path and must reach it.
 //   Reported write — deleteSession, archiveSession, updateSessionTitle,
-//     abortSession: returns false, logs once, never retries. The caller reads
-//     a truthful boolean and proceeds either way.
+//     abortSession, summarizeSession: returns false, logs once, never retries.
+//     The caller reads a truthful boolean and proceeds either way.
 //   Best-effort read — getSessionDirectory, getSessionTitle, listSessions,
 //     fetchMessages, fetchSnapshot: returns the empty value (undefined / [] / [] / {}),
 //     logs once. Each reader has a degraded answer designed for it.
@@ -391,6 +391,50 @@ export async function abortSession(client, sessionID) {
   return Boolean(outcome.data)
 }
 
+// Cap on the summarize request. A compaction is a whole LLM turn on the
+// session's entire history, so it is nothing like the 5 s reads above: this
+// window is the point at which the plugin stops waiting for an answer, not the
+// point at which opencode stops compacting.
+const SUMMARIZE_TIMEOUT_MS = 300_000
+
+// Compacts one session on demand: opencode's own compaction agent runs over the
+// session and replaces its history with a summary message.
+//
+// This is the ON side of the plugin's per-agent compaction switch. opencode's
+// automatic compaction is off in every session of this process
+// (applyCompactionPolicy, src/compaction.js), so an agent whose
+// `agentCompaction` entry says on is compacted here instead, at the threshold
+// that agent already has.
+//
+// Reported write: false is a refused request (logged with its status) or the
+// literal `false` the route answers when it compacted nothing. Every other
+// delivered answer — the documented `true`, and an empty body from a build that
+// answers this route without one — reads as done, the discipline
+// `requestFailure` already applies to promptAsync's 204. The one caller
+// (compactSession) proceeds either way, because the fallback for a compaction
+// that did not happen is the relief that was already there: the primary's
+// handoff, the subagent's tool-call lockdown.
+//
+// `providerID` / `modelID` name the model the compaction turn runs on. The SDK
+// declares the body optional, but opencode resolves no model of its own for
+// this route, so the caller resolves one and a session with none is not
+// compacted at all.
+export async function summarizeSession(client, sessionID, { providerID, modelID } = {}) {
+  const op = "summarizeSession (session.summarize)"
+  const outcome = await attempt(op, () =>
+    client.session.summarize({
+      path: { id: sessionID },
+      body: { providerID, modelID },
+      signal: AbortSignal.timeout(SUMMARIZE_TIMEOUT_MS),
+    }),
+  )
+  if (!outcome.ok) {
+    logFailure(op, outcome.error, { sessionID, providerID, modelID })
+    return false
+  }
+  return outcome.data !== false
+}
+
 // Per-session directory cache. `toolCtx.directory` and the plugin-factory
 // closure's `directory` both reflect where `opencode serve` was started, NOT
 // the session's actual project directory (which is set per-session via
@@ -629,6 +673,11 @@ export async function fetchSnapshot(client, sessionID) {
     lastActivity: latestActivity(messages),
     ctxTokens: latestContextTokens(messages),
     result: finalResult(messages),
+    // The model this session last answered on, for a caller that has to make
+    // another request ON this session rather than about it — today the
+    // compaction driver, whose summarize call carries the model itself. See
+    // latestModel; undefined where no assistant message names a usable pair.
+    model: latestModel(messages),
   }
 }
 
@@ -697,11 +746,21 @@ function usableText(part) {
 // the earlier assistant messages and returns the most recent usable text
 // instead. That is the last thing the subagent actually said about its work,
 // and handing it up is what keeps a run from being repeated from scratch.
+// A COMPACTION message is skipped and the walk goes on past it. opencode marks
+// the assistant message its compaction agent writes with `info.summary === true`
+// — the same flag its own step-finish check reads — and that text is a summary
+// of the session written FOR the model, not the subagent reporting to its
+// caller. Handing it up would give the orchestrator a compaction turn as the
+// result of the work, and it is the newest assistant message at exactly the
+// moment a compacted session falls quiet. What stands behind it is the last
+// thing the subagent itself said, which is what this function exists to return.
+//
 // Undefined only when the session holds no usable assistant text at all.
 export function finalResult(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
     if (m?.info?.role !== "assistant") continue
+    if (m.info.summary === true) continue
     const text = (m.parts ?? [])
       .map(usableText)
       .filter(Boolean)
@@ -727,8 +786,41 @@ export function finalResult(messages) {
 // An in-progress assistant step carries a `tokens` object that is still
 // all-zero, so skip zero sums and keep walking back to the last completed
 // step. Undefined if none yet.
+//
+// The walk STOPS at a compaction message (`info.summary === true`) and answers
+// undefined. A compaction replaces the session's history with that one summary,
+// so nothing before it describes the session's context any more — and the
+// compaction turn's own figure is the worst reading of all: its input is the
+// whole history it was given to summarize, i.e. the fill the compaction just
+// removed. Reported, it would make a freshly compacted session look exactly as
+// full as it was before, and every reader of this figure — the primary
+// threshold, the subagent budget — would act on the fill that is gone. Answering
+// "no figure yet" is the truth here: the next real turn produces the first one
+// that describes the compacted session.
+// The `{ providerID, modelID }` pair of the newest assistant message, or
+// undefined where no assistant message carries both as non-empty strings.
+//
+// Both fields are required on `AssistantMessage`, so this is the model the
+// session is actually running on — ahead of any pin a config file holds for the
+// agent's name, which may have been changed since the session started. A
+// COMPACTION message counts here, unlike in the two readers above: it names the
+// model that compacted the session, which is exactly as usable for the next
+// compaction as any other turn's.
+function latestModel(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const info = messages[i]?.info
+    if (info?.role !== "assistant") continue
+    const { providerID, modelID } = info
+    if (typeof providerID !== "string" || providerID === "") continue
+    if (typeof modelID !== "string" || modelID === "") continue
+    return { providerID, modelID }
+  }
+  return undefined
+}
+
 function latestContextTokens(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.info?.summary === true) return undefined
     const t = messages[i]?.info?.tokens
     if (!t) continue
     const sum =

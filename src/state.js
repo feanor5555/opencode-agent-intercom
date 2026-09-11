@@ -180,6 +180,24 @@ export const endlessInProgress = new Set()
 // re-schedule on its very next turn and retry continuously.
 export const endlessCooldowns = new Map()
 
+// sessionIDs of primary sessions whose context crossed the threshold while
+// compaction is the relief armed for their agent, and whose compaction is
+// SCHEDULED but not yet started. The compaction twin of pendingHandoffs, marked
+// by the same transform hook for the same reason: the hook fires while the
+// triggering turn is running, and compacting there would cut the very turn
+// being answered out of the session. See scheduleCompactionIfNeeded /
+// claimPendingCompaction in registry.js.
+//
+// A primary carries at most ONE of the three latches: the transform hook
+// resolves endless > compaction > handoff in one place and cancels the other
+// two's unclaimed latches on every turn.
+export const pendingCompactions = new Set()
+
+// sessionIDs with a plugin-driven compaction currently EXECUTING (between
+// claimPendingCompaction and releaseCompaction). Guards against a second idle
+// event starting a second compaction on a session already being compacted.
+export const compactionInProgress = new Set()
+
 // sessionID -> { reason, at } for a primary whose endless run stopped ITSELF:
 // the cycle ceiling, the no-progress bound, or a cycle that found nothing left
 // to do. A pause is RUNTIME state and nothing else — the settings file is
@@ -409,6 +427,8 @@ export function resetState() {
   pendingEndless.clear()
   endlessInProgress.clear()
   endlessCooldowns.clear()
+  pendingCompactions.clear()
+  compactionInProgress.clear()
   endlessPauses.clear()
   endlessProgress.lastOpenIds = null
   endlessProgress.stalledCycles = 0

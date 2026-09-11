@@ -21,6 +21,8 @@ import {
   pendingEndless,
   endlessInProgress,
   endlessCooldowns,
+  pendingCompactions,
+  compactionInProgress,
   endlessPauses,
   endlessWindDownPermits,
   endlessProgress,
@@ -133,6 +135,11 @@ export function forgetPrimary(sessionID) {
   pendingEndless.delete(sessionID)
   endlessInProgress.delete(sessionID)
   endlessCooldowns.delete(sessionID)
+  // And the compaction latch: the session is deleted at this point, so a
+  // scheduled compaction has no idle left to claim it and one in progress is
+  // compacting a session that no longer exists. Both would only leak.
+  pendingCompactions.delete(sessionID)
+  compactionInProgress.delete(sessionID)
   // The wind-down permit of the cycle that just replaced this primary. It is
   // single-use and belongs to one cycle; the cycle's own `finally` disarms it
   // too, and this is the second half of the same guarantee — no permit outlives
@@ -1559,6 +1566,82 @@ export function isHandoffInProgress(sessionID) {
 }
 
 // ----------------------------------------------------------------------------
+// Idle-gated compaction scheduling: the same four gates over the compaction
+// latch, for the primary whose agent has compaction switched ON
+// (compactionEnabledFor, src/settings.js).
+//
+// Idle-gated for the reason the handoff is: the transform hook fires WHILE the
+// triggering turn is running, and a compaction started there would summarize
+// the session out from under the turn being answered. So the hook only MARKS
+// and the primary's next `session.idle` claims and runs it
+// (maybeRunPendingCompaction, src/compaction.js).
+//
+// One difference from the handoff, and it is the whole point of this relief:
+// the session SURVIVES. So the success path has no forgetPrimary to release the
+// in-progress latch — releaseCompaction is the only release there is, and it
+// runs on success and on failure alike.
+// ----------------------------------------------------------------------------
+
+// Transform-side gate: schedule a compaction for this primary iff the context
+// threshold is exceeded AND none is already pending or executing. True only
+// when the latch was NEWLY set, so the toast fires once per crossing.
+export function scheduleCompactionIfNeeded(sessionID, threshold) {
+  if (!shouldTriggerPrimaryHandoff(sessionID, threshold)) return false
+  return markCompactionPending(sessionID)
+}
+
+// Marks a primary's compaction as pending. False when the id is falsy, one is
+// already executing for it, or the latch is already set.
+export function markCompactionPending(sessionID) {
+  if (!sessionID) return false
+  if (compactionInProgress.has(sessionID)) return false
+  if (pendingCompactions.has(sessionID)) return false
+  pendingCompactions.add(sessionID)
+  return true
+}
+
+export function hasCompactionPending(sessionID) {
+  return pendingCompactions.has(sessionID)
+}
+
+// Idle-side gate: atomically consume the latch and take the in-progress state.
+// True exactly once per scheduled compaction — a duplicate idle event, or an
+// idle arriving while the compaction turn itself runs, returns false.
+export function claimPendingCompaction(sessionID) {
+  if (!sessionID) return false
+  if (!pendingCompactions.has(sessionID)) return false
+  if (compactionInProgress.has(sessionID)) return false
+  pendingCompactions.delete(sessionID)
+  compactionInProgress.add(sessionID)
+  return true
+}
+
+// The only release, run on every exit of the compaction. The consumed pending
+// flag is NOT restored: a retry goes through a fresh schedule on a later
+// over-threshold turn, so a compaction that keeps failing cannot hot-loop on
+// every idle event. Where it SUCCEEDED there is nothing to re-schedule anyway —
+// the session's own token figure has dropped below the threshold.
+export function releaseCompaction(sessionID) {
+  if (!sessionID) return
+  compactionInProgress.delete(sessionID)
+}
+
+// Another relief took this primary's threshold over — endless mode, or the
+// user switching the per-agent switch off mid-session. Drop an unclaimed latch,
+// the mirror of cancelPendingHandoff / cancelPendingEndless. A compaction
+// already executing is NOT touched: it is one request in flight and it ends by
+// itself.
+export function cancelPendingCompaction(sessionID) {
+  if (!sessionID) return false
+  if (compactionInProgress.has(sessionID)) return false
+  return pendingCompactions.delete(sessionID)
+}
+
+export function isCompactionInProgress(sessionID) {
+  return compactionInProgress.has(sessionID)
+}
+
+// ----------------------------------------------------------------------------
 // Endless mode: the latch, the spawn freeze, the quiesce predicate and the
 // state the bounds need (cooldown after an abandoned cycle, open-task progress
 // across cycles, and the per-session pause a self-stop leaves behind).
@@ -2002,6 +2085,26 @@ function createEntry(
     // Latch: true after notifyParentOfDenialLoop has fired for this subagent
     // so the parent isn't spammed every subsequent over-budget turn.
     notifiedParentOfLoop: false,
+    // When the plugin's own compaction of THIS subagent's session started, or
+    // undefined while none is running. Set before the summarize request and
+    // cleared when it ends, either way it ended.
+    //
+    // It is the one fact three paths have to agree on while a compaction runs.
+    // The idle handler must not read the quiet session the compaction turn
+    // leaves behind as the subagent's one-shot reply (onSessionIdle, hooks.js);
+    // the watchdog must not reap the entry on the silence window while a
+    // compaction is the work in flight (watchdogLimit, watchdog.js); and the
+    // crossing that starts one must not start a second (startSubagentCompaction,
+    // src/compaction.js). A timestamp rather than a boolean because the watchdog
+    // needs the start to measure its window from.
+    compactingSince: undefined,
+    // How many compactions this subagent's session has already been given.
+    // Bounded by MAX_SUBAGENT_COMPACTIONS (src/compaction.js): a compaction that
+    // frees nothing must not become a loop, and past the cap the tool-call
+    // lockdown takes the crossing over exactly as it does with the switch off.
+    // Cumulative across the runs of a reused session, like `runs`: the cap is a
+    // statement about the session, and a reuse is the same session again.
+    compactions: 0,
     // How many nested spawns this subagent run has been ADMITTED so far. The
     // per-run quota (maxNestedSpawns) is checked against it in the spawn gate
     // and it is charged there, in the same synchronous block, so two spawn

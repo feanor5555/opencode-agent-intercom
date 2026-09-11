@@ -53,8 +53,10 @@ import {
   primaryContextTokens,
   scheduleHandoffIfNeeded,
   scheduleEndlessIfNeeded,
+  scheduleCompactionIfNeeded,
   cancelPendingEndless,
   cancelPendingHandoff,
+  cancelPendingCompaction,
   resetEndlessProgress,
   endlessPauseReason,
   isEndlessPaused,
@@ -81,6 +83,7 @@ import {
   primaryContextThreshold,
   endlessModeInEffect,
   contextBudgetFor,
+  compactionEnabledFor,
   reuseCeilingFor,
   retentionOffered,
   retentionActive,
@@ -135,6 +138,7 @@ import {
 } from "./notices.js"
 import { capReplyForAgent } from "./resultfile.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
+import { maybeRunPendingCompaction, startSubagentCompaction } from "./compaction.js"
 import {
   maybeRunPendingHandoff,
   maybeRunPendingEndless,
@@ -442,6 +446,24 @@ export function createTransformSystem(client) {
         // endlessContext DISPLACES maxPrimaryContext. Arming both would be
         // inert, the lower one always firing first.
         //
+        // WHICH RELIEF that threshold buys is resolved here, and it is a
+        // three-way decision with a fixed order:
+        //
+        //   endless mode in effect → the cycle. It is a whole mode the user
+        //     armed explicitly, its threshold already displaces
+        //     maxPrimaryContext, and it replaces the session rather than
+        //     shrinking it — there is nothing for a compaction to add.
+        //   else compaction switched on for this agent → a compaction of this
+        //     very session, so the orchestrator keeps its session, its
+        //     subagents and its handles.
+        //   else → the plain handoff, unchanged.
+        //
+        // The switch is read LIVE, at every crossing, and a user may flip it
+        // between two turns of one session. So each branch cancels the other
+        // two's UNCLAIMED latches, exactly as the endless branch already
+        // cancels the handoff's: two latches on one primary would have the idle
+        // handler fire two reliefs back to back on the same session.
+        //
         // What the mode's own stops leave behind: a pause on THIS session,
         // never a written `endlessMode: false`. A paused primary takes the
         // plain-handoff branch and arms at maxPrimaryContext exactly as a
@@ -466,6 +488,7 @@ export function createTransformSystem(client) {
           // maxPrimaryContext with the mode off and endlessContext with it on —
           // and the idle handler fires both executors on the same primary.
           cancelPendingHandoff(sessionID)
+          cancelPendingCompaction(sessionID)
           if (scheduleEndlessIfNeeded(sessionID, threshold)) {
             log("endless: scheduled", { sessionID, ctx: primaryContextTokens(sessionID), threshold })
             showToast(client, {
@@ -498,13 +521,35 @@ export function createTransformSystem(client) {
             // bound that switched the mode off — fired again.
             resetEndlessProgress()
           }
-          if (scheduleHandoffIfNeeded(sessionID, threshold)) {
-            log("primary handoff scheduled (idle-gated)", { sessionID })
-            showToast(client, {
-              title: "agent-intercom",
-              message:
-                "primary context limit reached — orchestrator handoff scheduled for the end of this turn",
-            })
+          // The relief this agent's own switch names. Idle-gated like the other
+          // two and for the same reason recorded above: the transform hook
+          // fires while the triggering turn runs, and compacting here would
+          // summarize away the very turn being answered.
+          if (compactionEnabledFor(agentName)) {
+            cancelPendingHandoff(sessionID)
+            if (scheduleCompactionIfNeeded(sessionID, threshold)) {
+              log("primary compaction scheduled (idle-gated)", {
+                sessionID,
+                agent: agentName,
+                ctx: primaryContextTokens(sessionID),
+                threshold,
+              })
+              showToast(client, {
+                title: "agent-intercom",
+                message:
+                  "primary context limit reached — this session is compacted at the end of this turn",
+              })
+            }
+          } else {
+            cancelPendingCompaction(sessionID)
+            if (scheduleHandoffIfNeeded(sessionID, threshold)) {
+              log("primary handoff scheduled (idle-gated)", { sessionID })
+              showToast(client, {
+                title: "agent-intercom",
+                message:
+                  "primary context limit reached — orchestrator handoff scheduled for the end of this turn",
+              })
+            }
           }
         }
         limits = formatLimitsNotice({
@@ -896,6 +941,14 @@ function detectAgentFromSystem(output) {
 //     tool call on the same figure; the block escalates over successive turns
 //     and notifies the parent at BUDGET_NOTIFY_AFTER.
 //
+// With compaction switched ON for this agent type, the budget crossing buys a
+// COMPACTION of the session instead of the lockdown, up to
+// MAX_SUBAGENT_COMPACTIONS. The budget itself is never lifted: it is re-armed
+// against a smaller session, and every crossing the compaction cannot take —
+// the switch off, the cap spent, a question open — is the lockdown's, exactly
+// as before. The reserve band above is untouched either way; the subagent is
+// still told to wrap up while it has room, because a compaction may yet refuse.
+//
 // Hot path: this runs before EVERY subagent LLM call. The snapshot HTTP fetch
 // dominates cost as the subagent's message history grows, so the result is
 // cached on the entry for CTX_TTL_MS. Once we get within CTX_NEAR_BUDGET of
@@ -911,8 +964,16 @@ async function contextLimitNotice(client, entry) {
   const cacheFresh = now - entry.lastTokensFetchAt < CTX_TTL_MS
   const nearBudget =
     entry.ctxTokens != null && entry.ctxTokens > maxContext * CTX_NEAR_BUDGET
+  // The model this session is running on, as the snapshot below reports it.
+  // Only the budget crossing uses it, and only with compaction switched on —
+  // the summarize request carries its own model. Undefined where this turn read
+  // the cache instead of the session, which is never the case at the crossing:
+  // `nearBudget` is true from CTX_NEAR_BUDGET on, so the figure that triggers
+  // the crossing and the model that serves it come from the same read.
+  let sessionModel
   if (!cacheFresh || nearBudget) {
     const snapshot = await fetchSnapshot(client, entry.sessionID)
+    sessionModel = snapshot.model
     // Stamp the fetch time even when the snapshot came back empty (no assistant
     // step yet → ctxTokens null). Guarding this behind `ctxTokens != null` left
     // lastTokensFetchAt at 0 forever, so `cacheFresh` stayed false and the
@@ -955,6 +1016,31 @@ async function contextLimitNotice(client, entry) {
       `"Done:" (or "Blocked:") naming what you accomplished and what remains. That message is ` +
       `the ONLY thing the orchestrator receives from you — start no new line of investigation, ` +
       `open no further files.\n---\n`
+    )
+  }
+
+  // The budget is breached. With compaction switched on for this type the
+  // relief is a compaction of this session rather than the lockdown: the run
+  // continues in a smaller session and the budget is re-armed against it, up to
+  // MAX_SUBAGENT_COMPACTIONS. startSubagentCompaction takes the decision and
+  // owns the latch; false means this crossing is the lockdown's after all —
+  // the switch is off, the cap is spent, or a question of this subagent's is
+  // open and its waiter must not have the session summarized under it.
+  //
+  // The notice below is what the model is told while the compaction runs.
+  // guardToolExecute is still denying on the same figure — the entry's
+  // ctxTokens is over the budget until the compaction clears it — so a
+  // subagent told nothing would meet a wall of refusals it has no account of.
+  // It is deliberately not a STOP: nothing is being wound up here.
+  if (startSubagentCompaction(client, entry, { model: sessionModel })) {
+    return (
+      `\n\n---\n⏳ HOLD. agent-intercom: your context has reached ` +
+      `${fmtTokens(entry.ctxTokens)} tokens of the ${fmtTokens(maxContext)} budget, so your ` +
+      `session is being COMPACTED right now — your history is being replaced by a summary of ` +
+      `it, and you keep working in the same session afterwards.\n\n` +
+      `Make NO tool call on this turn: every one is refused until the compaction lands. Say in ` +
+      `one sentence what you were doing and what you will do next, and continue from there on ` +
+      `your following turn.\n---\n`
     )
   }
 
@@ -1497,6 +1583,15 @@ export function createEventHandler(client) {
           void maybeRunPendingEndless(client, props?.sessionID).catch((err) => {
             dropEndlessLatch(props?.sessionID, `the cycle failed to start: ${errMsg(err)}`)
           })
+          // The third relief, same discipline again: only a primary whose agent
+          // has compaction switched on carries this latch, so it is a set
+          // lookup and a return for every other idle. Detached because a
+          // compaction is a whole LLM turn over the session's history, and
+          // blocking the event stream on it would starve the subagent wakes
+          // above. maybeRunPendingCompaction never rejects — it catches its own
+          // body and releases the latch in a `finally` — so `void` hides no
+          // unhandled rejection here.
+          void maybeRunPendingCompaction(client, props?.sessionID)
           // Detector B stays true within the session: the prompt files are
           // re-judged between turns, never during one, so the finding block
           // moves its bytes only where the user actually changed a file.
@@ -1621,6 +1716,26 @@ async function onSessionIdle({ sessionID }, client) {
       log("idle held: subagent is waiting on a live child", {
         handle: e.handle,
         sessionID,
+      })
+      return null
+    }
+    // The same statement for the other thing that makes a running session fall
+    // quiet without having finished: the plugin is compacting it. What goes
+    // quiet here is the compaction turn, not the subagent — taking it would
+    // hand the parent a result the subagent never wrote, free the slot, and
+    // delete the session in the middle of a summarize request on it.
+    //
+    // Left untouched for the reason above it: `dispatched` is a one-way claim
+    // and `status = "idle"` would make the watchdog skip this entry for good.
+    // When the compaction ends, the latch clears, the subagent answers its
+    // pending turn and goes idle again — that idle finds no compaction and runs
+    // the normal path. If it never speaks again, the watchdog's own window on
+    // the compaction, and then the silence window, are what end it.
+    if (e.compactingSince) {
+      log("idle held: subagent session is being compacted", {
+        handle: e.handle,
+        sessionID,
+        compactingSince: e.compactingSince,
       })
       return null
     }

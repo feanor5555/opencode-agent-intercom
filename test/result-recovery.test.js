@@ -139,6 +139,56 @@ test("finalResult: user messages are never mistaken for the subagent's result", 
   assert.equal(finalResult(messages), undefined)
 })
 
+// A compaction turn is not the subagent reporting on its work. opencode marks
+// the message its compaction agent writes with `info.summary === true`, and that
+// message is the newest assistant message at exactly the moment a compacted
+// session falls quiet — the moment the wake path reads it.
+const summaryMessage = (text) => ({
+  info: { role: "assistant", summary: true },
+  parts: [textPart(text)],
+})
+
+test("finalResult: a compaction message is walked past, not handed up as the result", () => {
+  const messages = [
+    user("do x"),
+    assistant(textPart("Done: wrote the parser.")),
+    summaryMessage("The session so far: the user asked for a parser; the agent wrote one."),
+  ]
+  assert.equal(finalResult(messages), "Done: wrote the parser.")
+})
+
+test("finalResult: a session whose only assistant text is a compaction yields undefined", () => {
+  assert.equal(finalResult([user("do x"), summaryMessage("a summary of the session")]), undefined)
+})
+
+test("finalResult: `summary: false` is an ordinary assistant message", () => {
+  const messages = [assistant(textPart("early")), {
+    info: { role: "assistant", summary: false },
+    parts: [textPart("Done: the real reply.")],
+  }]
+  assert.equal(finalResult(messages), "Done: the real reply.")
+})
+
+test("latestContextTokens stops at a compaction: the fill it removed is not a figure", async () => {
+  const client = {
+    session: {
+      messages: async () => ({
+        data: [
+          { info: { role: "assistant", tokens: { input: 5_000, output: 10 } }, parts: [textPart("work")] },
+          // The compaction turn's own input is the whole history it summarized.
+          {
+            info: { role: "assistant", summary: true, tokens: { input: 120_000, output: 900 } },
+            parts: [textPart("a summary")],
+          },
+        ],
+      }),
+    },
+  }
+  const snapshot = await fetchSnapshot(client, "ses_compacted")
+  assert.equal(snapshot.ctxTokens, undefined, "no figure describes the compacted session yet")
+  assert.equal(snapshot.result, "work", "and the result is the last thing the agent itself said")
+})
+
 test("finalResult: no usable assistant text anywhere yields undefined", () => {
   assert.equal(finalResult([]), undefined)
   assert.equal(finalResult([user("do x"), assistant(toolPart("read"))]), undefined)

@@ -10,6 +10,11 @@
 // `0` is a valid value meaning "disabled" — it must be preserved through
 // every layer, not treated as falsy.
 //
+// `compactionEnabledFor`, the per-type switch for automatic compaction, is at
+// the very bottom: the same three levels over booleans,
+// agentCompaction[agent] > flat `compaction` (file, else env) >
+// DEFAULT_COMPACTION, which is `false`.
+//
 // `resultCeilingFor`, the per-type ceiling on how much of a subagent's final
 // reply reaches the orchestrator, is at the bottom of this file: three levels,
 // resultTokens[agent] > flat maxResultTokens (file, else env) >
@@ -27,6 +32,8 @@ import {
   DEFAULT_AGENT_CONTEXT,
   DEFAULT_MAX_CONTEXT,
   DEFAULT_MAX_RESULT_TOKENS,
+  DEFAULT_COMPACTION,
+  compactionEnabledFor,
   contextBudgetFor,
   resultCeilingFor,
   getSettings,
@@ -44,6 +51,7 @@ function clearEnv() {
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_SEARXNG_URL
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS
+  delete process.env.OPENCODE_AGENT_INTERCOM_COMPACTION
 }
 
 // Point settings.js at an empty temp dir so the JSON loader has no opinion.
@@ -317,6 +325,95 @@ test("a malformed flat maxResultTokens leaves the env-or-default resolution stan
   for (const bad of [-1, 2.5, "3000", null]) {
     const file = withSettings({ maxResultTokens: bad })
     assert.equal(resultCeilingFor("coder"), 1500, `bad value ${JSON.stringify(bad)} in ${file}`)
+  }
+  clearEnv()
+})
+
+// ===========================================================================
+// compactionEnabledFor — automatic compaction per agent type
+// ===========================================================================
+
+const COMPACTION_ENV = "OPENCODE_AGENT_INTERCOM_COMPACTION"
+
+test("compaction is off for every type when nobody configured it", () => {
+  clearEnv()
+  isolate()
+  assert.equal(DEFAULT_COMPACTION, false)
+  assert.equal(getSettings().compaction, false)
+  assert.deepEqual(getSettings().agentCompaction, {})
+  assert.equal(compactionEnabledFor("orchestrator"), false)
+  assert.equal(compactionEnabledFor("coder"), false)
+  assert.equal(compactionEnabledFor("a-type-nobody-configured"), false)
+})
+
+test("the compaction switch resolves file > env > default", () => {
+  clearEnv()
+  isolate()
+  process.env[COMPACTION_ENV] = "1"
+  resetSettings()
+  assert.equal(compactionEnabledFor("coder"), true, "env beats the built-in default")
+
+  withSettings({ compaction: false })
+  assert.equal(compactionEnabledFor("coder"), false, "the flat file key beats the env var")
+
+  withSettings({ compaction: false, agentCompaction: { coder: true } })
+  assert.equal(compactionEnabledFor("coder"), true, "the type's own entry beats the flat key")
+  assert.equal(compactionEnabledFor("planner"), false, "a type without an entry inherits the flat value")
+
+  withSettings({ compaction: true, agentCompaction: { coder: false } })
+  assert.equal(compactionEnabledFor("coder"), false, "an own `false` beats a flat `true`")
+  assert.equal(compactionEnabledFor("orchestrator"), true)
+  clearEnv()
+})
+
+test("a malformed agentCompaction map is dropped entry by entry", () => {
+  clearEnv()
+  withSettings({
+    compaction: false,
+    agentCompaction: { coder: "true", planner: 1, reviewer: null, designer: true, "": true },
+  })
+  assert.equal(compactionEnabledFor("coder"), false, "a string entry must be dropped")
+  assert.equal(compactionEnabledFor("planner"), false, "a numeric entry must be dropped")
+  assert.equal(compactionEnabledFor("reviewer"), false, "a null entry must be dropped")
+  assert.equal(compactionEnabledFor("designer"), true, "the one valid entry must survive")
+  assert.deepEqual(getSettings().agentCompaction, { designer: true })
+})
+
+test("an agentCompaction that is not a plain object leaves the map empty", () => {
+  clearEnv()
+  for (const bad of [[true], "true", null, 1]) {
+    withSettings({ compaction: true, agentCompaction: bad })
+    assert.deepEqual(getSettings().agentCompaction, {}, `bad map ${JSON.stringify(bad)}`)
+    assert.equal(compactionEnabledFor("coder"), true, "every type falls through to the flat value")
+  }
+})
+
+test("a malformed flat compaction key leaves the env-or-default resolution standing", () => {
+  clearEnv()
+  isolate()
+  process.env[COMPACTION_ENV] = "1"
+  resetSettings()
+  for (const bad of ["true", 1, null, 0]) {
+    const file = withSettings({ compaction: bad })
+    assert.equal(compactionEnabledFor("coder"), true, `bad value ${JSON.stringify(bad)} in ${file}`)
+  }
+  clearEnv()
+})
+
+test("the compaction env var is read as 1/0 and anything else falls through", () => {
+  clearEnv()
+  isolate()
+  for (const [raw, expected] of [
+    ["1", true],
+    ["0", false],
+    [" 1 ", true],
+    ["yes", DEFAULT_COMPACTION],
+    ["true", DEFAULT_COMPACTION],
+    ["", DEFAULT_COMPACTION],
+  ]) {
+    process.env[COMPACTION_ENV] = raw
+    resetSettings()
+    assert.equal(compactionEnabledFor("coder"), expected, `env ${JSON.stringify(raw)}`)
   }
   clearEnv()
 })

@@ -40,6 +40,17 @@
 // would disable that default for good. A paused session resolves its threshold
 // as if the mode were off, so the plain handoff still relieves it of context.
 //
+// Automatic compaction resolves the same way and is a value PER AGENT TYPE.
+// The flat key `compaction` is what every type without an entry of its own
+// inherits, the map `agentCompaction` names a type's own value, and
+// `compactionEnabledFor` resolves the value in effect for one type — the
+// discipline `maxResultTokens` / `resultTokens` sets. Off by default.
+// The key is the plugin's OWN, not opencode's `compaction` object: opencode's
+// switch is global and is written to `auto: false` unconditionally
+// (applyCompactionPolicy, src/compaction.js), so nothing here is ever written
+// into it. What this key governs is the compaction the PLUGIN drives for an
+// agent whose value is on.
+//
 // `showAgentcom` resolves the same way and is the second boolean key. While it
 // is OFF, every message the plugin posts into a session carries `synthetic:
 // true` on its text part: opencode's renderer skips such a part, the model
@@ -76,6 +87,7 @@
 //       "maxReuseContext": N, "reuseContext": { "<agent>": N },
 //       "maxResultTokens": N, "resultTokens": { "<agent>": N },
 //       "showAgentcom": true|false,
+//       "compaction": true|false, "agentCompaction": { "<agent>": true|false },
 //       "agentMode": "orchestrator"|"solo" }
 
 import { readFileSync } from "node:fs"
@@ -252,6 +264,15 @@ const DEFAULT_ENDLESS_MAX_CYCLES = 10
 // inherits. Exported for the same reason as the limits above — the TUI plugin
 // carries its own copy and test/settings-defaults-parity.test.js pins them.
 export const DEFAULT_SHOW_AGENTCOM = true
+// Whether automatic compaction is on for an agent type the `agentCompaction`
+// map does not name. Off: compaction shrinks a session by replacing its
+// transcript with a summary, and this plugin already owns two reliefs that do
+// not — the primary handoff and, for a subagent, the context budget. A user who
+// wants it says so per type, or through the flat key for all of them.
+//
+// Exported for the parity the other defaults are exported for
+// (tui/src/settings-file.ts, test/settings-defaults-parity.test.js).
+export const DEFAULT_COMPACTION = false
 
 // The two agent modes this plugin can run in, and the one it runs in when
 // nothing says otherwise.
@@ -380,6 +401,10 @@ function envStr(name, def) {
 // directly.
 // showAgentcom shows the plugin's own postings in the transcript; while it is
 // off they are hidden from it and still left in the model's payload.
+// agentCompaction is the per-agent compaction switch exactly as the file holds
+// it (empty when the file names none) and compaction is the flat value for
+// every type it does not name — read both through compactionEnabledFor rather
+// than directly.
 // agentMode is "orchestrator" or "solo" and nothing else — read it through
 // soloModeActive rather than directly, which is where the mode becomes a
 // branch and where it is latched for the life of the process.
@@ -427,6 +452,8 @@ export function getSettings() {
     endlessMaxCycles: envNum("OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES", DEFAULT_ENDLESS_MAX_CYCLES),
     maxNestedSpawns: envNum("OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS", DEFAULT_MAX_NESTED_SPAWNS),
     showAgentcom: envBool("OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM", DEFAULT_SHOW_AGENTCOM),
+    compaction: envBool("OPENCODE_AGENT_INTERCOM_COMPACTION", DEFAULT_COMPACTION),
+    agentCompaction: {},
     agentMode: envAgentMode("OPENCODE_AGENT_INTERCOM_AGENT_MODE", DEFAULT_AGENT_MODE),
   }
   try {
@@ -540,6 +567,22 @@ export function getSettings() {
     }
     if (typeof raw?.showAgentcom === "boolean") {
       resolved.showAgentcom = raw.showAgentcom
+    }
+    if (typeof raw?.compaction === "boolean") {
+      resolved.compaction = raw.compaction
+    }
+    // Per-agent compaction switches, read with exactly the discipline the three
+    // per-agent ceilings above are read with, only over booleans: a key
+    // survives only as a real boolean, one garbage entry costs the user that
+    // entry and not the map, and a value that is not a plain object leaves the
+    // map empty so every type falls through to the flat value. Nothing is
+    // materialised.
+    if (raw?.agentCompaction && typeof raw.agentCompaction === "object" && !Array.isArray(raw.agentCompaction)) {
+      const perAgent = {}
+      for (const [name, value] of Object.entries(raw.agentCompaction)) {
+        if (name !== "" && typeof value === "boolean") perAgent[name] = value
+      }
+      resolved.agentCompaction = perAgent
     }
     // A value naming no mode leaves the env-or-default resolution standing,
     // exactly as a bad boolean or a bad number does above.
@@ -666,6 +709,32 @@ export function resultCeilingFor(agent) {
   const s = getSettings()
   if (Object.hasOwn(s.resultTokens, agent)) return s.resultTokens[agent]
   return s.maxResultTokens
+}
+
+// Whether automatic compaction is on for one agent type. Order, the two levels
+// resultCeilingFor has:
+//   1. the type's own `agentCompaction` entry from the file,
+//   2. the flat `compaction` — file, else the env var
+//      OPENCODE_AGENT_INTERCOM_COMPACTION, else DEFAULT_COMPACTION.
+//
+// No source flag: there is no built-in per-type table behind this map and no
+// legacy key, so there is nothing to disambiguate — the shape reuseCeilingFor
+// and resultCeilingFor already have.
+//
+// NOT latched, unlike soloModeActive. This key governs no tool surface and no
+// prompt — nothing opencode settles at instance bootstrap depends on it,
+// because the global `compaction.auto` the config hook writes is unconditional
+// and never reads this value (src/compaction.js). So it is resolved live on
+// every crossing, through the normal TTL cache plus the agentcom watch's
+// invalidation, and a change in the file takes effect without a restart.
+//
+// Resolved per call, never cached on a registry entry, for the reason
+// contextBudgetFor states: a freshly spawned subagent is tracked under a
+// provisional type name until the spawn tool upgrades it.
+export function compactionEnabledFor(agent) {
+  const s = getSettings()
+  if (Object.hasOwn(s.agentCompaction, agent)) return s.agentCompaction[agent]
+  return s.compaction
 }
 
 // Whether this process offers retention at all, decided at the first read and

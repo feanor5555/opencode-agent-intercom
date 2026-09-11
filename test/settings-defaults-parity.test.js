@@ -46,6 +46,8 @@ import {
   DEFAULT_MAX_SUBAGENTS,
   DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_SHOW_AGENTCOM,
+  DEFAULT_COMPACTION,
+  compactionEnabledFor,
   contextBudgetFor,
   reuseCeilingFor,
   resultCeilingFor,
@@ -73,7 +75,9 @@ import {
   DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS as TUI_DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
   DEFAULT_RETAINED_SUBAGENT_TTL_MS as TUI_DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_SHOW_AGENTCOM as TUI_DEFAULT_SHOW_AGENTCOM,
+  DEFAULT_COMPACTION as TUI_DEFAULT_COMPACTION,
   effectiveAgentContext,
+  effectiveCompaction,
   effectiveResultTokens,
   effectiveReuseContext,
   readSettings,
@@ -102,6 +106,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS
+  delete process.env.OPENCODE_AGENT_INTERCOM_COMPACTION
 })
 
 // The two watchdog windows as every case below expects them when neither the
@@ -139,6 +144,8 @@ function bothSides() {
       maxResultTokens: plugin.maxResultTokens,
       resultTokens: plugin.resultTokens,
       showAgentcom: plugin.showAgentcom,
+      compaction: plugin.compaction,
+      agentCompaction: plugin.agentCompaction,
     },
     tui,
   ]
@@ -199,6 +206,18 @@ function assertReplyCeiling(agent, value, source) {
   assert.equal(tui.source, source)
 }
 
+// Asserts the two halves agree on whether one type is compacted and on where
+// that value came from. The plugin drives the compaction and the sidebar shows
+// the switch, so a divergence would show an agent as compacted that is not.
+function assertCompaction(agent, value, source) {
+  resetSettings()
+  const plugin = compactionEnabledFor(agent)
+  const tui = effectiveCompaction(readSettings(), agent)
+  assert.equal(plugin, value)
+  assert.equal(tui.value, value)
+  assert.equal(tui.source, source)
+}
+
 test("the two modules carry the same built-in defaults", () => {
   assert.equal(DEFAULT_MAX_SUBAGENTS, TUI_DEFAULT_MAX_SUBAGENTS)
   assert.equal(DEFAULT_MAX_CONTEXT, TUI_DEFAULT_MAX_CONTEXT)
@@ -210,6 +229,7 @@ test("the two modules carry the same built-in defaults", () => {
   assert.equal(DEFAULT_RETAINED_SUBAGENT_TTL_MS, TUI_DEFAULT_RETAINED_SUBAGENT_TTL_MS)
   assert.equal(DEFAULT_MAX_REUSE_CONTEXT, TUI_DEFAULT_MAX_REUSE_CONTEXT)
   assert.equal(DEFAULT_MAX_RESULT_TOKENS, TUI_DEFAULT_MAX_RESULT_TOKENS)
+  assert.equal(DEFAULT_COMPACTION, TUI_DEFAULT_COMPACTION)
   assert.deepEqual(DEFAULT_AGENT_CONTEXT, TUI_DEFAULT_AGENT_CONTEXT)
 })
 
@@ -290,6 +310,8 @@ test("with neither file nor env both resolve the built-in defaults", () => {
     maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
     resultTokens: {},
     showAgentcom: DEFAULT_SHOW_AGENTCOM,
+    compaction: DEFAULT_COMPACTION,
+    agentCompaction: {},
   })
   assert.deepEqual(tui, plugin)
 })
@@ -318,6 +340,8 @@ test("with env alone both resolve the env value", () => {
     maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
     resultTokens: {},
     showAgentcom: false,
+    compaction: DEFAULT_COMPACTION,
+    agentCompaction: {},
   })
   assert.deepEqual(tui, plugin)
 })
@@ -357,6 +381,8 @@ test("with file and env both let the file win", () => {
     maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
     resultTokens: {},
     showAgentcom: true,
+    compaction: DEFAULT_COMPACTION,
+    agentCompaction: {},
   })
   assert.deepEqual(tui, plugin)
 })
@@ -384,6 +410,8 @@ test("both reject the same file values and fall back to env or default", () => {
     maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
     resultTokens: {},
     showAgentcom: DEFAULT_SHOW_AGENTCOM,
+    compaction: DEFAULT_COMPACTION,
+    agentCompaction: {},
   })
   assert.deepEqual(tui, plugin)
 })
@@ -410,6 +438,8 @@ test("both keep 0 as a value in its own right", () => {
     maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
     resultTokens: {},
     showAgentcom: DEFAULT_SHOW_AGENTCOM,
+    compaction: DEFAULT_COMPACTION,
+    agentCompaction: {},
   })
   assert.deepEqual(tui, plugin)
 })
@@ -871,4 +901,102 @@ test("both keep the reply map apart from the budget and reuse maps", () => {
   assertCeiling("coder", 150000, "agent")
   assertReplyCeiling("coder", 20000, "agent")
   assertReplyCeiling("planner", DEFAULT_MAX_RESULT_TOKENS, "inherited")
+})
+
+// Automatic compaction, pinned over its whole chain: the constant, the env var
+// name, the flat key, the per-type map and the boolean rule both sides apply to
+// each. The plugin compacts on this value and the sidebar shows it, so a
+// divergence would show a role as compacted that never is.
+test("both resolve the compaction keys file > env > default and reject the same values", () => {
+  const [empty, tuiEmpty] = bothSides()
+  assert.equal(empty.compaction, DEFAULT_COMPACTION)
+  assert.deepEqual(empty.agentCompaction, {})
+  assert.deepEqual(tuiEmpty, empty)
+  assertCompaction("coder", false, "inherited")
+
+  process.env.OPENCODE_AGENT_INTERCOM_COMPACTION = "1"
+  const [envOnly, tuiEnvOnly] = bothSides()
+  assert.equal(envOnly.compaction, true, "env over the built-in default")
+  assert.deepEqual(tuiEnvOnly, envOnly)
+  assertCompaction("coder", true, "inherited")
+
+  writeFileSync(file, JSON.stringify({ compaction: false, agentCompaction: { coder: true } }))
+  const [fromFile, tuiFromFile] = bothSides()
+  assert.equal(fromFile.compaction, false, "the file wins over the env var")
+  assert.deepEqual(fromFile.agentCompaction, { coder: true })
+  assert.deepEqual(tuiFromFile, fromFile)
+  assertCompaction("coder", true, "agent")
+  assertCompaction("planner", false, "inherited")
+
+  for (const bad of ["true", 1, 0, null]) {
+    writeFileSync(file, JSON.stringify({ compaction: bad }))
+    const [plugin, tui] = bothSides()
+    assert.equal(plugin.compaction, true, `${JSON.stringify(bad)} must be rejected by both`)
+    assert.deepEqual(tui, plugin)
+  }
+})
+
+test("both drop the same agentCompaction entries and keep the rest of the map", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({
+      agentCompaction: { coder: true, planner: "true", reviewer: 1, designer: null },
+    }),
+  )
+  const [plugin, tui] = bothSides()
+  assert.deepEqual(plugin.agentCompaction, { coder: true })
+  assert.deepEqual(tui, plugin)
+  assertCompaction("coder", true, "agent")
+  for (const agent of ["planner", "reviewer", "designer"]) {
+    assertCompaction(agent, DEFAULT_COMPACTION, "inherited")
+  }
+})
+
+test("both ignore an agentCompaction that is not a plain object", () => {
+  for (const bad of [[true], "true", 1, null]) {
+    writeFileSync(file, JSON.stringify({ compaction: true, agentCompaction: bad }))
+    const [plugin, tui] = bothSides()
+    assert.deepEqual(plugin.agentCompaction, {})
+    assert.deepEqual(tui, plugin)
+    assertCompaction("coder", true, "inherited")
+  }
+})
+
+test("both keep a per-type `false` against a flat `true`", () => {
+  writeFileSync(file, JSON.stringify({ compaction: true, agentCompaction: { coder: false } }))
+  assertCompaction("coder", false, "agent")
+  assertCompaction("orchestrator", true, "inherited")
+})
+
+test("both read the compaction env var as 1/0 and ignore anything else", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_COMPACTION = "0"
+  const [off, tuiOff] = bothSides()
+  assert.equal(off.compaction, false)
+  assert.deepEqual(tuiOff, off)
+
+  for (const bad of ["yes", "true", "", "2"]) {
+    process.env.OPENCODE_AGENT_INTERCOM_COMPACTION = bad
+    const [plugin, tui] = bothSides()
+    assert.equal(plugin.compaction, DEFAULT_COMPACTION, `env ${JSON.stringify(bad)}`)
+    assert.deepEqual(tui, plugin)
+  }
+})
+
+// The compaction map is its own setting and reads none of the three numeric
+// maps: a context budget says nothing about whether that type is compacted.
+test("both keep the compaction map apart from the three ceiling maps", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({
+      agentContext: { coder: 40000 },
+      reuseContext: { coder: 150000 },
+      resultTokens: { coder: 20000 },
+      agentCompaction: { coder: true },
+    }),
+  )
+  assertBudget("coder", 40000, "agent")
+  assertCeiling("coder", 150000, "agent")
+  assertReplyCeiling("coder", 20000, "agent")
+  assertCompaction("coder", true, "agent")
+  assertCompaction("planner", DEFAULT_COMPACTION, "inherited")
 })

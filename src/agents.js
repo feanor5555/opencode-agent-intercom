@@ -801,6 +801,12 @@ function directoryKey(directory) {
 //   summary     — registered in the same pass,
 //   compaction  — one turn whenever a session crosses the context threshold.
 //
+// `compaction` is named here and switched off elsewhere: its switch is the
+// global `config.compaction.auto`, which this plugin writes in EVERY agent mode
+// (applyCompactionPolicy, src/compaction.js), because automatic compaction is a
+// setting of its own rather than a solo-mode concern. This list is a statement
+// about opencode, not about who writes what.
+//
 // Established from the installed binary (opencode 1.18.29,
 // ~/.opencode/bin/opencode), where all three are registered
 // `mode: "primary", hidden: true`.
@@ -811,10 +817,12 @@ function directoryKey(directory) {
 // reading of what solo mode is for.
 export const BUILTIN_AUTO_AGENTS = Object.freeze(["title", "summary", "compaction"])
 
-// Stops those turns for a SOLO-mode process. A no-op in the orchestrator
-// pattern, where a second agent is what the whole plugin is built to run.
+// Stops the `title` and `summary` turns for a SOLO-mode process. A no-op in the
+// orchestrator pattern, where a second agent is what the whole plugin is built
+// to run. `compaction` is not here: its switch is global, holds in both modes
+// and is written by applyCompactionPolicy (src/compaction.js).
 //
-// Two different switches, because opencode reads the two agents differently:
+// The switch:
 //
 //   - `title` and `summary` are switched off through `config.agent[<name>]
 //     .disable`, an opencode config key of its own (the agent-entry schema
@@ -826,19 +834,9 @@ export const BUILTIN_AUTO_AGENTS = Object.freeze(["title", "summary", "compactio
 //     `compaction` are the only two names the registry is asked for by literal,
 //     so disabling it removes an entry nothing reaches and cannot break a path.
 //
-//   - `compaction` is switched off through `config.compaction.auto`, NOT
-//     through the agent entry. Its overflow test reads that key and answers
-//     "not overflowing" when it is false (`if(e.cfg.compaction?.auto===!1)
-//     return!1`), so the turn is never started. The agent entry must be left
-//     alone here: unlike the title path, the compaction path dereferences the
-//     fetch without a guard (`let m=yield*l.get("compaction"),q=m.model?…`), so
-//     `disable` there would turn an automatic compaction into a throw.
-//     Context relief in solo mode is the plugin's own primary handoff, which
-//     the mode already arms.
-//
-// The plugin wins over a project that set either key: in solo mode the backend
-// serves one agent at a time, so this is not a default to be overridden. Both
-// writes preserve every neighbouring key. Mutates `config` in place.
+// The plugin wins over a project that set the key: in solo mode the backend
+// serves one agent at a time, so this is not a default to be overridden. The
+// write preserves every neighbouring key. Mutates `config` in place.
 export function suppressBuiltinAgentTurns(config) {
   if (!config || typeof config !== "object") return
   if (!soloModeActive()) return
@@ -850,11 +848,6 @@ export function suppressBuiltinAgentTurns(config) {
         : null
     config.agent[name] = { ...existing, disable: true }
   }
-  const compaction =
-    config.compaction && typeof config.compaction === "object" && !Array.isArray(config.compaction)
-      ? config.compaction
-      : null
-  config.compaction = { ...compaction, auto: false }
 }
 
 // The name the primary of one project runs under: the `default_agent` captured

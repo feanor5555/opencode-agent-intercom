@@ -48,6 +48,14 @@
 //                                               settings file if present.
 //   OPENCODE_AGENT_INTERCOM_PROJECT_CONTEXT     "1" (default) to prepend the project snapshot on
 //                                               spawn, "0" to disable it
+//   OPENCODE_AGENT_INTERCOM_COMPACTION          "1" switches automatic compaction ON for every
+//                                               agent type the settings file's `agentCompaction`
+//                                               map does not name, "0" (the default) off.
+//                                               opencode's own automatic compaction is switched
+//                                               off in every mode whatever this says; what the
+//                                               value governs is the compaction the plugin
+//                                               drives itself. Overridden by the settings file
+//                                               (`compaction`, `agentCompaction`) if present.
 //   OPENCODE_AGENT_INTERCOM_AGENT_MODE         "orchestrator" (default) runs the primary as the
 //                                               orchestrator pattern this plugin enforces;
 //                                               "solo" runs the primary as a single agent that
@@ -55,10 +63,10 @@
 //                                               kind starting (none of spawn/abort/list/reuse,
 //                                               opencode's native task denied, the plugin's
 //                                               subagent roles disabled, the hidden title and
-//                                               summary agents switched off, compaction.auto
-//                                               set to false, endless mode counting as off,
-//                                               and the orchestration guide and limits block
-//                                               not injected). Latched at plugin load — a
+//                                               summary agents switched off, endless mode
+//                                               counting as off, and the orchestration guide
+//                                               and limits block not injected). Latched at
+//                                               plugin load — a
 //                                               change needs an opencode restart and holds
 //                                               across every further restart until it is
 //                                               switched back. Overridden by the settings
@@ -77,6 +85,7 @@ import {
   rewritePendingTools,
 } from "./hooks.js"
 import { installAgents, suppressBuiltinAgentTurns } from "./agents.js"
+import { applyCompactionPolicy } from "./compaction.js"
 import { recordSessionAgent } from "./registry.js"
 import { chatParamsHook } from "./llmparams.js"
 import { chatMessageHook, applyModelChoices, messageAgent } from "./llmmodel.js"
@@ -167,8 +176,20 @@ export default async (ctx) => {
       } catch (err) {
         log("config hook error", err?.message ?? String(err))
       }
-      // Solo mode only: stop opencode's own hidden `title`, `summary` and
-      // `compaction` agents from taking a turn. They start on opencode's own
+      // Switch opencode's automatic compaction off, in BOTH agent modes and
+      // whatever the settings say. opencode's switch is global and has no
+      // per-agent form, so the plugin owns it: compaction is off for every
+      // agent that does not carry its own `agentCompaction: true`, and the
+      // side that says ON is the plugin's own driver. The write reads no
+      // setting, which is what lets that per-agent switch be read live instead
+      // of being latched with this config.
+      try {
+        applyCompactionPolicy(config)
+      } catch (err) {
+        log("config compaction hook error", err?.message ?? String(err))
+      }
+      // Solo mode only: stop opencode's own hidden `title` and `summary`
+      // agents from taking a turn. They start on opencode's own
       // initiative and not through a tool call, so no guard of this plugin is
       // on their path — this config write is the only place they can be
       // reached. A no-op in the orchestrator pattern. Runs BEFORE

@@ -16,9 +16,12 @@
 //      or re-start a session, which used to ask the mode nothing at all: the
 //      whole block on the spawn machinery in solo mode was the shape of one
 //      object literal.
-//   4. opencode's own hidden `title`, `summary` and `compaction` agents, which
-//      it starts on its own initiative — no tool call, so not one of the
-//      plugin's enforcement points is on their path.
+//   4. opencode's own hidden `title` and `summary` agents, which it starts on
+//      its own initiative — no tool call, so not one of the plugin's
+//      enforcement points is on their path. The third such agent, `compaction`,
+//      is switched off in EVERY mode and belongs to
+//      test/compaction-policy.test.js; what this file still pins about it is
+//      that the solo suppression writes no compaction key of its own.
 //   5. The invariant over the lot: driving a solo-mode instance over a client
 //      whose `session.create` THROWS must not raise.
 //
@@ -202,8 +205,10 @@ test("solo mode never disables the primary itself", () => {
 // all three are registered `mode: "primary", hidden: true`; the agent-entry
 // schema declares `disable`, and opencode's config merge deletes the registry
 // entry for a `disable: true`; the title path then takes its own early return
-// on the empty fetch. `compaction` is switched off through `compaction.auto`
-// instead, because its own path dereferences the fetch without a guard.
+// on the empty fetch. `compaction` is switched off through the global
+// `compaction.auto` instead, because its own path dereferences the fetch
+// without a guard — that write is unconditional and lives in
+// src/compaction.js, so this section covers `title` and `summary` alone.
 
 test("solo mode switches opencode's title and summary agents off through its own key", () => {
   loadSolo()
@@ -213,15 +218,19 @@ test("solo mode switches opencode's title and summary agents off through its own
   assert.equal(config.agent.summary.disable, true)
 })
 
-test("solo mode switches automatic compaction off and leaves the compaction AGENT alone", () => {
+test("the suppression leaves both the compaction agent and the compaction key alone", () => {
   loadSolo()
   const config = { agent: {} }
   suppressBuiltinAgentTurns(config)
-  assert.equal(config.compaction.auto, false, "opencode's own off switch for the turn")
   assert.equal(
     config.agent.compaction,
     undefined,
     "disabling the agent would turn an automatic compaction into a throw, not into a skip",
+  )
+  assert.equal(
+    config.compaction,
+    undefined,
+    "the global key is written unconditionally elsewhere (src/compaction.js)",
   )
 })
 
@@ -237,17 +246,16 @@ test("the suppression keeps every neighbouring key it did not come for", () => {
     temperature: 0.5,
     disable: true,
   })
-  assert.deepEqual(config.compaction, { tail_turns: 15, prune: true, auto: false })
+  assert.deepEqual(config.compaction, { tail_turns: 15, prune: true }, "not this write's key")
 })
 
-test("the plugin wins over a project that switched either back on", () => {
+test("the plugin wins over a project that switched the title agent back on", () => {
   // Not a default to be overridden: in solo mode the backend serves one agent
   // at a time, and a `title` turn beside the primary's own is the failure case.
   loadSolo()
-  const config = { agent: { title: { disable: false } }, compaction: { auto: true } }
+  const config = { agent: { title: { disable: false } } }
   suppressBuiltinAgentTurns(config)
   assert.equal(config.agent.title.disable, true)
-  assert.equal(config.compaction.auto, false)
 })
 
 test("orchestrator mode: the suppression is a no-op", () => {
@@ -262,13 +270,12 @@ test("the suppression survives a config it cannot use", () => {
     assert.doesNotThrow(() => suppressBuiltinAgentTurns(config))
   }
   // A non-object where an object is expected is replaced, not merged into.
-  const odd = { agent: { title: "not an object" }, compaction: [] }
+  const odd = { agent: { title: "not an object" } }
   suppressBuiltinAgentTurns(odd)
   assert.deepEqual(odd.agent.title, { disable: true })
-  assert.deepEqual(odd.compaction, { auto: false })
 })
 
-test("the three names this covers are the three opencode really runs", () => {
+test("the three names opencode really starts on its own are named", () => {
   assert.deepEqual([...BUILTIN_AUTO_AGENTS], ["title", "summary", "compaction"])
   for (const name of BUILTIN_AUTO_AGENTS) {
     assert.equal(AGENTS[name], undefined, `${name} is opencode's, not one of the plugin's roles`)
@@ -588,6 +595,6 @@ test("the config hook of a solo instance leaves nothing that can start a second 
   }
   assert.equal(config.agent.title.disable, true)
   assert.equal(config.agent.summary.disable, true)
-  assert.equal(config.compaction.auto, false)
+  assert.equal(config.compaction.auto, false, "written in every mode, src/compaction.js")
   assert.equal(config.agent.orchestrator.disable, undefined, "the one agent there is stays")
 })

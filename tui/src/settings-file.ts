@@ -50,6 +50,12 @@
 // then DEFAULT_MAX_RESULT_TOKENS. `0` is a real value and means that type's
 // reply is never cut.
 //
+// Automatic compaction is a value PER AGENT TYPE the same way, only a boolean:
+// the `agentCompaction` map holds a type's own value, the flat `compaction` key
+// is what a type without one inherits, and behind it stand the env var
+// OPENCODE_AGENT_INTERCOM_COMPACTION and DEFAULT_COMPACTION. The key is the
+// plugin's own and is never opencode's `compaction` object.
+//
 // Every write goes through a read-modify-write: the sidebar seeds its signals
 // once at mount, so its copy is stale as soon as the file is edited elsewhere.
 // Only the key the user just touched goes into what disk currently holds — the
@@ -89,6 +95,11 @@ import { createJsonObjectFile } from "./json-object-file.ts";
 // shape is read.
 export type { AgentContext };
 
+// A boolean setting per agent type — the shape agentCompaction has, beside the
+// three numeric AgentContext maps. Only the types the user gave a value of
+// their own; nothing is materialised on read.
+export type AgentFlags = Record<string, boolean>;
+
 // Where the flat `maxContext` came from. "default" means nobody set it, which
 // is what lets the built-in per-type table apply.
 export type MaxContextSource = "file" | "env" | "default";
@@ -110,11 +121,15 @@ export interface Settings {
   maxResultTokens: number;
   resultTokens: AgentContext;
   showAgentcom: boolean;
+  compaction: boolean;
+  agentCompaction: AgentFlags;
 }
 
 // The scalar keys that hold a limit, i.e. the ones a [-]/[+] row steps.
 // endlessMode and showAgentcom are not among them: they are the file's booleans
-// and each has its own writer. maxContext is not one either: it is legacy-only
+// and each has its own writer, and the flat `compaction` is not one either —
+// it is a boolean AND a per-type inheritance, edited per agent in
+// agentCompaction. maxContext is not one either: it is legacy-only
 // and is written by nothing here — a ceiling is edited per agent through
 // stepAgentContext. maxNestedSpawns is not one either: it is read and preserved
 // for parity with the plugin, and no row edits it. maxReuseContext is not one
@@ -214,6 +229,11 @@ export const RETAINED_SUBAGENT_TTL_STEP_MS = 60000;
 // copy is DEFAULT_SHOW_AGENTCOM in src/settings.js and
 // test/settings-defaults-parity.test.js fails on a divergence.
 export const DEFAULT_SHOW_AGENTCOM = true;
+// Whether automatic compaction is on for an agent type the agentCompaction map
+// does not name. The plugin's own copy is DEFAULT_COMPACTION in src/settings.js
+// and test/settings-defaults-parity.test.js fails on a divergence. No row steps
+// this flat key: it is what an untouched type inherits.
+export const DEFAULT_COMPACTION = false;
 
 const MAX_CONTEXT_ENV = "OPENCODE_AGENT_INTERCOM_MAX_CONTEXT";
 
@@ -245,6 +265,18 @@ function filterAgentContext(v: unknown): AgentContext | null {
   return kept;
 }
 
+// The usable entries of an agentCompaction value, or null when the value is not
+// a plain object at all. Same discipline as filterAgentContext above, over the
+// plugin's boolean rule instead of its limit rule.
+function filterAgentFlags(v: unknown): AgentFlags | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const kept: AgentFlags = {};
+  for (const [name, value] of Object.entries(v as Record<string, unknown>)) {
+    if (name !== "" && isFlag(value)) kept[name] = value;
+  }
+  return kept;
+}
+
 // What each key must look like for the plugin to use it. Written as a mapped
 // type over the file's keys so a key added to the panel cannot be left without
 // one.
@@ -264,6 +296,8 @@ const SETTING_VALIDATORS: { [K in FileKey]: (v: unknown) => boolean } = {
   maxResultTokens: isLimit,
   resultTokens: (v) => filterAgentContext(v) !== null,
   showAgentcom: isFlag,
+  compaction: isFlag,
+  agentCompaction: (v) => filterAgentFlags(v) !== null,
 };
 
 function envNum(name: string, def: number): number {
@@ -332,6 +366,8 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
     ),
     resultTokens: {},
     showAgentcom: envFlag("OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM", DEFAULT_SHOW_AGENTCOM),
+    compaction: envFlag("OPENCODE_AGENT_INTERCOM_COMPACTION", DEFAULT_COMPACTION),
+    agentCompaction: {},
   };
   if (isLimit(raw.maxSubagents)) s.maxSubagents = raw.maxSubagents;
   if (isLimit(raw.maxContext)) {
@@ -360,6 +396,9 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
   const perAgentResult = filterAgentContext(raw.resultTokens);
   if (perAgentResult !== null) s.resultTokens = perAgentResult;
   if (isFlag(raw.showAgentcom)) s.showAgentcom = raw.showAgentcom;
+  if (isFlag(raw.compaction)) s.compaction = raw.compaction;
+  const perAgentCompaction = filterAgentFlags(raw.agentCompaction);
+  if (perAgentCompaction !== null) s.agentCompaction = perAgentCompaction;
   return s;
 }
 
@@ -432,6 +471,24 @@ export function effectiveResultTokens(
   return { value: settings.maxResultTokens, source: "inherited" };
 }
 
+// Whether automatic compaction is on for one agent type, and whether that value
+// is the type's own or the inherited flat one — the same { value, source } pair
+// the ceiling rows read their ★ from. Same order as the plugin's
+// compactionEnabledFor: own entry > the flat `compaction`, itself resolved
+// file > env > DEFAULT_COMPACTION.
+//
+// Two levels, like effectiveResultTokens: no built-in per-type table stands
+// behind this map and no legacy key.
+export function effectiveCompaction(
+  settings: Settings,
+  agent: string,
+): { value: boolean; source: "agent" | "inherited" } {
+  if (Object.hasOwn(settings.agentCompaction, agent)) {
+    return { value: settings.agentCompaction[agent], source: "agent" };
+  }
+  return { value: settings.compaction, source: "inherited" };
+}
+
 // Drops every setting the plugin would reject, so the file cannot keep one that
 // silently is not in effect while the panel displays the env-or-default value
 // instead. Each key is checked against its own validator, so a step on a limit
@@ -452,6 +509,14 @@ function pruneSettings(merged: Record<string, unknown>): Record<string, unknown>
     const kept = filterAgentContext(merged[key]);
     if (kept === null || Object.keys(kept).length === 0) delete merged[key];
     else merged[key] = kept;
+  }
+  // The one per-type map of booleans, normalised the same way: the plugin drops
+  // a bad entry and keeps the rest, so a whole-map verdict here would cost the
+  // user entries that are in effect.
+  if ("agentCompaction" in merged) {
+    const kept = filterAgentFlags(merged.agentCompaction);
+    if (kept === null || Object.keys(kept).length === 0) delete merged.agentCompaction;
+    else merged.agentCompaction = kept;
   }
   for (const [k, isValid] of Object.entries(SETTING_VALIDATORS)) {
     if (k in merged && !isValid(merged[k])) delete merged[k];

@@ -46,6 +46,7 @@ import {
   DEFAULT_MAX_SUBAGENT_AGE_MS,
   DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
   DEFAULT_SHOW_AGENTCOM,
+  DEFAULT_COMPACTION,
   RETAINED_SUBAGENT_TTL_STEP_MS,
   SUBAGENT_AGE_STEP_MS,
   SUBAGENT_TOOL_CALL_STEP_MS,
@@ -86,6 +87,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS
+  delete process.env.OPENCODE_AGENT_INTERCOM_COMPACTION
 })
 
 const onDisk = () => JSON.parse(readFileSync(file, "utf8"))
@@ -112,6 +114,11 @@ const state = (over = {}) => ({
   maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
   resultTokens: {},
   showAgentcom: DEFAULT_SHOW_AGENTCOM,
+  // Per-agent automatic compaction: a flat inherited value and the map of the
+  // types that carry one of their own. No row edits either yet; both are part
+  // of every resolved state all the same.
+  compaction: DEFAULT_COMPACTION,
+  agentCompaction: {},
   ...over,
 })
 
@@ -414,6 +421,40 @@ test("a showAgentcom the plugin rejects is dropped without costing the other key
 
   assert.deepEqual(merged, state({ maxSubagents: 3, endlessMode: true }))
   assert.deepEqual(onDisk(), { endlessMode: true, maxSubagents: 3 })
+})
+
+// The per-agent compaction map is normalised on every write, entry by entry —
+// the discipline the three numeric maps get, over the plugin's boolean rule.
+// No row edits it yet; what a write must not do is leave a map in the file that
+// the plugin would read differently from what the panel shows.
+test("a write normalises agentCompaction entry by entry and keeps the good ones", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ agentCompaction: { coder: true, planner: "true", reviewer: 1 } }),
+  )
+
+  const merged = setSetting("maxSubagents", 3)
+
+  assert.deepEqual(merged, state({ maxSubagents: 3, agentCompaction: { coder: true } }))
+  assert.deepEqual(onDisk(), { agentCompaction: { coder: true }, maxSubagents: 3 })
+})
+
+test("a write drops an agentCompaction with nothing usable left in it", () => {
+  writeFileSync(file, JSON.stringify({ agentCompaction: { planner: "yes" }, maxContext: 90000 }))
+
+  const merged = setSetting("maxSubagents", 3)
+
+  assert.deepEqual(merged, state({ maxSubagents: 3, maxContext: 90000 }))
+  assert.deepEqual(onDisk(), { maxContext: 90000, maxSubagents: 3 })
+})
+
+test("a write drops a flat compaction the plugin would reject", () => {
+  writeFileSync(file, JSON.stringify({ compaction: "on", agentCompaction: { coder: false } }))
+
+  const merged = setSetting("maxSubagents", 3)
+
+  assert.deepEqual(merged, state({ maxSubagents: 3, agentCompaction: { coder: false } }))
+  assert.deepEqual(onDisk(), { agentCompaction: { coder: false }, maxSubagents: 3 })
 })
 
 test("an agentcom toggle that cannot reach the disk leaves the panel on the file's state", { skip: rootSkip }, () => {

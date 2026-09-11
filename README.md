@@ -157,6 +157,15 @@ row onto a second line.
   in `AGENTS.md`, so your project is resumable across restarts. Zero
   per-project prompt engineering.
 
+- **Compaction under your control, off by default.** opencode compacts a
+  session on one global switch with no per-agent form. The plugin writes
+  that switch off in every agent mode and takes the ON side itself: the
+  sidebar's `compaction` row arms it per role, and an armed agent is
+  compacted by the plugin at the context threshold that role already has —
+  the primary's `maxPrimaryContext`, a subagent's own context budget. The
+  row is live; no opencode restart. With it off for the primary, the plain
+  handoff or endless mode is what relieves the session.
+
 - **Graceful context-limit handling.** When a subagent runs out of context, it
   does not die and it does not hallucinate. The plugin tells *the parent*
   (which still has headroom) so the orchestrator can re-plan. We never
@@ -576,6 +585,25 @@ exposes every runtime knob:
     cut. Everything past the ceiling is cut out of the wake notice and
     written to a file the notice names. `[reset current agent]` does not
     touch any of these three rows.
+- **`compaction [on/off]`** — automatic compaction for the agent type the
+  same cycler has selected, last of its rows and directly above
+  `[reset current agent]`. Writes `"agentCompaction": { "<agent>": true |
+  false }` and inherits the flat `"compaction"` key (env
+  `OPENCODE_AGENT_INTERCOM_COMPACTION`, default `false`) wherever the map
+  has no entry; `★` marks a type that has its own value, and flipping back
+  to the inherited value deletes the entry again. opencode's own automatic
+  compaction is switched off for the whole process
+  (`applyCompactionPolicy`, `src/compaction.js`), so this row is the only
+  thing that compacts anything: an agent switched on is compacted by the
+  plugin through `client.session.summarize` at the context threshold that
+  agent already has — `maxPrimaryContext` for the primary, the type's own
+  context budget for a subagent. The row is LIVE and carries no restart
+  note, because the global write reads no setting. The line under it says
+  when the cell cannot take effect: `no threshold armed — compaction never
+  fires` for an `on` with a threshold of `0`, `endless mode owns the
+  primary threshold` for an `on` primary while the cycle is in effect, and
+  `no context relief armed — the session will overflow` for an `off`
+  primary with no handoff threshold and no cycle either.
 - **`retain (min)`** — the retention window in whole minutes, the unit the
   row is shown and stepped in. Writes `"retainedSubagentTtlMs"` in ms; the
   row's floor is one whole minute. A `0` typed by hand into the file
@@ -809,7 +837,9 @@ also takes `"maxRetainedSubagents"`, `"retainedSubagentTtlMs"`,
 `"maxReuseContext"` and the per-agent-type `"reuseContext"` map for the
 `reuse`/retention feature, `"midRunMessaging"`, `"answerWaitMs"` and
 `"maxMessageTokens"` for the mid-run channel, `"maxResultTokens"` and the per-agent-type
-`"resultTokens"` map for the reply ceiling, `"searxngUrl"` and `"exaApiKey"`
+`"resultTokens"` map for the reply ceiling, `"compaction"` and the
+per-agent-type `"agentCompaction"` map for automatic compaction,
+`"searxngUrl"` and `"exaApiKey"`
 (each overriding its environment variable), and `"forumBangs"` (no env var —
 the array REPLACES the built-in set rather than extending it). Everything else
 is environment-variable-driven:
@@ -846,6 +876,7 @@ is environment-variable-driven:
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_WIND_DOWN_TIMEOUT_MS` | `900000` | How long (ms) the cycle waits for the permitted wind-down subagent to rewrite the todo file before abandoning. Not shown in the sidebar. |
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES` | `10` | Cycle ceiling per opencode process. At the ceiling endless mode writes itself off. `"0"` arms no ceiling. |
 | `OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM` | on | `"0"` hides the plugin's own postings — subagent notices, handoff kickoff, doc-summary prompts — from the transcript. Their text still reaches the model unchanged. `"1"` shows them. TUI file overrides. |
+| `OPENCODE_AGENT_INTERCOM_COMPACTION` | off | Automatic compaction for every agent type the `agentCompaction` map does not name. `"1"` on, `"0"` off. opencode's own `compaction.auto` is written `false` in every agent mode by `applyCompactionPolicy` (`src/compaction.js`), so the ON side is the plugin's own: it compacts that agent's session through `client.session.summarize` at the threshold that agent already has — `maxPrimaryContext` for the primary (endless mode wins over it where the cycle is in effect), the type's own context budget for a subagent, capped at three compactions per subagent run. Read LIVE at every crossing, not latched. TUI file overrides via `"compaction"` and the per-agent-type `"agentCompaction"` map; the sidebar's `compaction` row edits it per role. |
 | `OPENCODE_AGENT_INTERCOM_AGENT_MODE` | `orchestrator` | `"orchestrator"` (default) runs the primary as the delegation pattern this plugin enforces; `"solo"` runs the primary as a single agent that does the work itself, with no second agent of any kind starting — none of `spawn`/`abort`/`list`/`reuse`, opencode's native `task` denied, the plugin's subagent roles disabled in the registry, opencode's hidden `title` and `summary` agents switched off, endless mode counting as off, and the orchestration guide and the limits block not injected into the primary. Latched at plugin load — a change needs an opencode restart and then holds across every further restart until it is switched back. TUI file overrides via `"agentMode"` in `~/.config/opencode/agent-intercom.json`; the `mode` row in the sidebar's TUI settings block steps through the two values with a two-step arm-and-confirm. `compaction.auto` is set to `false` in every mode by `applyCompactionPolicy` (`src/compaction.js`), so opencode's own context relief is gone — the plugin's own primary handoff replaces it, but a user who sets `maxPrimaryContext: 0` gets a `ContextOverflowError` instead of a compaction. Solo mode exists for a local model server running with `parallel 1`, where any second agent competes with the primary for the only slot. |
 
 ## Endless mode
@@ -994,6 +1025,15 @@ removing every "do it yourself" tool from the primary is the enforcement lever.
   re-pinned text visible in the diff. Two things stay uncovered: guide
   text outside those four elements, and a maintainer who re-pins a real
   contract change without bumping.
+- **Compaction is per session upstream, not per agent.** opencode's
+  `compaction.auto` is one global key, its agent schema carries no
+  compaction entry, and no hook can veto a compaction once started. So the
+  per-agent row here is the plugin's own: the global switch is written
+  `false` and an agent that is switched on is compacted by a
+  `client.session.summarize` call the plugin makes at its own threshold.
+  Setting `compaction.auto: true` in a project's `opencode.json` does not
+  survive — the plugin's write wins, or the row would say something that is
+  not in effect.
 - **Solo-maintainer surface area.** `pw` daemon, `gen` CLI, Exa SSE parser,
   ctags subprocess, four opencode hooks. 1046 unit tests, no CI against real
   opencode. Bugs are addressed at hobby-project pace.

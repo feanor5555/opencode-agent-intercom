@@ -11,7 +11,9 @@
 // `result Token` — live in the LLM params body, directly after the `effort`
 // row and before `[reset current agent]`, and read the agent from the LLM
 // section's own cycler (`props.llmAgent()`, over AGENT_NAMES). The sidebar
-// therefore carries one agent cycler, not two. The flat retention rows and the
+// therefore carries one agent cycler, not two. The `compaction` row is the
+// fourth value on that cycler and sits last of them, directly above
+// `[reset current agent]`. The flat retention rows and the
 // two watchdog rows — `silence (s)` and `in tool (min)` — stay in
 // the Subagents body, and `[reset current agent]` stays a reset of the LLM
 // parameters alone: it must not touch the three ceilings, which live in a
@@ -99,6 +101,65 @@ test("the ceiling rows read the LLM section's agent selection", () => {
     assert.ok(
       source.includes(`${stepper}(currentLlmAgent(), delta, AGENT_NAMES)`),
       `${stepper} steps the LLM agent against AGENT_NAMES`,
+    )
+  }
+})
+
+// The compaction row is per role, not a flat limit over all subagents, so it
+// belongs on the cycler in the LLM params body and not in the Subagents block.
+// Its `orchestrator` entry is the row's most important one, and the cycler is
+// the only control in the sidebar that selects that role.
+test("the compaction row sits last on the cycler, above [reset current agent]", () => {
+  const compaction = row("compaction")
+  const resultToken = row("result Token")
+
+  assert.ok(compaction > LLM_HEADER, "compaction stands in the LLM params body")
+  assert.ok(compaction > resultToken, "compaction stands after result Token")
+  assert.ok(compaction < RESET_ROW, "compaction stands before [reset current agent]")
+  assert.ok(
+    compaction > SUBAGENTS_HEADER && compaction > TUI_SETTINGS_HEADER,
+    "compaction is not in the Subagents or TUI settings body",
+  )
+})
+
+test("the compaction row reads the LLM section's agent selection and the endless state", () => {
+  assert.ok(
+    source.includes(
+      "compactionRowState(\n                props.settings(),\n                props.llmAgent(),\n                endlessState() === \"on\",\n              )",
+    ),
+    "the row's state is resolved from the settings, the LLM agent and the endless row's own verdict",
+  )
+  // The write is a toggle of that same agent, with no cycler list behind it:
+  // unlike the three ceilings it runs no freeze migration.
+  assert.ok(
+    source.includes("toggleAgentCompaction(currentLlmAgent())"),
+    "the toggle writes the LLM agent's own entry",
+  )
+  assert.equal(
+    source.includes("toggleAgentCompaction(currentLlmAgent(), AGENT_NAMES)"),
+    false,
+    "the toggle freezes no list",
+  )
+})
+
+// The row is live: the global `compaction.auto:false` the plugin writes reads
+// no setting, so nothing this row writes has to reach opencode's bootstrap
+// snapshot. It must therefore NOT carry the restart note the `mode` row does,
+// and it must stay a plain click rather than gaining that row's arm-and-confirm.
+test("the compaction row is a live switch with no restart note", () => {
+  const start = source.indexOf('rowLabel("compaction")')
+  const end = source.indexOf('{"[reset current agent]"}', start)
+  assert.ok(start >= 0 && end > start, "the compaction row bounds are present")
+  const rowSource = source.slice(start, end)
+  assert.ok(
+    rowSource.includes("props.onToggleCompaction"),
+    "the cell writes the switch on a plain click",
+  )
+  for (const forbidden of ["restart", "armed", "Armed"]) {
+    assert.equal(
+      rowSource.includes(forbidden),
+      false,
+      `the compaction row carries no ${forbidden} state`,
     )
   }
 })

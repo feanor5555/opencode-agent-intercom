@@ -118,6 +118,7 @@ export interface Settings {
   agentContext: AgentContext;
   maxSubagentAgeMs: number;
   maxSubagentToolCallMs: number;
+  maxPrimaryContext: number;
   endlessMode: boolean;
   endlessContext: number;
   maxNestedSpawns: number;
@@ -143,7 +144,9 @@ export interface Settings {
 // and is written by nothing here — a ceiling is edited per agent through
 // stepAgentContext. maxNestedSpawns is not one either: it is read and preserved
 // for parity with the plugin, and no row edits it. answerWaitMs and
-// maxMessageTokens are out for that same reason. maxReuseContext is not one
+// maxMessageTokens are out for that same reason, and so is maxPrimaryContext,
+// which the panel reads to say whether the primary has a threshold armed at
+// all. maxReuseContext is not one
 // for a different reason: the reuse ceiling is edited per agent type, in
 // reuseContext through stepReuseContext, and the flat key is only what a type
 // without an own entry inherits. maxResultTokens is out for that same reason,
@@ -197,6 +200,19 @@ export const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000;
 // src/settings.js, pinned the same indirect way as the window above. Stepped by
 // the panel's "in tool (min)" row, which shows and steps it in whole minutes.
 export const DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS = 660000;
+// The context the PRIMARY session is relieved at, in whole tokens: the
+// threshold that buys a handoff, or a compaction where that agent's compaction
+// switch is on. `0` arms neither — the session then runs until the provider's
+// own limit ends it. While endless mode is in effect endlessContext DISPLACES
+// this value (primaryContextThreshold, src/settings.js), which is why the
+// compaction row resolves the armed threshold over both keys.
+//
+// The plugin's own copy is DEFAULT_MAX_PRIMARY_CONTEXT in src/settings.js,
+// which does not export it, so test/settings-defaults-parity.test.js pins this
+// constant against the value the plugin resolves with neither file nor env —
+// the same indirect pin the two watchdog windows above get. No row steps it:
+// it is read here to say what the compaction row's note says.
+export const DEFAULT_MAX_PRIMARY_CONTEXT = 80000;
 // The unit the silence window is shown and stepped in: whole seconds. Fifteen
 // of them, so the 90 s default is six steps off zero and a user can reach the
 // values either side of it without a long hold, while a hold still crosses the
@@ -309,6 +325,7 @@ const SETTING_VALIDATORS: { [K in FileKey]: (v: unknown) => boolean } = {
   agentContext: (v) => filterAgentContext(v) !== null,
   maxSubagentAgeMs: isLimit,
   maxSubagentToolCallMs: isLimit,
+  maxPrimaryContext: isLimit,
   endlessMode: isFlag,
   endlessContext: isLimit,
   maxNestedSpawns: isLimit,
@@ -367,6 +384,10 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
       "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS",
       DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
     ),
+    maxPrimaryContext: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT",
+      DEFAULT_MAX_PRIMARY_CONTEXT,
+    ),
     endlessMode: envFlag("OPENCODE_AGENT_INTERCOM_ENDLESS_MODE", DEFAULT_ENDLESS_MODE),
     endlessContext: envNum("OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT", DEFAULT_ENDLESS_CONTEXT),
     maxNestedSpawns: envNum(
@@ -415,6 +436,7 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
   if (isLimit(raw.maxSubagentToolCallMs)) {
     s.maxSubagentToolCallMs = raw.maxSubagentToolCallMs;
   }
+  if (isLimit(raw.maxPrimaryContext)) s.maxPrimaryContext = raw.maxPrimaryContext;
   if (isFlag(raw.endlessMode)) s.endlessMode = raw.endlessMode;
   if (isLimit(raw.endlessContext)) s.endlessContext = raw.endlessContext;
   if (isLimit(raw.maxNestedSpawns)) s.maxNestedSpawns = raw.maxNestedSpawns;
@@ -755,6 +777,40 @@ export function setShowAgentcom(value: boolean): Settings {
 // stale.
 export function toggleShowAgentcom(): Settings {
   return applySetting("showAgentcom", (current) => !current.showAgentcom);
+}
+
+// Flips one agent type's compaction switch, from the value that type has in
+// effect at this moment on disk rather than from the panel's copy.
+//
+// Deliberately NOT the freeze-and-drop-the-flat-key migration the three ceiling
+// rows run (stepPerAgentCeiling above): a step is relative to the current value,
+// so those rows must freeze what every type has in effect before they move one
+// of them, while a toggle is absolute — it names the value it writes. So the
+// flat `compaction` key stays where it is and keeps its meaning as what an
+// untouched type inherits, and only the toggled type gains an entry.
+//
+// Where the flipped value equals the inherited one the entry is DELETED instead
+// of written: the type is then back to inheriting, the row's ★ goes, and a later
+// change to the flat key reaches this type again. Flipping the same row twice
+// therefore leaves the file as it was.
+//
+// Returns the merged state for the signals; an unreadable file or a failed
+// write leaves the file as it is and hands back the state on disk.
+export function toggleAgentCompaction(agent: string): Settings {
+  let raw: Record<string, unknown>;
+  try {
+    raw = file.readRaw();
+  } catch {
+    return readSettings();
+  }
+  const current = resolveSettings(raw);
+  const next: AgentFlags = { ...current.agentCompaction };
+  const flipped = !effectiveCompaction(current, agent).value;
+  if (flipped === current.compaction) delete next[agent];
+  else next[agent] = flipped;
+  const merged = pruneSettings({ ...raw, agentCompaction: next });
+  if (!file.write(merged)) return readSettings();
+  return resolveSettings(merged);
 }
 
 // The agent mode this file carries, or the default where it carries none the

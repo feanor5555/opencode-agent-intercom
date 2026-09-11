@@ -78,6 +78,7 @@ import {
   DEFAULT_MAX_SUBAGENTS as TUI_DEFAULT_MAX_SUBAGENTS,
   DEFAULT_MAX_SUBAGENT_AGE_MS as TUI_DEFAULT_MAX_SUBAGENT_AGE_MS,
   DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS as TUI_DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
+  DEFAULT_MAX_PRIMARY_CONTEXT as TUI_DEFAULT_MAX_PRIMARY_CONTEXT,
   DEFAULT_MID_RUN_MESSAGING as TUI_DEFAULT_MID_RUN_MESSAGING,
   DEFAULT_RETAINED_SUBAGENT_TTL_MS as TUI_DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_SHOW_AGENTCOM as TUI_DEFAULT_SHOW_AGENTCOM,
@@ -111,6 +112,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_MESSAGE_TOKENS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS
   delete process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT
@@ -139,6 +141,17 @@ const WATCHDOG_DEFAULTS = {
   maxSubagentToolCallMs: TUI_DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
 }
 
+// The primary's own context threshold as every case below expects it when
+// neither the file nor the env names it. src/settings.js keeps its default
+// module-private the way it keeps the two watchdog ones, so the sidebar's
+// constant is the only named one and the dedicated test further down pins the
+// plugin against it. No row steps the key: the panel reads it to say whether the
+// primary has a threshold armed at all, which is what the `compaction` row's
+// note line is about.
+const PRIMARY_CONTEXT_DEFAULT = {
+  maxPrimaryContext: TUI_DEFAULT_MAX_PRIMARY_CONTEXT,
+}
+
 // Every setting both sides carry, as each resolves it right now. The plugin
 // caches for TTL_MS, so its cache is dropped first.
 function bothSides() {
@@ -153,6 +166,7 @@ function bothSides() {
       agentContext: plugin.agentContext,
       maxSubagentAgeMs: plugin.maxSubagentAgeMs,
       maxSubagentToolCallMs: plugin.maxSubagentToolCallMs,
+      maxPrimaryContext: plugin.maxPrimaryContext,
       endlessMode: plugin.endlessMode,
       endlessContext: plugin.endlessContext,
       maxNestedSpawns: plugin.maxNestedSpawns,
@@ -325,6 +339,7 @@ test("with neither file nor env both resolve the built-in defaults", () => {
     maxContextSource: "default",
     agentContext: {},
     ...WATCHDOG_DEFAULTS,
+    ...PRIMARY_CONTEXT_DEFAULT,
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
     maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
@@ -356,6 +371,7 @@ test("with env alone both resolve the env value", () => {
     maxContextSource: "env",
     agentContext: {},
     ...WATCHDOG_DEFAULTS,
+    ...PRIMARY_CONTEXT_DEFAULT,
     endlessMode: true,
     endlessContext: 300000,
     maxNestedSpawns: 3,
@@ -398,6 +414,7 @@ test("with file and env both let the file win", () => {
     maxContextSource: "file",
     agentContext: {},
     ...WATCHDOG_DEFAULTS,
+    ...PRIMARY_CONTEXT_DEFAULT,
     endlessMode: false,
     endlessContext: 120000,
     maxNestedSpawns: 1,
@@ -428,6 +445,7 @@ test("both reject the same file values and fall back to env or default", () => {
     maxContextSource: "default",
     agentContext: {},
     ...WATCHDOG_DEFAULTS,
+    ...PRIMARY_CONTEXT_DEFAULT,
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
     maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
@@ -457,6 +475,7 @@ test("both keep 0 as a value in its own right", () => {
     maxContextSource: "file",
     agentContext: {},
     ...WATCHDOG_DEFAULTS,
+    ...PRIMARY_CONTEXT_DEFAULT,
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: 0,
     maxNestedSpawns: 0,
@@ -674,6 +693,42 @@ test("both carry the same watchdog defaults", () => {
   assert.equal(plugin.maxSubagentAgeMs, TUI_DEFAULT_MAX_SUBAGENT_AGE_MS)
   assert.equal(plugin.maxSubagentToolCallMs, TUI_DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS)
   assert.deepEqual(tui, plugin)
+})
+
+// The primary's context threshold, which no row steps and both sides must
+// still resolve alike: the panel reads it to decide whether the `compaction`
+// row owes its "no threshold armed" line, and a divergence there would put that
+// line under a primary that does have one.
+test("both carry the same primary context default", () => {
+  const [plugin, tui] = bothSides()
+  assert.equal(plugin.maxPrimaryContext, TUI_DEFAULT_MAX_PRIMARY_CONTEXT)
+  assert.deepEqual(tui, plugin)
+})
+
+test("both resolve maxPrimaryContext file > env > default and reject the same values", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT = "120000"
+  const [envOnly, tuiEnvOnly] = bothSides()
+  assert.equal(envOnly.maxPrimaryContext, 120000, "env over the built-in default")
+  assert.deepEqual(tuiEnvOnly, envOnly)
+
+  writeFileSync(file, JSON.stringify({ maxPrimaryContext: 40000 }))
+  const [fromFile, tuiFromFile] = bothSides()
+  assert.equal(fromFile.maxPrimaryContext, 40000, "file over env")
+  assert.deepEqual(tuiFromFile, fromFile)
+
+  // 0 is a real value on this key — no threshold armed — and must not fall back.
+  writeFileSync(file, JSON.stringify({ maxPrimaryContext: 0 }))
+  const [zero, tuiZero] = bothSides()
+  assert.equal(zero.maxPrimaryContext, 0)
+  assert.deepEqual(tuiZero, zero)
+
+  // A value neither side accepts leaves the env value standing on both.
+  for (const bad of [-1, 1.5, "80000", null]) {
+    writeFileSync(file, JSON.stringify({ maxPrimaryContext: bad }))
+    const [plugin, tui] = bothSides()
+    assert.equal(plugin.maxPrimaryContext, 120000, `rejected: ${JSON.stringify(bad)}`)
+    assert.deepEqual(tui, plugin)
+  }
 })
 
 test("both resolve the watchdog keys file > env > default and reject the same values", () => {

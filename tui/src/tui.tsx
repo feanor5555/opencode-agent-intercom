@@ -96,10 +96,16 @@ import {
   stepReuseContext,
   stepSetting,
   readAgentMode,
+  toggleAgentCompaction,
   toggleAgentMode,
   toggleEndlessMode,
   toggleShowAgentcom,
 } from "./settings-file.ts";
+import {
+  compactionRowCell,
+  compactionRowNote,
+  compactionRowState,
+} from "./compaction-row.ts";
 import {
   AGENT_MODE_CONFIRM_MS,
   type AgentMode,
@@ -750,6 +756,15 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // cycler, same freeze on the first step — see stepResultTokens.
   const adjustResultTokens = (delta: number): void => {
     showSettings(stepResultTokens(currentLlmAgent(), delta, AGENT_NAMES));
+  };
+
+  // Flip the selected agent's compaction switch and save. Same cycler as the
+  // three ceiling rows, and the same read-modify-write: the value flipped is
+  // the one the file holds for that type at this moment. No freeze — a toggle
+  // names the value it writes, so the flat key is left alone and a flip back to
+  // the inherited value drops the entry again (toggleAgentCompaction).
+  const toggleCompaction = (): void => {
+    showSettings(toggleAgentCompaction(currentLlmAgent()));
   };
 
   // Walk the pick list by one. Position and write are one read-modify-write in
@@ -1657,6 +1672,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             onAdjustContext={alsoDisarmAgentMode(adjustAgentContext)}
             onAdjustReuse={alsoDisarmAgentMode(adjustReuseContext)}
             onAdjustResultTokens={alsoDisarmAgentMode(adjustResultTokens)}
+            onToggleCompaction={alsoDisarmAgentMode(toggleCompaction)}
             agentMode={agentMode}
             armedAgentMode={armedAgentMode}
             onSwitchAgentMode={requestAgentModeSwitch}
@@ -1745,6 +1761,7 @@ function SubagentPanel(props: {
   onAdjustContext: (delta: number) => void;
   onAdjustReuse: (delta: number) => void;
   onAdjustResultTokens: (delta: number) => void;
+  onToggleCompaction: () => void;
   // The orchestrator/solo switch, the question pending over it, and the click
   // that puts that question: the first click arms the row, the second switches.
   // Unlike every other switch here this one is not live — the plugin latches it
@@ -2614,6 +2631,57 @@ function SubagentPanel(props: {
                   <text fg={props.theme.success}>{" ★"}</text>
                 </Show>
               </box>
+            );
+          })()}
+          {/* Automatic compaction for the same agent type, picked by the same
+              cycler: on, the plugin summarizes that agent's session when it
+              crosses the threshold that agent already has; off, it does not.
+              opencode's own automatic compaction is switched off for the whole
+              process either way (applyCompactionPolicy, src/compaction.js), so
+              this row is the only thing that compacts anything.
+
+              LIVE, and deliberately without the restart note the `mode` row
+              carries: the global write reads no setting, so nothing here has to
+              reach opencode's bootstrap snapshot and the driver re-reads the
+              file at every crossing. ★ marks a type carrying a value of its own,
+              as on the three ceiling rows; flipping back to the inherited value
+              drops the entry and the ★ with it.
+
+              The line under the row is the honest half: a switch that is on says
+              nothing about whether anything will ever fire it, and one that is
+              off says nothing about what is left to relieve the session
+              (compaction-row.ts). */}
+          {(() => {
+            const compaction = createMemo(() =>
+              compactionRowState(
+                props.settings(),
+                props.llmAgent(),
+                endlessState() === "on",
+              ),
+            );
+            const note = createMemo(() =>
+              compactionRowNote(compaction(), panelWidth()),
+            );
+            return (
+              <>
+                <box flexDirection="row">
+                  <text fg={props.theme.textMuted}>{rowLabel("compaction")}</text>
+                  <text
+                    fg={compaction().on ? props.theme.success : props.theme.textMuted}
+                    onMouseDown={props.onToggleCompaction}
+                  >
+                    {compactionRowCell(compaction())}
+                  </text>
+                  <Show when={compaction().source === "agent"}>
+                    <text fg={props.theme.success}>{" ★"}</text>
+                  </Show>
+                </box>
+                <Show when={note() !== ""}>
+                  <box flexDirection="row">
+                    <text fg={props.theme.textMuted}>{note()}</text>
+                  </box>
+                </Show>
+              </>
             );
           })()}
           <box flexDirection="row">

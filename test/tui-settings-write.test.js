@@ -48,6 +48,7 @@ import {
   DEFAULT_MAX_SUBAGENTS,
   DEFAULT_MAX_SUBAGENT_AGE_MS,
   DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
+  DEFAULT_MAX_PRIMARY_CONTEXT,
   DEFAULT_SHOW_AGENTCOM,
   DEFAULT_COMPACTION,
   RETAINED_SUBAGENT_TTL_STEP_MS,
@@ -64,6 +65,7 @@ import {
   stepResultTokens,
   stepReuseContext,
   stepSetting,
+  toggleAgentCompaction,
   toggleEndlessMode,
   toggleShowAgentcom,
 } from "../tui/src/settings-file.ts"
@@ -91,6 +93,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS
   delete process.env.OPENCODE_AGENT_INTERCOM_COMPACTION
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_MID_RUN_MESSAGING
   delete process.env.OPENCODE_AGENT_INTERCOM_ANSWER_WAIT_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_MESSAGE_TOKENS
@@ -108,6 +111,10 @@ const state = (over = {}) => ({
   agentContext: {},
   maxSubagentAgeMs: DEFAULT_MAX_SUBAGENT_AGE_MS,
   maxSubagentToolCallMs: DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
+  // The primary's own context threshold: read and preserved by the store,
+  // stepped by no row, and read by the `compaction` row to say whether that
+  // threshold is armed at all.
+  maxPrimaryContext: DEFAULT_MAX_PRIMARY_CONTEXT,
   endlessMode: DEFAULT_ENDLESS_MODE,
   endlessContext: DEFAULT_ENDLESS_CONTEXT,
   // Read and preserved by the store, stepped by no sidebar row; it is part of
@@ -1108,4 +1115,118 @@ test("the reuse and result freezes cover the same cycler list", () => {
 
   // The two maps are stepped independently; the context map stays out of it.
   assert.equal("agentContext" in onDisk(), false)
+})
+
+// The per-agent compaction switch: the fourth per-type value on the same
+// cycler, and the only one that is a toggle rather than a step. It therefore
+// runs NO freeze migration — a step is relative and must freeze what every type
+// has in effect before it moves one, while a toggle names the value it writes.
+// The flat `compaction` key keeps its meaning as what an untouched type
+// inherits, and an entry that would only repeat the inherited value is deleted
+// instead of written.
+
+test("the first compaction toggle writes one entry and leaves the flat key alone", () => {
+  const merged = toggleAgentCompaction("coder")
+
+  assert.deepEqual(onDisk(), { agentCompaction: { coder: true } })
+  assert.equal("compaction" in onDisk(), false, "the flat key is not materialised")
+  assert.deepEqual(merged, state({ agentCompaction: { coder: true } }))
+  // No freeze: every other type is untouched and still inherits.
+  assert.deepEqual(Object.keys(onDisk().agentCompaction), ["coder"])
+})
+
+test("toggling back to the inherited value drops the entry and the empty map", () => {
+  toggleAgentCompaction("coder")
+  const merged = toggleAgentCompaction("coder")
+
+  assert.equal("agentCompaction" in onDisk(), false, "the last entry takes the map")
+  assert.deepEqual(merged, state())
+})
+
+test("a type is switched OFF against a flat key that is on", () => {
+  writeFileSync(file, JSON.stringify({ compaction: true }))
+  const merged = toggleAgentCompaction("coder")
+
+  assert.deepEqual(onDisk(), { compaction: true, agentCompaction: { coder: false } })
+  assert.deepEqual(merged, state({ compaction: true, agentCompaction: { coder: false } }))
+
+  // And back: the flipped value equals the inherited one, so the entry goes.
+  toggleAgentCompaction("coder")
+  assert.deepEqual(onDisk(), { compaction: true })
+})
+
+test("the toggle flips the value the file holds at this moment", () => {
+  // A hand edit between the panel's mount and the click: the flip starts from
+  // disk, not from the panel's stale copy.
+  writeFileSync(file, JSON.stringify({ agentCompaction: { coder: true } }))
+  toggleAgentCompaction("coder")
+  assert.equal("agentCompaction" in onDisk(), false)
+})
+
+test("the env value is what a toggle flips away from where the file names none", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_COMPACTION = "1"
+  toggleAgentCompaction("coder")
+  // Inherited on through the env, so the entry written is the off one.
+  assert.deepEqual(onDisk(), { agentCompaction: { coder: false } })
+})
+
+test("a compaction toggle touches no other key", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({
+      maxSubagents: 3,
+      agentContext: { coder: 50000 },
+      resultTokens: { coder: 8000 },
+      endlessMode: false,
+      searxngUrl: "http://example.invalid",
+      agentCompaction: { reviewer: true },
+    }),
+  )
+  toggleAgentCompaction("coder")
+
+  assert.deepEqual(onDisk(), {
+    maxSubagents: 3,
+    agentContext: { coder: 50000 },
+    resultTokens: { coder: 8000 },
+    endlessMode: false,
+    searxngUrl: "http://example.invalid",
+    agentCompaction: { reviewer: true, coder: true },
+  })
+})
+
+test("a non-boolean entry in the compaction map is dropped by a toggle", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ agentCompaction: { reviewer: "yes", planner: false } }),
+  )
+  toggleAgentCompaction("coder")
+
+  assert.deepEqual(onDisk().agentCompaction, { planner: false, coder: true })
+})
+
+test("a compaction map that is not an object is dropped by a toggle", () => {
+  writeFileSync(file, JSON.stringify({ agentCompaction: [1, 2], maxSubagents: 2 }))
+  toggleAgentCompaction("coder")
+
+  assert.deepEqual(onDisk(), { maxSubagents: 2, agentCompaction: { coder: true } })
+})
+
+test("an unparsable file is left alone by a compaction toggle", () => {
+  writeFileSync(file, "{ not json")
+  const merged = toggleAgentCompaction("coder")
+
+  assert.equal(readFileSync(file, "utf8"), "{ not json")
+  assert.deepEqual(merged, state())
+})
+
+test("a compaction toggle that cannot reach the disk leaves the panel on the file's state", { skip: rootSkip }, () => {
+  writeFileSync(file, JSON.stringify({ agentCompaction: { coder: true } }))
+  chmodSync(file, 0o400)
+  try {
+    const merged = toggleAgentCompaction("coder")
+    assert.deepEqual(onDisk(), { agentCompaction: { coder: true } })
+    assert.deepEqual(merged, state({ agentCompaction: { coder: true } }))
+  } finally {
+    chmodSync(file, 0o600)
+  }
 })

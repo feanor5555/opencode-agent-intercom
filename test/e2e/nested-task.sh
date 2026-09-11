@@ -284,6 +284,7 @@ capture_session() {
     return 0
   fi
   mv "$tmp" "$raw"
+  e2e_audit_record "$raw"
   python3 - "$raw" "$flat" <<'PY' 2>/dev/null || : > "$flat"
 import json, sys
 
@@ -1038,11 +1039,13 @@ else
   fi
 fi
 
-# What answered. The orchestrator, the blocked caller and the child were all
-# captured above — the two subagent sessions while they were still alive — so
-# this reads every turn of the run. `applyModelChoices` (src/llmmodel.js) beats
-# the model a POST names, so the request alone would say nothing.
-if e2e_model_audit "$PREFIX" /dev/null "$OUT_DIR/$PREFIX".*.messages.json > /dev/null 2>&1; then
+# What answered, over the captures this run recorded as it wrote them. The
+# orchestrator, the blocked caller and the child were all captured above — the
+# two subagent sessions while they were still alive — so this reads every turn
+# of the run, and no capture an earlier run left in the out directory.
+# `applyModelChoices` (src/llmmodel.js) beats the model a POST names, so the
+# request alone would say nothing.
+if e2e_audit_recorded "$PREFIX" /dev/null > /dev/null 2>&1; then
   record "model-pin — every turn ran on the pinned model" 1 "$E2E_AUDIT_LINE"
 else
   record "model-pin — every turn ran on the pinned model" 0 "$E2E_AUDIT_LINE"

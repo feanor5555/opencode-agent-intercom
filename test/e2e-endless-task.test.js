@@ -445,3 +445,73 @@ test("run-all.sh stops its server before the endless driver, not only in the tra
     "no e2e_server_stop between the last driver that uses the suite server and endless-task.sh — a session left alive there runs a wind-down cycle of its own on the todo file the endless driver asserts on",
   )
 })
+
+// ---------- the wind-down closing line -------------------------------------
+
+const WIND_DOWN_READER = resolve(import.meta.dirname, "e2e/lib/wind-down-reply.py")
+
+function readWindDownReply(payload) {
+  const dir = mkdtempSync(join(tmpdir(), "wind-down-reply-"))
+  const file = join(dir, "capture.json")
+  writeFileSync(file, JSON.stringify(payload))
+  const r = spawnSync("python3", [WIND_DOWN_READER, file], { encoding: "utf8" })
+  rmSync(dir, { recursive: true, force: true })
+  return r
+}
+
+function assistantText(text) {
+  return { info: { role: "assistant", sessionID: "ses_1" }, parts: [{ type: "text", text }] }
+}
+
+test("the wind-down reader returns the shaped closing line, and the last one when a cycle ran twice", () => {
+  const r = readWindDownReply([
+    assistantText("I will hand over now."),
+    assistantText("## WIND-DOWN DONE — 4 open"),
+    assistantText("some later turn"),
+    assistantText("prose first\n## WIND-DOWN DONE — no change\ntrailing prose"),
+  ])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(r.stdout.trim(), "## WIND-DOWN DONE — no change")
+})
+
+test("the wind-down reader stays silent on a tree that carries no such line", () => {
+  const r = readWindDownReply([assistantText("nothing shaped here")])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(r.stdout.trim(), "")
+})
+
+test("the wind-down reader survives a capture that does not parse", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wind-down-reply-"))
+  const file = join(dir, "capture.json")
+  writeFileSync(file, "not json at all")
+  const r = spawnSync("python3", [WIND_DOWN_READER, file], { encoding: "utf8" })
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(r.stdout.trim(), "")
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("the driver keeps the refused wind-down bytes before its cleanup removes the isolated HOME", () => {
+  assert.match(
+    DRIVER_SOURCE,
+    /keep_rejected_content/,
+    "the driver never keeps the bytes the confirm step refused",
+  )
+  const helper = DRIVER_SOURCE.indexOf("keep_rejected_content() {")
+  const use = DRIVER_SOURCE.indexOf("kept=$(keep_rejected_content", helper)
+  assert.ok(use > helper, "the (c) criterion does not keep the refused bytes")
+  assert.match(
+    DRIVER_SOURCE.slice(helper, helper + 900),
+    /rejectedContentPath/,
+    "the helper does not read the path the plugin's rejection line names",
+  )
+})
+
+test("the driver captures the primary's own wind-down turn and audits it", () => {
+  const capture = DRIVER_SOURCE.indexOf(".primary-wind-down.json")
+  assert.ok(capture > 0, "the driver never captures the turn the cycle itself drives")
+  assert.match(
+    DRIVER_SOURCE,
+    /e2e_audit_record "\$OUT_DIR\/\$PREFIX\.cycle\$CYCLE\.primary-wind-down\.json"/,
+    "the wind-down turn is captured but never recorded for the model audit",
+  )
+})

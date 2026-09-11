@@ -73,9 +73,11 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 8
 done
 curl -s "$BASE/session/$SID/message" > "$OUTDIR/$PREFIX.full.json"
+e2e_audit_record "$OUTDIR/$PREFIX.full.json"
 snapshot_subagents
 T2=$(date +%s); echo "[$PREFIX] total $((T2-T0))s"
 
-# Which model answered — a turn on anything but the pin fails the driver.
-e2e_model_audit "$PREFIX" "$OUTDIR/$PREFIX.model-audit.txt" \
-  "$OUTDIR/$PREFIX.full.json" "$OUTDIR/$PREFIX".audit-*.json
+# Which model answered, over the captures this run recorded as it wrote them —
+# never a glob over the out directory, which also holds what earlier runs left
+# there. A turn on anything but the pin fails the driver.
+e2e_audit_recorded "$PREFIX" "$OUTDIR/$PREFIX.model-audit.txt"

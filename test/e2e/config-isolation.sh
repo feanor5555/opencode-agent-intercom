@@ -329,12 +329,66 @@ e2e_iso_remove() {
 
 # ---------- the model audit ------------------------------------------------
 
+# The captures one run is audited over.
+#
+# The audit may only read message trees THIS run wrote. The out directory is
+# shared between drivers and between runs and is never emptied, so a glob over
+# it also matches the captures runs before this one left behind — whose turns
+# answered on whatever model those runs pinned, and which then read as foreign
+# models the present run never used. Every driver therefore records each
+# capture as it writes it and is audited over exactly that list.
+#
+# The list is kept in a file rather than in a variable because several drivers
+# take a capture inside a command substitution (`FLAT=$(mr_capture …)`), whose
+# subshell cannot write the parent's variables. `$$` is the invoking shell's pid
+# in a subshell too, so parent and subshell name the same file. Sourcing this
+# library empties it: one file per driver process, holding that process's run.
+E2E_AUDIT_MANIFEST="${TMPDIR:-/tmp}/e2e-audit-captures.$$.list"
+: > "$E2E_AUDIT_MANIFEST" 2>/dev/null || :
+
+# Usage: e2e_audit_record <json_file> [json_file ...]
+#
+# Records a capture this run wrote. Recording the same path again is harmless:
+# the audit reads the manifest deduplicated, so a capture rewritten inside a
+# poll loop is audited once.
+e2e_audit_record() {
+  local path
+  for path in "$@"; do
+    [ -n "$path" ] || continue
+    printf '%s\n' "$path" >> "$E2E_AUDIT_MANIFEST" 2>/dev/null || :
+  done
+  return 0
+}
+
+# Usage: e2e_audit_recorded <label> <report_file>
+#
+# Audits exactly the captures e2e_audit_record was given, in the order they were
+# first recorded. An empty manifest fails with status 2 instead of passing: a run
+# that recorded no capture has shown no turn of its own to have answered on the
+# pin. E2E_AUDIT_LINE carries the evidence line either way, as with
+# e2e_model_audit.
+e2e_audit_recorded() {
+  local label="$1" report="$2"
+  local -a files=()
+  local path
+  while IFS= read -r path; do
+    [ -n "$path" ] && files+=("$path")
+  done < <(awk 'NF && !seen[$0]++' "$E2E_AUDIT_MANIFEST" 2>/dev/null)
+  if [ "${#files[@]}" -eq 0 ]; then
+    E2E_AUDIT_LINE="$label: no capture of this run was recorded, so no turn of it can be shown to have answered on $E2E_MODEL_REF"
+    printf 'FAIL  model-pin (%s)\n      %s\n' "$label" "$E2E_AUDIT_LINE" | tee -a "$report"
+    return 2
+  fi
+  e2e_model_audit "$label" "$report" "${files[@]}"
+}
+
 # Usage: e2e_audit_fetch_sessions <base_url> <out_prefix> <sid> [sid ...]
 #
 # Writes each session's message tree to <out_prefix>.audit-<sid>.json, skipping
 # a session that no longer answers with a non-empty list — a subagent session is
 # deleted the moment it finishes, and a 404 must not overwrite a snapshot taken
-# while it was alive. Prints the files it wrote, one per line.
+# while it was alive. Prints the files it wrote, one per line, and records each
+# of them for the audit.
 e2e_audit_fetch_sessions() {
   local base="$1" prefix="$2" sid file tmp
   shift 2
@@ -345,6 +399,7 @@ e2e_audit_fetch_sessions() {
     curl -s -m 60 "$base/session/$sid/message" > "$tmp" 2>/dev/null
     if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d,list) and d else 1)' "$tmp" 2>/dev/null; then
       mv "$tmp" "$file"
+      e2e_audit_record "$file"
       printf '%s\n' "$file"
     else
       rm -f "$tmp"

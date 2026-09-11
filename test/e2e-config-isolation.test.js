@@ -261,6 +261,59 @@ e2e_model_audit "13-message" "${dir}/report.txt" "${dir}/cap.json" && echo AUDIT
   rmSync(dir, { recursive: true, force: true })
 })
 
+// The out directory is shared and never emptied: it holds the captures of every
+// earlier run as well, on whatever model those runs pinned. An audit that globs
+// it reports those turns as foreign models of the present run.
+test("the audit reads the captures this run recorded and no other file beside them", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
+  capture(dir, "mine.json", [["openai", "gpt-5.6-luna"]])
+  capture(dir, "subshell.json", [["openai", "gpt-5.6-luna"]])
+  // What an earlier run left in the same directory, on the model it pinned.
+  capture(dir, "stale.json", [
+    ["xai", "grok-4.6"],
+    ["xai", "grok-4.6"],
+  ])
+  const script = join(dir, "run.sh")
+  writeFileSync(
+    script,
+    `. "${LIB}"
+e2e_resolve_model
+e2e_audit_record "${dir}/mine.json"
+e2e_audit_record "${dir}/mine.json"
+# A capture taken inside a command substitution: the subshell cannot write the
+# parent's variables, and the record has to survive it all the same.
+TAKEN=$(e2e_audit_record "${dir}/subshell.json"; printf taken)
+echo "TAKEN=$TAKEN"
+e2e_audit_recorded "11-endless" "${dir}/report.txt" && echo AUDIT_OK || echo "AUDIT_FAILED=$?"
+`,
+  )
+  const r = spawnSync("bash", [script], { encoding: "utf8" })
+  assert.match(r.stdout, /TAKEN=taken/)
+  assert.match(r.stdout, /AUDIT_OK/, r.stdout + r.stderr)
+  assert.match(r.stdout, /2 assistant message\(s\) over 2 capture\(s\)/)
+  assert.match(r.stdout, /every one answered by openai\/gpt-5\.6-luna=2/)
+  assert.doesNotMatch(r.stdout, /grok/)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("the audit fails rather than passes when the run recorded no capture", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
+  capture(dir, "stale.json", [["xai", "grok-4.6"]])
+  const script = join(dir, "run.sh")
+  writeFileSync(
+    script,
+    `. "${LIB}"
+e2e_resolve_model
+e2e_audit_recorded "11-endless" "${dir}/report.txt" && echo AUDIT_OK || echo "AUDIT_FAILED=$?"
+`,
+  )
+  const r = spawnSync("bash", [script], { encoding: "utf8" })
+  assert.match(r.stdout, /AUDIT_FAILED=2/)
+  assert.match(r.stdout, /no capture of this run was recorded/)
+  assert.match(readFileSync(join(dir, "report.txt"), "utf8"), /FAIL {2}model-pin/)
+  rmSync(dir, { recursive: true, force: true })
+})
+
 // ---------- the drivers ----------------------------------------------------
 
 test("every driver resolves its model through the library and none carries an own default", () => {
@@ -316,11 +369,56 @@ test("every driver audits the model it ran on", () => {
   const e2e = resolve(import.meta.dirname, "e2e")
   for (const name of ["run-task.sh", "multi-task.sh", "endless-task.sh", "nested-task.sh"]) {
     const src = readFileSync(join(e2e, name), "utf8")
-    assert.match(src, /\be2e_model_audit\b/, `${name} does not audit what answered`)
+    assert.match(src, /\be2e_audit_recorded\b/, `${name} does not audit what answered`)
   }
   for (const name of ["ask-task.sh", "message-task.sh"]) {
     const src = readFileSync(join(e2e, name), "utf8")
     assert.match(src, /\bmr_model_audit\b/, `${name} does not audit what answered`)
+  }
+  const midrun = readFileSync(join(e2e, "lib/midrun-common.sh"), "utf8")
+  assert.match(midrun, /\be2e_audit_recorded\b/, "midrun-common.sh does not audit what answered")
+})
+
+// The audit is over the captures the run recorded, never over a pattern matched
+// against the out directory: that directory is shared and never emptied, so a
+// glob sweeps in the captures of earlier runs and reports the models they were
+// pinned to as foreign models of this one.
+test("no driver hands the audit a pattern instead of the captures it recorded", () => {
+  const e2e = resolve(import.meta.dirname, "e2e")
+  for (const name of [
+    "run-task.sh",
+    "multi-task.sh",
+    "endless-task.sh",
+    "nested-task.sh",
+    "ask-task.sh",
+    "message-task.sh",
+    "lib/midrun-common.sh",
+  ]) {
+    const src = readFileSync(join(e2e, name), "utf8")
+    for (const line of src.split("\n")) {
+      if (/^\s*#/.test(line)) continue
+      assert.doesNotMatch(
+        line,
+        /\be2e_model_audit\b/,
+        `${name} audits directly instead of over its recorded captures: ${line}`,
+      )
+    }
+  }
+})
+
+// Each capture a driver writes has to be recorded where it is written, or the
+// audit passes over a turn nobody looked at.
+test("every driver records the captures it writes", () => {
+  const e2e = resolve(import.meta.dirname, "e2e")
+  for (const name of [
+    "run-task.sh",
+    "multi-task.sh",
+    "endless-task.sh",
+    "nested-task.sh",
+    "lib/midrun-common.sh",
+  ]) {
+    const src = readFileSync(join(e2e, name), "utf8")
+    assert.match(src, /\be2e_audit_record\b/, `${name} writes captures it never records`)
   }
 })
 

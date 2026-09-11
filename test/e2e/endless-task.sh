@@ -505,6 +505,22 @@ rejection_line() {
   [ -n "$hit" ] && printf '%s' "${hit#*:}"
 }
 
+# The bytes the confirm step refused, kept where the run can still be read.
+# The plugin files them under the server's own cache, which sits inside the
+# isolated HOME this driver removes in its cleanup — so the path the rejection
+# line names is gone by the time anybody reads the report. Copies the file into
+# the out directory and prints the copy's path; prints nothing when the line
+# names no path or the file is already gone.
+keep_rejected_content() {
+  local line="$1" src kept
+  [ -n "$line" ] || return 0
+  src=$(printf '%s' "$line" | sed -nE 's/.*"rejectedContentPath":"([^"]*)".*/\1/p')
+  [ -n "$src" ] && [ -f "$src" ] || return 0
+  kept="$OUT_DIR/$PREFIX.cycle$CYCLE.rejected-wind-down.md"
+  cp "$src" "$kept" 2>/dev/null || return 0
+  printf '%s' "$kept"
+}
+
 # Poll a message capture through a small verdict reader. The reader prints
 # state|verdict|evidence; a non-running state ends the poll, while a running
 # state keeps waiting until the shared step bound, or until the server dies.
@@ -964,6 +980,7 @@ post_prompt() {
 # number, or nothing when no message carries a non-zero token sum yet.
 primary_ctx_tokens() {
   curl -s -m 30 "$BASE/session/$SID/message" > "$OUT_DIR/$PREFIX.cycle$CYCLE.primary-messages.json"
+  e2e_audit_record "$OUT_DIR/$PREFIX.cycle$CYCLE.primary-messages.json"
   python3 - "$OUT_DIR/$PREFIX.cycle$CYCLE.primary-messages.json" <<'PY'
 import json, sys
 try:
@@ -1318,10 +1335,34 @@ run_cycle() {
     # A rewrite the plugin would not stand behind is the failure this driver was
     # extended for, so it is named with the conjunct that rejected it rather
     # than only as a missing line.
-    local rejected
+    local rejected kept
     rejected=$(rejection_line)
+    kept=$(keep_rejected_content "$rejected")
     record "$tag (c) rewrite — the wind-down rewrite reached the todo file" 0 \
-      "${rejected:+the rewrite was rejected and the snapshot restored: $rejected — }$WAIT_REASON"
+      "${rejected:+the rewrite was rejected and the snapshot restored: $rejected — }${kept:+the refused bytes are kept at $kept — }$WAIT_REASON"
+  fi
+
+  # ---------- the primary's own wind-down turn ------------------------------
+
+  # The primary's tree as the cycle left it, taken whether the confirmation came
+  # or not. The pre-cycle capture above is taken before the threshold is even
+  # crossed, so the turn the CYCLE drives — the wind-down prompt the plugin
+  # sends and the shaped closing line the primary answers with — stands only in
+  # this one. It is recorded for the model audit, which would otherwise never
+  # read a turn the endless path itself started, and the closing line it carries
+  # is what V3 reads: `— no change` says the subagent left the file alone on
+  # purpose, `— <n> open` over an unchanged file is what V3 refuses.
+  curl -s -m 30 "$BASE/session/$SID/message" > "$OUT_DIR/$PREFIX.cycle$CYCLE.primary-wind-down.json"
+  e2e_audit_record "$OUT_DIR/$PREFIX.cycle$CYCLE.primary-wind-down.json"
+  local wind_down_reply
+  wind_down_reply=$(python3 "$HERE/lib/wind-down-reply.py" "$OUT_DIR/$PREFIX.cycle$CYCLE.primary-wind-down.json" 2>/dev/null || printf '')
+  if [ -n "$wind_down_reply" ]; then
+    say "[$PREFIX] $tag wind-down closing line: $wind_down_reply"
+    printf 'wind-down reply     cycle %s: %s\n' "$CYCLE" "$wind_down_reply" >> "$REPORT_FILE"
+  else
+    say "[$PREFIX] $tag no shaped wind-down closing line in the primary's tree"
+    printf 'wind-down reply     cycle %s: none in %s\n' \
+      "$CYCLE" "$OUT_DIR/$PREFIX.cycle$CYCLE.primary-wind-down.json" >> "$REPORT_FILE"
   fi
 
   # ---------- this cycle's work-off gate ------------------------------------
@@ -1463,6 +1504,7 @@ PY
     local kick_result kick_verdict kick_evidence kick_rest
     kick_result=$(poll_verdict "$OUT_DIR/$PREFIX.cycle$CYCLE.new-session-messages.json" \
       "$HERE/lib/kickoff-ids.py" "$saved_ids")
+    e2e_audit_record "$OUT_DIR/$PREFIX.cycle$CYCLE.new-session-messages.json"
     kick_rest=${kick_result#*|}
     kick_verdict=${kick_rest%%|*}
     kick_evidence=${kick_rest#*|}
@@ -1524,6 +1566,7 @@ observe_workoff() {
     POLL_URL="$BASE/session/$newsid/message"
     local work_read work_state work_rest work_verdict work_evidence
     work_read=$(poll_verdict "$work_capture" "$HERE/lib/successor-turn.py" "$saved_ids")
+    e2e_audit_record "$work_capture"
     work_state=${work_read%%|*}
     work_rest=${work_read#*|}
     work_verdict=${work_rest%%|*}
@@ -1673,13 +1716,15 @@ fi
 
 # ---------- the model -------------------------------------------------------
 
-# What answered, over every session this run captured. The pin lives in the
-# isolated llm-models.json because `applyModelChoices` (src/llmmodel.js) writes
-# that file's entry into `config.agent[<name>].model` and beats the model each
-# prompt names.
+# What answered, over the captures THIS run recorded as it wrote them — the
+# primary's message tree per cycle, the successor's, and the successor's first
+# work turn. Never a glob over the out directory: it holds the captures of
+# earlier runs too, whose turns answered on whatever model those runs pinned.
+# The pin lives in the isolated llm-models.json because `applyModelChoices`
+# (src/llmmodel.js) writes that file's entry into `config.agent[<name>].model`
+# and beats the model each prompt names.
 say ""
-if e2e_model_audit "$PREFIX" /dev/null "$OUT_DIR/$PREFIX".*messages.json \
-     "$OUT_DIR/$PREFIX".successor-first-turn.json > /dev/null 2>&1; then
+if e2e_audit_recorded "$PREFIX" /dev/null > /dev/null 2>&1; then
   record "model-pin — every captured turn ran on the pinned model" 1 "$E2E_AUDIT_LINE"
 else
   record "model-pin — every captured turn ran on the pinned model" 0 "$E2E_AUDIT_LINE"

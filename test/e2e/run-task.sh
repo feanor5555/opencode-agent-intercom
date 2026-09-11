@@ -92,11 +92,13 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
 done
 
 curl -s "$BASE/session/$SID/message" > "$OUTDIR/$PREFIX.full-messages.json"
+e2e_audit_record "$OUTDIR/$PREFIX.full-messages.json"
 snapshot_subagents
 T2=$(date +%s)
 echo "[$PREFIX] total $((T2-T0))s, $(date +%H:%M:%S)"
 
-# Which model answered. Fails the driver, and with it the suite: a run on the
-# machine's own per-agent choice proves nothing about the pinned one.
-e2e_model_audit "$PREFIX" "$OUTDIR/$PREFIX.model-audit.txt" \
-  "$OUTDIR/$PREFIX.full-messages.json" "$OUTDIR/$PREFIX".audit-*.json
+# Which model answered, over the captures this run recorded as it wrote them —
+# never a glob over the out directory, which also holds what earlier runs left
+# there. Fails the driver, and with it the suite: a run on the machine's own
+# per-agent choice proves nothing about the pinned one.
+e2e_audit_recorded "$PREFIX" "$OUTDIR/$PREFIX.model-audit.txt"

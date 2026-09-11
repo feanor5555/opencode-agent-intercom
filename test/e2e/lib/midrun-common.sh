@@ -241,6 +241,7 @@ mr_capture() {
     return 0
   fi
   mv "$tmp" "$raw"
+  e2e_audit_record "$raw"
   python3 - "$raw" "$flat" <<'PY' 2>/dev/null || : > "$flat"
 import json, sys
 
@@ -377,14 +378,15 @@ PY
 # ---------- the model audit -------------------------------------------------
 
 # Which model answered, asserted as a criterion of the run: every assistant
-# message of every session this driver captured — the orchestrator's and the
-# subagent's, the latter snapshotted while it was alive — has to name the pin.
+# message of every session this driver captured in THIS run — the orchestrator's
+# and the subagent's, the latter snapshotted while it was alive — has to name the
+# pin. The captures are the ones recorded as they were written, never a glob over
+# the out directory, which also holds what earlier runs left there.
 # `applyModelChoices` (src/llmmodel.js) beats the model a POST names, so the
 # request alone says nothing about what ran.
 mr_model_audit() {
   local ok=0
-  if e2e_model_audit "$MR_PREFIX" /dev/null "$MR_OUT_DIR/$MR_PREFIX".*.messages.json \
-       "$MR_OUT_DIR/$MR_PREFIX".audit-*.json > /dev/null 2>&1; then
+  if e2e_audit_recorded "$MR_PREFIX" /dev/null > /dev/null 2>&1; then
     ok=1
   fi
   mr_record "model-pin" "$ok" "$E2E_AUDIT_LINE"

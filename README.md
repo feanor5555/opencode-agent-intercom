@@ -1035,7 +1035,7 @@ removing every "do it yourself" tool from the primary is the enforcement lever.
   survive — the plugin's write wins, or the row would say something that is
   not in effect.
 - **Solo-maintainer surface area.** `pw` daemon, `gen` CLI, Exa SSE parser,
-  ctags subprocess, four opencode hooks. 1046 unit tests, no CI against real
+  ctags subprocess, four opencode hooks. 2141 unit tests, no CI against real
   opencode. Bugs are addressed at hobby-project pace.
 
 ## Development

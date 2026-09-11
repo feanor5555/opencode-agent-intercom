@@ -50,6 +50,13 @@
 // then DEFAULT_MAX_RESULT_TOKENS. `0` is a real value and means that type's
 // reply is never cut.
 //
+// The mid-run channel between a caller and a RUNNING subagent carries three
+// flat keys — `midRunMessaging` (its off switch, the file's third boolean),
+// `answerWaitMs` (how long a subagent's blocked question waits for an answer)
+// and `maxMessageTokens` (the ceiling on one message in either direction). No
+// row edits any of them: they are read and preserved for parity with the
+// plugin, so a write from this panel cannot drop a key the plugin honours.
+//
 // Automatic compaction is a value PER AGENT TYPE the same way, only a boolean:
 // the `agentCompaction` map holds a type's own value, the flat `compaction` key
 // is what a type without one inherits, and behind it stand the env var
@@ -114,6 +121,9 @@ export interface Settings {
   endlessMode: boolean;
   endlessContext: number;
   maxNestedSpawns: number;
+  midRunMessaging: boolean;
+  answerWaitMs: number;
+  maxMessageTokens: number;
   maxRetainedSubagents: number;
   retainedSubagentTtlMs: number;
   maxReuseContext: number;
@@ -126,13 +136,14 @@ export interface Settings {
 }
 
 // The scalar keys that hold a limit, i.e. the ones a [-]/[+] row steps.
-// endlessMode and showAgentcom are not among them: they are the file's booleans
-// and each has its own writer, and the flat `compaction` is not one either —
+// endlessMode, showAgentcom and midRunMessaging are not among them: they are
+// the file's booleans, and the flat `compaction` is not one either —
 // it is a boolean AND a per-type inheritance, edited per agent in
 // agentCompaction. maxContext is not one either: it is legacy-only
 // and is written by nothing here — a ceiling is edited per agent through
 // stepAgentContext. maxNestedSpawns is not one either: it is read and preserved
-// for parity with the plugin, and no row edits it. maxReuseContext is not one
+// for parity with the plugin, and no row edits it. answerWaitMs and
+// maxMessageTokens are out for that same reason. maxReuseContext is not one
 // for a different reason: the reuse ceiling is edited per agent type, in
 // reuseContext through stepReuseContext, and the flat key is only what a type
 // without an own entry inherits. maxResultTokens is out for that same reason,
@@ -161,6 +172,17 @@ export const DEFAULT_ENDLESS_CONTEXT = 250000;
 // that parity and because a write must not drop a key the plugin honours — no
 // row steps it.
 export const DEFAULT_MAX_NESTED_SPAWNS = 2;
+// The mid-run channel between a caller and a RUNNING subagent: its off switch,
+// how long a subagent's blocked `ask` waits for an answer (0 = it does not wait
+// at all) and the ceiling on one message in either direction. The plugin's own
+// copies are DEFAULT_MID_RUN_MESSAGING, DEFAULT_ANSWER_WAIT_MS and
+// DEFAULT_MAX_MESSAGE_TOKENS in src/settings.js and
+// test/settings-defaults-parity.test.js fails on a divergence. Carried here for
+// that parity and because a write must not drop a key the plugin honours — no
+// row edits any of the three, they are file and env only.
+export const DEFAULT_MID_RUN_MESSAGING = true;
+export const DEFAULT_ANSWER_WAIT_MS = 300000;
+export const DEFAULT_MAX_MESSAGE_TOKENS = 1000;
 // How long a subagent may be silent with no tool call in flight before the
 // watchdog aborts it, frees its slot and wakes the orchestrator with a timeout
 // notice. `0` switches that watchdog off. The plugin's own copy is
@@ -289,6 +311,9 @@ const SETTING_VALIDATORS: { [K in FileKey]: (v: unknown) => boolean } = {
   endlessMode: isFlag,
   endlessContext: isLimit,
   maxNestedSpawns: isLimit,
+  midRunMessaging: isFlag,
+  answerWaitMs: isLimit,
+  maxMessageTokens: isLimit,
   maxRetainedSubagents: isLimit,
   retainedSubagentTtlMs: isLimit,
   maxReuseContext: isLimit,
@@ -347,6 +372,15 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
       "OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS",
       DEFAULT_MAX_NESTED_SPAWNS,
     ),
+    midRunMessaging: envFlag(
+      "OPENCODE_AGENT_INTERCOM_MID_RUN_MESSAGING",
+      DEFAULT_MID_RUN_MESSAGING,
+    ),
+    answerWaitMs: envNum("OPENCODE_AGENT_INTERCOM_ANSWER_WAIT_MS", DEFAULT_ANSWER_WAIT_MS),
+    maxMessageTokens: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_MESSAGE_TOKENS",
+      DEFAULT_MAX_MESSAGE_TOKENS,
+    ),
     maxRetainedSubagents: envNum(
       "OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS",
       DEFAULT_MAX_RETAINED_SUBAGENTS,
@@ -383,6 +417,9 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
   if (isFlag(raw.endlessMode)) s.endlessMode = raw.endlessMode;
   if (isLimit(raw.endlessContext)) s.endlessContext = raw.endlessContext;
   if (isLimit(raw.maxNestedSpawns)) s.maxNestedSpawns = raw.maxNestedSpawns;
+  if (isFlag(raw.midRunMessaging)) s.midRunMessaging = raw.midRunMessaging;
+  if (isLimit(raw.answerWaitMs)) s.answerWaitMs = raw.answerWaitMs;
+  if (isLimit(raw.maxMessageTokens)) s.maxMessageTokens = raw.maxMessageTokens;
   if (isLimit(raw.maxRetainedSubagents)) s.maxRetainedSubagents = raw.maxRetainedSubagents;
   if (isLimit(raw.retainedSubagentTtlMs)) s.retainedSubagentTtlMs = raw.retainedSubagentTtlMs;
   // The floor the plugin applies last, after file, env and default alike, so a

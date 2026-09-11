@@ -322,7 +322,21 @@ export async function createChildSession(client, { parentID, title, directory })
 // 408 and 429 are not terminal, though this narrower prompt policy still retries
 // only 5xx. An "indeterminate" throw is ambiguous — there the duplicate-prompt risk
 // outweighs the retry, and it throws on the first failure.
-export async function promptSession(client, { sessionID, agent, prompt, hideable = false }) {
+//
+// `noReply` is the one argument that changes that calculus. It asks opencode to
+// PERSIST the message into the session and start NO turn — the server returns
+// before the runner loop is entered. A session that is busy picks the message up
+// at its next step, an idle one simply keeps it. So the non-idempotency above
+// does not apply to such a send: a duplicate delivery costs a repeated
+// paragraph in the transcript, not a second run. Its retry policy is therefore
+// postNotice's — both failure kinds, no status narrowing — because there is
+// nothing left for the narrow policy to protect, and a steering message the
+// caller was told had been queued must not be lost to one blip. It is the
+// mid-run channel's delivery route and the only call site that passes it.
+export async function promptSession(
+  client,
+  { sessionID, agent, prompt, hideable = false, noReply = false },
+) {
   const { showAgentcom, postNoticeRetries, postNoticeRetryBackoffMs } = getSettings()
   const hidden = hideable && !showAgentcom
   // Only a hideable send puts the session under the switch. The one call site
@@ -335,15 +349,28 @@ export async function promptSession(client, { sessionID, agent, prompt, hideable
     () =>
       client.session.promptAsync({
         path: { id: sessionID },
-        body: { agent, parts: [intercomTextPart(prompt, { hidden })] },
+        // `noReply` is only put on the body where it is asked for, so every
+        // existing call site sends exactly the body it sent before.
+        body: {
+          agent,
+          parts: [intercomTextPart(prompt, { hidden })],
+          ...(noReply ? { noReply: true } : {}),
+        },
       }),
-    {
-      retries: postNoticeRetries,
-      backoffMs: postNoticeRetryBackoffMs,
-      retryKinds: ["refused"],
-      shouldRetry: (err) => typeof err.status === "number" && err.status >= 500,
-      context: { sessionID },
-    },
+    noReply
+      ? {
+          retries: postNoticeRetries,
+          backoffMs: postNoticeRetryBackoffMs,
+          retryKinds: ["refused", "indeterminate"],
+          context: { sessionID, noReply: true },
+        }
+      : {
+          retries: postNoticeRetries,
+          backoffMs: postNoticeRetryBackoffMs,
+          retryKinds: ["refused"],
+          shouldRetry: (err) => typeof err.status === "number" && err.status >= 500,
+          context: { sessionID },
+        },
   )
 }
 

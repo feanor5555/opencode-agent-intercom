@@ -65,6 +65,13 @@
 // is LATCHED at plugin load and a change needs an opencode restart — see
 // soloModeActive.
 //
+// The mid-run channel between a caller and a RUNNING subagent resolves the same
+// way on all three of its keys: `midRunMessaging` is its off switch and the
+// third boolean key, `answerWaitMs` is how long a subagent's blocked `ask`
+// waits for an answer (0 = do not wait), and `maxMessageTokens` bounds one
+// message in either direction. Unlike retention, `midRunMessaging` gates no
+// conditional tool registration, so it is read live and needs no restart.
+//
 // The searxng engine bangs `forum_search` chains resolve from the file key
 // `forumBangs` alone (no env var). It is the only array-valued key and it
 // REPLACES the built-in set rather than extending it: the set describes one
@@ -83,6 +90,8 @@
 //       "endlessMode": true|false, "endlessContext": N,
 //       "endlessQuiesceTimeoutMs": N, "endlessMaxCycles": N,
 //       "maxNestedSpawns": N,
+//       "midRunMessaging": true|false, "answerWaitMs": N,
+//       "maxMessageTokens": N,
 //       "maxRetainedSubagents": N, "retainedSubagentTtlMs": N,
 //       "maxReuseContext": N, "reuseContext": { "<agent>": N },
 //       "maxResultTokens": N, "resultTokens": { "<agent>": N },
@@ -216,6 +225,43 @@ export const DEFAULT_MAX_RESULT_TOKENS = 2000
 // (tui/src/settings-file.ts) and test/settings-defaults-parity.test.js pins the
 // two against each other.
 export const DEFAULT_MAX_NESTED_SPAWNS = 2
+// ---- the mid-run channel between a caller and a running subagent -------------
+//
+// How long a subagent's `ask` blocks on its caller's answer before the tool
+// hands it back "no answer came" and the run carries on. A finite wait is what
+// keeps the channel from being a way to hang: nothing polls on either side, the
+// subagent is suspended on a promise and costs nothing while it waits, so the
+// only thing this number bounds is how long a caller may leave a question
+// standing.
+//
+// 5 minutes: long enough that a busy orchestrator reaches the question at its
+// next step and answers it in that turn, short enough that a subagent whose
+// caller has moved on is not holding a concurrency slot for the length of a
+// session. `0` means do not wait at all — the question is delivered and the
+// tool returns at once, and an answer that comes later arrives as an ordinary
+// queued message.
+//
+// The effective wait is additionally CLAMPED against the watchdog window the
+// blocked `ask` call is measured on, so the wait can never outlive the reap
+// that would cut the subagent off inside it — see askWaitMs (src/agentmsg.js).
+// At these defaults the clamp is inert: 300 s of wait under a 660 s window.
+export const DEFAULT_ANSWER_WAIT_MS = 300000
+// The ceiling, in estimated tokens, on ONE mid-run message in either direction:
+// a steering message down to a subagent, a question up to its caller.
+//
+// It is deliberately far below the reply ceiling (DEFAULT_MAX_RESULT_TOKENS)
+// and has no overflow file behind it. Mid-run traffic is a correction or a
+// question, and something that does not fit in 1000 tokens is the wrong
+// instrument — the refusal says so, which is also what keeps `ask` from being
+// used to route findings past the reply ceiling.
+export const DEFAULT_MAX_MESSAGE_TOKENS = 1000
+// The off switch for the whole mid-run channel. On by default.
+//
+// Unlike retention it is read LIVE and is not latched: it gates no conditional
+// tool registration — both tools are registered outside solo mode whatever it
+// says — so switching it takes effect without an opencode restart and the tools
+// simply refuse while it is off.
+export const DEFAULT_MID_RUN_MESSAGING = true
 // Built-in searxng bang set for `forum_search`, each engine verified to answer
 // on its bang. Four of the five return thread URLs on their own site —
 // stackoverflow, askubuntu, superuser, hackernews; lobste.rs is carried as a
@@ -390,6 +436,13 @@ function envStr(name, def) {
 // number of cycles one process runs; 0 disables the cycle ceiling.
 // maxNestedSpawns is how many subagents one subagent run may start; 0 disables
 // nesting.
+// midRunMessaging is the off switch for the channel between a caller and a
+// RUNNING subagent; while it is off both of its tools refuse. answerWaitMs is
+// how long a subagent's blocked `ask` waits for its caller's answer before it
+// is told none came; 0 means it does not wait at all. maxMessageTokens bounds
+// one message in either direction — read it through askWaitMs / the two tools'
+// own checks, and note that answerWaitMs is additionally clamped against the
+// watchdog's tool-call window (src/agentmsg.js).
 // maxRetainedSubagents is how many finished subagents may be held alive as
 // retained sessions at once; 0 (the default) switches retention off and every
 // subagent's session is deleted as soon as its result is delivered.
@@ -451,6 +504,12 @@ export function getSettings() {
     ),
     endlessMaxCycles: envNum("OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES", DEFAULT_ENDLESS_MAX_CYCLES),
     maxNestedSpawns: envNum("OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS", DEFAULT_MAX_NESTED_SPAWNS),
+    answerWaitMs: envNum("OPENCODE_AGENT_INTERCOM_ANSWER_WAIT_MS", DEFAULT_ANSWER_WAIT_MS),
+    maxMessageTokens: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_MESSAGE_TOKENS",
+      DEFAULT_MAX_MESSAGE_TOKENS,
+    ),
+    midRunMessaging: envBool("OPENCODE_AGENT_INTERCOM_MID_RUN_MESSAGING", DEFAULT_MID_RUN_MESSAGING),
     showAgentcom: envBool("OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM", DEFAULT_SHOW_AGENTCOM),
     compaction: envBool("OPENCODE_AGENT_INTERCOM_COMPACTION", DEFAULT_COMPACTION),
     agentCompaction: {},
@@ -561,6 +620,18 @@ export function getSettings() {
     }
     if (Number.isInteger(raw?.endlessMaxCycles) && raw.endlessMaxCycles >= 0) {
       resolved.endlessMaxCycles = raw.endlessMaxCycles
+    }
+    if (Number.isInteger(raw?.answerWaitMs) && raw.answerWaitMs >= 0) {
+      resolved.answerWaitMs = raw.answerWaitMs
+    }
+    if (Number.isInteger(raw?.maxMessageTokens) && raw.maxMessageTokens >= 0) {
+      resolved.maxMessageTokens = raw.maxMessageTokens
+    }
+    // A boolean key, read with the rule endlessMode and showAgentcom are read
+    // with: anything but a real boolean leaves the env-or-default resolution
+    // standing.
+    if (typeof raw?.midRunMessaging === "boolean") {
+      resolved.midRunMessaging = raw.midRunMessaging
     }
     if (Number.isInteger(raw?.maxNestedSpawns) && raw.maxNestedSpawns >= 0) {
       resolved.maxNestedSpawns = raw.maxNestedSpawns

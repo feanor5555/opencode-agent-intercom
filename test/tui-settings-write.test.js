@@ -37,7 +37,10 @@ import {
   DEFAULT_ENDLESS_CONTEXT,
   DEFAULT_ENDLESS_MODE,
   DEFAULT_MAX_CONTEXT,
+  DEFAULT_ANSWER_WAIT_MS,
+  DEFAULT_MAX_MESSAGE_TOKENS,
   DEFAULT_MAX_NESTED_SPAWNS,
+  DEFAULT_MID_RUN_MESSAGING,
   DEFAULT_MAX_RETAINED_SUBAGENTS,
   DEFAULT_MAX_RESULT_TOKENS,
   DEFAULT_MAX_REUSE_CONTEXT,
@@ -88,6 +91,9 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS
   delete process.env.OPENCODE_AGENT_INTERCOM_COMPACTION
+  delete process.env.OPENCODE_AGENT_INTERCOM_MID_RUN_MESSAGING
+  delete process.env.OPENCODE_AGENT_INTERCOM_ANSWER_WAIT_MS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_MESSAGE_TOKENS
 })
 
 const onDisk = () => JSON.parse(readFileSync(file, "utf8"))
@@ -107,6 +113,11 @@ const state = (over = {}) => ({
   // Read and preserved by the store, stepped by no sidebar row; it is part of
   // every resolved state all the same.
   maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
+  // The mid-run channel's three keys, read and preserved by the store the same
+  // way and stepped by no row either.
+  midRunMessaging: DEFAULT_MID_RUN_MESSAGING,
+  answerWaitMs: DEFAULT_ANSWER_WAIT_MS,
+  maxMessageTokens: DEFAULT_MAX_MESSAGE_TOKENS,
   maxRetainedSubagents: DEFAULT_MAX_RETAINED_SUBAGENTS,
   retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,

@@ -502,3 +502,54 @@ test("createChildSession: a thrown transport error still propagates to the calle
   )
   assert.equal(answered, "not called", "an indeterminate create returns no value at all")
 })
+
+// ---- promptSession with noReply: the mid-run channel's delivery route --------
+//
+// `noReply: true` asks opencode to PERSIST the message and start no turn. That
+// makes the send idempotent in the only sense that matters — a duplicate costs
+// a repeated paragraph, not a second run — so its retry policy is postNotice's
+// (both failure kinds) rather than the narrow 5xx-only one the turn-starting
+// send has to keep.
+
+test("promptSession: noReply travels in the body and only where it is asked for", async () => {
+  const client = fakeClient("session", "promptAsync", async () => ({
+    data: undefined,
+    response: { status: 204 },
+  }))
+  await promptSession(client, { sessionID: "ses_n", agent: "coder", prompt: "steer", noReply: true })
+  assert.equal(client.calls[0].body.noReply, true)
+
+  await promptSession(client, { sessionID: "ses_n", agent: "coder", prompt: "task" })
+  assert.equal("noReply" in client.calls[1].body, false, "an ordinary send carries no such key")
+})
+
+test("promptSession: a noReply send retries a thrown transport error too", async () => {
+  // The narrow policy refuses this retry because a first delivery may already
+  // have started a turn. With noReply no turn exists to be started twice, and a
+  // steering message the caller was told had been queued must not be lost.
+  let calls = 0
+  const client = fakeClient("session", "promptAsync", async (n) => {
+    calls = n
+    if (n < 3) throw new Error("socket hang up")
+    return { data: undefined, response: { status: 204 } }
+  })
+  await promptSession(client, { sessionID: "ses_o", prompt: "steer", noReply: true })
+  assert.equal(calls, 3, "1 initial attempt + 2 retries of the indeterminate failure")
+})
+
+test("promptSession: a noReply send retries a refused 4xx the narrow policy would not", async () => {
+  const client = fakeClient("session", "promptAsync", async (n) =>
+    n < 3 ? envelope(429, "TooManyRequestsError", "slow down") : { data: undefined, response: { status: 204 } },
+  )
+  await promptSession(client, { sessionID: "ses_p", prompt: "steer", noReply: true })
+  assert.equal(client.calls.length, 3)
+})
+
+test("promptSession: a noReply send still throws once the budget is spent", async () => {
+  const client = fakeClient("session", "promptAsync", async () => envelope(500, "InternalError", "boom"))
+  await assert.rejects(
+    () => promptSession(client, { sessionID: "ses_q", prompt: "steer", noReply: true }),
+    (err) => err.status === 500 && err.kind === "refused",
+  )
+  assert.equal(client.calls.length, 3)
+})

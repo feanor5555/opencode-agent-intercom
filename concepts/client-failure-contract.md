@@ -42,9 +42,11 @@ classified as **"the session was deleted underneath the plugin"**, and `reuse` a
 
 A transient server error permanently destroys a retained handle.
 
-The direct-fetch paths in the module read failures themselves and stay as they are: `patchPartSynthetic`
-(`if (res?.ok) return "ok"`) and the direct-post fallback of `selectTuiSession`. The SDK branch of
-`selectTuiSession` and `showToast` are wrappers like every other SDK call and run through `attempt`.
+The direct-fetch paths in the module no longer read failures themselves: `applyAgentcomVisibility`
+and `patchPartSynthetic` go through the client's own transport (`lowLevelClient`, verb parameter,
+`partRoute`), and a resolved status ≥ 400 maps to `refused` while a thrown transport error maps to
+`unreachable`. The bare `fetch` survives only for a client shape that has no transport, and the
+sweep's guard is now `if (!lowLevelClient(client, "patch") && !serverUrl)`.
 
 ## 2. Target state
 

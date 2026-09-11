@@ -20,6 +20,11 @@
 // resultTokens[agent] > flat maxResultTokens (file, else env) >
 // DEFAULT_MAX_RESULT_TOKENS, where `0` means no ceiling at all.
 //
+// The mid-run channel's three flat scalars close the file: `midRunMessaging`,
+// `answerWaitMs` and `maxMessageTokens`, each on the plain file > env > default
+// order, with `0` a real value on both limits and the boolean taken from the
+// file only as a real boolean.
+//
 // Run: node --test --test-timeout=2000 test/settings.test.js
 
 import test from "node:test"
@@ -30,8 +35,11 @@ import { join } from "node:path"
 
 import {
   DEFAULT_AGENT_CONTEXT,
+  DEFAULT_ANSWER_WAIT_MS,
   DEFAULT_MAX_CONTEXT,
+  DEFAULT_MAX_MESSAGE_TOKENS,
   DEFAULT_MAX_RESULT_TOKENS,
+  DEFAULT_MID_RUN_MESSAGING,
   DEFAULT_COMPACTION,
   compactionEnabledFor,
   contextBudgetFor,
@@ -416,4 +424,120 @@ test("the compaction env var is read as 1/0 and anything else falls through", ()
     assert.equal(compactionEnabledFor("coder"), expected, `env ${JSON.stringify(raw)}`)
   }
   clearEnv()
+})
+
+// ---- the mid-run channel's three scalars -------------------------------------
+//
+// Two limits and a boolean, each resolving file > env > default like every
+// other key. They are pinned here because nothing else in the suite reads them
+// as plain settings: `midRunMessaging` is the switch both tools refuse on,
+// `answerWaitMs` is the number the ask waiter clamps (test/ask-waiter.test.js
+// pins the clamp itself) and `maxMessageTokens` bounds one message in either
+// direction.
+
+const ANSWER_WAIT_ENV = "OPENCODE_AGENT_INTERCOM_ANSWER_WAIT_MS"
+const MESSAGE_TOKENS_ENV = "OPENCODE_AGENT_INTERCOM_MAX_MESSAGE_TOKENS"
+const MID_RUN_ENV = "OPENCODE_AGENT_INTERCOM_MID_RUN_MESSAGING"
+
+function clearMidRunEnv() {
+  delete process.env[ANSWER_WAIT_ENV]
+  delete process.env[MESSAGE_TOKENS_ENV]
+  delete process.env[MID_RUN_ENV]
+}
+
+// The three values a user who configures nothing runs on, as literals — every
+// other assertion below reads them through the constants.
+test("the mid-run channel ships on a 5 minute wait, a 1000 token message and on", () => {
+  clearMidRunEnv()
+  isolate()
+  resetSettings()
+  assert.equal(DEFAULT_ANSWER_WAIT_MS, 300000)
+  assert.equal(DEFAULT_MAX_MESSAGE_TOKENS, 1000)
+  assert.equal(DEFAULT_MID_RUN_MESSAGING, true)
+  const s = getSettings()
+  assert.equal(s.answerWaitMs, DEFAULT_ANSWER_WAIT_MS)
+  assert.equal(s.maxMessageTokens, DEFAULT_MAX_MESSAGE_TOKENS)
+  assert.equal(s.midRunMessaging, DEFAULT_MID_RUN_MESSAGING)
+})
+
+test("the two mid-run limits resolve file > env > default", () => {
+  clearMidRunEnv()
+  process.env[ANSWER_WAIT_ENV] = "60000"
+  process.env[MESSAGE_TOKENS_ENV] = "500"
+  isolate()
+  resetSettings()
+  assert.equal(getSettings().answerWaitMs, 60000, "env over the built-in default")
+  assert.equal(getSettings().maxMessageTokens, 500, "env over the built-in default")
+
+  withSettings({ answerWaitMs: 120000, maxMessageTokens: 250 })
+  resetSettings()
+  assert.equal(getSettings().answerWaitMs, 120000, "the file wins over the env var")
+  assert.equal(getSettings().maxMessageTokens, 250, "the file wins over the env var")
+  clearMidRunEnv()
+})
+
+test("0 is a real value on both mid-run limits", () => {
+  clearMidRunEnv()
+  withSettings({ answerWaitMs: 0, maxMessageTokens: 0 })
+  resetSettings()
+  // 0 on the wait is "deliver the question and do not wait"; 0 on the token
+  // ceiling is "do not bound the message". Neither may be read as falsy and
+  // replaced by the default.
+  assert.equal(getSettings().answerWaitMs, 0)
+  assert.equal(getSettings().maxMessageTokens, 0)
+  clearMidRunEnv()
+})
+
+test("a malformed mid-run limit leaves the env-or-default resolution standing", () => {
+  clearMidRunEnv()
+  process.env[ANSWER_WAIT_ENV] = "60000"
+  for (const bad of [1.5, -1, "2", null, {}]) {
+    withSettings({ answerWaitMs: bad, maxMessageTokens: bad })
+    resetSettings()
+    assert.equal(getSettings().answerWaitMs, 60000, `bad value ${JSON.stringify(bad)}`)
+    assert.equal(
+      getSettings().maxMessageTokens,
+      DEFAULT_MAX_MESSAGE_TOKENS,
+      `bad value ${JSON.stringify(bad)}`,
+    )
+  }
+  clearMidRunEnv()
+})
+
+test("midRunMessaging is taken from the file only as a real boolean", () => {
+  clearMidRunEnv()
+  withSettings({ midRunMessaging: false })
+  resetSettings()
+  assert.equal(getSettings().midRunMessaging, false, "the channel can be switched off")
+
+  for (const bad of ["false", 0, null, "true"]) {
+    withSettings({ midRunMessaging: bad })
+    resetSettings()
+    assert.equal(
+      getSettings().midRunMessaging,
+      DEFAULT_MID_RUN_MESSAGING,
+      `bad value ${JSON.stringify(bad)}`,
+    )
+  }
+  clearMidRunEnv()
+})
+
+test("the midRunMessaging env var is read as 1/0 and the file still beats it", () => {
+  clearMidRunEnv()
+  isolate()
+  for (const [raw, expected] of [
+    ["0", false],
+    ["1", true],
+    ["no", DEFAULT_MID_RUN_MESSAGING],
+    ["", DEFAULT_MID_RUN_MESSAGING],
+  ]) {
+    process.env[MID_RUN_ENV] = raw
+    resetSettings()
+    assert.equal(getSettings().midRunMessaging, expected, `env ${JSON.stringify(raw)}`)
+  }
+  process.env[MID_RUN_ENV] = "0"
+  withSettings({ midRunMessaging: true })
+  resetSettings()
+  assert.equal(getSettings().midRunMessaging, true, "the file wins over the env var")
+  clearMidRunEnv()
 })

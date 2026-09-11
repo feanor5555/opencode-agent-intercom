@@ -5,9 +5,9 @@
 // carries its own copy of the shared defaults, the env var names and the
 // file > env > default order. Nothing at runtime notices when the two drift
 // apart; these tests do, by pinning both sides at the same file and env. The
-// two boolean keys are in it too: endlessMode and showAgentcom are pinned here
-// as booleans, the kind whose validator differs from the integer rule the
-// others share.
+// three boolean keys are in it too: endlessMode, showAgentcom and
+// midRunMessaging are pinned here as booleans, the kind whose validator differs
+// from the integer rule the others share.
 //
 // The role set itself is pinned the same way. The plugin derives it once, from
 // AGENTS in src/agents.js: AGENT_NAMES (src/promptsfile.js) is every installed
@@ -36,14 +36,17 @@ import { SPAWNABLE_ROLES } from "../src/agents.js"
 import { AGENT_NAMES } from "../src/promptsfile.js"
 import {
   DEFAULT_AGENT_CONTEXT,
+  DEFAULT_ANSWER_WAIT_MS,
   DEFAULT_ENDLESS_CONTEXT,
   DEFAULT_ENDLESS_MODE,
   DEFAULT_MAX_CONTEXT,
+  DEFAULT_MAX_MESSAGE_TOKENS,
   DEFAULT_MAX_NESTED_SPAWNS,
   DEFAULT_MAX_RESULT_TOKENS,
   DEFAULT_MAX_RETAINED_SUBAGENTS,
   DEFAULT_MAX_REUSE_CONTEXT,
   DEFAULT_MAX_SUBAGENTS,
+  DEFAULT_MID_RUN_MESSAGING,
   DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_SHOW_AGENTCOM,
   DEFAULT_COMPACTION,
@@ -63,9 +66,11 @@ import {
   spawnableAgentNames,
 } from "../tui/src/agent-roles.ts"
 import {
+  DEFAULT_ANSWER_WAIT_MS as TUI_DEFAULT_ANSWER_WAIT_MS,
   DEFAULT_ENDLESS_CONTEXT as TUI_DEFAULT_ENDLESS_CONTEXT,
   DEFAULT_ENDLESS_MODE as TUI_DEFAULT_ENDLESS_MODE,
   DEFAULT_MAX_CONTEXT as TUI_DEFAULT_MAX_CONTEXT,
+  DEFAULT_MAX_MESSAGE_TOKENS as TUI_DEFAULT_MAX_MESSAGE_TOKENS,
   DEFAULT_MAX_NESTED_SPAWNS as TUI_DEFAULT_MAX_NESTED_SPAWNS,
   DEFAULT_MAX_RESULT_TOKENS as TUI_DEFAULT_MAX_RESULT_TOKENS,
   DEFAULT_MAX_RETAINED_SUBAGENTS as TUI_DEFAULT_MAX_RETAINED_SUBAGENTS,
@@ -73,6 +78,7 @@ import {
   DEFAULT_MAX_SUBAGENTS as TUI_DEFAULT_MAX_SUBAGENTS,
   DEFAULT_MAX_SUBAGENT_AGE_MS as TUI_DEFAULT_MAX_SUBAGENT_AGE_MS,
   DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS as TUI_DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
+  DEFAULT_MID_RUN_MESSAGING as TUI_DEFAULT_MID_RUN_MESSAGING,
   DEFAULT_RETAINED_SUBAGENT_TTL_MS as TUI_DEFAULT_RETAINED_SUBAGENT_TTL_MS,
   DEFAULT_SHOW_AGENTCOM as TUI_DEFAULT_SHOW_AGENTCOM,
   DEFAULT_COMPACTION as TUI_DEFAULT_COMPACTION,
@@ -100,6 +106,9 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MID_RUN_MESSAGING
+  delete process.env.OPENCODE_AGENT_INTERCOM_ANSWER_WAIT_MS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_MESSAGE_TOKENS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS
@@ -108,6 +117,16 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS
   delete process.env.OPENCODE_AGENT_INTERCOM_COMPACTION
 })
+
+// The mid-run channel's three keys as every case below expects them when
+// neither the file nor the env names one. No row in the sidebar edits them, so
+// they only ever appear here as the value both sides inherit, and both sides
+// export a named constant for each — unlike the two watchdog windows below.
+const MID_RUN_DEFAULTS = {
+  midRunMessaging: DEFAULT_MID_RUN_MESSAGING,
+  answerWaitMs: DEFAULT_ANSWER_WAIT_MS,
+  maxMessageTokens: DEFAULT_MAX_MESSAGE_TOKENS,
+}
 
 // The two watchdog windows as every case below expects them when neither the
 // file nor the env names one. src/settings.js keeps its own two defaults
@@ -137,6 +156,9 @@ function bothSides() {
       endlessMode: plugin.endlessMode,
       endlessContext: plugin.endlessContext,
       maxNestedSpawns: plugin.maxNestedSpawns,
+      midRunMessaging: plugin.midRunMessaging,
+      answerWaitMs: plugin.answerWaitMs,
+      maxMessageTokens: plugin.maxMessageTokens,
       maxRetainedSubagents: plugin.maxRetainedSubagents,
       retainedSubagentTtlMs: plugin.retainedSubagentTtlMs,
       maxReuseContext: plugin.maxReuseContext,
@@ -225,6 +247,9 @@ test("the two modules carry the same built-in defaults", () => {
   assert.equal(DEFAULT_ENDLESS_CONTEXT, TUI_DEFAULT_ENDLESS_CONTEXT)
   assert.equal(DEFAULT_SHOW_AGENTCOM, TUI_DEFAULT_SHOW_AGENTCOM)
   assert.equal(DEFAULT_MAX_NESTED_SPAWNS, TUI_DEFAULT_MAX_NESTED_SPAWNS)
+  assert.equal(DEFAULT_MID_RUN_MESSAGING, TUI_DEFAULT_MID_RUN_MESSAGING)
+  assert.equal(DEFAULT_ANSWER_WAIT_MS, TUI_DEFAULT_ANSWER_WAIT_MS)
+  assert.equal(DEFAULT_MAX_MESSAGE_TOKENS, TUI_DEFAULT_MAX_MESSAGE_TOKENS)
   assert.equal(DEFAULT_MAX_RETAINED_SUBAGENTS, TUI_DEFAULT_MAX_RETAINED_SUBAGENTS)
   assert.equal(DEFAULT_RETAINED_SUBAGENT_TTL_MS, TUI_DEFAULT_RETAINED_SUBAGENT_TTL_MS)
   assert.equal(DEFAULT_MAX_REUSE_CONTEXT, TUI_DEFAULT_MAX_REUSE_CONTEXT)
@@ -303,6 +328,7 @@ test("with neither file nor env both resolve the built-in defaults", () => {
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
     maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
+    ...MID_RUN_DEFAULTS,
     maxRetainedSubagents: DEFAULT_MAX_RETAINED_SUBAGENTS,
     retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
     maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
@@ -333,6 +359,7 @@ test("with env alone both resolve the env value", () => {
     endlessMode: true,
     endlessContext: 300000,
     maxNestedSpawns: 3,
+    ...MID_RUN_DEFAULTS,
     maxRetainedSubagents: DEFAULT_MAX_RETAINED_SUBAGENTS,
     retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
     maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
@@ -374,6 +401,7 @@ test("with file and env both let the file win", () => {
     endlessMode: false,
     endlessContext: 120000,
     maxNestedSpawns: 1,
+    ...MID_RUN_DEFAULTS,
     maxRetainedSubagents: DEFAULT_MAX_RETAINED_SUBAGENTS,
     retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
     maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
@@ -403,6 +431,7 @@ test("both reject the same file values and fall back to env or default", () => {
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
     maxNestedSpawns: DEFAULT_MAX_NESTED_SPAWNS,
+    ...MID_RUN_DEFAULTS,
     maxRetainedSubagents: DEFAULT_MAX_RETAINED_SUBAGENTS,
     retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
     maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
@@ -431,6 +460,7 @@ test("both keep 0 as a value in its own right", () => {
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: 0,
     maxNestedSpawns: 0,
+    ...MID_RUN_DEFAULTS,
     maxRetainedSubagents: DEFAULT_MAX_RETAINED_SUBAGENTS,
     retainedSubagentTtlMs: DEFAULT_RETAINED_SUBAGENT_TTL_MS,
     maxReuseContext: DEFAULT_MAX_REUSE_CONTEXT,
@@ -999,4 +1029,44 @@ test("both keep the compaction map apart from the three ceiling maps", () => {
   assertReplyCeiling("coder", 20000, "agent")
   assertCompaction("coder", true, "agent")
   assertCompaction("planner", DEFAULT_COMPACTION, "inherited")
+})
+
+test("both resolve the mid-run channel's three keys file > env > default", () => {
+  // The two limits take the integer rule, the switch takes the boolean rule,
+  // and no row in the sidebar edits any of them — they are read and preserved
+  // so a panel write cannot drop a key the plugin honours.
+  process.env.OPENCODE_AGENT_INTERCOM_ANSWER_WAIT_MS = "120000"
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_MESSAGE_TOKENS = "400"
+  process.env.OPENCODE_AGENT_INTERCOM_MID_RUN_MESSAGING = "0"
+  const [envOnly, tuiEnvOnly] = bothSides()
+  assert.equal(envOnly.answerWaitMs, 120000)
+  assert.equal(envOnly.maxMessageTokens, 400)
+  assert.equal(envOnly.midRunMessaging, false)
+  assert.deepEqual(tuiEnvOnly, envOnly)
+
+  writeFileSync(
+    file,
+    JSON.stringify({ answerWaitMs: 60000, maxMessageTokens: 200, midRunMessaging: true }),
+  )
+  const [fromFile, tuiFromFile] = bothSides()
+  assert.equal(fromFile.answerWaitMs, 60000, "the file wins over the env var")
+  assert.equal(fromFile.maxMessageTokens, 200, "the file wins over the env var")
+  assert.equal(fromFile.midRunMessaging, true, "the file wins over the env var")
+  assert.deepEqual(tuiFromFile, fromFile)
+
+  for (const bad of [1.5, -1, "2", null]) {
+    writeFileSync(file, JSON.stringify({ answerWaitMs: bad, maxMessageTokens: bad, midRunMessaging: bad }))
+    const [plugin, tui] = bothSides()
+    assert.equal(plugin.answerWaitMs, 120000, `${bad} must be rejected by both`)
+    assert.equal(plugin.maxMessageTokens, 400, `${bad} must be rejected by both`)
+    assert.equal(plugin.midRunMessaging, false, `${bad} must be rejected by both`)
+    assert.deepEqual(tui, plugin)
+  }
+
+  // 0 is a value in its own right on both limits: no wait, and no token bound.
+  writeFileSync(file, JSON.stringify({ answerWaitMs: 0, maxMessageTokens: 0 }))
+  const [off, tuiOff] = bothSides()
+  assert.equal(off.answerWaitMs, 0)
+  assert.equal(off.maxMessageTokens, 0)
+  assert.deepEqual(tuiOff, off)
 })

@@ -252,6 +252,30 @@ export const endlessWindDownPermits = new Map()
 // parent of a waited child may be a primary, which has no entry at all.
 export const pendingChildResults = new Map()
 
+// asking subagent's sessionID -> waiter record { sessionID, parentID, id,
+//                                                question, askedAt, promise,
+//                                                settled, timer, settle }.
+//
+// The one place an OPEN QUESTION from a running subagent to its caller is
+// recorded. A record exists from the moment the subagent's `ask` tool call
+// blocks until that question is settled by any path — the caller's answer, the
+// answer window expiring, an abort, a watchdog reap, a teardown — and
+// `record.promise` is what the subagent's `ask` tool call is suspended on for
+// exactly that span.
+//
+// Keyed by the ASKING subagent's session id, for the reason pendingChildResults
+// is keyed by the child's: every path that ends a subagent has that id in hand,
+// so no ending path has to look up a direction to settle the waiter. The
+// caller's id rides along on the record because the question has to be posted
+// to it and because "which of my subagents is waiting on me?" is the direction
+// the caller asks in.
+//
+// Everything that reads or writes it lives in agentmsg.js; the map is here
+// because it is process-wide shared state like every other map in this file,
+// and because resetState has to be able to settle a leftover waiter without
+// importing agentmsg.js (which imports this module).
+export const pendingAsks = new Map()
+
 // sessionID -> record for an abort/error teardown waiting for the session's
 // post-abort cleanup to finish. The record's promise resolves when the matching
 // `session.idle` event arrives or its bounded rescue timer expires. Kept here so
@@ -360,6 +384,13 @@ export function resetState() {
     record.settle({ status: "abandoned", detail: "process state reset" })
   }
   pendingChildResults.clear()
+  // The same discipline for the ask waiters: a leftover would leave the next
+  // test's `ask` promise pending for ever and its answer timer would fire into
+  // that test. `settle` is idempotent and clears the timer.
+  for (const record of pendingAsks.values()) {
+    record.settle({ status: "abandoned", detail: "process state reset" })
+  }
+  pendingAsks.clear()
   for (const record of pendingSessionQuiescence.values()) {
     record.settle("abandoned")
   }

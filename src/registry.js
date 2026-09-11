@@ -283,6 +283,89 @@ function toolCallKey(callID) {
   return callID ?? "unknown"
 }
 
+// ---- the mid-run channel's bookkeeping on one entry --------------------------
+//
+// The four functions below are the whole interface to the five fields
+// `createEntry` stamps for the mid-run channel (messagesIn, pendingAsk,
+// asksOut, asksAnswered, asksUnanswered), so the registry stays the single
+// owner of entry shape and the tool, the hook and the notice cannot each write
+// them their own way.
+//
+// Every one of them is SYNCHRONOUS and takes no lock, exactly like
+// beginToolCall / endToolCall above, so they may be called from inside a
+// `registryMutex.runExclusive` section without nesting the non-re-entrant FIFO
+// mutex — which is where the `message` tool has to call them, because the
+// decision "this entry is still running" and the bookkeeping for it have to be
+// one critical section against the wake's.
+//
+// An entry built without the fields — a hand-made fixture, an entry from an
+// older shape — reads as "nothing sent, no ask open" on every read below.
+
+// Records one message the caller sent down to this subagent and returns that
+// record, or undefined for no entry at all.
+//
+// Unlike beginToolCall, a missing array is CREATED rather than read as a
+// refusal: the stamp beginToolCall writes is bookkeeping the watchdog can do
+// without, while a message dropped here is a steering attempt the orchestrator
+// was told had been queued. `seen` starts false and is raised by
+// markMessagesSeen.
+export function noteMessageIn(entry, text, at = Date.now()) {
+  if (!entry) return undefined
+  if (!Array.isArray(entry.messagesIn)) entry.messagesIn = []
+  const record = { text, sentAt: at, seen: false }
+  entry.messagesIn.push(record)
+  return record
+}
+
+// Raises `seen` on every message queued for this subagent that has not been
+// observed yet, and returns how many this call raised.
+//
+// Called from the one hook that fires per LLM REQUEST (createTransformMessages,
+// src/hooks.js): a subagent making a request after a message was queued is the
+// only observation available that the message reached the model, because
+// opencode publishes nothing between the queued user message and the step that
+// reads it. Idempotent — a second request raises nothing further.
+export function markMessagesSeen(entry) {
+  const messages = entry?.messagesIn
+  if (!Array.isArray(messages)) return 0
+  let raised = 0
+  for (const message of messages) {
+    if (!message.seen) {
+      message.seen = true
+      raised += 1
+    }
+  }
+  return raised
+}
+
+// Opens a question on this entry and counts it. Returns false — changing
+// nothing — where there is no entry or where a question is ALREADY open, which
+// is what makes "one question at a time" a property of the entry rather than of
+// the tool that happens to ask.
+export function openAsk(entry, ask) {
+  if (!entry || !ask?.id) return false
+  if (entry.pendingAsk) return false
+  entry.pendingAsk = { id: ask.id, question: ask.question, askedAt: ask.askedAt ?? Date.now() }
+  entry.asksOut = (entry.asksOut ?? 0) + 1
+  return true
+}
+
+// Closes the open question and counts how it ended. Returns false where there
+// was none, so every ending path may call it unconditionally and twice.
+//
+// `answered` is the one outcome that counts as answered; every other ending —
+// the window expiring, an abort, a watchdog reap, a teardown that named no
+// outcome — counts as unanswered, because from the subagent's side they are
+// the same thing: it asked and no answer came. The completion notice reports
+// the two figures as they stand here.
+export function clearAsk(entry, outcome) {
+  if (!entry?.pendingAsk) return false
+  entry.pendingAsk = undefined
+  if (outcome === "answered") entry.asksAnswered = (entry.asksAnswered ?? 0) + 1
+  else entry.asksUnanswered = (entry.asksUnanswered ?? 0) + 1
+  return true
+}
+
 // Categorizes a registry entry into one displayed state:
 //   "aborted"  — user/orchestrator killed it
 //   "idle"     — opencode-idle (a brief transient between session.idle firing
@@ -1912,6 +1995,30 @@ function createEntry(
     // nothing — the entry lives exactly as long as the one-shot run.
     nestedRuns: 0,
     nestedTokens: 0,
+    // ---- the mid-run channel between this subagent and its caller ----------
+    //
+    // What the caller has sent DOWN to this subagent while it runs:
+    // [{ text, sentAt, seen }], oldest first. `seen` is raised once the
+    // subagent has made an LLM request after the message was queued, which is
+    // the only observation available that it reached the model — opencode
+    // publishes nothing between a queued user message and the step that reads
+    // it. A message still unseen when the run ends is named in the completion
+    // notice, so a steering attempt cannot be silently lost.
+    messagesIn: [],
+    // The question this subagent has open right now — { id, question, askedAt }
+    // — or undefined. Its `ask` tool call is blocked on the matching waiter in
+    // `pendingAsks` (src/state.js) for exactly as long as this is set, so the
+    // two are raised and cleared together through openAsk / clearAsk below.
+    // One at a time: a second question while one is open is refused.
+    pendingAsk: undefined,
+    // The questions this subagent has put up, and how those ended. Kept as
+    // three counters rather than a list because they are read for one line of
+    // the completion notice and nothing else. Cumulative across the runs of a
+    // reused session, exactly as nestedSpawns / nestedRuns are, and labelled as
+    // cumulative where they are reported.
+    asksOut: 0,
+    asksAnswered: 0,
+    asksUnanswered: 0,
     // Latch: set true the instant sweepWatchdog decides this subagent has
     // timed out, BEFORE we call signalAbort / postNotice / removeEntry.
     // Used to keep the watchdog and the normal onSessionIdle path from both

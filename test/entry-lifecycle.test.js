@@ -29,6 +29,10 @@ import {
   entryLifecycle,
   LIFECYCLE_RUNNING,
   countActiveSubagents,
+  noteMessageIn,
+  markMessagesSeen,
+  openAsk,
+  clearAsk,
   spawnCapDecision,
   activeTaskIdsFor,
   isQuiesced,
@@ -198,4 +202,87 @@ test("both renderings of the active list show running entries only", async () =>
   assert.equal(listedAfter.output, "No active subagents.")
   const noticeAfter = await turnNotice(hooks, PRIMARY, "msg_user2")
   assert.doesNotMatch(noticeAfter, /researcher#1/)
+})
+
+// ---- the mid-run channel's bookkeeping on one entry --------------------------
+//
+// The four helpers in src/registry.js are the whole interface to the five
+// fields createEntry stamps for the channel. They are pure and synchronous —
+// they take no lock, so the `message` tool may call them inside the same
+// registryMutex section that decides the entry is still running — and an entry
+// built without the fields reads as "nothing sent, no ask open".
+
+test("createEntry stamps the mid-run fields empty", () => {
+  const entry = register("ses_sub1")
+  assert.deepEqual(entry.messagesIn, [])
+  assert.equal(entry.pendingAsk, undefined)
+  assert.equal(entry.asksOut, 0)
+  assert.equal(entry.asksAnswered, 0)
+  assert.equal(entry.asksUnanswered, 0)
+})
+
+test("noteMessageIn records a message unseen and markMessagesSeen raises it once", () => {
+  const entry = register("ses_sub1")
+  const first = noteMessageIn(entry, "use the HTTP API", 1000)
+  assert.deepEqual(first, { text: "use the HTTP API", sentAt: 1000, seen: false })
+  noteMessageIn(entry, "and skip the cache", 2000)
+  assert.equal(entry.messagesIn.length, 2)
+
+  assert.equal(markMessagesSeen(entry), 2, "both unseen messages are raised")
+  assert.equal(markMessagesSeen(entry), 0, "a second LLM request raises nothing further")
+  assert.deepEqual(entry.messagesIn.map((m) => m.seen), [true, true])
+
+  // A message queued after the subagent's last request stays unseen, which is
+  // what lets the completion notice name a steering attempt that was lost.
+  noteMessageIn(entry, "too late", 3000)
+  assert.deepEqual(entry.messagesIn.map((m) => m.seen), [true, true, false])
+})
+
+test("openAsk opens one question at a time and clearAsk counts how it ended", () => {
+  const entry = register("ses_sub1")
+  assert.equal(openAsk(entry, { id: "ask1", question: "which lockfile?", askedAt: 10 }), true)
+  assert.deepEqual(entry.pendingAsk, { id: "ask1", question: "which lockfile?", askedAt: 10 })
+  assert.equal(entry.asksOut, 1)
+
+  // One at a time is a property of the entry, not of the tool that asks.
+  assert.equal(openAsk(entry, { id: "ask2", question: "and the other?" }), false)
+  assert.equal(entry.pendingAsk.id, "ask1")
+  assert.equal(entry.asksOut, 1)
+
+  assert.equal(clearAsk(entry, "answered"), true)
+  assert.equal(entry.pendingAsk, undefined)
+  assert.equal(entry.asksAnswered, 1)
+  assert.equal(entry.asksUnanswered, 0)
+
+  // Idempotent: every ending path may call it unconditionally and twice.
+  assert.equal(clearAsk(entry, "answered"), false)
+  assert.equal(entry.asksAnswered, 1)
+
+  // Every ending that is not an answer counts as unanswered — from the
+  // subagent's side an expiry, an abort and a reap are the same thing.
+  for (const outcome of ["unanswered", "aborted", "timeout", "ended"]) {
+    openAsk(entry, { id: `ask-${outcome}`, question: outcome })
+    assert.equal(clearAsk(entry, outcome), true)
+  }
+  assert.equal(entry.asksOut, 5)
+  assert.equal(entry.asksAnswered, 1)
+  assert.equal(entry.asksUnanswered, 4)
+})
+
+test("an entry without the fields reads as nothing sent and no ask open", () => {
+  // A hand-made fixture, or an entry from an older shape.
+  const bare = { handle: "coder#9", sessionID: "ses_bare" }
+  assert.equal(markMessagesSeen(bare), 0)
+  assert.equal(clearAsk(bare, "answered"), false)
+  assert.equal(markMessagesSeen(undefined), 0)
+  assert.equal(clearAsk(undefined, "answered"), false)
+  assert.equal(openAsk(undefined, { id: "ask1" }), false)
+  assert.equal(openAsk(bare, { question: "no id" }), false, "an ask without an id opens nothing")
+  assert.equal(noteMessageIn(undefined, "x"), undefined)
+
+  // A message is never dropped, though: unlike the tool-call stamp, the array
+  // is created rather than the write refused.
+  const recorded = noteMessageIn(bare, "steer", 5)
+  assert.deepEqual(bare.messagesIn, [{ text: "steer", sentAt: 5, seen: false }])
+  assert.equal(recorded.seen, false)
 })

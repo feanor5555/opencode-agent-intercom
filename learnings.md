@@ -519,3 +519,43 @@ The model that actually ran is only established from the runtime log at
 modelID=…` lines carry the session id, the agent name and the mode, so
 the model can be tied back to the right session and the right role. Check
 there, per session, before attributing anything to a model.
+
+## A prompt into a busy opencode session is queued, not refused, and is drained at the next step boundary
+
+Read off the installed opencode 1.18.30 binary and its SDK types, not from
+documentation. Three facts, and the mid-run channel (`message`, `src/tools.js`)
+rests on all three:
+
+- **A prompt into a BUSY session is accepted, persisted and queued.**
+  `SessionBusyError` (HTTP 409) exists but wraps only `shell`, `revert`,
+  `unrevert` and `deleteMessage` — neither `prompt` nor `promptAsync` is wrapped,
+  and `promptAsync` answers 204 unconditionally. The runner's state machine
+  discards the duplicate work and hands the caller the deferred of the fiber
+  already running: `case"Running": case"ShellThenRun": return[y(m.run.done),m]`.
+- **The queue is drained at each STEP boundary, not on idle.**
+  `SessionPrompt.run` is a `while(!0)` loop that re-reads the whole message
+  stream at the top of every iteration, and its exit test is
+  `if(j?.finish && !["tool-calls","unknown"].includes(j.finish) && !fe && j.parentID===X.id){…break}`.
+  A user message appended mid-turn changes `X` (the latest user message), so the
+  last assistant message no longer replies to it, the loop does NOT exit, and a
+  further step runs with the new message in context. One iteration is one model
+  call plus its tool executions, so a message lands after the in-flight step
+  completes and never inside one. The corollary matters as much: a message that
+  arrives while the subagent is writing its final reply FORCES one more step
+  rather than being lost.
+- **`noReply: true` persists a user message without starting a turn.** Both
+  prompt routes accept it (`@opencode-ai/sdk` `types.gen.d.ts`), and the server
+  does `if(t.noReply===!0)return U;` — the message is written and the loop is not
+  started. On a busy session the running loop still picks it up at its next step;
+  on an idle session it simply sits. opencode uses this itself for synthetic
+  notices.
+
+The practical consequence: a steering message needs no polling, no socket and no
+fork, and it cannot start a second turn on a subagent this plugin has already
+accounted as finished. A plain prompt (no `noReply`) would: on a session that
+went idle in the meantime it takes the `Idle` branch and starts a fresh turn.
+
+Between a tool call's announcement and its result opencode publishes nothing, so
+neither the plugin nor opencode can see inside a call. A subagent inside a long
+`bash` is therefore reached exactly when that call returns — nothing can be
+faster.

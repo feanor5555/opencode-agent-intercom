@@ -153,7 +153,9 @@ test("a subagent the wake has claimed is refused, and nothing is written to it",
   entry.dispatched = true
   const res = await hooks.tool.message.execute({ subagent: "coder#1", text: "x" }, toolCtx)
   assert.match(res.output, /no longer running/)
-  assert.match(res.output, /Spawn a fresh subagent/)
+  // At the shipped default retention is on, so the way forward the refusal
+  // names is the rung above a fresh spawn: the run may still be held.
+  assert.match(res.output, /check list\(\) for a RETAINED row and use reuse\("coder#1"/)
   assert.equal(prompts.length, 0)
 
   entry.dispatched = false
@@ -168,6 +170,22 @@ test("a subagent the wake has claimed is refused, and nothing is written to it",
     (await hooks.tool.message.execute({ subagent: "coder#1", text: "x" }, toolCtx)).output,
     /no longer running/,
   )
+  assert.equal(prompts.length, 0)
+})
+
+test("with retention off the same refusal points at a fresh spawn instead", async () => {
+  // The other half of the ladder: where nothing is ever held, `reuse` does not
+  // exist and naming it would send the orchestrator at a tool it has not got.
+  settings({ maxRetainedSubagents: 0 })
+  const { ctx, prompts } = makeCtx()
+  const hooks = await plugin(ctx)
+  const entry = register()
+
+  entry.dispatched = true
+  const res = await hooks.tool.message.execute({ subagent: "coder#1", text: "x" }, toolCtx)
+  assert.match(res.output, /no longer running/)
+  assert.match(res.output, /Spawn a fresh subagent carrying what you wanted to say\./)
+  assert.doesNotMatch(res.output, /reuse\(/)
   assert.equal(prompts.length, 0)
 })
 

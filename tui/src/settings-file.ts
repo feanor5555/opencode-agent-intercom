@@ -209,12 +209,13 @@ export const SUBAGENT_AGE_STEP_MS = 15000;
 // mark within a hold of the default.
 export const SUBAGENT_TOOL_CALL_STEP_MS = 60000;
 // How many finished subagents may be held alive as re-promptable sessions at
-// once; 0 switches retention off, which is the shipped default and the one-shot
-// behaviour. The plugin's own copy is DEFAULT_MAX_RETAINED_SUBAGENTS in
-// src/settings.js and test/settings-defaults-parity.test.js fails on a
-// divergence. Stepped by the panel's "retained subs" row, which shows the 0 as
-// "off".
-export const DEFAULT_MAX_RETAINED_SUBAGENTS = 0;
+// once; 0 switches retention off. Two is the shipped default: it is the rung
+// between the mid-run `message` channel and a fresh spawn, so a subagent stays
+// addressable for a follow-up just after it has answered. The plugin's own copy
+// is DEFAULT_MAX_RETAINED_SUBAGENTS in src/settings.js and
+// test/settings-defaults-parity.test.js fails on a divergence. Stepped by the
+// panel's "retained subs" row, which shows a 0 as "off".
+export const DEFAULT_MAX_RETAINED_SUBAGENTS = 2;
 // How long one retained subagent is held, in ms, measured from the moment it
 // was retained. The plugin's own copy is DEFAULT_RETAINED_SUBAGENT_TTL_MS in
 // src/settings.js. Stepped by the panel's "retain (min)" row, which shows and

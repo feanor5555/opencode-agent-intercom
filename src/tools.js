@@ -1879,7 +1879,8 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
             description:
               'Start a subagent non-blocking. Returns a handle ("researcher#1") for `abort`. You stay ' +
               "responsive; you are woken automatically with the subagent's reply when it finishes. " +
-              "One-shot: a subagent replies once and is destroyed. For more work, spawn a fresh one. " +
+              "It answers once and is then destroyed — but while it runs you can reach it with " +
+              "message(subagent, text), and it can ask you back. For more work, spawn a fresh one. " +
               "A reply starting with `Blocked:` is a decision handed up to you, not a failure to retry: " +
               "decide about the problem and whether the task continues, then spawn a fresh subagent " +
               "carrying that decision instead of re-sending the same prompt. " +
@@ -1953,8 +1954,9 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
 
         list: tool({
           description:
-            "List your currently running subagents (handle, agent, status, age). Finished ones are gone " +
-            "(one-shot); their result already arrived in the wake notice." +
+            "List your currently running subagents (handle, agent, status, age). Finished ones are " +
+            "gone; their result already arrived in the wake notice. A row marked `asking` is " +
+            "waiting for your answer — reply with message()." +
             (retentionOn
               ? " Subagents that are being held for a follow-up are listed separately as RETAINED, " +
                 "with the context they hold and the time left on them — those can be asked a " +

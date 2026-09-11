@@ -618,10 +618,11 @@ test("a ceiling write that cannot reach the disk leaves the panel on the file's 
 test("the retained count steps like the other limits and is written alone", () => {
   writeFileSync(file, JSON.stringify({ maxSubagents: 2 }))
 
+  // Stepped from the shipped default of 2, since the file names no value.
   const merged = stepSetting("maxRetainedSubagents", 1)
 
-  assert.deepEqual(onDisk(), { maxSubagents: 2, maxRetainedSubagents: 1 })
-  assert.deepEqual(merged, state({ maxSubagents: 2, maxRetainedSubagents: 1 }))
+  assert.deepEqual(onDisk(), { maxSubagents: 2, maxRetainedSubagents: 3 })
+  assert.deepEqual(merged, state({ maxSubagents: 2, maxRetainedSubagents: 3 }))
 })
 
 test("the retained count steps down to 0, the value that switches retention off", () => {

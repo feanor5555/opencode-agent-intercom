@@ -169,9 +169,17 @@ const DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS = 660000
 // process at once. A retained subagent has delivered its result and had its
 // wake posted, but its opencode session was NOT deleted, so it stays
 // re-promptable. 0 switches retention off entirely: every subagent's session
-// is deleted the moment its result is delivered, which is the one-shot
-// behaviour this plugin has always had, and is the default.
-export const DEFAULT_MAX_RETAINED_SUBAGENTS = 0
+// is deleted the moment its result is delivered.
+//
+// 2 is the default, and it is the other half of the mid-run channel rather
+// than a setting of its own. The guides no longer claim a subagent is out of
+// reach, and that only holds as one ladder: reachable with `message` while it
+// runs, reachable with `reuse` just after it has answered, a fresh `spawn`
+// after that. At 0 the middle rung is missing and ORCHESTRATION_REUSE_GUIDE is
+// dead text behind a flag the model never reads. Two held sessions are what the
+// existing TTL reap and capacity eviction (watchdog.js) already bound, and the
+// rollback is one key: `maxRetainedSubagents: 0`.
+export const DEFAULT_MAX_RETAINED_SUBAGENTS = 2
 // How long one retained subagent is held, in ms, measured from the moment it
 // was retained (`entry.retainedAt`). The watchdog sweep reaps a retained entry
 // once this window is past. Clamped to a minimum of 1 ms: "hold forever" is

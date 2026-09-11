@@ -2,8 +2,8 @@
 // in its system prompt, the completion notice of a run whose session was kept,
 // and the per-turn snapshot of its subagents.
 //
-// Each is pinned in BOTH states, because the shipped default is
-// `maxRetainedSubagents = 0` and at that default nothing is ever retained:
+// Each is pinned in BOTH states — retention ships ON, at
+// `maxRetainedSubagents = 2`, and `maxRetainedSubagents: 0` switches it off:
 //
 //   - retention off — every one of the three is byte for byte what it was
 //     before the feature existed. The expected strings below are written out in
@@ -182,6 +182,7 @@ test("the reuse block teaches the tool, the late follow-up, the alternative and 
 })
 
 test("retention off: the primary's system prompt carries no word about reuse", async () => {
+  withSettings({ maxRetainedSubagents: 0 })
   const hooks = await plugin(makeCtx())
   const element = await stableElement(hooks, PRIMARY)
   assert.ok(element.includes(ORCHESTRATION_GUIDE), "the shipped guide is there")
@@ -203,7 +204,7 @@ test("a subagent is never told about reuse, whatever the setting says", async ()
   register("ses_sub1", { agent: "coder" })
   const element = await stableElement(hooks, "ses_sub1")
   assert.doesNotMatch(element, /reuse\(/)
-  assert.match(element, /You are a one-shot subagent/, "its own run is one-shot either way")
+  assert.match(element, /You reply ONCE/, "its own run answers once either way")
 })
 
 test("the guide follows the latched answer, not a settings edit made after load", async () => {
@@ -328,6 +329,7 @@ const SNAPSHOT_SHIPPED =
   "\n---\n"
 
 test("retention off: the snapshot block is byte for byte what it has always been", async () => {
+  withSettings({ maxRetainedSubagents: 0 })
   const hooks = await plugin(makeCtx())
   register("ses_sub1")
   const text = await turnNotice(hooks, PRIMARY, "msg_1")
@@ -335,6 +337,7 @@ test("retention off: the snapshot block is byte for byte what it has always been
 })
 
 test("retention off: a retained entry is shown nowhere and the prose stays as it was", async () => {
+  withSettings({ maxRetainedSubagents: 0 })
   const hooks = await plugin(makeCtx())
   register("ses_sub1")
   retain("ses_sub2", { agent: "planner" })

@@ -126,9 +126,14 @@ export async function primaryTransform(hooks, sessionID = nextPrimary()) {
 // carry it too — several probes would otherwise be answered by the guide alone.
 export const roleOf = (agent) => AGENTS[agent].prompt
 
-// The subagent core guide as it read BEFORE the `Blocked:` contract: the one
-// line that carries it, removed from the current constant, so the fixture
+// The subagent core guide as it read BEFORE the `Blocked:` contract: every line
+// that carries the element, removed from the current constant, so the fixture
 // cannot drift away from what the file it stands for actually looked like.
+//
+// The filter is the probe's own matcher (`blocked-contract`, overrides.js) and
+// not a prefix, because more than one line of the guide carries the element —
+// the report rule and the `ask` vs `Blocked:` discrimination — and a fixture
+// that dropped only the first would still satisfy the probe it exists to fail.
 export const preBlockedCore = SUBAGENT_GUIDE_CORE.split("\n")
-  .filter((line) => !line.startsWith("Blocked:"))
+  .filter((line) => !/`Blocked:`/.test(line))
   .join("\n")

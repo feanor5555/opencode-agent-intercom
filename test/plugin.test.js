@@ -1401,7 +1401,9 @@ test("an oversized subagent result is cut at the token ceiling and filed in full
     await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
 
     await hooks.event({ event: { type: "session.idle", properties: { sessionID: created[0] } } })
-    wake = notices.find((n) => /finished and been destroyed/.test(n))
+    // Retention ships on, so this run's session is HELD and the head says so;
+    // the cut this test is about happens either way.
+    wake = notices.find((n) => /has finished\./.test(n))
     assert.ok(wake, "wake notice missing")
     assert.match(wake, /\[cut at 2000 tokens — \d+ more tokens of this reply are not shown here/)
     // The tail of the original output must be gone (we kept only the head).

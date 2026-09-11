@@ -17,8 +17,8 @@
 //     that subagent as held, not even for one poll;
 //   - an accepted reuse takes the stamp off again, and a reuse whose prompt
 //     never lands puts the original window back;
-//   - at the shipped default (`maxRetainedSubagents = 0`) no title is written
-//     at all;
+//   - with retention off (`maxRetainedSubagents: 0`) no title is written at
+//     all;
 //   - a retained entry whose opencode session is deleted by somebody else —
 //     the sidebar's `x` on a held row is the case — goes with its session,
 //     rather than standing until the window runs out.
@@ -281,7 +281,8 @@ test("a refused retention publishes nothing: a nested child", async () => {
   assert.equal(readRetentionStamp(titleOf(titles, "ses_nested")), undefined)
 })
 
-test("at the shipped default nothing is retained and no stamp is ever published", async () => {
+test("with retention off nothing is retained and no stamp is ever published", async () => {
+  withSettings({ maxRetainedSubagents: 0 })
   const { ctx, created, deleted, titles } = makeCtx({ messages: assistantReply("THE RESULT") })
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)
@@ -295,9 +296,9 @@ test("at the shipped default nothing is retained and no stamp is ever published"
   assert.equal(written.length, 1, "the create, and nothing after it")
   // The marker goes on unconditionally — it is what attributes the session to
   // this plugin from outside, and nothing about it says the session is held.
-  // The retention stamp is the part that stays away at the default.
+  // The retention stamp is the part that stays away with retention off.
   assert.equal(written[0].title, `${SUBAGENT_SESSION_TITLE_MARKER}planner: x`)
-  assert.equal(readRetentionStamp(written[0].title), undefined, "no stamp at the default")
+  assert.equal(readRetentionStamp(written[0].title), undefined, "no stamp with retention off")
 })
 
 // ---- the reuse ends a retention, and says so --------------------------------

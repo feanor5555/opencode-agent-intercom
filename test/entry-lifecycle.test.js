@@ -197,11 +197,16 @@ test("both renderings of the active list show running entries only", async () =>
   assert.match(notice, /active subagents across all orchestrator sessions/i)
   assert.match(notice, /researcher#1 \(researcher\)/)
 
+  // Retention ships on, so a retained entry does not vanish from the two
+  // renderings — it leaves the ACTIVE part of each and reappears under
+  // RETAINED, which is what "running entries only" means for them.
   entry.lifecycle = "retained"
   const listedAfter = await hooks.tool.list.execute({}, toolCtx)
-  assert.equal(listedAfter.output, "No active subagents.")
+  assert.match(listedAfter.output, /^No active subagents\.\n\nRETAINED —/)
+  assert.match(listedAfter.output, /researcher#1 {2}\[retained\]/)
   const noticeAfter = await turnNotice(hooks, PRIMARY, "msg_user2")
-  assert.doesNotMatch(noticeAfter, /researcher#1/)
+  assert.match(noticeAfter, /• none running/)
+  assert.match(noticeAfter, /• researcher#1 \(researcher\) — retained/)
 })
 
 // ---- the mid-run channel's bookkeeping on one entry --------------------------

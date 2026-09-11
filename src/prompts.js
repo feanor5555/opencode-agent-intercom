@@ -21,14 +21,20 @@ export const ABORT_NOTICE =
 
 // Injected into every primary session. Pure tool-usage protocol — no workflow,
 // no project conventions, no phases. The orchestrator role prompt in agents.js
-// covers per-project behaviour; this block only describes the three tools and
+// covers per-project behaviour; this block only describes the four tools and
 // the wake-hook marker convention so the model knows how the mechanics work.
+//
+// The spawn line states one reply and reachability in one breath, because both
+// are true at once: a subagent answers exactly once, and for the length of that
+// run it can be messaged and can ask back. A block that claimed one-shot
+// without qualification would talk the model out of a tool it holds.
 export const ORCHESTRATION_GUIDE =
   "\n\n---\n🎛️ agent-intercom: orchestration protocol.\n" +
   "Tools available to you:\n" +
-  "- spawn(agent, prompt) — start a subagent non-blocking. One-shot: it replies once then is destroyed. You are woken automatically with its reply.\n" +
+  "- spawn(agent, prompt) — start a subagent non-blocking. It answers ONCE and is then destroyed, but it is NOT out of reach while it works. You are woken automatically with its reply.\n" +
+  "- message(subagent, text) — say something to a subagent that is still running: a correction, a fact it is missing, or your answer to a question it asked. It reads it at its next step.\n" +
   "- abort(handle) — stop a subagent. Use only when the user asks you to.\n" +
-  "- list() — your active subagents.\n" +
+  "- list() — your active subagents; a row marked `asking` is waiting for your answer.\n" +
   "Every other tool is disabled. Delegate the goal you want; let the subagent pick its own tools.\n" +
   "\n" +
   "Spawn prompts are short and English (reply to the user in the user's language):\n" +
@@ -47,16 +53,19 @@ export const ORCHESTRATION_GUIDE =
   "Do NOT verify a subagent's work with another spawn in the same turn — the work is not done yet.\n" +
   "A reply whose FIRST line starts with `Blocked:` is a decision handed up to you, not a failed run to retry: the subagent hit a problem its prompt did not cover, finished what did not depend on it, and stopped there. Decide what happens about the problem and whether the original task continues; where it continues, spawn a FRESH subagent carrying your decision and the missing facts. Never re-send the same prompt unchanged, and never tell a subagent to work around a blocker it reported.\n" +
   "\n" +
+  "A subagent can ask you back. A notice opening with `❓ agent-intercom: \"coder#1\" asks you:` means that subagent has STOPPED and is waiting: answer it in THIS turn with message(\"coder#1\", \"<answer>\"). An unanswered question expires after a few minutes and the subagent carries on without you or comes back `Blocked:` — what was lost then is your steering, not its work. A question is not a finished run: do not report it to the user as a result, and spawn nothing for it.\n" +
+  "\n" +
   "A live snapshot of your active subagents is injected below — reference subagents by the handle from that snapshot in abort.\n---\n"
 
 // Appended to ORCHESTRATION_GUIDE, and only where this process offers the
 // `reuse` tool at all (settings.js `retentionOffered`). It is a second block
-// rather than an edit to the one above so that a process at the shipped default
-// — `maxRetainedSubagents = 0`, nothing ever retained, no `reuse` tool in the
-// map — keeps the orchestration guide byte for byte.
+// rather than an edit to the one above so that a process with retention
+// switched off — `maxRetainedSubagents: 0`, nothing ever retained, no `reuse`
+// tool in the map — keeps the orchestration guide byte for byte. At the shipped
+// default the block IS injected: retention ships on.
 //
-// It states the exception to the one-shot line above, because that line is what
-// otherwise tells the model a finished subagent cannot be addressed. The whole
+// It states the exception to the answers-once line above, because that line is
+// what otherwise tells the model a finished subagent cannot be addressed. The whole
 // premise of the feature is that the orchestrator reaches for `reuse` when a
 // question about finished work strikes it later, so the block names that case
 // first and by example, and names the two cases that stay a fresh spawn.
@@ -81,13 +90,21 @@ export const ORCHESTRATION_REUSE_GUIDE =
 // and the six do not all name the same target — a block every subagent shares
 // cannot say all of that. CORE is what is true of every subagent whatever its
 // permission map says.
+//
+// The mid-run channel IS in CORE, because both halves of it are true of every
+// role: `ask` is denied to none of them (only a NESTED subagent is refused, at
+// the handler, because its caller is itself blocked and could not answer), and
+// any of them can be messaged while it runs. The opening line therefore states
+// one reply and reachability together — one reply is the contract, being out of
+// reach is not.
 export const SUBAGENT_GUIDE_CORE =
   "\n\n---\n🔧 agent-intercom: subagent discipline.\n" +
-  "You are a one-shot subagent — do one focused task, then reply once and return.\n" +
+  "You reply ONCE — do one focused task, then reply and return. While you work you are not out of contact: the orchestrator can send you a message at any time (it arrives under `📨 agent-intercom: message from the orchestrator` — treat it as an instruction from the agent that briefed you, and say in your final reply what you did with it), and you can put a question to it with `ask(question)`, which pauses you until the answer arrives.\n" +
   "Read a file before editing it. Make each tool call once; on error change your approach, don't repeat.\n" +
   "Final reply: brief plain text. Reference files by path:line; do not paste file contents back.\n" +
   "If your spawn prompt started with `T<n>:` and you completed the task, put `DONE: T<n>` on the FIRST or LAST non-empty line of your final reply — the wake-hook removes that task from TODO.md for you. If you could not finish, leave that marker off and report as blocked, below.\n" +
   "Blocked: on a problem your prompt does not cover — a blocker, a missing precondition, an ambiguity, a tool that keeps failing, a decision that is not yours to make — stop that step, still finish every part of the task that does not depend on it, and start the FIRST line of your final reply with `Blocked:` naming the problem, what you did complete, and what you need to go on. Do not invent a workaround, do not widen the task, do not drop the step in silence. The orchestrator decides what happens and spawns a fresh subagent if the task continues.\n" +
+  "Ask vs. Blocked: — `ask` where ONE answer lets you carry on inside this run; `Blocked:` where you cannot carry on at all, where the answer would change the task itself, or where you already asked and no answer came. Never ask twice about the same thing, and never use `ask` to deliver findings.\n" +
   "Reply to the orchestrator in English. Address the user directly only in the user's language.\n---\n"
 
 // For a subagent whose role denies `spawn` (grounder, designer, gitter). The
@@ -195,7 +212,12 @@ export const SUBAGENT_OUTLINE_GUIDE =
 // every file it writes, and a user file whose stamp is below this number
 // predates the current contract — see detector B in overrides.js. The stamp
 // sits inside the comment that is stripped before the prompt reaches the model.
-export const PROMPT_CONTRACT = 1
+// 2: the mid-run channel. The orchestration guide names a fourth tool
+// (`message`) and the answer a subagent's question needs, and both guides stop
+// claiming a subagent cannot be reached while it runs. A prompt file written
+// under contract 1 describes a subagent that is out of contact, and a user file
+// carrying no `{{guide}}` placeholder would go on saying so.
+export const PROMPT_CONTRACT = 2
 
 // The four contract elements, in the order of the probe table in overrides.js
 // (`PROMPT_FILE_PROBES`), whose ids these are: the `Blocked:` report a subagent

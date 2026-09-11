@@ -17,7 +17,7 @@
 
 import test, { beforeEach } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -65,11 +65,18 @@ writeFileSync(join(fixtureDir, "src", "main.js"), "// fixture")
 const settingsFile = join(fixtureDir, "agent-intercom.json")
 setSettingsPath(settingsFile)
 
+// Retention off for this whole file. Every assertion below is about the
+// teardown path — which session is deleted, when, and in what order — and a
+// held session is by definition not deleted. Retention has its own tests
+// (test/subagent-retention.test.js); here it would only mask the breaks these
+// tests exist to pin.
+const BASE_SETTINGS = { maxRetainedSubagents: 0 }
+
 // Room for a parent and a child in the same test. The cap is global and its
 // default is 1, which is precisely what break 4 is about — the tests that pin
 // the cap itself set their own value.
 function withMaxSubagents(n) {
-  writeFileSync(settingsFile, JSON.stringify({ maxSubagents: n }))
+  writeFileSync(settingsFile, JSON.stringify({ ...BASE_SETTINGS, maxSubagents: n }))
   resetSettings()
 }
 
@@ -84,7 +91,7 @@ beforeEach(() => {
   resetTurnNotices()
   resetProjectContext()
   resetPermissionGuardCache()
-  rmSync(settingsFile, { force: true })
+  writeFileSync(settingsFile, JSON.stringify(BASE_SETTINGS))
   resetSettings()
 })
 

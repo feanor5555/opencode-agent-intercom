@@ -264,8 +264,16 @@ function toolNames() {
 
 test("orchestrator mode: the primary gets the orchestration tools", () => {
   const names = toolNames()
-  for (const tool of ["spawn", "abort", "list"]) assert.ok(names.includes(tool), tool)
-  assert.ok(!names.includes("reuse"), "retention is off by default")
+  for (const tool of ["spawn", "abort", "list", "message", "reuse"]) {
+    assert.ok(names.includes(tool), tool)
+  }
+})
+
+test("orchestrator mode with retention off: every tool but reuse", () => {
+  loadWith({ maxRetainedSubagents: 0 })
+  const names = toolNames()
+  for (const tool of ["spawn", "abort", "list", "message"]) assert.ok(names.includes(tool), tool)
+  assert.ok(!names.includes("reuse"), "nothing is held, so nothing could be addressed")
 })
 
 test("solo mode: none of the four orchestration tools is registered", () => {
@@ -453,7 +461,11 @@ const guideNote = (agent) =>
   )?.[0] ?? ""
 
 test("orchestrator mode: the reference file names the guide the primary really gets", () => {
-  assert.match(guideNote("orchestrator"), /agent-intercom guide block \(ORCHESTRATION_GUIDE\)/)
+  // Retention ships on, so the primary really does get both blocks.
+  assert.match(
+    guideNote("orchestrator"),
+    /agent-intercom guide block \(ORCHESTRATION_GUIDE \+ ORCHESTRATION_REUSE_GUIDE\)/,
+  )
   assert.match(renderDefaultsFile("orchestrator"), /Your only job is to delegate/)
 })
 

@@ -201,10 +201,17 @@ test("not offered at load, switched on now: not in effect, capacity 0", () => {
   assert.equal(retentionCapacity(), 0, "no entry may be retained that no tool can address")
 })
 
-test("neither: the shipped default, in effect nowhere", () => {
+test("neither: switched off in the file, in effect nowhere", () => {
+  loadWith({ maxRetainedSubagents: 0 })
   assert.equal(retentionOffered(), false)
   assert.equal(retentionActive(), false)
   assert.equal(retentionCapacity(), 0)
+})
+
+test("the shipped default: offered, on, and two sessions of capacity", () => {
+  assert.equal(retentionOffered(), true)
+  assert.equal(retentionActive(), true)
+  assert.equal(retentionCapacity(), 2)
 })
 
 // ---- 2. what each combination does to a finished subagent --------------------

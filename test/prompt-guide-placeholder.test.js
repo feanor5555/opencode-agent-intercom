@@ -272,7 +272,8 @@ test("with retention offered the reference names the reuse block too", () => {
 })
 
 test("with retention off the reference names ORCHESTRATION_GUIDE alone", () => {
-  assert.equal(retentionOffered(), false, "the shipped default")
+  writeSettings({ maxRetainedSubagents: 0 })
+  assert.equal(retentionOffered(), false, "switched off in the file")
   const note = GUIDE_NOTE.exec(renderOpencodeDefaultFile("orchestrator"))
   assert.equal(note[1], "ORCHESTRATION_GUIDE")
   assert.doesNotMatch(renderOpencodeDefaultFile("orchestrator"), /reuse/i)

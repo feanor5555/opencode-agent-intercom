@@ -615,7 +615,9 @@ test("the caller's own completion notice carries what its nested runs cost", asy
 
   // The caller now finishes. Its own wake notice goes to the primary parent.
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_planner" } } })
-  const wake = notices.find((t) => t.includes("has finished and been destroyed"))
+  // Retention ships on, so the planner's own session is held rather than
+  // destroyed; the head differs and the nested line below it does not.
+  const wake = notices.find((t) => t.includes('your subagent "planner#1" (planner) has finished'))
   assert.ok(wake, "the primary parent is woken for its planner")
   assert.match(wake, /⤷ nested: 1 run, ~8\.0k tokens \(not counted in the figure above\)\./)
 })

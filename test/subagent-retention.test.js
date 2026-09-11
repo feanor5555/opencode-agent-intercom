@@ -1,7 +1,7 @@
 // Retention: a finished subagent kept alive as a re-promptable session instead
 // of having its opencode session deleted at idle.
 //
-// The whole feature hangs on one setting. `maxRetainedSubagents` defaults to 0,
+// The whole feature hangs on one setting. `maxRetainedSubagents` ships at 2,
 // and at 0 the idle path is what it has always been: deliver the result, remove
 // the entry, delete the session. Above 0 a top-level subagent that ended
 // cleanly keeps both, on `lifecycle: "retained"`, until its window runs out or
@@ -10,8 +10,8 @@
 // What is pinned here:
 //   - the two settings and their defaults, over file > env > default, and the
 //     1 ms floor under the window;
-//   - retention off (the default) leaves the idle path's observable behaviour
-//     exactly as it was;
+//   - retention off (`maxRetainedSubagents: 0`) leaves the idle path's
+//     observable behaviour exactly as it was;
 //   - retention on holds the session, keeps the handle, and holds no
 //     concurrency slot;
 //   - the exclusions: a `Blocked:` report, a nested child and a session whose
@@ -147,18 +147,20 @@ function idle(hooks, sessionID) {
 
 // ---- the settings and their defaults ---------------------------------------
 
-test("with neither file nor env, retention is off and the window is one hour", () => {
+test("with neither file nor env, two sessions are held and the window is one hour", () => {
   const s = getSettings()
-  assert.equal(s.maxRetainedSubagents, 0, "the feature ships off")
+  assert.equal(s.maxRetainedSubagents, 2, "the feature ships on, at two held sessions")
   assert.equal(s.retainedSubagentTtlMs, 3600000, "60 minutes")
 })
 
 test("both retention settings resolve file > env > default", () => {
-  process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS = "2"
+  // 4, not the built-in 2: an env value equal to the default would prove
+  // nothing about which of the two answered.
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS = "4"
   process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS = "60000"
   resetSettings()
   let s = getSettings()
-  assert.equal(s.maxRetainedSubagents, 2, "env over the built-in default")
+  assert.equal(s.maxRetainedSubagents, 4, "env over the built-in default")
   assert.equal(s.retainedSubagentTtlMs, 60000)
 
   withSettings({ maxRetainedSubagents: 5, retainedSubagentTtlMs: 120000 })
@@ -171,7 +173,7 @@ test("both reject a non-integer or negative value and fall back", () => {
   for (const bad of [-1, 1.5, "3", null, true]) {
     withSettings({ maxRetainedSubagents: bad, retainedSubagentTtlMs: bad })
     const s = getSettings()
-    assert.equal(s.maxRetainedSubagents, 0, `${bad} must not reach maxRetainedSubagents`)
+    assert.equal(s.maxRetainedSubagents, 2, `${bad} must not reach maxRetainedSubagents`)
     assert.equal(s.retainedSubagentTtlMs, 3600000, `${bad} must not reach retainedSubagentTtlMs`)
   }
 })
@@ -290,7 +292,8 @@ test("isRetainedExpired reads only retained entries, and an unstamped one is exp
 
 // ---- retention off: today's behaviour, unchanged ----------------------------
 
-test("at the default capacity of 0 the idle path deletes the session, as it always has", async () => {
+test("at a capacity of 0 the idle path deletes the session, as it always has", async () => {
+  withSettings({ maxRetainedSubagents: 0 })
   const { ctx, created, deleted, notices } = makeCtx({ messages: assistantReply("THE RESULT") })
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "planner", prompt: "x" }, toolCtx)

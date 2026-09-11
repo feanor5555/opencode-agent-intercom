@@ -1,5 +1,5 @@
 {
-  "contract": 1,
+  "contract": 2,
   "elements": {
     "blocked-contract": [
       {
@@ -7,8 +7,16 @@
         "line": "A reply whose FIRST line starts with `Blocked:` is a decision handed up to you, not a failed run to retry: the subagent hit a problem its prompt did not cover, finished what did not depend on it, and stopped there. Decide what happens about the problem and whether the original task continues; where it continues, spawn a FRESH subagent carrying your decision and the missing facts. Never re-send the same prompt unchanged, and never tell a subagent to work around a blocker it reported."
       },
       {
+        "block": "ORCHESTRATION_GUIDE",
+        "line": "A subagent can ask you back. A notice opening with `❓ agent-intercom: \"coder#1\" asks you:` means that subagent has STOPPED and is waiting: answer it in THIS turn with message(\"coder#1\", \"<answer>\"). An unanswered question expires after a few minutes and the subagent carries on without you or comes back `Blocked:` — what was lost then is your steering, not its work. A question is not a finished run: do not report it to the user as a result, and spawn nothing for it."
+      },
+      {
         "block": "SUBAGENT_GUIDE_CORE",
         "line": "Blocked: on a problem your prompt does not cover — a blocker, a missing precondition, an ambiguity, a tool that keeps failing, a decision that is not yours to make — stop that step, still finish every part of the task that does not depend on it, and start the FIRST line of your final reply with `Blocked:` naming the problem, what you did complete, and what you need to go on. Do not invent a workaround, do not widen the task, do not drop the step in silence. The orchestrator decides what happens and spawns a fresh subagent if the task continues."
+      },
+      {
+        "block": "SUBAGENT_GUIDE_CORE",
+        "line": "Ask vs. Blocked: — `ask` where ONE answer lets you carry on inside this run; `Blocked:` where you cannot carry on at all, where the answer would change the task itself, or where you already asked and no answer came. Never ask twice about the same thing, and never use `ask` to deliver findings."
       },
       {
         "block": "SUBAGENT_NO_SPAWN_GUIDE",
@@ -32,7 +40,11 @@
     "spawn-protocol": [
       {
         "block": "ORCHESTRATION_GUIDE",
-        "line": "- spawn(agent, prompt) — start a subagent non-blocking. One-shot: it replies once then is destroyed. You are woken automatically with its reply."
+        "line": "- spawn(agent, prompt) — start a subagent non-blocking. It answers ONCE and is then destroyed, but it is NOT out of reach while it works. You are woken automatically with its reply."
+      },
+      {
+        "block": "ORCHESTRATION_GUIDE",
+        "line": "- message(subagent, text) — say something to a subagent that is still running: a correction, a fact it is missing, or your answer to a question it asked. It reads it at its next step."
       },
       {
         "block": "ORCHESTRATION_GUIDE",
@@ -40,7 +52,7 @@
       },
       {
         "block": "ORCHESTRATION_GUIDE",
-        "line": "- list() — your active subagents."
+        "line": "- list() — your active subagents; a row marked `asking` is waiting for your answer."
       }
     ],
     "delegation-block": [

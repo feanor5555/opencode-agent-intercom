@@ -168,9 +168,10 @@ const PRIMARY_TOOLS = new Set([
   // primary that calls it anyway is refused by this allowlist with the text
   // that names what it does have.
   "message",
-  // Only reachable where retention is switched on: the tool itself is not
-  // registered at `maxRetainedSubagents = 0` (see createTools), so at the
-  // default this entry gates a tool that does not exist.
+  // Only reachable where retention is switched on. It ships on, so at the
+  // default this gates a tool that is really there; at
+  // `maxRetainedSubagents: 0` the tool is not registered (see createTools) and
+  // this entry gates nothing.
   "reuse",
 ])
 

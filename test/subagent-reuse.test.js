@@ -546,9 +546,10 @@ test("a reused subagent is a running row again while its follow-up runs", async 
   assert.doesNotMatch(listed.output, /RETAINED/)
 })
 
-// ---- inert at the default ----------------------------------------------------
+// ---- inert with retention switched off ---------------------------------------
 
 test("with retention off there is no reuse tool and list is what it has always been", async () => {
+  withSettings({ maxRetainedSubagents: 0 })
   const { ctx, created } = makeCtx({ messages: assistantReply("R", 20000) })
   const hooks = await plugin(ctx)
   assert.equal(hooks.tool.reuse, undefined, "the tool is not even offered")

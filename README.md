@@ -114,6 +114,15 @@ laid-out width: the agent type is kept whole where the budget allows, the
 model next, and the topic takes the remainder and is dropped below a minimum rather than wrapping the
 row onto a second line.
 
+The line beneath a row also carries what the subagent has on the **mid-run
+channel**: `asking` where it has stopped on a question of its own and is
+waiting for the orchestrator to answer it with `message()`, and `msgs:N` for
+the messages the orchestrator has sent it this run — the same two columns the
+`list()` tool shows on a running row. Both come off the session title, where
+the plugin publishes them: a subagent blocked inside `ask` is `busy` to
+opencode and writes nothing, so without the marker it is indistinguishable
+from one that has hung.
+
 ## What this gives you that stock opencode doesn't
 
 - **The primary never blocks. Ever.** opencode's native `task` is blocking —

@@ -14,14 +14,19 @@ import assert from "node:assert/strict"
 import {
   SUBAGENT_SESSION_TITLE_MARKER as PLUGIN_MARKER,
   RETENTION_STAMP_RE as PLUGIN_STAMP_RE,
+  MID_RUN_STAMP_RE as PLUGIN_MID_RUN_RE,
   readRetentionStamp as pluginReadRetentionStamp,
+  readMidRunStamp as pluginReadMidRunStamp,
   retentionStampedTitle,
+  stampedSubagentTitle,
 } from "../src/teardown.js"
 import {
   FALLBACK_PANEL_W,
   SUBAGENT_SESSION_TITLE_MARKER,
   RETENTION_STAMP_RE,
+  MID_RUN_STAMP_RE,
   readRetentionStamp,
+  readMidRunStamp,
   MIN_TOPIC_W,
   MODEL_MAX_W,
   ROW_CHROME_W,
@@ -128,6 +133,43 @@ test("subagentTopic strips the retention stamp: it is state, not topic", () => {
   )
   assert.equal(
     subagentTopic("coder", retentionStampedTitle("coder: rewrite the parser", 1_700_000_060_000)),
+    "rewrite the parser",
+  )
+})
+
+test("the TUI reads the mid-run stamp exactly as the plugin writes it", () => {
+  // The plugin publishes a running subagent's open question and the messages
+  // it has been sent on the same title; this package cannot import it, so the
+  // format is mirrored and pinned here.
+  assert.equal(MID_RUN_STAMP_RE.source, PLUGIN_MID_RUN_RE.source)
+  const asking = stampedSubagentTitle("Searching for X", { asking: true, messagesIn: 2 })
+  assert.equal(asking, "[agent-intercom] [mid:msgs:2,asking] Searching for X")
+  assert.deepEqual(readMidRunStamp(asking), { asking: true, messagesIn: 2 })
+  assert.deepEqual(readMidRunStamp(asking), pluginReadMidRunStamp(asking))
+})
+
+test("a title with nothing on the channel reads as a quiet subagent", () => {
+  for (const title of [
+    stampedSubagentTitle("Searching for X", {}),
+    retentionStampedTitle("Searching for X", 1_700_000_060_000),
+    "[mid:asking] no marker",
+    "something a user typed",
+    undefined,
+  ]) {
+    assert.deepEqual(readMidRunStamp(title), { asking: false, messagesIn: 0 }, String(title))
+  }
+})
+
+test("subagentTopic strips the mid-run stamp: it is state, not topic", () => {
+  assert.equal(
+    subagentTopic(
+      "researcher",
+      stampedSubagentTitle("Searching for X", { asking: true, messagesIn: 1 }),
+    ),
+    "Searching for X",
+  )
+  assert.equal(
+    subagentTopic("coder", stampedSubagentTitle("coder: rewrite the parser", { asking: true })),
     "rewrite the parser",
   )
 })

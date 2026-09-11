@@ -7,6 +7,7 @@ import {
   routeParentNotice,
   removeEntry,
   entryForSession,
+  isActiveEntry,
   isPrimary,
   markEntryClosing,
   clearAsk,
@@ -531,16 +532,83 @@ export const SUBAGENT_SESSION_TITLE_MARKER = "[agent-intercom] "
 // attribution test (startsWith) is unaffected by the stamp.
 export const RETENTION_STAMP_RE = /^\[retained:(\d{1,15})\]\s/
 
-// The title a held subagent's session carries: marker, stamp, then the text
-// `spawn` was given. `retainedUntil` at or below zero composes the plain form,
-// which is what an accepted reuse writes back.
-export function retentionStampedTitle(baseTitle, retainedUntil) {
+// The mid-run state of a RUNNING subagent, published on that same title and in
+// the vocabulary `list` already renders on a running row (`formatListRow`,
+// src/tools.js): `msgs:N` for the messages the caller has sent down this run,
+// `asking` for a question this subagent has STOPPED on and is waiting for an
+// answer to.
+//
+// Published for the same reason the retention state is: neither is visible from
+// outside the plugin's own memory. A subagent blocked inside its own `ask` call
+// is `busy` to opencode and silent to every reader of the session — exactly
+// what a hung subagent looks like — so a panel that only reads the server
+// cannot tell work waiting on the orchestrator from work that has stalled.
+//
+// The stamp sits between the marker and the work title, is empty where there is
+// nothing to say, and carries its fields comma-separated in the order `list`
+// renders them: `[mid:msgs:2,asking]`. A run whose channel was never used
+// writes no stamp and therefore no title at all.
+export const MID_RUN_STAMP_RE = /^\[mid:([^\]]{1,32})\]\s/
+
+// Upper bound on the message count the stamp carries, so the field stays inside
+// the length the reader accepts however long a run talks to its subagent.
+export const MID_RUN_MAX_MESSAGES = 9999
+
+// The mid-run stamp itself, with its trailing space, or the empty string where
+// nothing has happened on the channel.
+export function midRunStamp({ asking = false, messagesIn = 0 } = {}) {
+  const count = Number.isFinite(messagesIn) ? Math.floor(messagesIn) : 0
+  const fields = []
+  if (count > 0) fields.push(`msgs:${Math.min(count, MID_RUN_MAX_MESSAGES)}`)
+  if (asking) fields.push("asking")
+  return fields.length === 0 ? "" : `[mid:${fields.join(",")}] `
+}
+
+// The mid-run state read back off a title: what the panel decodes. A title
+// without the marker, without the stamp, or with a stamp no longer in this
+// shape reads as a subagent with nothing on its channel — never as an error and
+// never as a question nobody asked.
+export function readMidRunStamp(title) {
+  const quiet = { asking: false, messagesIn: 0 }
+  if (typeof title !== "string") return quiet
+  if (!title.startsWith(SUBAGENT_SESSION_TITLE_MARKER)) return quiet
+  // Past the retention stamp where one stands there, so the reader is total
+  // over everything the composer below can write.
+  let rest = title.slice(SUBAGENT_SESSION_TITLE_MARKER.length)
+  const retention = RETENTION_STAMP_RE.exec(rest)
+  if (retention) rest = rest.slice(retention[0].length)
+  const match = MID_RUN_STAMP_RE.exec(rest)
+  if (!match) return quiet
+  const fields = match[1].split(",")
+  const messages = fields.find((f) => f.startsWith("msgs:"))
+  const count = messages ? Number(messages.slice("msgs:".length)) : 0
+  return {
+    asking: fields.includes("asking"),
+    messagesIn: Number.isFinite(count) && count > 0 ? count : 0,
+  }
+}
+
+// The title a subagent's session carries: marker, the retention stamp where it
+// is held, the mid-run stamp where its channel has something to say, then the
+// text `spawn` was given. Each part is absent where it has nothing to say, so a
+// subagent that is neither held nor talking carries the marker and its work
+// title, which is the title spawn wrote.
+export function stampedSubagentTitle(baseTitle, { retainedUntil = 0, asking, messagesIn } = {}) {
   const base = typeof baseTitle === "string" ? baseTitle : ""
-  const stamp =
+  const retention =
     Number.isFinite(retainedUntil) && retainedUntil > 0
       ? `[retained:${Math.floor(retainedUntil)}] `
       : ""
-  return SUBAGENT_SESSION_TITLE_MARKER + stamp + base
+  return SUBAGENT_SESSION_TITLE_MARKER + retention + midRunStamp({ asking, messagesIn }) + base
+}
+
+// The title a held subagent's session carries: marker, stamp, then the text
+// `spawn` was given. `retainedUntil` at or below zero composes the plain form,
+// which is what an accepted reuse writes back. A retention is published when
+// the run is over, so it carries no mid-run stamp: writing it back is what
+// takes a stamp of that run off the title.
+export function retentionStampedTitle(baseTitle, retainedUntil) {
+  return stampedSubagentTitle(baseTitle, { retainedUntil })
 }
 
 // The epoch ms a published retention window ends at, read back off a title.
@@ -570,6 +638,32 @@ export async function publishRetentionState(client, sessionID, { retainedUntil =
   if (!client || !sessionID) return false
   const entry = entryForSession(sessionID)
   const title = retentionStampedTitle(entry?.title ?? "", retainedUntil)
+  return updateSessionTitle(client, sessionID, title)
+}
+
+// Writes the mid-run state of one RUNNING subagent to its title: a question it
+// has stopped on, and how many messages its caller has sent it this run.
+//
+// The state is read off the entry rather than passed in, so every caller
+// publishes what the registry holds at the moment it calls and no call site can
+// publish a question that is no longer open. Called at the transitions — a
+// question opening, that question ending, a message queued — and nowhere else.
+//
+// Refused for an entry that is not a running subagent — `isActiveEntry`, the
+// plugin's single definition of that, so an aborted entry is refused as well as
+// a retained or closing one. A finished subagent's title belongs to
+// `publishRetentionState`, which writes the retention state and takes any
+// mid-run stamp of the run just ended off with it. Best-effort and silent about
+// failure beyond the log, exactly like the retention publish: a title that
+// could not be written costs a reader the marker it would have shown.
+export async function publishMidRunState(client, sessionID) {
+  if (!client || !sessionID) return false
+  const entry = entryForSession(sessionID)
+  if (!isActiveEntry(entry)) return false
+  const title = stampedSubagentTitle(entry.title ?? "", {
+    asking: Boolean(entry.pendingAsk),
+    messagesIn: Array.isArray(entry.messagesIn) ? entry.messagesIn.length : 0,
+  })
   return updateSessionTitle(client, sessionID, title)
 }
 

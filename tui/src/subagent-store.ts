@@ -46,12 +46,18 @@
 // and unheld rows alike, and it is what keeps a row from outliving the session
 // it names.
 //
+// The same title carries the mid-run state of a RUNNING subagent, published
+// the same way and for the same reason: a subagent blocked inside its own
+// `ask` call is `busy` to opencode and writes nothing to its session, so it
+// looks exactly like one that has hung. `[mid:msgs:2,asking]` is what tells
+// the two apart, and `midRunRowNote` renders it on the row's second line.
+//
 // `maxRetainedSubagents` ships at 2, so retention is reachable by default.
 // Under the rollback `maxRetainedSubagents: 0` nothing about it is: the plugin
 // stamps no title, `decideRow` never returns a hold, no row ever carries
 // `retained`, and `reapRows` reaps on the session's absence alone.
 
-import { readRetentionStamp } from "./subagent-label.ts";
+import { readMidRunStamp, readRetentionStamp } from "./subagent-label.ts";
 
 // The status of one row. It says what the row SHOWS, never whether the row
 // exists — that is decided by the session still being listed.
@@ -310,6 +316,28 @@ export function retainedRowNote(
   now: number = Date.now(),
 ): string {
   return `retained · ${retainedMinutesLeft(entry, now)}m left`;
+}
+
+// The mid-run metadata a running row carries on its second line, after the age
+// and the context size: that this subagent has stopped on a question of its
+// own, and how many messages its orchestrator has sent it this run.
+//
+// Both come off the session title, which is where the plugin publishes them —
+// a subagent blocked inside `ask` is `busy` to opencode and writes nothing, so
+// there is no other evidence a reader of the server could go on, and a row
+// showing only the pulsing dot cannot tell that subagent from a hung one.
+//
+// The two fields are the `list` tool's own (`formatListRow`, src/tools.js), in
+// the opposite order: this line is clipped by the panel's width from the right,
+// and `asking` — the one marker that names work waiting on the orchestrator
+// itself — is what must survive the clip. Empty for a row with nothing on its
+// channel, which is every row of a run that never used it.
+export function midRunRowNote(entry: SubagentEntry): string {
+  const state = readMidRunStamp(entry.title);
+  const parts: string[] = [];
+  if (state.asking) parts.push("asking");
+  if (state.messagesIn > 0) parts.push(`msgs:${state.messagesIn}`);
+  return parts.join(" · ");
 }
 
 // Whether a held row has been past the end of its published window for longer

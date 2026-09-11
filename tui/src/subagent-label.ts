@@ -100,6 +100,45 @@ export function readRetentionStamp(title: string | undefined): number | undefine
   return Number.isFinite(until) && until > 0 ? until : undefined;
 }
 
+// The mid-run state the plugin publishes on that same title while a subagent is
+// RUNNING, behind the retention stamp's place: `[mid:msgs:2,asking]`, in the
+// vocabulary the `list` tool renders on a running row. It is the panel's only
+// evidence that a subagent has stopped on a question of its own — one blocked
+// inside `ask` is `busy` to opencode and writes nothing, which is exactly what
+// a hung subagent looks like from outside the plugin.
+//
+// Mirrors MID_RUN_STAMP_RE in src/teardown.js, which is what writes it;
+// test/tui-subagent-label.test.js pins the two against each other.
+export const MID_RUN_STAMP_RE = /^\[mid:([^\]]{1,32})\]\s/;
+
+export interface MidRunState {
+  // A question is open and the subagent is waiting for the orchestrator.
+  asking: boolean;
+  // How many messages the orchestrator has sent down to it this run.
+  messagesIn: number;
+}
+
+// The mid-run state read off a title. A title without the marker, without the
+// stamp, or with a stamp no longer in this shape reads as a subagent with
+// nothing on its channel — never as a question nobody asked.
+export function readMidRunStamp(title: string | undefined): MidRunState {
+  const quiet: MidRunState = { asking: false, messagesIn: 0 };
+  if (typeof title !== "string") return quiet;
+  if (!title.startsWith(SUBAGENT_SESSION_TITLE_MARKER)) return quiet;
+  let rest = title.slice(SUBAGENT_SESSION_TITLE_MARKER.length);
+  const retention = RETENTION_STAMP_RE.exec(rest);
+  if (retention) rest = rest.slice(retention[0].length);
+  const match = MID_RUN_STAMP_RE.exec(rest);
+  if (!match) return quiet;
+  const fields = match[1]!.split(",");
+  const messages = fields.find((f) => f.startsWith("msgs:"));
+  const count = messages ? Number(messages.slice("msgs:".length)) : 0;
+  return {
+    asking: fields.includes("asking"),
+    messagesIn: Number.isFinite(count) && count > 0 ? count : 0,
+  };
+}
+
 // The marker a cut leaves behind, and the columns it occupies.
 const ELLIPSIS = "…";
 const ELLIPSIS_W = 1;
@@ -243,11 +282,11 @@ export function modelDisplayName(label: string): string {
 // marker and without the redundant `${agent}: ` prefix of a fallback title, cut
 // to `maxW` columns. Empty where the title holds nothing else.
 //
-// The three prefixes come off in the order they are written: the marker, the
-// retention stamp where the session is being held, then the fallback title's
-// agent name. Each is matched without its trailing space, because sanitizing
-// collapses and trims whitespace: a title that is the marker alone has none
-// left to match.
+// The four prefixes come off in the order they are written: the marker, the
+// retention stamp where the session is being held, the mid-run stamp where its
+// channel has something to say, then the fallback title's agent name. Each is
+// matched without its trailing space, because sanitizing collapses and trims
+// whitespace: a title that is the marker alone has none left to match.
 export function subagentTopic(
   agent: string,
   title: string,
@@ -256,9 +295,11 @@ export function subagentTopic(
   let topic = sanitizeTitle(title);
   const marker = SUBAGENT_SESSION_TITLE_MARKER.trim();
   if (topic.startsWith(marker)) topic = topic.slice(marker.length).trim();
-  // The stamp is state, not topic: the row says "retained · 47m left" on its
-  // second line, and the title text belongs to the work the subagent did.
+  // The stamps are state, not topic: the row says "retained · 47m left" or
+  // "asking · msgs:2" on its second line, and the title text belongs to the
+  // work the subagent did.
   topic = topic.replace(/^\[retained:\d{1,15}\]/, "").trim();
+  topic = topic.replace(/^\[mid:[^\]]{1,32}\]/, "").trim();
   const prefix = `${agent}:`;
   if (topic.startsWith(prefix)) topic = topic.slice(prefix.length).trim();
   return truncate(topic, maxW);

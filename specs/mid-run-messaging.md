@@ -125,8 +125,36 @@ untouched by this feature.
 - The question notice is an intercom notice and follows `showAgentcom`, like the
   completion notice. That is acceptable because the caller's answer is a visible
   tool call and the exchange is reported in full at the end of the run.
-- `list` marks a running row `msgs:N` and `asking`. The TUI sidebar's subagent
-  row carries no such marker: the channel has no TUI half.
+- `list` marks a running row `msgs:N` and `asking`, and the TUI sidebar's
+  subagent row carries the same two on its second line, `asking` first because
+  that line is clipped from the right (`midRunRowNote`,
+  `tui/src/subagent-store.ts`, rendered in `tui/src/tui.tsx`).
+
+## The state the panel reads
+
+A subagent blocked inside its own `ask` call is `busy` to opencode and writes
+nothing to its session until the answer comes, which is exactly what a hung
+subagent looks like from outside the plugin. The state is therefore PUBLISHED
+rather than inferred, on the channel the retention state already uses: the
+subagent session's title, behind the plugin's own marker and behind the
+retention stamp's place, as `[mid:msgs:N,asking]` — `midRunStamp` /
+`readMidRunStamp` / `stampedSubagentTitle` in `src/teardown.js`, mirrored for
+the panel in `tui/src/subagent-label.ts` and pinned against each other by
+`test/tui-subagent-label.test.js`.
+
+`publishMidRunState(client, sessionID)` writes it, reading the state off the
+registry entry rather than from its caller, so no call site can publish a
+question that is no longer open. It is called at the three transitions —
+a question opening, that question ending however it ended, a message queued —
+and refused for an entry `isActiveEntry` no longer holds for: a finished
+subagent's title belongs to `publishRetentionState`, which writes the retention
+state and takes the mid-run stamp of the run just ended off with it. Both
+publishes are best-effort: a title that could not be written costs a reader the
+marker it would have shown, never a wrong one. The stamps are state and not
+topic, so `subagentTopic` strips them before the row's label is composed.
+
+An accepted `reuse` resets `messagesIn` and writes the plain title back, so run
+2's row starts from an empty channel — the same rule the exchange line keeps.
 
 ## The exchange line
 

@@ -71,6 +71,7 @@ import {
   isOrchestratorSession,
   isRetained,
   isSessionLive,
+  midRunRowNote,
   readSessionChildren,
   reapRows,
   retainedRowNote,
@@ -2005,6 +2006,9 @@ function SubagentPanel(props: {
           )
         : label(),
     );
+    // What this row's subagent has on the mid-run channel, read off its title
+    // on every change of it.
+    const midRunNote = createMemo(() => midRunRowNote(rowProps.entry));
     // A busy/retry subagent's dot alternates filled/hollow on the pulse timer
     // so you can see it is still working; finished/aborted dots stay static.
     const marker = createMemo(() => {
@@ -2059,6 +2063,14 @@ function SubagentPanel(props: {
           </Show>
           <Show when={rowProps.entry.status === "aborted"}>
             <text fg={props.theme.error}> · aborting</text>
+          </Show>
+          {/* A subagent that has stopped on a question of its own says so, and
+              says how many messages it has been sent this run. Both come off
+              the session title, where the plugin publishes them; without them
+              a subagent waiting on its orchestrator is indistinguishable from
+              one that has hung. */}
+          <Show when={midRunNote() !== ""}>
+            <text fg={props.theme.warning}>{` · ${midRunNote()}`}</text>
           </Show>
           {/* A held row says so and says how long it still has. The countdown
               is in whole minutes, the same figure and the same word the `list`

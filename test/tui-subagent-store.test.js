@@ -31,7 +31,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { retainedMinutesLeft as pluginMinutesLeft } from "../src/format.js"
-import { retentionStampedTitle } from "../src/teardown.js"
+import { retentionStampedTitle, stampedSubagentTitle } from "../src/teardown.js"
 import {
   ABORT_CONFIRM_TEXT,
   DROP_CONFIRM_TEXT,
@@ -41,6 +41,7 @@ import {
   assembleSubagentEntry,
   decideRow,
   isRetained,
+  midRunRowNote,
   reapRows,
   retainedMinutesLeft,
   retainedMsLeft,
@@ -381,6 +382,59 @@ test("the window left never goes negative", () => {
 
 test("a held row's note names the state and the minutes left", () => {
   assert.equal(retainedRowNote(heldRow(), NOW + 780000), "retained · 47m left")
+})
+
+// ---- the mid-run marker on a running row --------------------------------
+
+test("a row whose subagent has stopped on a question says asking", () => {
+  const entry = row({
+    status: "busy",
+    title: stampedSubagentTitle(WORK_TITLE, { asking: true }),
+  })
+  assert.equal(midRunRowNote(entry), "asking")
+})
+
+test("the messages sent down this run are counted on the row", () => {
+  assert.equal(
+    midRunRowNote(row({ title: stampedSubagentTitle(WORK_TITLE, { messagesIn: 3 }) })),
+    "msgs:3",
+  )
+  // Both, and `asking` first: this line is clipped from the right and the
+  // marker that names work waiting on the orchestrator has to survive it.
+  assert.equal(
+    midRunRowNote(
+      row({ title: stampedSubagentTitle(WORK_TITLE, { asking: true, messagesIn: 3 }) }),
+    ),
+    "asking · msgs:3",
+  )
+})
+
+test("a row with nothing on its channel carries no mid-run note at all", () => {
+  assert.equal(midRunRowNote(row({ title: PLAIN_TITLE })), "")
+  assert.equal(midRunRowNote(row({ title: HELD_TITLE })), "")
+  assert.equal(midRunRowNote(row({ title: "a session this plugin never made" })), "")
+})
+
+test("a poll carries the mid-run state onto the row with the title", () => {
+  const asked = stampedSubagentTitle(WORK_TITLE, { asking: true, messagesIn: 1 })
+  const entry = assembleSubagentEntry(
+    row({ title: PLAIN_TITLE, status: "busy" }),
+    { id: "ses_child", title: asked },
+    "ses_primary",
+    { kind: "row", status: "busy" },
+    "researcher#1",
+  )
+  assert.equal(midRunRowNote(entry), "asking · msgs:1")
+  // And off again on the poll after the answer, without touching the status.
+  const answered = assembleSubagentEntry(
+    entry,
+    { id: "ses_child", title: stampedSubagentTitle(WORK_TITLE, { messagesIn: 1 }) },
+    "ses_primary",
+    { kind: "row", status: "busy" },
+    "researcher#1",
+  )
+  assert.equal(midRunRowNote(answered), "msgs:1")
+  assert.equal(answered.status, "busy")
 })
 
 test("a held row carries its own marker, distinct from every other status", () => {

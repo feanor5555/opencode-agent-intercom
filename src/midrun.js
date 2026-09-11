@@ -25,7 +25,7 @@ import {
 } from "./registry.js"
 import { promptSession } from "./client.js"
 import { registerAskWaiter, settleAsk } from "./agentmsg.js"
-import { postParentNotice } from "./teardown.js"
+import { postParentNotice, publishMidRunState } from "./teardown.js"
 import {
   getSettings,
   contextBudgetFor,
@@ -239,6 +239,9 @@ export function createMidRunTools({ client, unknown }) {
       }
     }
     log("message queued", { handle: entry.handle, sessionID: entry.sessionID, tokens: estimate })
+    // The count this run stands at, onto the session title, so the sidebar's
+    // row carries the same `msgs:N` the orchestrator's own `list` row does.
+    await publishMidRunState(client, entry.sessionID)
     return {
       output:
         `Queued for "${entry.handle}" (${entry.agent}) — ${deliveryMomentPhrase(entry)}. It was ` +
@@ -335,12 +338,23 @@ export function createMidRunTools({ client, unknown }) {
       id: waiter.id,
       waitMs: waiter.waitMs,
     })
+    // The question, onto the session title, before this call blocks on it: from
+    // here until the answer this subagent is `busy` to opencode and silent to
+    // every reader of its session, which is what a hung subagent looks like.
+    // The stamp is what tells the sidebar's row the two apart.
+    await publishMidRunState(client, sessionID)
 
     const outcome = await waiter.promise
     // The entry may be gone by now — the reap, the abort and the teardown all
     // settle the waiter on their way out — so the flag is cleared off whatever
     // entry is still there rather than off the one captured above.
     clearAsk(entryForSession(sessionID), outcome.status)
+    // And off again, however the question ended. Answered or expired, this
+    // subagent is working rather than waiting from this moment, and a marker
+    // left standing would name a question nobody can still answer. A no-op
+    // where the entry is gone or no longer running, which is every ending that
+    // deletes the session.
+    await publishMidRunState(client, sessionID)
     const waitedSec = Math.round((outcome.waitedMs ?? 0) / 1000)
     if (outcome.status === "answered") {
       return {

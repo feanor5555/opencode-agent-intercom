@@ -186,8 +186,17 @@ Final reply: first line \`DONE: T<n>\` when you completed the task, then one bul
 // which deliberately reads only the object form as a spawn allowlist).
 // Denying at the schema level is the primary defense: a tool that stays in the
 // schema but gets thrown by the guard drives small models into a denial loop.
+// `message` joins them: a subagent may not steer another subagent. The one
+// child it can have is a nested one, which is one-shot by construction — its
+// caller is blocked inside the `spawn` call for the whole of it and can run no
+// tool round while it works.
+//
+// `ask` is deliberately denied NOWHERE: every subagent role may put a question
+// to the caller that briefed it, the NO_SPAWN roles included. The one case that
+// could deadlock — a nested subagent whose caller is blocked waiting for it —
+// is refused in the tool's own handler, where the caller's kind can be read.
 const SUBAGENT_NO_DELEGATION = {
-  task: "deny", abort: "deny", list: "deny",
+  task: "deny", abort: "deny", list: "deny", message: "deny",
 }
 
 // Denied on a role that may not delegate at all. Kept apart from
@@ -351,6 +360,12 @@ export const AGENTS = {
       ...NO_WEB_ACCESS,
       outline: "deny", task: "deny",
       glob: "deny", grep: "deny",
+      // The subagent half of the mid-run channel. Denied at the schema level
+      // rather than only thrown by the guard, for the reason the comment on
+      // SUBAGENT_NO_DELEGATION gives: a tool that stays in the schema and is
+      // refused at runtime drives small models into a denial loop. The
+      // orchestrator has nobody to ask — it answers, with `message`.
+      ask: "deny",
       todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
     },
     prompt: ORCHESTRATOR_PROMPT,

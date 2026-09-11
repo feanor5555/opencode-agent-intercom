@@ -65,6 +65,9 @@ import {
   primaryDirectoryOf,
   beginToolCall,
   endToolCall,
+  markMessagesSeen,
+  clearAsk,
+  exchangeSnapshot,
   CTX_TTL_MS,
 } from "./registry.js"
 import {
@@ -122,6 +125,7 @@ import {
   SUBAGENT_SESSION_TITLE_MARKER,
 } from "./teardown.js"
 import { settleChildWaiter, detachedParentOf, hasLiveChildren } from "./childwait.js"
+import { settleAsk } from "./agentmsg.js"
 import {
   completionNotice,
   errorNotice,
@@ -154,6 +158,16 @@ const PRIMARY_TOOLS = new Set([
   "spawn",
   "abort",
   "list",
+  // The downward half of the mid-run channel. Always registered outside solo
+  // mode; whether it does anything is decided live by `midRunMessaging`, which
+  // is why it is listed unconditionally here and filtered only out of the
+  // refusal text below.
+  //
+  // `ask` is deliberately NOT a member: it is the subagent's half, denied to
+  // the primary in the orchestrator's own permission map (src/agents.js), and a
+  // primary that calls it anyway is refused by this allowlist with the text
+  // that names what it does have.
+  "message",
   // Only reachable where retention is switched on: the tool itself is not
   // registered at `maxRetainedSubagents = 0` (see createTools), so at the
   // default this entry gates a tool that does not exist.
@@ -208,7 +222,20 @@ export const AGENT_STARTING_TOOLS = Object.freeze(["task"])
 //
 // Frozen for the same reason AGENT_STARTING_TOOLS is, and read through the
 // private `soloDeniedTools` below.
-export const SOLO_DENIED_TOOLS = Object.freeze([...AGENT_STARTING_TOOLS, "spawn", "reuse", "abort"])
+// `message` and `ask` are members for the same reason spawn / reuse / abort
+// are: solo mode registers neither (both live in the non-solo arm of
+// createTools), and a name that reappeared in the schema by a route the tool
+// map does not decide would otherwise address a second agent — one to steer,
+// or one to put a question to — in a mode whose whole point is that no second
+// agent exists.
+export const SOLO_DENIED_TOOLS = Object.freeze([
+  ...AGENT_STARTING_TOOLS,
+  "spawn",
+  "reuse",
+  "abort",
+  "message",
+  "ask",
+])
 
 // The membership tests the two guard branches actually run. Private to this
 // module, so the exported authorities above stay frozen and there is still
@@ -221,8 +248,15 @@ const soloDeniedTools = new Set(SOLO_DENIED_TOOLS)
 // effect: it is not registered at all where retention was off at load, and
 // where it was switched off since it refuses every call — either way naming it
 // would send the model after something it cannot use.
+// `message` is filtered on the same rule for the same reason: while
+// `midRunMessaging` is off it refuses every call, so naming it would send the
+// model after something it cannot use. The difference is only where the answer
+// comes from — retention was latched at load, this one is read live.
 function availablePrimaryTools() {
-  return [...PRIMARY_TOOLS].filter((name) => name !== "reuse" || retentionActive()).join(", ")
+  return [...PRIMARY_TOOLS]
+    .filter((name) => name !== "reuse" || retentionActive())
+    .filter((name) => name !== "message" || getSettings().midRunMessaging)
+    .join(", ")
 }
 
 // TODO.md is the domain of the six agents that produce concrete deliverables:
@@ -707,6 +741,13 @@ export function createTransformMessages(client) {
     // contextLimitNotice applies to itself.
     let volatile
     if (entry) {
+      // This hook is the one that fires per LLM REQUEST, and a request made
+      // after a message was queued is the only observation available that the
+      // message reached the model: opencode publishes nothing between the
+      // queued user message and the step that reads it. Bookkeeping only —
+      // nothing for the mid-run channel is injected here, the message travels
+      // as a persisted user message of its own.
+      markMessagesSeen(entry)
       volatile = await contextLimitNotice(client, entry)
       if (!aborted.has(sessionID) && (await delegatesNested(client, entry.agent))) {
         volatile += nestedQuotaNotice(sessionID)
@@ -1589,6 +1630,21 @@ async function onSessionIdle({ sessionID }, client) {
     // sweepWatchdog iteration) either sees `dispatched` and skips or never
     // touches this entry at all. Cheap, idempotent, single-write.
     e.dispatched = true
+    // The run is over, so a question it was blocked on is over with it. Settled
+    // inside this section, before the counters below are read: the ask ends as
+    // unanswered and the exchange snapshot has to report it that way. Both
+    // calls are synchronous and lock-free, so neither nests the mutex.
+    //
+    // A subagent blocked in `ask` is inside a tool call and does not go idle,
+    // so on the ordinary path there is nothing here to settle; what this covers
+    // is the session that fell quiet around the blocked call anyway — an
+    // opencode-side error, a reload — where the waiter would otherwise hold on
+    // in a session about to be deleted.
+    settleAsk(sessionID, {
+      status: "ended",
+      detail: "the subagent's run ended while its question was open",
+    })
+    clearAsk(e, "ended")
     // Inline removeEntry (via removeEntryLocked) instead of awaiting removeEntry:
     // removeEntry itself is wrapped in runExclusive, and the FIFO mutex is
     // not re-entrant — nesting runExclusive inside runExclusive on the same
@@ -1643,11 +1699,17 @@ async function onSessionIdle({ sessionID }, client) {
       // is not read as a fresh subagent's, and labels the cumulative figures
       // that come with it.
       runs: e.runs ?? 1,
+      // The mid-run traffic of this run, read here for the reason `nested` is:
+      // the entry is removed a few lines above and is gone by the time the
+      // notice is composed. `unread` is the steering the subagent never got to
+      // read — it was still inside a tool call when it finished — and the
+      // notice names it rather than letting a correction be silently lost.
+      exchange: exchangeSnapshot(e),
       retained: retention.retain,
     }
   })
   if (!wake) return
-  const { handle, parentID, agent, taskId, directory, packageTokens, nested, runs } = wake
+  const { handle, parentID, agent, taskId, directory, packageTokens, nested, runs, exchange } = wake
   // Whether the session survives this path. Starts false and is only raised
   // once the result is in hand: a snapshot fetch or a notice that throws falls
   // through to the delete below, exactly as it did before retention existed.
@@ -1751,6 +1813,7 @@ async function onSessionIdle({ sessionID }, client) {
           // this same value, so the notice cannot claim a session the delete is
           // about to take.
           retain,
+          exchange,
         ),
         { allowTrackedSubagent: wake.lateParentID === parentID },
       )

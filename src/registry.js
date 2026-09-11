@@ -366,6 +366,30 @@ export function clearAsk(entry, outcome) {
   return true
 }
 
+// The mid-run traffic of one run as the completion notice reports it:
+// `{ messages, unread, unreadAt, asksAnswered, asksUnanswered }`.
+//
+// Read off the entry in the same critical section that removes it, because the
+// entry is gone by the time the notice is composed. `unread` counts the
+// messages whose `seen` was never raised — the subagent finished without
+// making another LLM request after they were queued — and `unreadAt` is when
+// the FIRST of those was sent, which is the figure the notice quotes: it is the
+// steering the orchestrator believes it gave and did not.
+//
+// All zeroes for an entry that never used the channel, and for one built
+// without the fields, which is what makes the notice line absent there.
+export function exchangeSnapshot(entry) {
+  const messages = Array.isArray(entry?.messagesIn) ? entry.messagesIn : []
+  const unread = messages.filter((m) => !m.seen)
+  return {
+    messages: messages.length,
+    unread: unread.length,
+    unreadAt: unread[0]?.sentAt,
+    asksAnswered: entry?.asksAnswered ?? 0,
+    asksUnanswered: entry?.asksUnanswered ?? 0,
+  }
+}
+
 // Categorizes a registry entry into one displayed state:
 //   "aborted"  — user/orchestrator killed it
 //   "idle"     — opencode-idle (a brief transient between session.idle firing

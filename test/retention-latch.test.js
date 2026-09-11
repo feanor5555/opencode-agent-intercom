@@ -266,7 +266,9 @@ test("switched on without a restart: list and the snapshot stay as they were", a
   const snapshot = await turnNotice(hooks, PRIMARY, "msg_1")
   assert.equal(snapshot, "", "nothing running, nothing held, no block")
 
-  assert.match(await refusalText(hooks), /Available orchestration tools: spawn, abort, list\./)
+  // `message` stands in the list beside the three: the mid-run channel is on by
+  // default and is not gated by the retention latch this file is about.
+  assert.match(await refusalText(hooks), /Available orchestration tools: spawn, abort, list, message\./)
 })
 
 // Re-decided here: a `list` that runs after retention was switched off shows no
@@ -292,7 +294,9 @@ test("switched off: a retained entry is neither listed nor shown in the snapshot
 
   const refused = await hooks.tool.reuse.execute({ subagent: "planner#1", prompt: "q" }, toolCtx)
   assert.match(refused.output, /switched off for this installation/)
-  assert.match(await refusalText(hooks), /Available orchestration tools: spawn, abort, list\./)
+  // `message` stands in the list beside the three: the mid-run channel is on by
+  // default and is not gated by the retention latch this file is about.
+  assert.match(await refusalText(hooks), /Available orchestration tools: spawn, abort, list, message\./)
 
   // Untouched by the read paths themselves — no sweep has run yet.
   assert.equal(entryLifecycle(entryForSession(sessionID)), LIFECYCLE_RETAINED)
@@ -303,7 +307,10 @@ test("offered and on: the refusal names reuse among the orchestration tools", as
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   assert.ok(hooks.tool.reuse, "the map carries the tool")
-  assert.match(await refusalText(hooks), /Available orchestration tools: spawn, abort, list, reuse\./)
+  assert.match(
+    await refusalText(hooks),
+    /Available orchestration tools: spawn, abort, list, message, reuse\./,
+  )
 })
 
 // ---- 4. a capacity lowered while the process runs ----------------------------

@@ -237,12 +237,16 @@ test("spawn cleans up the orphaned child session when the prompt fails", async (
   assert.equal(entryForSession(subID), undefined, "a registry entry leaked after the failed spawn")
 })
 
-test("the send_message tool is not registered (one-shot subagent lifecycle)", async () => {
-  // send_message was removed: subagents are one-shot — they run to a single
-  // reply and are then destroyed. The orchestrator cannot inject mid-flight.
+test("the send_message tool is not registered — the mid-run channel is `message`", async () => {
+  // `send_message` was removed and stays removed. What replaced it is not it:
+  // a subagent still answers exactly ONCE and is then destroyed, and the one
+  // way to reach it while it runs is `message`, which queues a user message
+  // into its session without starting a turn. A tool map that carried both
+  // names would offer the orchestrator two doors to one channel.
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   assert.equal(hooks.tool.send_message, undefined)
+  assert.ok(hooks.tool.message, "the mid-run channel is registered under its own name")
 })
 
 test("abort cleans the subagent up: cooperative abort signal + best-effort session delete + entry reap", async () => {
@@ -430,10 +434,11 @@ test("tool.execute.before restricts a primary to the orchestration tools (spawn/
     )
   }
   // only the orchestration tools pass the guard
-  for (const t of ["spawn", "abort", "list"]) {
+  for (const t of ["spawn", "abort", "list", "message"]) {
     await hooks["tool.execute.before"]({ tool: t, sessionID: "ses_primary", callID: `a-${t}` })
   }
-  // send_message was removed — it must be rejected like any non-orchestration tool
+  // send_message is not one of them — it must be rejected like any
+  // non-orchestration tool, `message` beside it notwithstanding
   await assert.rejects(
     () => hooks["tool.execute.before"]({ tool: "send_message", sessionID: "ses_primary", callID: "d-sm" }),
     /orchestrator/i,

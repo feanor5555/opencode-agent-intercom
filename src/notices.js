@@ -1,6 +1,11 @@
-// Parent-facing notice string builders. Pure composition — these functions
-// only turn registry-entry / snapshot data into the wake-notice text that the
-// orchestrator sees. No client, no I/O, no session-lifecycle side effects.
+// Notice string builders. Pure composition — these functions only turn
+// registry-entry / snapshot data into the text an agent sees. No client, no
+// I/O, no session-lifecycle side effects.
+//
+// Parent-facing throughout, with one exception that lives here for the same
+// reason the others do — it is composed text the plugin puts in front of a
+// model: `framedAgentMessage`, the block a mid-run message from the caller is
+// wrapped in before it enters the SUBAGENT's session.
 
 import { getSettings, contextBudgetFor } from "./settings.js"
 import { countActiveSubagents, RETAIN_TASK_SHARE } from "./registry.js"
@@ -105,6 +110,90 @@ function retainedTail(handle, agent, ctxTokens) {
   )
 }
 
+// The block every mid-run message from the caller is wrapped in before it is
+// queued into the subagent's session. Never sent bare: what arrives there is a
+// user message, the strongest position in the context, and an unframed
+// paragraph is indistinguishable from a fresh task — a small model would drop
+// what it is doing and start on it.
+//
+// Three things the frame has to say, and it says nothing else: who this is
+// from, that it is NOT a new task, and that the final reply has to account for
+// it — which is the only way the orchestrator ever learns whether its steering
+// landed.
+export function framedAgentMessage(text) {
+  return (
+    "📨 agent-intercom: message from the orchestrator that briefed you (this is NOT a new task).\n" +
+    "Fold it into the task you are already on, and say in your final reply what you did with it.\n\n" +
+    `${text}`
+  )
+}
+
+// The notice that carries a subagent's question to its caller. Posted through
+// postParentNotice like every other parent notice, so it is buffered during an
+// orchestrator handoff and redirected after one.
+//
+// The opening is the marker the orchestration guide names — `asks you:` — and
+// it is the one wake notice that is not a finished run. The two mistakes it has
+// to prevent are exactly that confusion: reporting the question to the user as
+// a result, and spawning something for it. So the notice says what the subagent
+// is doing right now (nothing — it has stopped), what the one action is that
+// changes that, and what happens if the orchestrator does not take it.
+export function askNotice(entry, ask) {
+  const waitMs = ask?.waitMs ?? 0
+  const window =
+    waitMs > 0
+      ? `It waits ${Math.round(waitMs / 1000)}s for your answer; after that it goes on without ` +
+        `you or comes back \`Blocked:\`, and what is lost then is your steering, not its work.`
+      : `It is NOT waiting — this run answers questions asynchronously — so an answer reaches it ` +
+        `at its next step if you send one.`
+  return (
+    `❓ agent-intercom: your subagent "${entry.handle}" (${entry.agent}, session ` +
+    `${entry.sessionID}) asks you:\n\n${ask?.question ?? ""}\n\n` +
+    `It has STOPPED and is waiting. Answer it in THIS turn with ` +
+    `message("${entry.handle}", "<your answer>"). ${window} ` +
+    `This is a question, not a finished run: do not report it to the user as a result, and spawn ` +
+    `nothing for it — the subagent is still on the task.`
+  )
+}
+
+// The tail line that reports the mid-run traffic of a finished run, and the one
+// place a steering attempt that was never read is named.
+//
+// `exchange` is `{ messages, unread, unreadAt, asksAnswered, asksUnanswered }`,
+// read off the registry entry inside the critical section that removes it.
+// Absent — the empty string — for a run with no traffic at all, which is every
+// run that never used the channel, so an ordinary completion notice is
+// byte-identical to what it has always been.
+//
+// A message queued but never read is the one thing this line must not leave
+// implicit: the orchestrator was told it had been queued, and if it finished
+// inside the tool call it was in when the message arrived, that steering simply
+// did not happen. Silence there would let the orchestrator believe a correction
+// landed that never did.
+function exchangeNotice(exchange) {
+  const messages = exchange?.messages ?? 0
+  const answered = exchange?.asksAnswered ?? 0
+  const unanswered = exchange?.asksUnanswered ?? 0
+  if (messages === 0 && answered === 0 && unanswered === 0) return ""
+  const parts = []
+  if (messages > 0) parts.push(`${messages} message${messages === 1 ? "" : "s"} down`)
+  if (answered > 0) parts.push(`${answered} question${answered === 1 ? "" : "s"} answered`)
+  if (unanswered > 0) {
+    parts.push(`${unanswered} unanswered`)
+  }
+  const unread = exchange?.unread ?? 0
+  const when = exchange?.unreadAt ? new Date(exchange.unreadAt).toTimeString().slice(0, 5) : ""
+  const lost =
+    unread > 0
+      ? ` — ${
+          unread === 1
+            ? `the message you sent${when ? ` at ${when}` : ""} was never read`
+            : `${unread} of those messages were never read`
+        }: it was still inside a tool call when it finished, so that steering did not reach it.`
+      : "."
+  return `\n📨 exchange: ${parts.join(", ")}${lost}`
+}
+
 export function completionNotice(
   handle,
   agent,
@@ -116,6 +205,7 @@ export function completionNotice(
   nested,
   runs = 1,
   retained = false,
+  exchange = undefined,
 ) {
   // A result opening with `Blocked:` is the subagent handing a decision up:
   // it stopped at a problem its prompt did not cover, did what did not depend
@@ -157,6 +247,7 @@ export function completionNotice(
     taskOutcomeLine(taskOutcome, blocked) +
     runSizeNotice(agent, ctxTokens, packageTokens, runs) +
     nestedRunsNotice(nested) +
+    exchangeNotice(exchange) +
     slotsNoticeAfterFinish(parentID)
   )
 }
@@ -271,7 +362,12 @@ function slotsNoticeAfterFinish(primaryID) {
 // the silence, names which of the two windows ended it, and hands over what the
 // subagent was last seen doing as the evidence the orchestrator re-dispatches
 // on.
-export function timeoutNotice(entry, limit, silentMs, result) {
+// `openQuestion` is the question the entry had open at the moment of the reap,
+// captured by timeoutSubagent before it settled the waiter. It changes what the
+// reap MEANS: a subagent that stopped on a question and was then cut off was
+// waiting for this very orchestrator, so the sentence names the question and
+// says that re-dispatching without deciding it would run into the same wall.
+export function timeoutNotice(entry, limit, silentMs, result, openQuestion) {
   const silentSec = Math.round(silentMs / 1000)
   const limitSec = Math.round(limit.ms / 1000)
   const held = `(limit ${limitSec}s, ${limit.setting})`
@@ -296,12 +392,18 @@ export function timeoutNotice(entry, limit, silentMs, result) {
     ? `\nWhat it produced before it was cut off — this is the only account of the work it ` +
       `managed, read it before you re-dispatch and do not have the same ground covered twice:\n${result}\n`
     : ""
+  const asked = openQuestion?.question
+    ? `\n❓ It had a question open to YOU when the clock ran out, and it never got an answer: ` +
+      `${openQuestion.question}\nDecide that question before you re-dispatch — a fresh subagent ` +
+      `on the same prompt walks into the same wall.`
+    : ""
   return (
     `🔔 agent-intercom: subagent "${entry.handle}" (${entry.agent}, session ${entry.sessionID}) ` +
     `${cause} — slot freed. ` +
     seen +
     judgement +
     `You may re-dispatch with spawn() if the work is still needed.` +
+    asked +
     recovered
   )
 }

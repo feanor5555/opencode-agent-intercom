@@ -9,6 +9,7 @@ import {
   entryForSession,
   isPrimary,
   markEntryClosing,
+  clearAsk,
   claimRetentionEvictionsLocked,
   registryMutex,
   reservePendingDelivery,
@@ -25,6 +26,7 @@ import {
 } from "./client.js"
 import { getSettings, retentionOffered } from "./settings.js"
 import { settleChildWaiter, detachedParentOf, liveChildSessionIDs } from "./childwait.js"
+import { settleAsk } from "./agentmsg.js"
 import {
   aborted,
   pendingSessionQuiescence,
@@ -377,6 +379,17 @@ export async function teardownSubagent(
       agent,
       ...(outcome ?? {}),
     })
+    // The same, for a question this subagent was blocked on: this helper is the
+    // one door every ending path that is not the idle wake goes through, so it
+    // is the catch-all that keeps a blocked `ask` from outliving its session.
+    // The paths that know WHY the run ended settle it themselves first with
+    // that reason (the abort handler, the watchdog), and this call is then the
+    // no-op it is for every subagent that asked nothing.
+    settleAsk(sessionID, {
+      status: outcome?.status ?? "ended",
+      detail: "the subagent's run ended while its question was open",
+    })
+    clearAsk(entryForSession(sessionID), outcome?.status ?? "ended")
     // A wind-down child never posts into its primary, on ANY ending path. Its
     // result already reached the primary as the permitted spawn's own tool
     // result, and that primary is being replaced by the cycle; a watchdog/abort

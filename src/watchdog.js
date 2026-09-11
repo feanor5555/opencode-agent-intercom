@@ -38,10 +38,12 @@ import {
   entryLifecycle,
   isRetainedExpired,
   oldestToolCall,
+  clearAsk,
   LIFECYCLE_CLOSING,
   LIFECYCLE_RETAINED,
 } from "./registry.js"
 import { liveChildSessionIDs } from "./childwait.js"
+import { settleAsk } from "./agentmsg.js"
 import { teardownSubagent, dropRetainedSubagents } from "./teardown.js"
 import { lastSeenPhrase, timeoutNotice } from "./notices.js"
 import { capReplyForAgent } from "./resultfile.js"
@@ -361,6 +363,19 @@ export async function timeoutSubagent(entry, limit, silentMs) {
     lastActivity: entry.lastActivity,
   })
 
+  // 0. A question this subagent was blocked on ends here, before any I/O: its
+  //    `ask` call is a tool call inside the session the steps below abort and
+  //    delete, and leaving it holding would keep it there until its own window
+  //    ran out, inside a session that no longer exists. The descriptor is
+  //    captured first because the notice reports it — the orchestrator has to
+  //    learn that the subagent it never answered was then cut off.
+  const openQuestion = entry.pendingAsk
+  settleAsk(sessionID, {
+    status: "timeout",
+    detail: "the subagent was cut off by the inactivity watchdog while its question was open",
+  })
+  clearAsk(entry, "timeout")
+
   // 1. Cooperative abort (best-effort, mirrors signalAbort in tools.js).
   try {
     await abortSession(watchdogClient, sessionID)
@@ -437,7 +452,7 @@ export async function timeoutSubagent(entry, limit, silentMs) {
         `no sign of life for ${silentMs} ms (${limit.setting} ${limit.ms} ms)` +
         (lastSeen ? `; last seen: ${lastSeen}` : ""),
     },
-    notice: watchdogClient ? timeoutNotice(entry, limit, silentMs, rescued) : null,
+    notice: watchdogClient ? timeoutNotice(entry, limit, silentMs, rescued, openQuestion) : null,
     markAborted: true,
     label: "watchdog",
   })

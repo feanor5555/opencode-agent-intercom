@@ -3,6 +3,8 @@
 // watchdog (watchdog.js) — kept here, importing neither, so the two callers do
 // not form an import cycle through this shared plumbing.
 
+import { isAbsolute } from "node:path"
+
 import {
   routeParentNotice,
   removeEntry,
@@ -27,7 +29,7 @@ import {
   fetchSnapshot,
 } from "./client.js"
 import { deliverParentNotice } from "./noticejournal.js"
-import { secureSubagentState } from "./resultfile.js"
+import { secureSubagentState, RESULT_FILE_TTL_MS } from "./resultfile.js"
 import { getSettings, retentionOffered } from "./settings.js"
 import { settleChildWaiter, detachedParentOf, liveChildSessionIDs } from "./childwait.js"
 import { settleAsk } from "./agentmsg.js"
@@ -370,7 +372,9 @@ export async function endLiveChildrenOf(client, sessionID, { label = "", seen, u
 // state could not be secured (see endLiveChildrenOf). Tearing a subagent down
 // quickly is worth less than the handover, so the session waits — the notice tells the
 // orchestrator it is being held and why, and the orphan sweep at the next
-// plugin load is what eventually collects it. `retain` takes precedence where
+// plugin load is what collects it: that sweep tries the same securing step
+// again and deletes the session only where it took, so the hold is not undone
+// by the collector. `retain` takes precedence where
 // both are set: it keeps the entry as well, which is strictly more.
 //
 // `quiesced` says the caller has ALREADY waited this session's post-abort
@@ -775,7 +779,8 @@ export async function publishMidRunState(client, sessionID) {
 // the world that would ever delete it.
 //
 // This is the counter-move, run once at plugin load: list the project's
-// sessions and delete the ones that can only be this plugin's own leftovers.
+// sessions, SECURE the state of the ones that can only be this plugin's own
+// leftovers, and delete them.
 export const ORPHAN_SWEEP_TTL_FACTOR = 2
 
 // The independent floor under the sweep's age bound. The watchdog-derived
@@ -792,10 +797,55 @@ export const ORPHAN_SWEEP_MIN_AGE_MS = 600000
 // nothing to its session and so looks exactly this idle from the outside.
 export const ORPHAN_SWEEP_WATCHDOG_FACTOR = 8
 
-// A session is deleted only when EVERY one of these holds. Each is a positive
-// statement about the session, not the absence of a reason to keep it — a
-// session that cannot be attributed with certainty is left standing, whatever
-// it costs in leaked rows.
+// The extra time a candidate whose state could NOT be secured is left standing,
+// counted on top of the sweep's own age bound rather than instead of it.
+//
+// The sweep is the collector for every session a `hold` left behind
+// (teardownSubagent's `hold`, above), and a hold exists precisely because that
+// session is the only remaining copy of what a subagent produced. So the sweep
+// reads it and files it before deleting, and where THAT read or write fails
+// again the session stays for another load. Without a bound it would then stay
+// forever: a row the server can no longer read is unreadable at every future
+// load too, and the leak the sweep exists to close would simply move to the
+// unreadable case.
+//
+// The figure is RESULT_FILE_TTL_MS, the plugin's own answer to how long a
+// subagent's result is worth keeping — the same constant, so the two cannot
+// drift. It is a GRACE on top of `minAgeMs` and not an absolute age, because
+// `minAgeMs` grows with the watchdog windows: a wide `maxSubagentToolCallMs`
+// can push it past a week, and an absolute bound would then be already spent
+// the first time a candidate is seen, deleting unfiled exactly what the hold
+// was for. On top, every held session gets the full week no matter how the
+// windows are set.
+export const ORPHAN_SWEEP_HOLD_GRACE_MS = RESULT_FILE_TTL_MS
+
+// The handle a swept session's result file is named and headed with. A leftover
+// has no registry entry left — that is what makes it a leftover — so the handle
+// its subagent ran under (`researcher#1`) and its agent type died with the
+// process that held them, and neither is recoverable from a session record: the
+// title carries the `spawn` description, which need not name the type at all.
+// The session id in the same file name is what identifies it exactly.
+export const ORPHAN_RESULT_HANDLE = "orphan"
+export const ORPHAN_RESULT_AGENT = "unknown"
+
+// Where a swept session's result file goes. The registry entry that carried the
+// subagent's `directory` is gone, but the registry was never the authority for
+// it: opencode stores a session's project directory ON the session, and the
+// sweep already holds that in the row it is judging — no extra request, and the
+// same value `getSessionDirectory` would read back. The sweep's own
+// `directory` argument (the project this plugin load runs in) is the fallback
+// for a server that reports none, and `overflowTarget` (src/resultfile.js)
+// turns a still-missing or relative directory into the private cache dir.
+function sweptSessionDirectory(session, fallbackDirectory) {
+  const own = session?.directory
+  if (typeof own === "string" && own !== "" && isAbsolute(own)) return own
+  return fallbackDirectory
+}
+
+// A session is a CANDIDATE only when EVERY one of these holds. Each is a
+// positive statement about the session, not the absence of a reason to keep it
+// — a session that cannot be attributed with certainty is left standing,
+// whatever it costs in leaked rows.
 //
 //  1. its title carries SUBAGENT_SESSION_TITLE_MARKER — this plugin created it
 //     as a subagent session, and nothing else writes that prefix;
@@ -832,7 +882,17 @@ export const ORPHAN_SWEEP_WATCHDOG_FACTOR = 8
 // that is working, however long the call runs. Positive settings on both still
 // leave the sweep useful, including for the shipped default. Every spawned
 // session carries the marker (tools.js), so the sweep can attribute them there
-// as well; the cost at load is one session.list call.
+// as well; the cost at load is one session.list call, plus one messages() read
+// per candidate.
+//
+// A candidate is then SECURED before it is deleted, and deleted only where that
+// took: the sweep is the collector for the sessions a `hold` left behind, so it
+// reads each one a last time and files what it holds to a result file. One that
+// still cannot be filed is left standing for another load, up to
+// ORPHAN_SWEEP_HOLD_GRACE_MS past the age bound above; past that it goes
+// unfiled, because a hold nothing can ever release is the leak again.
+//
+// Returns the sessions it really deleted. A held one is not in that list.
 export async function sweepOrphanedSubagentSessions(client, { directory, now = Date.now() } = {}) {
   const settings = getSettings()
   if (settings.maxSubagentAgeMs <= 0) return []
@@ -853,6 +913,7 @@ export async function sweepOrphanedSubagentSessions(client, { directory, now = D
   for (const s of sessions) if (typeof s?.parentID === "string" && s.parentID) parents.add(s.parentID)
 
   const deleted = []
+  const held = []
   for (const s of sessions) {
     const sessionID = s?.id
     if (typeof sessionID !== "string" || sessionID === "") continue
@@ -862,11 +923,50 @@ export async function sweepOrphanedSubagentSessions(client, { directory, now = D
     if (isPrimary(sessionID) || entryForSession(sessionID)) continue
     const idleSince = s.time?.updated
     if (typeof idleSince !== "number" || !Number.isFinite(idleSince)) continue
-    if (now - idleSince <= minAgeMs) continue
+    const idleMs = now - idleSince
+    if (idleMs <= minAgeMs) continue
+    // The securing step, and the reason this sweep is not a plain delete: the
+    // candidates include every session a `hold` left standing because its state
+    // reached no file, and deleting one of those unread would throw away the
+    // work the hold was protecting. So the same rule every mid-work ending
+    // follows runs here too — read the session once and write what it holds to
+    // its own result file (secureSubagentState, src/resultfile.js) — and only a
+    // session whose state is now in a file is deleted. One messages() call per
+    // candidate, and a candidate is by definition a session nothing else in the
+    // world still tracks.
+    const recovered = secureSubagentState(await fetchSnapshot(client, sessionID), {
+      handle: ORPHAN_RESULT_HANDLE,
+      agent: ORPHAN_RESULT_AGENT,
+      sessionID,
+      runs: 1,
+      directory: sweptSessionDirectory(s, directory),
+      retained: false,
+      // What the file dates itself with: when this session last moved, not when
+      // this sweep happened to run. The two can be a week apart.
+      finishedAt: new Date(idleSince).toISOString(),
+    })
+    if (!recovered.secured && idleMs <= minAgeMs + ORPHAN_SWEEP_HOLD_GRACE_MS) {
+      // Held for another load. Nothing further is done to it: it keeps its
+      // title, its parent and its idle timestamp, so the next sweep meets the
+      // same candidate one load older and tries the same read again.
+      held.push(sessionID)
+      log("bootstrap sweep: holding a leaked subagent session; its state could not be filed", {
+        sessionID,
+        title: s.title,
+        idleMs,
+        reason: recovered.holdReason,
+        error: recovered.error ?? undefined,
+      })
+      continue
+    }
     log("bootstrap sweep: deleting a leaked subagent session", {
       sessionID,
       title: s.title,
-      idleMs: now - idleSince,
+      idleMs,
+      file: recovered.path ?? undefined,
+      // The grace ran out with the state still unfiled: this delete loses what
+      // the session held, and says so rather than passing for an ordinary one.
+      unfiled: recovered.secured ? undefined : (recovered.holdReason ?? true),
     })
     // The gate reads a truthful boolean: a delete the server refused leaves the
     // session standing, so it is neither counted as deleted nor dropped from
@@ -881,5 +981,6 @@ export async function sweepOrphanedSubagentSessions(client, { directory, now = D
     }
   }
   if (deleted.length > 0) log("bootstrap sweep: deleted leaked subagent sessions", deleted.length)
+  if (held.length > 0) log("bootstrap sweep: held unfiled subagent sessions", held.length)
   return deleted
 }

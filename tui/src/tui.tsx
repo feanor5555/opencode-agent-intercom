@@ -57,6 +57,7 @@ import {
   ABORT_CONFIRM_MS,
   ABORT_CONFIRM_TEXT,
   DROP_CONFIRM_TEXT,
+  type AbortTrigger,
   type ArmedAbort,
   armingAfterSelection,
   decideAbort,
@@ -1378,8 +1379,18 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // handle — and the row goes as soon as the poll stops listing the session.
   // The row is dropped here as well so the panel answers the keypress at once;
   // a failed delete leaves it standing, because the session is then still there.
-  const dropRetained = async (id: string): Promise<void> => {
+  const dropRetained = async (
+    id: string,
+    trigger: AbortTrigger,
+  ): Promise<void> => {
     const entry = subagents().get(id);
+    debugLog("tui retention drop issued", {
+      sessionID: id,
+      handle: entry?.handle ?? null,
+      agent: entry?.agent ?? null,
+      status: entry?.status ?? null,
+      trigger,
+    });
     try {
       await api.client.session.delete({ sessionID: id });
     } catch {
@@ -1400,13 +1411,30 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     scheduleRefresh();
   };
 
-  const abortSubagent = async (id: string): Promise<void> => {
+  const abortSubagent = async (
+    id: string,
+    trigger: AbortTrigger,
+  ): Promise<void> => {
     const entry = subagents().get(id);
     if (isRetained(entry)) {
-      await dropRetained(id);
+      await dropRetained(id, trigger);
       return;
     }
     aborted.add(id);
+    // Written BEFORE the request goes out, so the line stands whatever the
+    // request does — and written here rather than in `requestAbort`, because
+    // this is the point an abort is really issued: the first request only arms
+    // the confirmation. Every server-side abort path logs, and this one used to
+    // leave a toast as its only trace, so who ended a subagent could not be
+    // settled afterwards. `trigger` is the gesture that ended it: the row's
+    // cross, the panel's `x`/`d` key, or the command palette.
+    debugLog("tui abort issued", {
+      sessionID: id,
+      handle: entry?.handle ?? null,
+      agent: entry?.agent ?? null,
+      status: entry?.status ?? null,
+      trigger,
+    });
     try {
       await api.client.session.abort(
         { sessionID: id },
@@ -1425,6 +1453,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       // A failed request did not start a teardown, so the local mark must not
       // turn the next poll into a false aborted row.
       aborted.delete(id);
+      debugLog("tui abort request failed", { sessionID: id, trigger });
       api.ui.toast({ variant: "error", message: `Abort failed for ${id}` });
     }
     scheduleRefresh();
@@ -1433,7 +1462,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // Every way to abort — the row's cross, the `x`/`d` keys and the abort
   // command — goes through this one request, so none of them can kill a session
   // on a single press. The first request arms the entry and the row asks for
-  // the confirmation; the second request for that same entry aborts.
+  // the confirmation; the second request for that same entry aborts. Each way
+  // names itself, and that name is carried through to the debug line the abort
+  // writes: a toast tells the user what happened, only the log tells a later
+  // reader which of the three gestures it was.
   let armTimer: ReturnType<typeof setTimeout> | undefined;
   const disarmAbort = (): void => {
     if (armTimer) {
@@ -1442,11 +1474,11 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     }
     if (armedAbort()) setArmedAbort(undefined);
   };
-  const requestAbort = (id: string): void => {
+  const requestAbort = (id: string, trigger: AbortTrigger): void => {
     const decision = decideAbort(armedAbort(), id, Date.now());
     disarmAbort();
     if (decision.kind === "abort") {
-      void abortSubagent(id);
+      void abortSubagent(id, trigger);
       return;
     }
     setArmedAbort(decision.armed);
@@ -1470,7 +1502,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   };
   const abortSelected = (): void => {
     const id = selectedID();
-    if (id) requestAbort(id);
+    if (id) requestAbort(id, "command");
   };
 
   const commandDispose =
@@ -1795,7 +1827,9 @@ function SubagentPanel(props: {
   parentOfGone: (id: string) => string | undefined;
   onOpen: (id: string) => void;
   // Asks for the abort of one entry: the first ask arms it, the second aborts.
-  onAbort: (id: string) => void;
+  // The trigger is the gesture that asked, and reaches the debug line the abort
+  // writes.
+  onAbort: (id: string, trigger: AbortTrigger) => void;
   maxSubagents: () => number;
   // The whole resolved settings state: the context row works its ceiling out of
   // three of its members at once.
@@ -1935,7 +1969,7 @@ function SubagentPanel(props: {
       if (id) props.onOpen(id);
     } else if (name === "x" || name === "d") {
       const id = props.selectedID();
-      if (id) props.onAbort(id);
+      if (id) props.onAbort(id, "key");
     } else if (name === "escape" || name === "esc") {
       // Escape takes back a pending abort question first; only a second Escape
       // gives the panel's focus up.
@@ -2065,7 +2099,7 @@ function SubagentPanel(props: {
     };
     const abortThis = (): void => {
       props.setSelectedID(rowProps.entry.sessionID);
-      props.onAbort(rowProps.entry.sessionID);
+      props.onAbort(rowProps.entry.sessionID, "row");
     };
     return (
       <box

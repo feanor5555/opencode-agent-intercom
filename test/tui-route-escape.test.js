@@ -421,7 +421,7 @@ test("every path that retires a row goes through retireRow", () => {
   for (const [name, marker] of [
     ["the poll's reap", "const refresh = async (): Promise<void> => {"],
     ["session.deleted", "const onSessionDeleted = (event: unknown): void => {"],
-    ["dropping a held row", "const dropRetained = async (id: string): Promise<void> => {"],
+    ["dropping a held row", "const dropRetained = async ("],
   ]) {
     assert.match(bodyOf(marker), /retireRow\(/, `${name} must retire through retireRow`)
   }
@@ -442,7 +442,7 @@ test("no retiring call site carries a route jump of its own", () => {
   for (const marker of [
     "const refresh = async (): Promise<void> => {",
     "const onSessionDeleted = (event: unknown): void => {",
-    "const dropRetained = async (id: string): Promise<void> => {",
+    "const dropRetained = async (",
     "const retireRow = (",
   ]) {
     assert.equal(

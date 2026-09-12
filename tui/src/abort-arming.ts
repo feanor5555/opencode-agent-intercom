@@ -26,6 +26,14 @@ export const ABORT_CONFIRM_TEXT = "abort? \u2715 or x again";
 // retention now, by deleting the session the plugin is holding.
 export const DROP_CONFIRM_TEXT = "drop? \u2715 or x again";
 
+// Which of the three entry points asked for an abort. It decides nothing — the
+// abort is the same abort whichever way it was asked for — and exists so the
+// debug line the panel writes at the abort names the gesture behind it: a toast
+// says only that something was aborted, and a live incident then cannot be told
+// apart from a stray keypress on a focused list.
+export const ABORT_TRIGGERS = ["row", "key", "command"] as const;
+export type AbortTrigger = (typeof ABORT_TRIGGERS)[number];
+
 // The one entry whose abort is armed, and when it was armed.
 export interface ArmedAbort {
   readonly sessionID: string;

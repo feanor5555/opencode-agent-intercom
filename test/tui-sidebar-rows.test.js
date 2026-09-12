@@ -563,7 +563,7 @@ test("a failed children request cannot become an empty completed poll", () => {
 })
 
 test("a failed abort clears the local aborted mark", () => {
-  const handler = only("const abortSubagent = async (id: string): Promise<void> => {")
+  const handler = only("const abortSubagent = async (")
   const start = source.indexOf("    aborted.add(id);", handler)
   const failed = source.indexOf("      aborted.delete(id);", handler)
   const end = source.indexOf("    scheduleRefresh();", failed)

@@ -21,6 +21,13 @@
 import { log, errMsg } from "./log.js"
 import { getSettings } from "./settings.js"
 import { INTERCOM_MESSAGE_METADATA_KEY, intercomTextPart } from "./pluginmsg.js"
+import {
+  logTuiRouteEscape,
+  noteTuiRouteSession,
+  noteTuiSessionGone,
+  tuiEscapeTarget,
+  tuiRouteIsOnSession,
+} from "./tuiroute.js"
 
 // Sleeps `ms` milliseconds. Resolved via setTimeout so a value of 0 returns
 // immediately without going through the timer queue.
@@ -535,7 +542,12 @@ export function forgetSessionDirectory(sessionID) {
 // children immediately before every delete on that path, and the abort tool
 // does the same before its own delete. Abort/error paths also wait for the
 // session's own idle event (or their bounded fallback) before deleting.
-export async function deleteSession(client, sessionID) {
+export async function deleteSession(client, sessionID, { parentID, fallbackID, cause = "delete" } = {}) {
+  // Before the DELETE, never after it: opencode answers `session.deleted` for
+  // the session the TUI is showing by navigating to its start page, and the
+  // panel's own guard runs on that same event and finds the route already
+  // moved. See escapeTuiRouteOffSession below and src/tuiroute.js.
+  await escapeTuiRouteOffSession(client, sessionID, { parentID, fallbackID, cause })
   const op = "deleteSession (session.delete)"
   const outcome = await attempt(op, () => client.session.delete({ path: { id: sessionID } }))
   if (!outcome.ok) {
@@ -546,7 +558,55 @@ export async function deleteSession(client, sessionID) {
   // explicit false is the server saying it did not delete; anything else
   // (including the bare undefined older shapes and the suite's doubles answer)
   // is a confirmation.
-  return outcome.data !== false
+  const deleted = outcome.data !== false
+  // A session that is gone is a session no later escape may land a user on.
+  if (deleted) noteTuiSessionGone(sessionID)
+  return deleted
+}
+
+// Moves the interactive TUI off a session that is about to be deleted, and
+// answers with the session it was moved to, or undefined where it was not
+// moved.
+//
+// Called from `deleteSession` and from nowhere else, so every path that
+// deletes a session — teardown on idle, error and watchdog timeout, the abort
+// tool, the retention drop, the child-first cascade, the spawn cleanup after a
+// failed prompt, the bootstrap orphan sweep, the handoff's orphaned new
+// session — carries the guard without a call site of its own to be forgotten
+// at the next one that is added.
+//
+// Three things it does NOT do, and each is the point:
+//
+//   - it moves nobody who is elsewhere. `tuiRouteIsOnSession` is a published
+//     fact from the TUI itself, so a user in the orchestrator chat while a
+//     subagent is reaped stays exactly where they are: no navigation, no toast,
+//     no log line but this function's own.
+//   - it never lands a user on a session that is equally gone. The target is
+//     the caller's session, the root primary behind it, and otherwise nothing.
+//   - it never throws or delays a teardown on a TUI that is not there: the
+//     common case costs one small file read, and the post only happens for a
+//     view that really is on the dying session.
+async function escapeTuiRouteOffSession(client, sessionID, { parentID, fallbackID, cause } = {}) {
+  if (!sessionID) return undefined
+  if (!tuiRouteIsOnSession(sessionID)) return undefined
+  const target = tuiEscapeTarget(sessionID, [parentID, fallbackID])
+  if (target === undefined) {
+    logTuiRouteEscape({
+      sessionID,
+      cause,
+      parentID: parentID ?? null,
+      fallbackID: fallbackID ?? null,
+      target: null,
+      moved: false,
+    })
+    return undefined
+  }
+  const moved = await selectTuiSession(client, target)
+  // The panel publishes its route on a change and up to a second later; until
+  // that sample arrives, this is what the next delete in a cascade reads.
+  if (moved) noteTuiRouteSession(target)
+  logTuiRouteEscape({ sessionID, cause, parentID: parentID ?? null, target, moved })
+  return moved ? target : undefined
 }
 
 // Rename of a session (PATCH /session/{id} with `title`), a REPORTED write. The

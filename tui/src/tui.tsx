@@ -37,6 +37,7 @@ import {
   setLlmModel,
 } from "./llm-models-file.ts";
 import { debugLog } from "./debug-log.ts";
+import { publishTuiRoute, routeSessionID } from "./route-file.ts";
 import {
   type EndlessPause,
   endlessRowCell,
@@ -588,12 +589,45 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const [llmAgentIdx, setLlmAgentIdx] = createSignal(0);
   const currentLlmAgent = (): string => AGENT_NAMES[llmAgentIdx()];
 
+  // The route this panel last saw and published, so a sample that changed
+  // nothing costs neither a write nor a log line. `undefined` is "never
+  // sampled", which is distinct from the `null` of a route naming no session.
+  let lastRouteSample: string | null | undefined = undefined;
+
+  // Publish where the view is, and log it when it MOVED.
+  //
+  // Two things hang on this. The plugin moves the view off a session before it
+  // deletes it (src/client.js: deleteSession → escapeTuiRouteOffSession), and
+  // this file is the only thing that tells it whether the view is on that
+  // session at all — without it every reap would either throw the user home or
+  // yank a user who was elsewhere. And the log line dates a route move: the run
+  // this repair came from could not say when the view had moved into the
+  // subagent, because the panel sampled the route only when something ended,
+  // which left a 33-minute hole around the one move that mattered.
+  //
+  // Sampled from the elapsed tick and from the file-state refresh, and written
+  // only on a change, so a session the user sits in for an hour is one write.
+  const sampleRoute = (): void => {
+    if (disposed) return;
+    const route = api.route.current;
+    const sessionID = routeSessionID(route);
+    if (sessionID === lastRouteSample) return;
+    lastRouteSample = sessionID;
+    const published = publishTuiRoute(sessionID);
+    debugLog("tui route sample", {
+      route: route.name,
+      routeSessionID: sessionID,
+      published,
+    });
+  };
+
   // The three files are shared with the main plugin and are hand-edited, so the
   // copies seeded at mount go stale. Re-read them on the same timer that
   // refreshes opencode's own defaults, and whenever the user turns to a view
   // that shows them — three small JSON reads.
   const refreshFileState = (): void => {
     if (disposed) return;
+    sampleRoute();
     showSettings(readSettings());
     setAgentModeState(readAgentMode());
     setLlmParams(readLlmParams());
@@ -1460,7 +1494,16 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       bindings: [{ key: "alt+a", cmd: FOCUS_LIST_COMMAND }],
     }) ?? (() => undefined);
 
-  const tick = setInterval(() => setNowMs(Date.now()), ELAPSED_TICK_MS);
+  // The route rides on the elapsed tick as well as on the 30 s file refresh:
+  // the plugin reads the published sample at the moment it deletes a session,
+  // and a sample half a minute old would send a user who has just walked into a
+  // subagent to the start page anyway. A tick that finds the route unchanged
+  // writes nothing.
+  sampleRoute();
+  const tick = setInterval(() => {
+    setNowMs(Date.now());
+    sampleRoute();
+  }, ELAPSED_TICK_MS);
   const pulse = setInterval(() => setPulseOn((p) => !p), PULSE_TICK_MS);
   const poll = setInterval(() => void refresh(), POLL_FALLBACK_MS);
 

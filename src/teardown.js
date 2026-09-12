@@ -9,6 +9,7 @@ import {
   entryForSession,
   isActiveEntry,
   isPrimary,
+  rootPrimaryFor,
   markEntryClosing,
   clearAsk,
   claimRetentionEvictionsLocked,
@@ -481,7 +482,20 @@ export async function teardownSubagent(
     // confirmation is logged here; the teardown proceeds either way, and a
     // session left standing is collected by sweepOrphanedSubagentSessions at
     // the next plugin load.
-    if (await deleteSession(client, sessionID)) {
+    //
+    // `parentID`/`fallbackID` are where a user WATCHING this subagent is
+    // carried to before the session goes — the caller's own session first, the
+    // root primary behind it (they differ for a nested subagent, whose caller
+    // is itself a subagent). The chain is walked here rather than after the
+    // delete, while the registry still holds it: `rootPrimaryFor` reads the
+    // parent's entry, and this subagent's own entry is gone by now.
+    if (
+      await deleteSession(client, sessionID, {
+        parentID,
+        fallbackID: rootPrimaryFor(parentID),
+        cause: label || "teardown",
+      })
+    ) {
       log(`${tag}deleted opencode session`, { handle, sessionID })
     }
     forgetSessionDirectory(sessionID)
@@ -796,7 +810,10 @@ export async function sweepOrphanedSubagentSessions(client, { directory, now = D
     // session standing, so it is neither counted as deleted nor dropped from
     // the directory cache. It stays a leftover and the next sweep finds it
     // again — this run reports only what it really removed.
-    if (await deleteSession(client, sessionID)) {
+    //
+    // A leaked session is one no registry entry names, so the parent this
+    // sweep escapes a watching user to is the one the session itself carries.
+    if (await deleteSession(client, sessionID, { parentID: s.parentID, cause: "sweep" })) {
       forgetSessionDirectory(sessionID)
       deleted.push(sessionID)
     }

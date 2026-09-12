@@ -802,7 +802,11 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
         })
         try {
           await removeEntry(sessionID)
-          await deleteSession(client, sessionID)
+          await deleteSession(client, sessionID, {
+            parentID: toolCtx.sessionID,
+            fallbackID: rootPrimary,
+            cause: "spawn-cleanup",
+          })
           forgetSessionDirectory(sessionID)
         } catch (cleanupErr) {
           log("spawn cleanup after prompt failure failed", errMsg(cleanupErr))
@@ -1388,7 +1392,14 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
           sessionID: entry.sessionID,
         })
       }
-      const ok = await deleteSession(client, entry.sessionID)
+      // The caller of this abort is the session the aborted subagent hung
+      // under, so a user watching it is carried there rather than to the start
+      // page — the same targets every other ending path escapes to.
+      const ok = await deleteSession(client, entry.sessionID, {
+        parentID: entry.parentID,
+        fallbackID: rootPrimaryFor(entry.parentID),
+        cause: "abort",
+      })
       if (ok) log("deleted opencode session (aborted)", { handle: entry.handle, sessionID: entry.sessionID })
       forgetSessionDirectory(entry.sessionID)
     } finally {

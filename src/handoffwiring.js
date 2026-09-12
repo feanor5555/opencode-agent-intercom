@@ -235,7 +235,11 @@ export async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, res
     // to cascade over. The OLD primary is retired via archiveSession (step 8)
     // to avoid opencode's recursive child-delete cascade over still-live
     // reparented subagents.
-    deleteSession: (sid) => deleteSession(client, sid),
+    // The orphan is the session the user would be looking at only if the view
+    // had already been switched to it, which happens after the kickoff; the
+    // OLD primary is where they belong back either way, and it is still there
+    // — a failed handoff does not retire it.
+    deleteSession: (sid) => deleteSession(client, sid, { parentID: sessionID, cause: "handoff-orphan" }),
     archiveSession: (sid) => archiveSession(client, sid),
     // Step 4b, the escape hatch for a step 3 that gave up.
     // `promptOldPrimaryForDocSummaries` gives up after
@@ -425,7 +429,10 @@ async function startWindDownSubagent(client, primarySessionID, directory, payloa
   } catch (err) {
     settleChildWaiter(sessionID, { status: "error", agent: WIND_DOWN_AGENT, detail: errMsg(err) })
     try {
-      await deleteSession(client, sessionID)
+      await deleteSession(client, sessionID, {
+        parentID: primarySessionID,
+        cause: "wind-down-cleanup",
+      })
     } catch {}
     throw err
   }

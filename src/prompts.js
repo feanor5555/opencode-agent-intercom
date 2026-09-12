@@ -350,10 +350,17 @@ export const OUTLINE_DISABLED_AGENTS = new Set(["designer", "gitter"])
 // fit is written out in full and the notice carries the path. This block exists
 // so the good outcome — the subagent files its own material, under the project,
 // while it still has its tools — has a chance of happening first.
+// The estimator's own exchange rate, in the one place both the system-prompt
+// block and the context-band demand read it from: a model judging the length of
+// its own draft counts characters, not tokens (format.js estimateReplyTokens).
+export function replyCapChars(ceiling) {
+  return Math.round(ceiling * 3.5)
+}
+
 export function replyCapBlock(agent) {
   const ceiling = resultCeilingFor(agent)
   if (!(ceiling > 0)) return ""
-  const chars = Math.round(ceiling * 3.5)
+  const chars = replyCapChars(ceiling)
   return (
     "\n\n---\n📄 agent-intercom: your final reply is capped.\n" +
     `The orchestrator sees at most ~${ceiling} tokens (~${chars} characters) of your final reply. ` +
@@ -362,6 +369,39 @@ export function replyCapBlock(agent) {
     "So file the long material yourself, while you still have your tools: write it under the " +
     "project, and let your reply carry the findings and the path. A reply that leaves the cut to " +
     "decide what survives keeps its opening and loses its conclusion.\n---\n"
+  )
+}
+
+// The same ceiling, said again at the two moments it is about to be breached:
+// the reserve band, where the subagent is told to wrap up while its tools still
+// work, and the lockdown, where they no longer do (contextLimitNotice,
+// src/hooks.js). The system-prompt block above was read once, thousands of
+// tokens ago, by a model that has since filled its context; these two turns are
+// the last chance to make the ceiling an INSTRUCTION rather than a truncation
+// the plugin applies afterwards.
+//
+// `canWrite` is what separates the two. In the reserve band the subagent still
+// has `write`, so the demand is the whole rule: a summary that fits, with the
+// detail in a file under the project whose path the summary names. In the
+// lockdown every work tool is denied, so the file can only be one that already
+// exists, and asking for a fresh one would send the model into a refusal.
+//
+// Empty at a ceiling of 0, like replyCapBlock: that type's reply is never cut,
+// so there is nothing to demand.
+export function resultCeilingDemand(agent, { canWrite = true } = {}) {
+  const ceiling = resultCeilingFor(agent)
+  if (!(ceiling > 0)) return ""
+  const chars = replyCapChars(ceiling)
+  return (
+    `\n\nThat message is CAPPED at ${ceiling} tokens (~${chars} characters): everything past ` +
+    `the cap is cut out of what the orchestrator receives, so a long account reaches it as an ` +
+    `opening paragraph and no conclusion. Write it as a SUMMARY that fits the cap — the state ` +
+    `you reached, what is done, what remains, the decisions taken — and ` +
+    (canWrite
+      ? "put the detail in a file under the project FIRST, then name that file's absolute path " +
+        "in the summary. Writing that file is the last work tool call you should make."
+      : "name the absolute path of the file the detail already stands in. You can no longer " +
+        "write one — `write` is denied like every other work tool.")
   )
 }
 

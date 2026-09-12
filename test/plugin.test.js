@@ -1381,9 +1381,11 @@ test("an oversized subagent result is cut at the token ceiling and filed in full
   // ceiling: the orchestrator must NOT see the tail, and the tail must not be
   // lost either — it is the overflow file the marker names.
   //
-  // HOME is repointed for the duration so the file lands in a temp results dir
-  // and never in the developer's own ~/.cache. cacheDir() resolves HOME per
-  // call, so this reaches the write below.
+  // The file lands under the SUBAGENT'S OWN project (`work/` in fixtureDir),
+  // because that is where the orchestrator's next subagent can read it. HOME is
+  // still repointed for the duration so that a fallback to the private cache —
+  // which must not happen here — could never touch the developer's own
+  // ~/.cache.
   const huge = "A".repeat(10000) + "MIDDLE_MARKER" + "B".repeat(10000)
   const messages = [
     {
@@ -1417,10 +1419,12 @@ test("an oversized subagent result is cut at the token ceiling and filed in full
     // whole — including the part the orchestrator was not shown.
     const path = /^(\/\S+\.md)$/m.exec(wake)?.[1]
     assert.ok(path, `no overflow file path in the notice: ${wake}`)
-    assert.ok(
-      path.startsWith(join(home, ".cache", "opencode-agent-intercom", "results")),
-      `overflow file outside the results dir: ${path}`,
+    assert.equal(
+      path,
+      join(fixtureDir, "work", `agent-intercom-result-researcher-1-${created[0]}.md`),
+      "the overflow file belongs in the project's work/ directory",
     )
+    assert.match(wake, /That file is in the project under `work\/`/)
     assert.equal(statSync(path).mode & 0o777, 0o600)
     const filed = readFileSync(path, "utf8")
     assert.ok(filed.endsWith(huge), "the overflow file must carry the reply verbatim and whole")
@@ -1428,6 +1432,52 @@ test("an oversized subagent result is cut at the token ceiling and filed in full
   } finally {
     process.env.HOME = realHome
     rmSync(home, { recursive: true, force: true })
+    rmSync(join(fixtureDir, "work"), { recursive: true, force: true })
+  }
+})
+
+// The other half of the same rule: securing the state comes BEFORE tearing the
+// subagent down. When the overflow file cannot be written, the session that
+// holds the uncut text is the only remaining copy of it, so the teardown keeps
+// it standing and the notice says so.
+//
+// The write is made to fail by putting a plain FILE where `work/` has to be a
+// directory: the recursive mkdir in writeOverflow then throws EEXIST.
+test("a result that could not be filed holds the subagent's session instead of deleting it", async () => {
+  const huge = "A".repeat(10000) + "MIDDLE_MARKER" + "B".repeat(10000)
+  const messages = [
+    {
+      info: { role: "assistant", tokens: { input: 100, output: 50, cache: { read: 0, write: 0 } } },
+      parts: [{ type: "text", text: huge }],
+    },
+  ]
+  // Retention off, so the session would otherwise be deleted on this very path
+  // and the hold is the only thing keeping it.
+  writeFileSync(settingsFile, JSON.stringify({ maxRetainedSubagents: 0 }))
+  resetSettings()
+  const blocker = join(fixtureDir, "work")
+  writeFileSync(blocker, "not a directory")
+  try {
+    const { ctx, created, deleted, notices } = makeCtx({ messages })
+    const hooks = await plugin(ctx)
+    await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: created[0] } } })
+
+    const wake = notices.find((n) => /has finished/.test(n))
+    assert.ok(wake, "wake notice missing")
+    assert.match(wake, /Its session is being HELD, not destroyed: its full result could not be filed/)
+    assert.match(wake, /the overflow file could not be written/)
+    assert.match(wake, new RegExp(`session ${created[0]}, and that session is being HELD`))
+    assert.equal(
+      deleted.includes(created[0]),
+      false,
+      "the session holding the only copy of the cut text must not be deleted",
+    )
+    // The slot is still freed: the subagent is finished, only its session waits.
+    const listed = await hooks.tool.list.execute({}, toolCtx)
+    assert.match(listed.output, /No active subagents/)
+  } finally {
+    rmSync(blocker, { force: true })
   }
 })
 

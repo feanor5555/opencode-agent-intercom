@@ -105,7 +105,7 @@ import { overrideBlock, overrideToastText } from "./overrides.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
 import { log, errMsg } from "./log.js"
-import { ABORT_NOTICE, guideBlocks } from "./prompts.js"
+import { ABORT_NOTICE, guideBlocks, resultCeilingDemand } from "./prompts.js"
 import {
   loadCustomPrompt,
   applyCustomPrompt,
@@ -1033,7 +1033,11 @@ async function contextLimitNotice(client, entry) {
       `Finish only what you are already holding, then write a plain-text message beginning with ` +
       `"Done:" (or "Blocked:") naming what you accomplished and what remains. That message is ` +
       `the ONLY thing the orchestrator receives from you — start no new line of investigation, ` +
-      `open no further files.\n---\n`
+      `open no further files.` +
+      // The result ceiling, named at the moment the reply is being demanded and
+      // while the subagent still has the `write` the demand asks for.
+      resultCeilingDemand(entry.agent, { canWrite: true }) +
+      `\n---\n`
     )
   }
 
@@ -1128,6 +1132,10 @@ async function contextLimitNotice(client, entry) {
     'text starting with "Done:" or "Blocked:". Do NOT try `read`, `edit`, `bash`, `web_search`, ' +
     '`webfetch` or any other work tool; do NOT try "just one more lookup". ' +
     tail +
+    // The same ceiling the reserve band named, for the subagent that is here
+    // without having passed through that band — a single turn can cross both.
+    // `canWrite: false`: every work tool is denied on this figure.
+    resultCeilingDemand(entry.agent, { canWrite: false }) +
     "\n---\n"
   )
 }
@@ -1862,6 +1870,12 @@ async function onSessionIdle({ sessionID }, client) {
   // once the result is in hand: a snapshot fetch or a notice that throws falls
   // through to the delete below, exactly as it did before retention existed.
   let retain = false
+  // The other reason it survives: the reply had to be cut and the overflow file
+  // could not be written, so this session is the only copy of what was cut. The
+  // teardown then holds it instead of deleting it (see `hold`, teardown.js).
+  // Raised from the cap's own report and never lowered by the notice failure
+  // below — a wake that failed is one more reason not to destroy the state.
+  let hold = false
   try {
     const snapshot = await fetchSnapshot(client, sessionID)
     // The retention conditions the critical section could not evaluate, both
@@ -1906,10 +1920,14 @@ async function onSessionIdle({ sessionID }, client) {
       sessionID,
       taskId,
       runs,
+      // Where the overflow file goes: `work/` under this subagent's own project
+      // directory, which is where the orchestrator's next subagent can read it.
+      directory,
       // The decision as it stands after phase 2, so the marker cannot offer a
       // `reuse` on a session the teardown below is about to delete.
       retained: retain,
     })
+    hold = Boolean(reply.error)
     // Hand the reply to a session blocked on this one, if there is one. This
     // is the only ending path that has a RESULT rather than just a cause, so
     // it settles here rather than leaving it to teardownSubagent's fallback —
@@ -1962,6 +1980,10 @@ async function onSessionIdle({ sessionID }, client) {
           // about to take.
           retain,
           exchange,
+          // The session is being kept because the cut part could not be filed;
+          // the head must not call it destroyed while the result text says the
+          // opposite.
+          hold,
         ),
         { allowTrackedSubagent: wake.lateParentID === parentID },
       )
@@ -1988,7 +2010,7 @@ async function onSessionIdle({ sessionID }, client) {
       // place: either it is being retained, and the teardown stops before the
       // delete, or the retention was revoked above and the teardown is the
       // thing that has to remove it.
-      { entryRemoved: !wake.retained, retain, label: "" },
+      { entryRemoved: !wake.retained, retain, hold, label: "" },
     )
     if (retain) await evictRetainedOverCapacity(client)
   } finally {
@@ -2293,6 +2315,7 @@ async function onSessionError(props, client) {
     sessionID,
     taskId: entry.taskId,
     runs: entry.runs ?? 1,
+    directory: entry.directory,
     retained: false,
   })
   // Wake the parent with the error notice, then free the slot — same teardown
@@ -2313,6 +2336,10 @@ async function onSessionError(props, client) {
       variant: wasAborted ? "warning" : "error",
     },
     markAborted: true,
+    // The rescued text was cut and could not be filed: this session is the only
+    // copy of the rest, so it is held rather than deleted — the same rule the
+    // idle path follows, and the notice above says so.
+    hold: Boolean(recovered.error),
     // The wait above already ran to its end for this session; the teardown
     // must not arm a second one for an idle event that has already come.
     quiesced: true,

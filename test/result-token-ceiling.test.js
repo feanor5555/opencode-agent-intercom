@@ -200,8 +200,8 @@ test("a reply over the ceiling: marker with the path, file 0600, body byte-ident
     "the kept prefix is the reply's own opening",
   )
   assert.ok(
-    capped.text.includes("You cannot read that file yourself"),
-    "the orchestrator is told it cannot read the file itself",
+    capped.text.includes("That path is outside the project, in this plugin's private cache"),
+    "a cache fallback says so, instead of promising a project file",
   )
   assert.ok(capped.text.includes("the subagent's session is gone"))
 
@@ -228,6 +228,64 @@ function splitAtSeparator(written) {
   assert.ok(at > 0, "the file carries the header/body separator")
   return [written.slice(0, at + 1), written.slice(at + sep.length)]
 }
+
+// The ordinary case: the subagent ran in a project, so its overflow lands in
+// that project's `work/` and the marker points the orchestrator at a path its
+// own next subagent can read. The private cache above is only what is left when
+// no absolute directory is known.
+test("a reply over the ceiling is filed in the subagent's project work/ directory", () => {
+  const home = isolate({ maxResultTokens: 100 })
+  const directory = mkdtempSync(join(tmpdir(), "intercom-proj-"))
+  dirs.push(directory)
+  const reply = "finding: the loader resolves plugins once.\n" + "x".repeat(5000)
+
+  const capped = capReplyForAgent(reply, { ...META, directory })
+
+  assert.equal(capped.error, null)
+  assert.equal(
+    capped.path,
+    join(directory, "work", "agent-intercom-result-researcher-1-ses_7c1f.md"),
+    "the file belongs under the project, not in the cache",
+  )
+  assert.ok(capped.text.includes(capped.path), "the marker carries the file path")
+  assert.ok(capped.text.includes("That file is in the project under `work/`"))
+  assert.equal(
+    existsSync(join(home, ".cache", "opencode-agent-intercom", "results")),
+    false,
+    "nothing goes to the private cache once a project directory is known",
+  )
+  const [, body] = splitAtSeparator(readFileSync(capped.path, "utf8"))
+  assert.equal(body, reply, "the project file holds the reply in full, cut part included")
+})
+
+// A directory that is not absolute names nothing reliable — it is whatever
+// `opencode serve` was started in — so it is treated as no directory at all.
+test("a relative directory falls back to the private cache", () => {
+  isolate({ maxResultTokens: 100 })
+  const capped = capReplyForAgent("z".repeat(5000), { ...META, directory: "some/where" })
+  assert.equal(capped.path, join(resultsDir(), "researcher-1-ses_7c1f.md"))
+})
+
+// The failure the teardown acts on: a plain FILE where `work/` has to be a
+// directory. Nothing throws, nothing is filed, and the marker says the session
+// is being held instead of naming a path that does not exist.
+test("a project write that fails reports it and says the session is held", () => {
+  isolate({ maxResultTokens: 100 })
+  const directory = mkdtempSync(join(tmpdir(), "intercom-proj-"))
+  dirs.push(directory)
+  writeFileSync(join(directory, "work"), "not a directory")
+
+  const capped = capReplyForAgent("q".repeat(5000), { ...META, directory })
+
+  assert.equal(capped.cut, true)
+  assert.equal(capped.path, null)
+  assert.ok(capped.error, "the write failure is reported to the caller")
+  assert.ok(capped.text.startsWith("q"), "the kept prefix still reaches the orchestrator")
+  assert.ok(
+    capped.text.includes("that session is being HELD rather than deleted"),
+    "the marker names the session as the surviving copy",
+  )
+})
 
 test("a reply under the ceiling passes verbatim and writes no file", () => {
   const home = isolate({ maxResultTokens: 2000 })

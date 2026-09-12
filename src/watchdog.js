@@ -419,9 +419,10 @@ export async function timeoutSubagent(entry, limit, silentMs) {
   //
   //    The same reply ceiling the idle and error paths apply — this text is
   //    about to be pushed into the orchestrator's context — and the overflow
-  //    file under the results cache is written HERE, while the session it
-  //    belongs to still exists. `retained: false`: a timed-out subagent is
-  //    never held. Skipped without a client, like the notice below.
+  //    file under the subagent's own project `work/` is written HERE, while the
+  //    session it belongs to still exists. `retained: false`: a timed-out
+  //    subagent is never offered for reuse. Skipped without a client, like the
+  //    notice below.
   //
   //    The same read also refreshes what the subagent was last seen doing. The
   //    entry's `lastActivity` is otherwise only restamped on the LLM-turn path
@@ -431,17 +432,25 @@ export async function timeoutSubagent(entry, limit, silentMs) {
   //    last thing the subagent did before it stopped. Costs nothing: the
   //    snapshot is already being fetched and already carries the field.
   let rescued = ""
+  // Raised when the rescued text had to be cut and the overflow file could not
+  // be written: this session is then the only copy of the rest, and the
+  // teardown below holds it instead of deleting it — the same rule the idle and
+  // error paths follow.
+  let hold = false
   if (watchdogClient) {
     const { result: lastText, lastActivity } = await fetchSnapshot(watchdogClient, sessionID)
     if (lastActivity) entry.lastActivity = lastActivity
-    rescued = capReplyForAgent(lastText, {
+    const capped = capReplyForAgent(lastText, {
       handle,
       agent,
       sessionID,
       taskId: entry.taskId,
       runs: entry.runs ?? 1,
+      directory: entry.directory,
       retained: false,
-    }).text
+    })
+    rescued = capped.text
+    hold = Boolean(capped.error)
   }
   const lastSeen = lastSeenPhrase(entry)
   // 3. Wake the parent with a timeout notice + free the slot — same teardown
@@ -476,6 +485,7 @@ export async function timeoutSubagent(entry, limit, silentMs) {
     },
     notice: watchdogClient ? timeoutNotice(entry, limit, silentMs, rescued, openQuestion) : null,
     markAborted: true,
+    hold,
     label: "watchdog",
   })
 }

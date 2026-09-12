@@ -573,6 +573,48 @@ test("at the budget: the existing lockdown block and the hard tool denial, uncha
   assert.equal(await toolAdmitted(hooks, sessionID), false)
 })
 
+// The ceiling is a truncation the plugin applies afterwards; these two blocks
+// are what make it an INSTRUCTION, at the two moments the reply is demanded.
+// `coder` carries no own `resultTokens` entry here, so the figure is the
+// default 2000 and the character figure the estimator's own 3.5-per-token.
+test("the reserve band names the result ceiling and demands a file for the detail", async () => {
+  const { hooks, sessionID } = await subagentAt(RESERVE_AT + 100)
+  const notice = await subagentTurnNotice(hooks, sessionID)
+  assert.match(notice, /WRAP UP NOW/)
+  assert.match(notice, /That message is CAPPED at 2000 tokens \(~7000 characters\)/)
+  assert.match(notice, /Write it as a SUMMARY that fits the cap/)
+  // Tools still work here, so the demand is for a file written NOW.
+  assert.match(notice, /put the detail in a file under the project FIRST/)
+  assert.match(notice, /name that file's absolute path in the summary/)
+})
+
+test("the lockdown names the same ceiling and asks only for a path that already exists", async () => {
+  const { hooks, sessionID } = await subagentAt(BUDGET)
+  const notice = await subagentTurnNotice(hooks, sessionID)
+  assert.match(notice, /Your work tools are now DISABLED/)
+  assert.match(notice, /That message is CAPPED at 2000 tokens \(~7000 characters\)/)
+  assert.match(notice, /name the absolute path of the file the detail already stands in/)
+  assert.doesNotMatch(
+    notice,
+    /put the detail in a file under the project FIRST/,
+    "a locked-down subagent cannot write, so it must not be sent to `write`",
+  )
+})
+
+test("a type whose ceiling is 0 gets no cap demand in either band", async () => {
+  writeFileSync(
+    settingsFile,
+    JSON.stringify({ agentContext: { coder: BUDGET }, resultTokens: { coder: 0 } }),
+  )
+  resetSettings()
+  const { ctx, created } = makeCtx({ ctxTokens: RESERVE_AT + 100, resultParts: [textPart("w")] })
+  const hooks = await plugin(ctx)
+  await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
+  const notice = await subagentTurnNotice(hooks, created[created.length - 1])
+  assert.match(notice, /WRAP UP NOW/)
+  assert.doesNotMatch(notice, /That message is CAPPED/)
+})
+
 test("the reserve is a fraction of whatever budget the type has, not a fixed margin", async () => {
   // Same relative position (95 % of the budget) on a budget ten times larger.
   writeFileSync(settingsFile, JSON.stringify({ agentContext: { coder: 100000 } }))

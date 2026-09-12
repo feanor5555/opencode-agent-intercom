@@ -13,10 +13,13 @@
 // path. A write that fails comes back as `{ error }` and turns into a different
 // sentence in the notice — the wake itself is never held up or lost.
 //
-// The file is machine state, not a deliverable: it goes under the user-private
-// cache dir (0700), never into the project, so a long reply cannot pollute a
-// user's `git status`. The subagent's own voluntary file is the one that
-// belongs under the project.
+// The file is the handover the wake notice could not carry, so it goes where
+// the orchestrator can actually get at it: `work/` under the project the
+// subagent ran in, the same directory a run's own reports live in. The private
+// cache dir (0700) is the fallback for the one case that has no project — a
+// subagent whose entry carries no absolute directory. Teardown is subordinate
+// to this: a reply that could not be filed anywhere holds its session open
+// instead of deleting the only remaining copy (`hold` in src/teardown.js).
 
 import fs from "node:fs"
 import path from "node:path"
@@ -32,7 +35,15 @@ import { resultCeilingFor } from "./settings.js"
 // an intent the user has about their work.
 export const RESULT_FILE_TTL_MS = 7 * 24 * 3600 * 1000
 
-// Where the overflow files live: a child of the plugin's private cache dir.
+// The project-side home of an overflow file and the prefix that marks it as
+// this plugin's among a project's other work artefacts. `work/` is the
+// project's own scratch area for a run's reports; nothing prunes what is
+// written there — it is the project's file, not cache.
+export const PROJECT_RESULT_SUBDIR = "work"
+export const PROJECT_RESULT_PREFIX = "agent-intercom-result-"
+
+// Where the overflow files live when no project can be resolved: a child of
+// the plugin's private cache dir.
 export function resultsDir() {
   return path.join(cacheDir(), "results")
 }
@@ -66,8 +77,27 @@ export function resultFileName({ handle, sessionID, runs }) {
   return `${safeHandle(handle)}-${safeHandle(sessionID)}${suffix}.md`
 }
 
+// Where one overflow file goes, and whether that place is inside the project.
+// The project wins whenever the subagent's entry carries an ABSOLUTE
+// directory: a relative one is whatever `opencode serve` was started in and
+// names nothing reliable, so it is treated as no directory at all. The cache
+// path is what is left, and it is the only case whose reader is not the
+// orchestrator's own next subagent.
+export function overflowTarget({ directory, handle, sessionID, runs }) {
+  const name = resultFileName({ handle, sessionID, runs })
+  if (typeof directory === "string" && directory !== "" && path.isAbsolute(directory)) {
+    return {
+      file: path.join(directory, PROJECT_RESULT_SUBDIR, PROJECT_RESULT_PREFIX + name),
+      inProject: true,
+    }
+  }
+  return { file: path.join(resultsDir(), name), inProject: false }
+}
+
 // Writes one reply in full — including the part that was cut — and returns
-// `{ path }`, or `{ error }` with the reason as its message. The header names
+// `{ path, inProject }`, or `{ error }` with the reason as its message. A
+// failure is the caller's signal that nothing was secured: the wake path holds
+// the subagent's session open rather than deleting the last copy. The header names
 // what the notice cannot: which subagent, which session, when, which task, how
 // big the whole reply was and where it was cut. Everything after the `---`
 // line is the reply verbatim, byte for byte, so a subagent reading this file
@@ -78,6 +108,7 @@ export function writeOverflow({
   sessionID,
   taskId,
   runs,
+  directory,
   text,
   estimate,
   ceiling,
@@ -85,7 +116,7 @@ export function writeOverflow({
 }) {
   const full = text == null ? "" : String(text)
   const size = Number.isFinite(estimate) ? estimate : estimateReplyTokens(full)
-  const file = path.join(ensureResultsDir(), resultFileName({ handle, sessionID, runs }))
+  const { file, inProject } = overflowTarget({ directory, handle, sessionID, runs })
   const header =
     `# subagent result — ${handle} (${agent})\n` +
     `session: ${sessionID}\n` +
@@ -94,9 +125,13 @@ export function writeOverflow({
     `size: ~${size} tokens (estimated), cut to ${ceiling} in the orchestrator's notice\n` +
     `\n---\n\n`
   try {
+    // The project's `work/` may not exist yet; the cache dir has its own
+    // best-effort mkdir, whose failure surfaces as the write error below.
+    if (inProject) fs.mkdirSync(path.dirname(file), { recursive: true })
+    else ensureResultsDir()
     fs.writeFileSync(file, header + full, { mode: 0o600 })
-    log("result overflow filed", { file, size, ceiling })
-    return { path: file }
+    log("result overflow filed", { file, size, ceiling, inProject })
+    return { path: file, inProject }
   } catch (err) {
     const error = errMsg(err)
     log("result overflow write failed", { file, error })
@@ -112,25 +147,38 @@ export function writeOverflow({
 //
 // The marker is plugin framing, like the notice's head and tail, and is not
 // itself counted against the ceiling.
-function filedMarker({ ceiling, omitted, file, handle, retained }) {
+function filedMarker({ ceiling, omitted, file, handle, retained, inProject }) {
   const tail = retained
     ? `The session is also still held, so reuse("${handle}", "…") can ask it about the cut part directly.`
     : `This file is the only copy; the subagent's session is gone.`
+  // Where the file sits in the project, it is an ordinary project file and any
+  // subagent reads it by path. Where it fell back to the private cache dir, it
+  // is outside every project the orchestrator delegates into, and the sentence
+  // says so rather than offering a path a reader may not get to.
+  const reach = inProject
+    ? `That file is in the project under \`${PROJECT_RESULT_SUBDIR}/\`. You have no read tool ` +
+      `yourself, so spawn a subagent and put the path in its prompt — it reads the file.`
+    : `That path is outside the project, in this plugin's private cache. You cannot read it ` +
+      `yourself; a subagent given the path can.`
   return (
     `\n\n[cut at ${ceiling} tokens — ${omitted} more tokens of this reply are not shown here.\n` +
     `The reply IN FULL, including everything cut, is the file\n` +
     `${file}\n` +
-    `You cannot read that file yourself. If the rest is needed, spawn a subagent and put the ` +
-    `path in its prompt — it reads the file. ${tail}]`
+    `${reach} ${tail}]`
   )
 }
 
+// Nothing was secured, so the session is not disposed of: the ending path reads
+// the `error` this marker reports and passes `hold` to the teardown, which
+// keeps the opencode session standing. The marker says that, because a
+// sentence pointing at a session the next line deletes would point at nothing.
 function unfiledMarker({ ceiling, omitted, error, sessionID }) {
   return (
     `\n\n[cut at ${ceiling} tokens — ${omitted} more tokens of this reply are not shown here, ` +
-    `and the overflow file could not be written (${error}). The cut text exists only in subagent ` +
-    `session ${sessionID} — open that session in the TUI to read it, or have the work redone ` +
-    `with a brief that asks for less.]`
+    `and the overflow file could not be written (${error}). The cut text therefore exists only ` +
+    `in subagent session ${sessionID}, and that session is being HELD rather than deleted so it ` +
+    `is not lost — open it in the TUI to read it, or have the work redone with a brief that ` +
+    `asks for less.]`
   )
 }
 
@@ -147,9 +195,12 @@ function unfiledMarker({ ceiling, omitted, error, sessionID }) {
 // (resultCeilingFor), never from a value frozen on a registry entry, and `0`
 // for that type means the reply passes whole with no file and no marker.
 //
-// meta: { handle, agent, sessionID, taskId, runs, retained, finishedAt }.
-// `retained` is whether that subagent's session is being HELD, which is the
-// only thing that changes the marker's last sentence.
+// meta: { handle, agent, sessionID, taskId, runs, directory, retained,
+// finishedAt }. `retained` is whether that subagent's session is being HELD,
+// which is the only thing that changes the marker's last sentence.
+// `directory` is the subagent's own project directory and decides where the
+// overflow file lands (overflowTarget); an `error` coming back means nothing
+// was filed, and the caller holds the session open for it.
 export function capReplyForAgent(text, meta = {}) {
   const full = text == null ? "" : String(text)
   const ceiling = resultCeilingFor(meta.agent)
@@ -158,12 +209,13 @@ export function capReplyForAgent(text, meta = {}) {
   const { kept, omittedTokens } = cutToTokens(full, ceiling)
   if (omittedTokens === 0) return { text: full, path: null, error: null, cut: false }
 
-  const { path: file, error } = writeOverflow({
+  const { path: file, error, inProject } = writeOverflow({
     handle: meta.handle,
     agent: meta.agent,
     sessionID: meta.sessionID,
     taskId: meta.taskId,
     runs: meta.runs,
+    directory: meta.directory,
     text: full,
     estimate: estimateReplyTokens(full),
     ceiling,
@@ -177,6 +229,7 @@ export function capReplyForAgent(text, meta = {}) {
         file,
         handle: meta.handle,
         retained: Boolean(meta.retained),
+        inProject: Boolean(inProject),
       })
     : unfiledMarker({ ceiling, omitted: omittedTokens, error, sessionID: meta.sessionID })
 

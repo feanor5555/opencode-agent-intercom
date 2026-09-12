@@ -307,6 +307,19 @@ export async function endLiveChildrenOf(client, sessionID, { label = "", seen } 
 // needs. Only the idle path passes it, and only after the retention decision
 // has been taken on the delivered result; every other ending path deletes.
 //
+// `hold` is the other reason a session is not deleted, and it is not a
+// retention: the subagent is finished, its entry goes out of the registry and
+// its slot is freed exactly as on every ending path, but the opencode session
+// itself is left standing. It is passed when the reply crossing into the
+// orchestrator's context had to be cut and the overflow file could NOT be
+// written (capReplyForAgent, src/resultfile.js): the session is then the only
+// remaining copy of what the subagent produced, and deleting it would destroy
+// the state this plugin exists to hand over. Tearing a subagent down quickly is
+// worth less than the handover, so the session waits — the notice tells the
+// orchestrator it is being held and why, and the orphan sweep at the next
+// plugin load is what eventually collects it. `retain` takes precedence where
+// both are set: it keeps the entry as well, which is strictly more.
+//
 // `quiesced` says the caller has ALREADY waited this session's post-abort
 // cleanup out and needs no second wait here. Passed by the error path, which
 // has to wait before its own rescue read — opencode publishes `session.error`
@@ -352,6 +365,7 @@ export async function teardownSubagent(
     markAborted = false,
     entryRemoved = false,
     retain = false,
+    hold = false,
     quiesced = false,
     label = "",
     outcome = null,
@@ -451,6 +465,16 @@ export async function teardownSubagent(
       if (reason === "timeout") {
         log(`${tag}session quiescence timed out; deleting`, { handle, sessionID })
       }
+    }
+    if (hold) {
+      // The state could not be secured to a file, so the session that holds it
+      // stays. Everything above has already run — the notice is out, the entry
+      // is gone, the slot is free — and only the delete is skipped. The
+      // directory cache entry goes with the entry, like on every other ending:
+      // nothing looks a held-for-state session up again.
+      log(`${tag}held opencode session: its result could not be filed`, { handle, sessionID })
+      forgetSessionDirectory(sessionID)
+      return
     }
     // A reported write: deleteSession never throws and answers whether the
     // delete took effect, logging the status itself where it did not. Only the

@@ -218,6 +218,7 @@ export function completionNotice(
   runs = 1,
   retained = false,
   exchange = undefined,
+  heldForState = false,
 ) {
   // A result opening with `Blocked:` is the subagent handing a decision up:
   // it stopped at a problem its prompt did not cover, did what did not depend
@@ -239,11 +240,24 @@ export function completionNotice(
   // two branches cannot both apply; the guard keeps that true of this function
   // on its own rather than only of its caller.
   const held = retained && !blocked
+  // The other reason a session outlives its subagent: the reply was cut and the
+  // overflow file could not be written, so the session is the last copy of the
+  // rest and the teardown holds it (`hold`, src/teardown.js). It is NOT a
+  // retention — the entry is gone, nothing can be put to it — so it only
+  // changes the word "destroyed", which would otherwise be false in the same
+  // notice whose result text says the session is being kept.
+  const stateHeld = heldForState && !held
+  const ending = stateHeld
+    ? "Its session is being HELD, not destroyed: its full result could not be filed, and that " +
+      "session is the only remaining copy of the part that was cut."
+    : null
   const head = blocked
-    ? `🔔 agent-intercom: your subagent "${handle}" (${agent})${followUp} came back BLOCKED and was destroyed.\n`
+    ? `🔔 agent-intercom: your subagent "${handle}" (${agent})${followUp} came back BLOCKED` +
+      `${ending ? `. ${ending}` : " and was destroyed."}\n`
     : held
       ? `🔔 agent-intercom: your subagent "${handle}" (${agent})${followUp} has finished. Its session is being HELD, not destroyed.\n`
-      : `🔔 agent-intercom: your subagent "${handle}" (${agent})${followUp} has finished and been destroyed.\n`
+      : `🔔 agent-intercom: your subagent "${handle}" (${agent})${followUp} has finished` +
+        `${ending ? `. ${ending}` : " and been destroyed."}\n`
   const tail = blocked
     ? `⚠️ This is a DECISION for you, not a failed run to retry: decide what happens about the ` +
       `problem and whether the original task continues — where it does, spawn a FRESH subagent ` +

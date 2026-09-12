@@ -218,12 +218,18 @@ plugin whatever a frozen prompt file says.
 
 ### 2.4 The overflow file
 
-- **Directory:** `~/.cache/opencode-agent-intercom/results/`, created 0700
-  through a sibling of `ensureCacheDir` (`src/log.js:18`). Not the project:
-  the file is machine state, not a deliverable, and a plugin that drops
-  untracked files into a user's repository on every long reply pollutes their
-  `git status`. The subagent's own voluntary file goes under the project; this
-  backstop does not.
+- **Directory:** `<entry.directory>/work/agent-intercom-result-<handle>-<sessionID>[-runN].md`,
+  where `entry.directory` is the subagent's own project directory and MUST be
+  absolute (`src/resultfile.js` `overflowTarget`). The private cache dir
+  `~/.cache/opencode-agent-intercom/results/` is the fallback for the only
+  case that has no project — a subagent whose entry carries a missing or
+  relative directory. The overflow file goes under the project because that
+  is where the orchestrator's next subagent can actually read it: a subagent
+  is given the file's path in the wake notice and walks it; a path under
+  `~/.cache/...` lives outside every project and lands in the cache-fallback
+  marker (see §2.5). `work/` is the project's own scratch area for a run's
+  reports; nothing prunes what is written there — it is the project's file,
+  not cache state.
 - **Name:** `<safeHandle>-<sessionID>.md`, where `safeHandle` is the handle with
   every character outside `[A-Za-z0-9._-]` replaced by `-` (`researcher#1` →
   `researcher-1`). A follow-up run of a retained session adds `-run<N>` for
@@ -251,11 +257,13 @@ size: ~5412 tokens (estimated), cut to 2000 in the orchestrator's notice
   `spawn`/`abort`/`list` and nothing else (`src/hooks.js:120-123`,
   `:1777`). The notice says so explicitly.
 - **Lifetime:** the files are the only copy once the session is deleted, so
-  nothing removes them on the wake path. They are pruned once per process at
-  load, beside the bootstrap sweep (`src/index.js:93`): every file in the
-  results directory whose mtime is older than
-  `RESULT_FILE_TTL_MS = 7 * 24 * 3600 * 1000` is deleted. Fixed constant, no
-  setting — it bounds a cache directory, it does not express an intent.
+  nothing removes them on the wake path. `pruneResultFiles` runs once per
+  process at load over the cache fallback only (`src/resultfile.js`,
+  `src/index.js:93`); files written under a project's `work/` are NOT pruned,
+  because `work/` belongs to the project and the project decides what stays.
+  The cache directory itself is bounded by
+  `RESULT_FILE_TTL_MS = 7 * 24 * 3600 * 1000`. Fixed constant, no setting —
+  it bounds a cache directory, it does not express an intent.
 - **Retention:** the file is written whether or not the session is held. A held
   session is reaped at its TTL; the file outlives it.
 
@@ -270,8 +278,19 @@ forms, chosen by what actually happened.
 
 [cut at 2000 tokens — 3412 more tokens of this reply are not shown here.
 The reply IN FULL, including everything cut, is the file
+<entry.directory>/work/agent-intercom-result-researcher-1-ses_7c1f.md
+That file is in the project under `work/`. You have no read tool yourself, so spawn a subagent and put the path in its prompt — it reads the file. This file is the only copy; the subagent's session is gone.]
+```
+
+Where the entry carried no absolute directory and the file fell back to the
+private cache dir, the same block reads:
+
+```
+
+[cut at 2000 tokens — 3412 more tokens of this reply are not shown here.
+The reply IN FULL, including everything cut, is the file
 ~/.cache/opencode-agent-intercom/results/researcher-1-ses_7c1f.md
-You cannot read that file yourself. If the rest is needed, spawn a subagent and put the path in its prompt — it reads the file. This file is the only copy; the subagent's session is gone.]
+That path is outside the project, in this plugin's private cache. You cannot read it yourself; a subagent given the path can. This file is the only copy; the subagent's session is gone.]
 ```
 
 **Filed, session held** (retention granted for this subagent):
@@ -280,8 +299,8 @@ You cannot read that file yourself. If the rest is needed, spawn a subagent and 
 
 [cut at 2000 tokens — 3412 more tokens of this reply are not shown here.
 The reply IN FULL, including everything cut, is the file
-~/.cache/opencode-agent-intercom/results/researcher-1-ses_7c1f.md
-You cannot read that file yourself. If the rest is needed, spawn a subagent and put the path in its prompt — it reads the file. The session is also still held, so reuse("researcher#1", "…") can ask it about the cut part directly.]
+<entry.directory>/work/agent-intercom-result-researcher-1-ses_7c1f.md
+That file is in the project under `work/`. You have no read tool yourself, so spawn a subagent and put the path in its prompt — it reads the file. The session is also still held, so reuse("researcher#1", "…") can ask it about the cut part directly.]
 ```
 
 **Not filed** (the write failed):
@@ -373,13 +392,14 @@ none is added here.
 
 ## 3. Assumptions
 
-- **A subagent's `read` tool accepts an absolute path outside the project
-  root.** The project already works this way — `pw screenshot /tmp/page.png`
-  followed by `read /tmp/page.png` stands in `README.md` as the documented
-  loop. Falsified by a spawn whose prompt names a results path and that comes
-  back with a read denial; the remedy is to move the directory to
-  `<project>/.opencode/agent-intercom/results/` and add a `.gitignore` line,
-  which changes §2.4 alone.
+- **A subagent's `read` tool accepts an absolute path under the project.**
+  This is the assumption that made the project-local location the default in
+  §2.4 — the orchestrator's next subagent can read the file the plugin writes.
+  Falsified by a spawn whose prompt names a results path under `<entry.directory>/work/`
+  and that comes back with a read denial; the remedy is to fall back to the
+  cache directory for that one project and have the orchestrator pass the
+  absolute cache path on a future spawn. The §2.5 marker already names the
+  cache case as a distinct phrasing, so the change is the resolver alone.
 - **3.5 ASCII chars per token, 1 token per non-ASCII code point is not low for
   the models in use.** Falsified by one measurement: run a real tokenizer for
   the model in use over a handful of captured subagent replies and compare with
@@ -464,20 +484,31 @@ can be handed out on its own.
    ceiling of 1, for an exactly-at-ceiling text (not cut, no marker), and for
    text one code point over.
 3. A reply over the ceiling: the notice carries the marker with the path, the
-   file exists with mode `0600` under `~/.cache/opencode-agent-intercom/results/`,
-   and its body is byte-identical to the full reply.
+   file exists with mode `0600` under `<entry.directory>/work/` (an absolute
+   project directory), and its body is byte-identical to the full reply.
+   `pruneResultFiles` does NOT touch it.
 4. A reply under the ceiling: no file is written and the notice carries the
    text verbatim.
 5. A per-type entry raising the ceiling: the same reply passes uncut for the
    type that carries the entry and is cut for one that does not.
 6. `resultTokens: { "<type>": 0 }`: no cut, no file, no marker, and the
    reply-cap prompt block absent from that type's system prompt.
-7. Write failure (results directory replaced by a read-only file): the notice
-   carries the not-filed marker naming the reason, and the wake still reaches
-   the orchestrator.
+7. Write failure (the project `work/` cannot be created, e.g. a read-only file
+   in the way): the notice carries the unfiled marker naming the reason, and
+   the session is HELD rather than deleted — the `hold` option on
+   `teardownSubagent` keeps the opencode session standing because it is the
+   only remaining copy of the cut text.
 8. Retention granted: the marker's held variant names `reuse`, and the file is
    written all the same.
 9. The open-points path is not capped — a long primary reply reaches
    `requestDocSummaries` whole.
 10. `pruneResultFiles` deletes a file older than `RESULT_FILE_TTL_MS` and keeps
-    a fresh one.
+    a fresh one, and only over the cache directory: files written under a
+    project's `work/` are left alone.
+11. An entry with a relative `directory` (whatever `opencode serve` was
+    started in) lands the overflow file in the cache dir, and the §2.5
+    marker names the cache location with the "outside the project" phrasing.
+12. A subagent whose session is HELD because the overflow file could not be
+    written is not addressable by `reuse` — the entry has been removed and
+    only the opencode session remains. The orphan sweep at the next plugin
+    load reaps it.

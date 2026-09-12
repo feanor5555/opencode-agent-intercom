@@ -156,6 +156,17 @@ export function askNotice(entry, ask) {
   )
 }
 
+// The sentence used when a cut result could not be filed and teardown keeps
+// the session as its only remaining copy. Every ending notice uses the same
+// wording so an orchestrator cannot read one held session as destroyed merely
+// because a different path delivered the result.
+function heldStateEnding(heldForState) {
+  return heldForState
+    ? "Its session is being HELD, not destroyed: its full result could not be filed, and that " +
+      "session is the only remaining copy of the part that was cut."
+    : null
+}
+
 // The tail line that reports the mid-run traffic of a finished run, and the one
 // place a steering attempt that was never read is named.
 //
@@ -247,10 +258,7 @@ export function completionNotice(
   // changes the word "destroyed", which would otherwise be false in the same
   // notice whose result text says the session is being kept.
   const stateHeld = heldForState && !held
-  const ending = stateHeld
-    ? "Its session is being HELD, not destroyed: its full result could not be filed, and that " +
-      "session is the only remaining copy of the part that was cut."
-    : null
+  const ending = heldStateEnding(stateHeld)
   const head = blocked
     ? `🔔 agent-intercom: your subagent "${handle}" (${agent})${followUp} came back BLOCKED` +
       `${ending ? `. ${ending}` : " and was destroyed."}\n`
@@ -393,7 +401,7 @@ function slotsNoticeAfterFinish(primaryID) {
 // reap MEANS: a subagent that stopped on a question and was then cut off was
 // waiting for this very orchestrator, so the sentence names the question and
 // says that re-dispatching without deciding it would run into the same wall.
-export function timeoutNotice(entry, limit, silentMs, result, openQuestion) {
+export function timeoutNotice(entry, limit, silentMs, result, openQuestion, heldForState = false) {
   const silentSec = Math.round(silentMs / 1000)
   const limitSec = Math.round(limit.ms / 1000)
   const held = `(limit ${limitSec}s, ${limit.setting})`
@@ -418,6 +426,7 @@ export function timeoutNotice(entry, limit, silentMs, result, openQuestion) {
     ? `\nWhat it produced before it was cut off — this is the only account of the work it ` +
       `managed, read it before you re-dispatch and do not have the same ground covered twice:\n${result}\n`
     : ""
+  const ending = heldStateEnding(heldForState)
   const asked = openQuestion?.question
     ? `\n❓ It had a question open to YOU when the clock ran out, and it never got an answer: ` +
       `${openQuestion.question}\nDecide that question before you re-dispatch — a fresh subagent ` +
@@ -426,6 +435,7 @@ export function timeoutNotice(entry, limit, silentMs, result, openQuestion) {
   return (
     `🔔 agent-intercom: subagent "${entry.handle}" (${entry.agent}, session ${entry.sessionID}) ` +
     `${cause} — slot freed. ` +
+    (ending ? `${ending} ` : "") +
     seen +
     judgement +
     `You may re-dispatch with spawn() if the work is still needed.` +
@@ -470,7 +480,7 @@ export function lastSeenPhrase(entry, maxChars = LAST_SEEN_CHARS) {
 // zero. It is appended only when there IS text; the failure wording above it
 // is unchanged either way, so a notice for a session that produced nothing
 // reads exactly as it did before.
-export function errorNotice(entry, message, wasAborted = false, result) {
+export function errorNotice(entry, message, wasAborted = false, result, heldForState = false) {
   const head = `🔔 agent-intercom: subagent "${entry.handle}" (${entry.agent}, session ${entry.sessionID}) `
   const body = wasAborted
     ? `aborted by user. Slot freed. `
@@ -479,9 +489,11 @@ export function errorNotice(entry, message, wasAborted = false, result) {
     ? `\nIts last text before it stopped — this is the only account of the work it managed, ` +
       `read it before you re-dispatch and do not have the same ground covered twice:\n${result}\n`
     : ""
+  const ending = heldStateEnding(heldForState)
   return (
     head +
     body +
+    (ending ? `${ending} ` : "") +
     `You may re-dispatch with spawn() if the work is still needed.` +
     recovered +
     slotsNoticeAfterFinish(entry.parentID)

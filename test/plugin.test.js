@@ -14,7 +14,7 @@ import { join } from "node:path"
 import { spawnSync } from "node:child_process"
 import plugin from "../src/index.js"
 import { resetState, aborted, pendingTaskIds, lastPrimaryTool } from "../src/state.js"
-import { entryForSession, forgetPrimary, trackPrimary, isPrimary } from "../src/registry.js"
+import { countActiveSubagents, entryForSession, forgetPrimary, trackPrimary, isPrimary } from "../src/registry.js"
 import { getSessionDirectory } from "../src/client.js"
 import { resetAgentcomVisibilityWatch } from "../src/agentcomsync.js"
 import { resetProjectContext } from "../src/project.js"
@@ -26,6 +26,7 @@ import {
   TODO_TOOLS,
   timeoutSubagent,
 } from "../src/hooks.js"
+import { sweepWatchdog } from "../src/watchdog.js"
 import { AGENTS, SPAWNABLE_ROLES } from "../src/agents.js"
 import { setParamsPath, resetCache as resetLlmParams } from "../src/llmparams.js"
 import { setModelsPath, resetCache as resetLlmModels } from "../src/llmmodel.js"
@@ -1478,6 +1479,152 @@ test("a result that could not be filed holds the subagent's session instead of d
     assert.match(listed.output, /No active subagents/)
   } finally {
     rmSync(blocker, { force: true })
+  }
+})
+
+function oversizedResultMessages() {
+  const huge = "A".repeat(10000) + "MIDDLE_MARKER" + "B".repeat(10000)
+  return [
+    {
+      info: { role: "assistant", tokens: { input: 100, output: 50, cache: { read: 0, write: 0 } } },
+      parts: [{ type: "text", text: huge }],
+    },
+  ]
+}
+
+function blockResultDirectory() {
+  const blocker = join(fixtureDir, "work")
+  rmSync(blocker, { recursive: true, force: true })
+  writeFileSync(blocker, "not a directory")
+  return blocker
+}
+
+// The error path uses the same result ceiling as idle, but its wake notice is
+// an errorNotice rather than a completionNotice. The session must still remain
+// as the last copy when writing the overflow file fails.
+test("session.error with an unfiled result keeps the session and frees its slot", async () => {
+  const blocker = blockResultDirectory()
+  try {
+    writeFileSync(
+      settingsFile,
+      JSON.stringify({ maxRetainedSubagents: 0, maxSubagents: 1 }),
+    )
+    resetSettings()
+    const { ctx, created, deleted, notices } = makeCtx({ messages: oversizedResultMessages() })
+    const hooks = await plugin(ctx)
+    await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+    const subID = created[0]
+
+    const ending = hooks.event({
+      event: {
+        type: "session.error",
+        properties: { sessionID: subID, error: { name: "SomeError", data: { message: "boom" } } },
+      },
+    })
+    // The error path waits for the matching idle event before reading the
+    // result; this also keeps the test on the production quiescence path.
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: subID } } })
+    await ending
+
+    const notice = notices.find((n) => n.startsWith("🔔 agent-intercom:"))
+    assert.ok(notice, "the error wake notice is missing")
+    assert.match(notice, /Its session is being HELD, not destroyed/)
+    assert.equal(deleted.includes(subID), false, "the session holding the uncopied result is kept")
+    assert.equal(entryForSession(subID), undefined, "the finished entry is removed")
+    assert.equal(countActiveSubagents(), 0, "the finished subagent frees its slot")
+  } finally {
+    rmSync(blocker, { force: true })
+  }
+})
+
+// With a writable project work directory, the same error path must complete
+// its ordinary cleanup and delete the now-filed session.
+test("session.error with a filed result deletes the session", async () => {
+  const workDir = join(fixtureDir, "work")
+  rmSync(workDir, { recursive: true, force: true })
+  try {
+    writeFileSync(
+      settingsFile,
+      JSON.stringify({ maxRetainedSubagents: 0, maxSubagents: 1 }),
+    )
+    resetSettings()
+    const { ctx, created, deleted, notices } = makeCtx({ messages: oversizedResultMessages() })
+    const hooks = await plugin(ctx)
+    await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+    const subID = created[0]
+
+    const ending = hooks.event({
+      event: {
+        type: "session.error",
+        properties: { sessionID: subID, error: { name: "SomeError", data: { message: "boom" } } },
+      },
+    })
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: subID } } })
+    await ending
+
+    assert.ok(notices.some((n) => /failed: SomeError: boom/.test(n)), "the error notice is missing")
+    assert.deepEqual(deleted, [subID], "a filed result allows the session to be deleted")
+    assert.equal(entryForSession(subID), undefined)
+    assert.equal(countActiveSubagents(), 0)
+  } finally {
+    rmSync(workDir, { recursive: true, force: true })
+  }
+})
+
+// The inactivity watchdog also secures the capped result before teardown. Its
+// timeout notice should identify the surviving session in the same way.
+test("the watchdog with an unfiled result keeps the session and frees its slot", async () => {
+  const blocker = blockResultDirectory()
+  try {
+    writeFileSync(
+      settingsFile,
+      JSON.stringify({ maxRetainedSubagents: 0, maxSubagents: 1, maxSubagentAgeMs: 1000 }),
+    )
+    resetSettings()
+    const { ctx, created, deleted, notices } = makeCtx({ messages: oversizedResultMessages() })
+    const hooks = await plugin(ctx)
+    await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+    const subID = created[0]
+    entryForSession(subID).lastActivityAt = Date.now() - 10_000
+
+    await sweepWatchdog()
+
+    const notice = notices.find((n) => n.startsWith("🔔 agent-intercom:"))
+    assert.ok(notice, "the watchdog wake notice is missing")
+    assert.match(notice, /Its session is being HELD, not destroyed/)
+    assert.equal(deleted.includes(subID), false, "the session holding the uncopied result is kept")
+    assert.equal(entryForSession(subID), undefined, "the reaped entry is removed")
+    assert.equal(countActiveSubagents(), 0, "the reaped subagent frees its slot")
+  } finally {
+    rmSync(blocker, { force: true })
+  }
+})
+
+// A successful overflow write leaves no reason for the watchdog to retain the
+// underlying session.
+test("the watchdog with a filed result deletes the session", async () => {
+  const workDir = join(fixtureDir, "work")
+  rmSync(workDir, { recursive: true, force: true })
+  try {
+    writeFileSync(
+      settingsFile,
+      JSON.stringify({ maxRetainedSubagents: 0, maxSubagents: 1, maxSubagentAgeMs: 1000 }),
+    )
+    resetSettings()
+    const { ctx, created, deleted, notices } = makeCtx({ messages: oversizedResultMessages() })
+    const hooks = await plugin(ctx)
+    await hooks.tool.spawn.execute({ agent: "researcher", prompt: "x" }, toolCtx)
+    const subID = created[0]
+    entryForSession(subID).lastActivityAt = Date.now() - 10_000
+
+    await sweepWatchdog()
+
+    assert.ok(notices.some((n) => /was cut off/.test(n)), "the watchdog notice is missing")
+    assert.deepEqual(deleted, [subID], "a filed result allows the session to be deleted")
+    assert.equal(entryForSession(subID), undefined)
+    assert.equal(countActiveSubagents(), 0)
+  } finally {
+    rmSync(workDir, { recursive: true, force: true })
   }
 })
 

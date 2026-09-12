@@ -2329,7 +2329,7 @@ async function onSessionError(props, client) {
       agent: entry.agent,
       detail: errText,
     },
-    notice: errorNotice(entry, errText, wasAborted, recovered.text),
+    notice: errorNotice(entry, errText, wasAborted, recovered.text, Boolean(recovered.error)),
     toast: {
       title: "agent-intercom",
       message: wasAborted ? `${entry.handle} aborted` : `${entry.handle} failed`,

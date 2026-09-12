@@ -483,7 +483,9 @@ export async function timeoutSubagent(entry, limit, silentMs) {
         `no sign of life for ${silentMs} ms (${limit.setting} ${limit.ms} ms)` +
         (lastSeen ? `; last seen: ${lastSeen}` : ""),
     },
-    notice: watchdogClient ? timeoutNotice(entry, limit, silentMs, rescued, openQuestion) : null,
+    notice: watchdogClient
+      ? timeoutNotice(entry, limit, silentMs, rescued, openQuestion, hold)
+      : null,
     markAborted: true,
     hold,
     label: "watchdog",

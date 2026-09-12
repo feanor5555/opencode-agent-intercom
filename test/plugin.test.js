@@ -1084,7 +1084,7 @@ test("a subagent over the context budget gets a wrap-up instruction injected", a
 
   const notice = await turnNotice(hooks, created[0])
   assert.match(notice, /context has reached/i)
-  assert.match(notice, /tool calls are now DISABLED/i)
+  assert.match(notice, /work tools are now DISABLED/i)
 
   // and over budget, the tool-execute guard hard-denies every tool call
   await assert.rejects(

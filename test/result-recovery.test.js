@@ -546,7 +546,7 @@ test("in the reserve band: told to write the summary WHILE the tools still work"
   assert.match(notice, /WRAP UP NOW/)
   assert.match(notice, /"Done:"/)
   // The whole point of the reserve: the demand arrives before the cut.
-  assert.doesNotMatch(notice, /Your tool calls are now DISABLED/)
+  assert.doesNotMatch(notice, /Your work tools are now DISABLED/)
   assert.equal(
     await toolAdmitted(hooks, sessionID),
     true,
@@ -567,7 +567,7 @@ test("at the budget: the existing lockdown block and the hard tool denial, uncha
   const { hooks, sessionID } = await subagentAt(BUDGET)
   const notice = await subagentTurnNotice(hooks, sessionID)
   assert.match(notice, /🛑 STOP\./)
-  assert.match(notice, /Your tool calls are now DISABLED/)
+  assert.match(notice, /Your work tools are now DISABLED/)
   assert.match(notice, /YOUR LITERAL NEXT MESSAGE MUST BEGIN WITH "Done:"/)
   assert.doesNotMatch(notice, /WRAP UP NOW/)
   assert.equal(await toolAdmitted(hooks, sessionID), false)

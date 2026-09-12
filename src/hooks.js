@@ -199,6 +199,24 @@ const PRIMARY_TOOLS = new Set([
 // collection here (SOLO_PRIMARY_PERMISSION, BUILTIN_AUTO_AGENTS, AGENT_MODES).
 export const AGENT_STARTING_TOOLS = Object.freeze(["task"])
 
+// The two tools of the mid-run channel (specs/mid-run-messaging.md): `message`
+// downward to a subagent, `ask` upward to the caller. They are the only way a
+// running agent reaches anyone outside its own session before its final reply.
+//
+// That is why they are named here rather than written as literals at the two
+// places that test them. A subagent locked down at its context budget keeps
+// exactly these two: the lockdown exists to stop it spending context on work,
+// not to cut it off from its caller, and without them an over-budget subagent
+// with a question — or with something its caller must hear before it winds
+// down — has no channel at all until it is torn down. Every other tool stays
+// denied there.
+//
+// Solo mode denies the same two names, for the reason the block below gives;
+// one collection, so the exemption and that deny cannot drift apart over which
+// names make up the channel. Frozen for the reason AGENT_STARTING_TOOLS is,
+// and read through the private `midRunMessagingTools` below.
+export const MID_RUN_MESSAGING_TOOLS = Object.freeze(["message", "ask"])
+
 // What a primary in SOLO mode may not run. The mode owns this set: solo mode
 // exists for a backend that serves one agent at a time (a llama.cpp server at
 // `parallel 1`), so nothing that could put a second agent on that slot may
@@ -238,15 +256,15 @@ export const SOLO_DENIED_TOOLS = Object.freeze([
   "spawn",
   "reuse",
   "abort",
-  "message",
-  "ask",
+  ...MID_RUN_MESSAGING_TOOLS,
 ])
 
-// The membership tests the two guard branches actually run. Private to this
+// The membership tests the guard branches actually run. Private to this
 // module, so the exported authorities above stay frozen and there is still
 // exactly one place each name is written.
 const agentStartingTools = new Set(AGENT_STARTING_TOOLS)
 const soloDeniedTools = new Set(SOLO_DENIED_TOOLS)
+const midRunMessagingTools = new Set(MID_RUN_MESSAGING_TOOLS)
 
 // The orchestration tools a primary may actually call right now, for the
 // refusal that names them. `reuse` is left out wherever retention is not in
@@ -1010,7 +1028,7 @@ async function contextLimitNotice(client, entry) {
     return (
       `\n\n---\n⚠️ WRAP UP NOW. agent-intercom: your context has reached ` +
       `${fmtTokens(entry.ctxTokens)} tokens of the ${fmtTokens(maxContext)} budget — about ` +
-      `${fmtTokens(left)} left. At the budget your tool calls are DISABLED outright, so this ` +
+      `${fmtTokens(left)} left. At the budget every work tool is DISABLED, so this ` +
       `is your last chance to write while you still have both tools and room.\n\n` +
       `Finish only what you are already holding, then write a plain-text message beginning with ` +
       `"Done:" (or "Blocked:") naming what you accomplished and what remains. That message is ` +
@@ -1075,27 +1093,40 @@ async function contextLimitNotice(client, entry) {
       : level === 2
         ? "🛑🛑 STOP — SECOND WARNING."
         : "🛑 STOP."
+  // The mid-run channel is what the lockdown leaves the subagent, so the block
+  // names it — but only where the channel is actually working. With
+  // `midRunMessaging` off both tools refuse every call (their handlers read the
+  // setting live), and naming them would send the model after something it
+  // cannot use, the same rule `availablePrimaryTools` follows for `message`.
+  const channelBlock = getSettings().midRunMessaging
+    ? "TWO tools are still open to you, and they are your way to reach the orchestrator before " +
+      "you wind down: `ask(question)` where one answer decides what your final reply says, and " +
+      "`message(subagent, text)` for a subagent of your own. Use them for that and nothing " +
+      "else — neither buys you room to carry on working.\n\n"
+    : ""
+
   const tail =
     level >= BUDGET_NOTIFY_AFTER
       ? "THE ORCHESTRATOR AND USER HAVE NOW BEEN NOTIFIED that you are stuck — the user is " +
-        "being asked whether to abort you. Every further tool call is wasted output that nobody " +
-        'will read. Your ONLY remaining move: write a plain-text message starting with "Done:" ' +
+        "being asked whether to abort you. Every further work-tool call is wasted output that " +
+        'nobody will read. Your remaining move: write a plain-text message starting with "Done:" ' +
         'or "Blocked:" — now.'
       : level === 2
         ? "One more over-budget turn and the orchestrator + user will be notified that you are " +
           'stuck. Write a plain-text message starting with "Done:" now.'
-        : `If you keep calling tools, after ${BUDGET_NOTIFY_AFTER} ignored warnings the ` +
+        : `If you keep calling work tools, after ${BUDGET_NOTIFY_AFTER} ignored warnings the ` +
           "orchestrator + user will be notified that you are stuck. Write a plain-text message " +
           'starting with "Done:" now.'
 
   return (
     `\n\n---\n${head} agent-intercom: your context has reached ${fmtTokens(entry.ctxTokens)} ` +
-    `tokens (budget ${fmtTokens(maxContext)}). Your tool calls are now DISABLED — every tool ` +
-    `call will be rejected with an error. This is warning ${level}/${BUDGET_NOTIFY_AFTER}.\n\n` +
+    `tokens (budget ${fmtTokens(maxContext)}). Your work tools are now DISABLED — every such ` +
+    `tool call will be rejected with an error. This is warning ${level}/${BUDGET_NOTIFY_AFTER}.\n\n` +
+    channelBlock +
     'YOUR LITERAL NEXT MESSAGE MUST BEGIN WITH "Done:" (or "Blocked:") followed by 1–2 short ' +
-    "sentences naming what you accomplished and what remains. No tool call, no JSON, no code " +
-    'block — plain text starting with "Done:" or "Blocked:". Do NOT try `read`, `edit`, `bash`, ' +
-    "`web_search`, `webfetch` or any other tool; do NOT try \"just one more lookup\". " +
+    "sentences naming what you accomplished and what remains. No JSON, no code block — plain " +
+    'text starting with "Done:" or "Blocked:". Do NOT try `read`, `edit`, `bash`, `web_search`, ' +
+    '`webfetch` or any other work tool; do NOT try "just one more lookup". ' +
     tail +
     "\n---\n"
   )
@@ -2495,6 +2526,51 @@ export function createGuardToolExecute(client, permissionGuard) {
       }
       const maxContext = contextBudgetFor(entry.agent)
       if (maxContext > 0 && entry.ctxTokens != null && entry.ctxTokens >= maxContext) {
+        // The mid-run channel survives the lockdown. `message` and `ask` are
+        // how a subagent reaches its caller while it runs, and a subagent that
+        // has just been told to wind down is exactly the one with something to
+        // say — a question whose answer decides what its final reply contains,
+        // or a note its caller needs before the session is gone. Both cost the
+        // session almost nothing: a handful of tokens each, against the work
+        // tools this lockdown exists to stop.
+        //
+        // Held off while a compaction of this session is in flight. The
+        // lockdown is then temporary — the run continues in the compacted
+        // session and the channel comes back with it — and `ask` would park an
+        // unreturned tool call in a session being summarized underneath it,
+        // the very thing startSubagentCompaction refuses to do to an open
+        // question (src/compaction.js).
+        //
+        // Returning here deliberately skips the counter reset below: the entry
+        // is still over its budget, and clearing stopInjections /
+        // notifiedParentOfLoop on a `message` call would reopen the escalation
+        // ladder from the bottom and let the parent be notified a second time.
+        if (midRunMessagingTools.has(input.tool)) {
+          if (!entry.compactingSince) {
+            log("mid-run channel admitted over context budget", {
+              handle: entry.handle,
+              tool: input.tool,
+              ctxTokens: entry.ctxTokens,
+              limit: maxContext,
+            })
+            return
+          }
+          // The compaction case, and its own refusal: a STOP escalation would
+          // be wrong here — nothing is being wound up, the channel is held for
+          // the length of one summarize and comes back with the compacted
+          // session. Not counted in `budgetDenials` either: that counter feeds
+          // the stuck-in-a-denial-loop notice, and a call refused by a
+          // compaction is not a subagent ignoring a stop sign.
+          log("mid-run channel held: session is compacting", {
+            handle: entry.handle,
+            tool: input.tool,
+          })
+          throw new Error(
+            `agent-intercom: \`${input.tool}\` is held while your session is being compacted — ` +
+              "your history is being replaced by a summary of it right now. Make no tool call on " +
+              "this turn; the channel is open again on your next one.",
+          )
+        }
         entry.budgetDenials = (entry.budgetDenials ?? 0) + 1
         const level = entry.stopInjections ?? 0
         log("denied tool call: subagent over context budget", {
@@ -2509,17 +2585,27 @@ export function createGuardToolExecute(client, permissionGuard) {
         // share one intensity level. We never auto-abort; the worst-case at
         // level >= BUDGET_NOTIFY_AFTER is that the parent has been notified
         // (by contextLimitNotice on the same turn) so the user can step in.
+        // Every tool that reaches here is a work tool — the channel's two are
+        // returned or refused above — so each rung can say what is still open.
+        // Left unsaid where `midRunMessaging` is off: the two tools then refuse
+        // every call in their own handlers, and the refusal would be pointing
+        // at a channel that is not there.
+        const channelNote = getSettings().midRunMessaging
+          ? " `message` and `ask` still reach your caller."
+          : ""
         const escalation =
           level >= BUDGET_NOTIFY_AFTER
             ? "🛑🛑🛑 FINAL. The orchestrator and user have been notified that you are stuck. " +
-              "No tool call will succeed. Your only path forward: write a plain-text message " +
-              'starting with "Done:" or "Blocked:".'
+              `No work tool will succeed.${channelNote} Your path forward: write a plain-text ` +
+              'message starting with "Done:" or "Blocked:".'
             : level === 2
               ? `🛑🛑 SECOND WARNING (turn ${level}/${BUDGET_NOTIFY_AFTER}). You have ignored ` +
                 "the previous STOP injection. One more over-budget turn and the orchestrator + " +
-                'user will be notified. Write a plain-text message starting with "Done:" now.'
-              : "🛑 STOP. Your context budget is exhausted; tool calls are disabled. Write a " +
-                'plain-text message starting with "Done:" (1–2 sentences) and return.'
+                `user will be notified.${channelNote} Write a plain-text message starting with ` +
+                '"Done:" now.'
+              : "🛑 STOP. Your context budget is exhausted; work tools are disabled." +
+                `${channelNote} Write a plain-text message starting with "Done:" (1–2 ` +
+                "sentences) and return."
         throw new Error("agent-intercom: " + escalation)
       }
       // Tool call accepted — clear stale counters from a previous near-budget

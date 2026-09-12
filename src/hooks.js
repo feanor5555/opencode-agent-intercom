@@ -1154,7 +1154,9 @@ async function notifyParentOfDenialLoop(client, entry) {
   })
   if (entry.parentID) {
     try {
-      await postParentNotice(client, entry.parentID, denialLoopNotice(entry))
+      await postParentNotice(client, entry.parentID, denialLoopNotice(entry), {
+        kind: "denial-loop",
+      })
     } catch (err) {
       log("denial loop: notify parent failed", errMsg(err))
     }
@@ -1985,7 +1987,7 @@ async function onSessionIdle({ sessionID }, client) {
           // opposite.
           hold,
         ),
-        { allowTrackedSubagent: wake.lateParentID === parentID },
+        { allowTrackedSubagent: wake.lateParentID === parentID, kind: "completion" },
       )
       showToast(client, {
         title: "agent-intercom",
@@ -2104,7 +2106,9 @@ async function noticeRetentionLost(client, dropped) {
     return
   }
   try {
-    await postParentNotice(client, dropped.parentID, retentionLostNotice(dropped))
+    await postParentNotice(client, dropped.parentID, retentionLostNotice(dropped), {
+      kind: "retention-lost",
+    })
     log("notified primary of a dropped retention", {
       handle: dropped.handle,
       parentID: dropped.parentID,

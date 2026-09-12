@@ -94,6 +94,7 @@ import { setServerUrl } from "./client.js"
 import { startAgentcomVisibilityWatch } from "./agentcomsync.js"
 import { sweepOrphanedSubagentSessions } from "./teardown.js"
 import { pruneResultFiles } from "./resultfile.js"
+import { replayPendingNotices } from "./noticejournal.js"
 import { log } from "./log.js"
 
 // The overflow-file prune is a cache sweep, not per-session work: opencode
@@ -101,6 +102,11 @@ import { log } from "./log.js"
 // directory of at most a few dozen files is enough for the life of that
 // process.
 let resultFilesPruned = false
+
+// The notice-journal replay is likewise a once-per-process pass, not
+// per-session work: it walks one cache directory and settles what a previous
+// process left pending.
+let pendingNoticesReplayed = false
 
 // NOTE: this module must have exactly ONE export — the default factory.
 // opencode 1.14.48 treats every named export of a plugin module as its own
@@ -152,6 +158,29 @@ export default async (ctx) => {
     resultFilesPruned = true
     setImmediate(() => {
       pruneResultFiles()
+    })
+  }
+
+  // The third leftover, and the one whose loss is silent: a parent notice this
+  // plugin posted and never got confirmed into the target session. opencode's
+  // `prompt_async` answers 204 the moment it has FORKED the fiber that writes
+  // the message row, so a wake notice can be accepted and never persisted, and
+  // the process can go before anything notices. Every such notice is journalled
+  // before it is posted (src/noticejournal.js); this pass confirms what a dead
+  // process left pending and posts again what really is missing, so an ending
+  // is not lost across a crash. Same next-event-loop-turn discipline as the two
+  // sweeps above — it makes one bounded read per pending entry and never
+  // throws.
+  if (!pendingNoticesReplayed) {
+    pendingNoticesReplayed = true
+    setImmediate(() => {
+      void replayPendingNotices(client)
+        .then((counts) => {
+          if (counts.pending > 0) log("notice journal replay", counts)
+        })
+        .catch((err) => {
+          log("notice journal replay failed", err?.message ?? String(err))
+        })
     })
   }
 

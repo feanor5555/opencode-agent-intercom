@@ -239,7 +239,13 @@ export async function withRetry(op, call, {
 // `postNoticeRetryBackoffMs` is the base delay.
 // Every caller of postNotice targets a primary, so the notice is hidden
 // whenever `showAgentcom` is off — the setting is read here, per send.
-export async function postNotice(client, sessionID, text) {
+// `deliveryID` is the journal id of this post (src/noticejournal.js). Where one
+// is given it is stamped into the part's metadata, which is what the delivery
+// confirmation reads the session back for; where none is given the body is
+// exactly what it was before the journal existed. A retry re-sends the SAME id,
+// because a retry is the same delivery — two rows carrying it would both
+// confirm, and a duplicate wake was already the accepted cost of the retry.
+export async function postNotice(client, sessionID, text, { deliveryID } = {}) {
   const { postNoticeRetries, postNoticeRetryBackoffMs, showAgentcom } = getSettings()
   rememberAgentcomSession(sessionID)
   await withRetry(
@@ -252,7 +258,7 @@ export async function postNotice(client, sessionID, text) {
         // handoff's lastUserGoal can skip it, and stamps `synthetic: true`
         // when the notice is hidden — see src/pluginmsg.js. The text reaches
         // the model either way; the post is the wake and is never dropped.
-        body: { parts: [intercomTextPart(text, { hidden: !showAgentcom })] },
+        body: { parts: [intercomTextPart(text, { hidden: !showAgentcom, deliveryID })] },
       }),
     {
       retries: postNoticeRetries,
@@ -692,6 +698,37 @@ export async function fetchMessages(client, sessionID) {
   )
   if (!outcome.ok) {
     logFailure(op, outcome.error, { sessionID })
+    return []
+  }
+  return Array.isArray(outcome.data) ? outcome.data : []
+}
+
+// Best-effort read of the NEWEST `limit` messages of a session, oldest-first
+// within the returned array — the bounded counterpart of fetchMessages, for a
+// caller that only has to see what landed at the end.
+//
+// `limit` is clamped to at least 1 and never passed as 0: opencode's
+// `GET /session/{id}/message` treats `limit: 0` as "no limit" and answers with
+// the session's ENTIRE history, which on a long primary is the one read this
+// wrapper exists to avoid. A non-integer or negative value is clamped the same
+// way rather than dropped, so no caller can fall through to the full history by
+// arithmetic.
+//
+// Returns [] on any failure, like fetchMessages: the one caller (the delivery
+// confirmation in noticejournal.js) treats "could not read" and "read, nothing
+// there" alike — neither confirms a delivery.
+export async function fetchSessionTail(client, sessionID, limit) {
+  const op = "fetchSessionTail (session.messages)"
+  const bounded = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : 1
+  const outcome = await attempt(op, () =>
+    client.session.messages({
+      path: { id: sessionID },
+      query: { limit: bounded },
+      signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
+    }),
+  )
+  if (!outcome.ok) {
+    logFailure(op, outcome.error, { sessionID, limit: bounded })
     return []
   }
   return Array.isArray(outcome.data) ? outcome.data : []

@@ -317,7 +317,7 @@ export function createMidRunTools({ client, unknown }) {
       }
     }
     try {
-      await postParentNotice(client, entry.parentID, askNotice(entry, waiter))
+      await postParentNotice(client, entry.parentID, askNotice(entry, waiter), { kind: "ask" })
     } catch (err) {
       settleAsk(sessionID, { status: "ended", detail: "the question never reached the caller" })
       // The same outcome the waiter was settled with, and a member of

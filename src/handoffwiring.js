@@ -49,7 +49,6 @@ import {
   fetchSnapshot,
   fetchMessages,
   getSessionTitle,
-  postNotice,
   showToast,
   deleteSession,
   archiveSession,
@@ -60,6 +59,7 @@ import {
   abortSession,
 } from "./client.js"
 import { dropRetainedSubagents, teardownSubagent, SUBAGENT_SESSION_TITLE_MARKER } from "./teardown.js"
+import { deliverParentNotice } from "./noticejournal.js"
 import { secureSubagentState } from "./resultfile.js"
 import {
   prepareTodoFile,
@@ -271,7 +271,16 @@ export async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, res
       if (!flushed) return 0
       for (const notice of flushed.notices) {
         try {
-          await postNotice(client, flushed.newID, notice)
+          // Durable delivery, like every other parent notice: these ARE the
+          // subagent notices postParentNotice buffered, only re-addressed to
+          // the successor, and a flush lost to an accepted-but-never-persisted
+          // post loses the same ending. The routing decision was already taken
+          // when they were buffered, so they go straight to the delivery rather
+          // than back through the router (src/noticejournal.js).
+          await deliverParentNotice(client, flushed.newID, notice, {
+            kind: "handoff-flush",
+            requestedFor: sessionID,
+          })
         } catch (err) {
           log("handoff flushDrain: notice delivery failed", {
             target: flushed.newID,
@@ -289,7 +298,10 @@ export async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, res
       if (!drained) return 0
       for (const notice of drained.notices) {
         try {
-          await postNotice(client, sessionID, notice)
+          await deliverParentNotice(client, sessionID, notice, {
+            kind: "handoff-drain-abort",
+            requestedFor: sessionID,
+          })
         } catch (err) {
           log("handoff abortDrain: notice delivery failed", {
             target: sessionID,

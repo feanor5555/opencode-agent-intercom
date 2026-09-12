@@ -18,7 +18,6 @@ import {
   releasePendingDelivery,
 } from "./registry.js"
 import {
-  postNotice,
   showToast,
   deleteSession,
   listSessions,
@@ -27,6 +26,7 @@ import {
   updateSessionTitle,
   fetchSnapshot,
 } from "./client.js"
+import { deliverParentNotice } from "./noticejournal.js"
 import { secureSubagentState } from "./resultfile.js"
 import { getSettings, retentionOffered } from "./settings.js"
 import { settleChildWaiter, detachedParentOf, liveChildSessionIDs } from "./childwait.js"
@@ -175,7 +175,7 @@ export async function postParentNotice(
   client,
   parentID,
   notice,
-  { allowTrackedSubagent = false } = {},
+  { allowTrackedSubagent = false, kind = "notice" } = {},
 ) {
   // A wake notice is for a PRIMARY. A parent that is itself a subagent got its
   // child through the blocking nested spawn, where the child's ending IS the
@@ -213,7 +213,22 @@ export async function postParentNotice(
   if (routed.target !== parentID) {
     log("parent notice re-routed to handoff successor", { parentID, target: routed.target })
   }
-  await postNotice(client, routed.target, notice)
+  // Durable delivery, not a bare post: `promptAsync` answers 204 as soon as it
+  // has FORKED the work that writes the message row, so this call establishes
+  // nothing about whether the notice landed. The journal entry written before
+  // the post, the confirmation read after it and the replay at the next plugin
+  // load are what stand behind that (src/noticejournal.js). It throws exactly
+  // where postNotice threw, so every caller's failure path is unchanged.
+  //
+  // Every parent notice the plugin sends goes through this one door — the
+  // completion wake, the error/timeout teardown notice, the denial-loop
+  // warning, the retention-drop notice and a subagent's `ask` — so all five are
+  // covered by being here. `kind` is what names them apart in the journal and
+  // in the log.
+  await deliverParentNotice(client, routed.target, notice, {
+    kind,
+    requestedFor: parentID,
+  })
 }
 
 // Ends every live child of `sessionID` before that session is deleted, and
@@ -458,6 +473,7 @@ export async function teardownSubagent(
       try {
         await postParentNotice(client, parentID, notice, {
           allowTrackedSubagent: detachedParentID === parentID,
+          kind: "teardown",
         })
         if (toast) showToast(client, toast)
       } catch (err) {

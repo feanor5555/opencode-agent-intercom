@@ -60,6 +60,7 @@ import {
   abortSession,
 } from "./client.js"
 import { dropRetainedSubagents, teardownSubagent, SUBAGENT_SESSION_TITLE_MARKER } from "./teardown.js"
+import { secureSubagentState } from "./resultfile.js"
 import {
   prepareTodoFile,
   readTodoFileNamed,
@@ -452,6 +453,24 @@ async function settleWindDownChild(client, primarySessionID, child) {
     } catch (err) {
       log("endless: aborting an unsettled wind-down child failed", { err: errMsg(err) })
     }
+    // The same mid-work securing rule every other reap follows: this child is
+    // being ended in the middle of writing the handover, and its session is
+    // about to go. What it managed is written to its result file first, and
+    // where that could not be done the session is held rather than deleted —
+    // an unsettled wind-down is exactly the case where the cycle needs to be
+    // able to read what the writer got through.
+    let recovered = { secured: true, path: null, holdReason: null }
+    try {
+      recovered = secureSubagentState(await fetchSnapshot(client, child.childSessionID), {
+        handle: child.childSessionID,
+        agent: WIND_DOWN_AGENT,
+        sessionID: child.childSessionID,
+        runs: 1,
+        retained: false,
+      })
+    } catch (err) {
+      log("endless: securing an unsettled wind-down child's state failed", { err: errMsg(err) })
+    }
     try {
       await teardownSubagent(
         client,
@@ -461,7 +480,7 @@ async function settleWindDownChild(client, primarySessionID, child) {
           parentID: primarySessionID,
           agent: WIND_DOWN_AGENT,
         },
-        { markAborted: true, label: "endless-wind-down" },
+        { markAborted: true, hold: !recovered.secured, label: "endless-wind-down" },
       )
     } catch (err) {
       log("endless: tearing down an unsettled wind-down child failed", { err: errMsg(err) })

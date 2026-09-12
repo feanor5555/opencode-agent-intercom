@@ -136,7 +136,7 @@ import {
   retentionLostNotice,
   isBlockedResult,
 } from "./notices.js"
-import { capReplyForAgent } from "./resultfile.js"
+import { capReplyForAgent, secureSubagentState } from "./resultfile.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
 import { maybeRunPendingCompaction, startSubagentCompaction } from "./compaction.js"
 import {
@@ -2303,13 +2303,22 @@ async function onSessionError(props, client) {
       sessionID,
     })
   }
-  const { result: lastText } = await fetchSnapshot(client, sessionID)
-  // The same reply ceiling the idle path applies, for the same reason: this
-  // text is about to be pushed into the orchestrator's context, and a session
-  // that died of a context-length error is exactly the one whose last text is
-  // longest. The overflow file is written before the teardown below deletes
-  // the session. `retained: false` — an errored subagent is never held.
-  const recovered = capReplyForAgent(lastText, {
+  const snapshot = await fetchSnapshot(client, sessionID)
+  // The mid-work securing rule (secureSubagentState, src/resultfile.js): this
+  // is not a completed run whose result the orchestrator now holds — the
+  // subagent was stopped in the middle of its work, and the teardown below
+  // deletes the only session that held it. So the rescued text goes to its
+  // result file whatever its size, before the delete and while the session
+  // still exists, and the file is what the state can be read back from
+  // afterwards. Wiring the hold to the CUT alone is what lost a coder's whole
+  // run on an abort: its rescued reply fitted the ceiling, so nothing was
+  // filed and the session was deleted regardless.
+  //
+  // The same call also applies the reply ceiling to what the notice carries,
+  // for the reason the idle path applies it: a session that died of a
+  // context-length error is exactly the one whose last text is longest.
+  // `retained: false` — an errored subagent is never offered for reuse.
+  const recovered = secureSubagentState(snapshot, {
     handle: entry.handle,
     agent: entry.agent,
     sessionID,
@@ -2329,17 +2338,26 @@ async function onSessionError(props, client) {
       agent: entry.agent,
       detail: errText,
     },
-    notice: errorNotice(entry, errText, wasAborted, recovered.text, Boolean(recovered.error)),
+    notice: errorNotice(
+      entry,
+      errText,
+      wasAborted,
+      recovered.text,
+      !recovered.secured,
+      recovered.holdReason ?? "unfiled",
+    ),
     toast: {
       title: "agent-intercom",
       message: wasAborted ? `${entry.handle} aborted` : `${entry.handle} failed`,
       variant: wasAborted ? "warning" : "error",
     },
     markAborted: true,
-    // The rescued text was cut and could not be filed: this session is the only
-    // copy of the rest, so it is held rather than deleted — the same rule the
-    // idle path follows, and the notice above says so.
-    hold: Boolean(recovered.error),
+    // The rule for every ending that is not a completed run: the session goes
+    // only where its state reached a file. Held where the write failed and
+    // where the session could not be read at all — in both cases this session
+    // is the only remaining copy of the run, and the notice above says which
+    // of the two it is.
+    hold: !recovered.secured,
     // The wait above already ran to its end for this session; the teardown
     // must not arm a second one for an idle event that has already come.
     quiesced: true,

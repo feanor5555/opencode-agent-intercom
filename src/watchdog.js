@@ -46,7 +46,7 @@ import { liveChildSessionIDs } from "./childwait.js"
 import { settleAsk } from "./agentmsg.js"
 import { teardownSubagent, dropRetainedSubagents } from "./teardown.js"
 import { lastSeenPhrase, timeoutNotice } from "./notices.js"
-import { capReplyForAgent } from "./resultfile.js"
+import { secureSubagentState } from "./resultfile.js"
 import { log, errMsg } from "./log.js"
 
 // How often the sweep runs. 5 s is a good balance: cheap (just a Map scan
@@ -417,12 +417,15 @@ export async function timeoutSubagent(entry, limit, silentMs) {
   //    the block. Ordered AFTER the abort so the step that was streaming has
   //    been stopped and its parts stand still while we read them.
   //
-  //    The same reply ceiling the idle and error paths apply — this text is
-  //    about to be pushed into the orchestrator's context — and the overflow
+  //    A reap is a mid-work ending like the abort/error path, so it follows the
+  //    same securing rule (secureSubagentState, src/resultfile.js): the result
   //    file under the subagent's own project `work/` is written HERE, while the
-  //    session it belongs to still exists. `retained: false`: a timed-out
-  //    subagent is never offered for reuse. Skipped without a client, like the
-  //    notice below.
+  //    session it belongs to still exists, and whatever the size of the text —
+  //    a rescued reply that happens to fit the reply ceiling is exactly the one
+  //    that used to be filed nowhere and deleted with its session. The same
+  //    call applies that ceiling to what the notice carries. `retained: false`:
+  //    a timed-out subagent is never offered for reuse. Skipped without a
+  //    client, like the notice below.
   //
   //    The same read also refreshes what the subagent was last seen doing. The
   //    entry's `lastActivity` is otherwise only restamped on the LLM-turn path
@@ -432,15 +435,16 @@ export async function timeoutSubagent(entry, limit, silentMs) {
   //    last thing the subagent did before it stopped. Costs nothing: the
   //    snapshot is already being fetched and already carries the field.
   let rescued = ""
-  // Raised when the rescued text had to be cut and the overflow file could not
-  // be written: this session is then the only copy of the rest, and the
-  // teardown below holds it instead of deleting it — the same rule the idle and
-  // error paths follow.
+  // Raised where the state could NOT be secured to a file: the write failed, or
+  // the session could not be read one last time. This session is then the only
+  // remaining copy of the run, so the teardown below holds it instead of
+  // deleting it, and the notice says which of the two it is.
   let hold = false
+  let holdReason = "unfiled"
   if (watchdogClient) {
-    const { result: lastText, lastActivity } = await fetchSnapshot(watchdogClient, sessionID)
-    if (lastActivity) entry.lastActivity = lastActivity
-    const capped = capReplyForAgent(lastText, {
+    const snapshot = await fetchSnapshot(watchdogClient, sessionID)
+    if (snapshot.lastActivity) entry.lastActivity = snapshot.lastActivity
+    const secured = secureSubagentState(snapshot, {
       handle,
       agent,
       sessionID,
@@ -449,8 +453,9 @@ export async function timeoutSubagent(entry, limit, silentMs) {
       directory: entry.directory,
       retained: false,
     })
-    rescued = capped.text
-    hold = Boolean(capped.error)
+    rescued = secured.text
+    hold = !secured.secured
+    holdReason = secured.holdReason ?? "unfiled"
   }
   const lastSeen = lastSeenPhrase(entry)
   // 3. Wake the parent with a timeout notice + free the slot — same teardown
@@ -484,7 +489,7 @@ export async function timeoutSubagent(entry, limit, silentMs) {
         (lastSeen ? `; last seen: ${lastSeen}` : ""),
     },
     notice: watchdogClient
-      ? timeoutNotice(entry, limit, silentMs, rescued, openQuestion, hold)
+      ? timeoutNotice(entry, limit, silentMs, rescued, openQuestion, hold, holdReason)
       : null,
     markAborted: true,
     hold,

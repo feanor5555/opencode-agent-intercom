@@ -20,6 +20,13 @@
 // subagent whose entry carries no absolute directory. Teardown is subordinate
 // to this: a reply that could not be filed anywhere holds its session open
 // instead of deleting the only remaining copy (`hold` in src/teardown.js).
+//
+// The same file is also the handover of an ending nobody planned. A subagent
+// torn down mid-work — aborted, errored, reaped by the watchdog — has its
+// rescued reply written here whatever its size (`secure` in capReplyForAgent),
+// because the wake notice carrying it can be lost with the process while the
+// session that held the work is already deleted. Only a reply that reached a
+// file lets that session go.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -27,6 +34,7 @@ import path from "node:path"
 import { cacheDir, log, errMsg } from "./log.js"
 import { estimateReplyTokens, cutToTokens } from "./format.js"
 import { resultCeilingFor } from "./settings.js"
+import { snapshotOutcome } from "./client.js"
 
 // How long an overflow file is kept. Once the subagent's session is deleted
 // this file is the ONLY copy of the cut text, so nothing removes it on the wake
@@ -102,6 +110,12 @@ export function overflowTarget({ directory, handle, sessionID, runs }) {
 // big the whole reply was and where it was cut. Everything after the `---`
 // line is the reply verbatim, byte for byte, so a subagent reading this file
 // gets the text and not a rendering of it.
+//
+// `cut` says whether the notice really is missing something. A file written to
+// SECURE an ending (see `secure` in capReplyForAgent) usually carries a reply
+// that reached the orchestrator whole, and a header claiming a cut that never
+// happened would send its reader looking for text that is already in front of
+// them.
 export function writeOverflow({
   handle,
   agent,
@@ -112,17 +126,21 @@ export function writeOverflow({
   text,
   estimate,
   ceiling,
+  cut = true,
   finishedAt,
 }) {
   const full = text == null ? "" : String(text)
   const size = Number.isFinite(estimate) ? estimate : estimateReplyTokens(full)
   const { file, inProject } = overflowTarget({ directory, handle, sessionID, runs })
+  const sizeLine = cut
+    ? `size: ~${size} tokens (estimated), cut to ${ceiling} in the orchestrator's notice\n`
+    : `size: ~${size} tokens (estimated), delivered whole in the orchestrator's notice\n`
   const header =
     `# subagent result — ${handle} (${agent})\n` +
     `session: ${sessionID}\n` +
     `finished: ${finishedAt ?? new Date().toISOString()}\n` +
     (taskId ? `task: ${taskId}\n` : "") +
-    `size: ~${size} tokens (estimated), cut to ${ceiling} in the orchestrator's notice\n` +
+    sizeLine +
     `\n---\n\n`
   try {
     // The project's `work/` may not exist yet; the cache dir has its own
@@ -184,30 +202,62 @@ function unfiledMarker({ ceiling, omitted, error, sessionID }) {
 
 // The whole ceiling, applied to one subagent's final reply at the point where
 // it crosses into another agent's context. Returns
-// `{ text, path, error, cut }`:
-//   text  — what the notice carries: the reply whole, or its kept prefix with
-//           the marker appended,
-//   path  — the overflow file, where one was written,
-//   error — why it was not, where the write failed,
-//   cut   — whether anything was cut at all.
+// `{ text, path, error, cut, secured, holdReason }`:
+//   text       — what the notice carries: the reply whole, or its kept prefix
+//                with the marker appended,
+//   path       — the result file, where one was written,
+//   error      — why it was not, where the write failed,
+//   cut        — whether anything was cut at all,
+//   secured    — whether the subagent's state now survives this process. It is
+//                what every ending path reads to decide whether the session may
+//                be deleted: false means the session is the only remaining copy
+//                and is HELD instead (`hold`, src/teardown.js),
+//   holdReason — why it is not secured: "unfiled", the file write failed. Null
+//                where it is secured. The second reason a mid-work ending can
+//                fail to secure a session — "unreadable", the session could not
+//                be read at all — is decided a level up, in
+//                secureSubagentState, which is the only thing that knows a
+//                fetch failed. The wake notice says which of the two it is.
 //
 // The ceiling is resolved from the PRODUCING agent's type on every call
 // (resultCeilingFor), never from a value frozen on a registry entry, and `0`
-// for that type means the reply passes whole with no file and no marker.
+// for that type means the reply passes whole with no cut and no marker.
 //
-// meta: { handle, agent, sessionID, taskId, runs, directory, retained,
+// meta: { handle, agent, sessionID, taskId, runs, directory, retained, secure,
 // finishedAt }. `retained` is whether that subagent's session is being HELD,
 // which is the only thing that changes the marker's last sentence.
 // `directory` is the subagent's own project directory and decides where the
-// overflow file lands (overflowTarget); an `error` coming back means nothing
-// was filed, and the caller holds the session open for it.
+// result file lands (overflowTarget).
+//
+// `secure` is what the ending paths that tear a subagent down MID-WORK pass —
+// the abort/error path and the watchdog reap. There the file is not the
+// overflow behind a cut: it is the handover itself. A rescued reply that
+// happens to fit the ceiling used to be filed nowhere and its session deleted
+// underneath it, so an aborted subagent's work left the store entirely. With
+// `secure` the reply is written whatever its size, the notice keeps the
+// wording it has (nothing was cut, so nothing is marked), and only a reply
+// that reached a file lets the session go.
 export function capReplyForAgent(text, meta = {}) {
   const full = text == null ? "" : String(text)
   const ceiling = resultCeilingFor(meta.agent)
-  if (full === "" || !(ceiling > 0)) return { text: full, path: null, error: null, cut: false }
+  const secure = Boolean(meta.secure)
 
-  const { kept, omittedTokens } = cutToTokens(full, ceiling)
-  if (omittedTokens === 0) return { text: full, path: null, error: null, cut: false }
+  // The session answered with no text of its own: a run that produced nothing
+  // it said, only steps it took. There is nothing to file and nothing to lose,
+  // so this counts as secured on a mid-work ending too — the session may go.
+  // The case that looks the same from here and is NOT this one, a session that
+  // could not be READ, never reaches this function: secureSubagentState holds
+  // it before the ceiling is ever applied.
+  if (full === "") {
+    return { text: full, path: null, error: null, cut: false, secured: true, holdReason: null }
+  }
+
+  const { kept, omittedTokens } =
+    ceiling > 0 ? cutToTokens(full, ceiling) : { kept: full, omittedTokens: 0 }
+  const cut = omittedTokens > 0
+  if (!cut && !secure) {
+    return { text: full, path: null, error: null, cut: false, secured: true, holdReason: null }
+  }
 
   const { path: file, error, inProject } = writeOverflow({
     handle: meta.handle,
@@ -219,8 +269,18 @@ export function capReplyForAgent(text, meta = {}) {
     text: full,
     estimate: estimateReplyTokens(full),
     ceiling,
+    cut,
     finishedAt: meta.finishedAt,
   })
+  const secured = Boolean(file)
+  const holdReason = secured ? null : "unfiled"
+
+  // Nothing was cut, so the notice carries the reply exactly as it did before
+  // this file existed. The file is the copy that outlives the process, not
+  // something the reader has to be sent to.
+  if (!cut) {
+    return { text: full, path: file ?? null, error: error ?? null, cut: false, secured, holdReason }
+  }
 
   const marker = file
     ? filedMarker({
@@ -233,7 +293,51 @@ export function capReplyForAgent(text, meta = {}) {
       })
     : unfiledMarker({ ceiling, omitted: omittedTokens, error, sessionID: meta.sessionID })
 
-  return { text: kept + marker, path: file ?? null, error: error ?? null, cut: true }
+  return { text: kept + marker, path: file ?? null, error: error ?? null, cut: true, secured, holdReason }
+}
+
+// The rule every ending that tears a subagent down MID-WORK follows, in one
+// place: the abort/error event (src/hooks.js), the inactivity reap
+// (src/watchdog.js), the `abort` tool (src/tools.js), the child-first teardown
+// (endLiveChildrenOf, src/teardown.js) and the unsettled wind-down child
+// (src/handoffwiring.js). Takes the LAST read of that session and returns the
+// same shape capReplyForAgent does, with `secured` as the decision the caller
+// acts on: delete the session only where it is true.
+//
+// Three cases, from the one read, and the middle one is why this wrapper
+// exists at all:
+//   the read failed      — nothing is established about the session
+//                          (snapshotOutcome "unavailable": a timeout, a
+//                          transport error, a 5xx). It may hold a full run or
+//                          nothing at all, and the way to tell them apart is
+//                          gone the moment the session is. NOT secured,
+//                          holdReason "unreadable".
+//   the read succeeded   — the result text is written to the session's result
+//   with text              file whatever its size, and the session may go
+//                          where that write took. Secured unless the write
+//                          itself failed, which is holdReason "unfiled".
+//   the read succeeded   — nothing to file: the run said nothing. Secured, and
+//   with no text           the session goes as it always did.
+//
+// A session the read reports GONE (404, or an empty message list) is the last
+// case: there is nothing left to hold.
+export function secureSubagentState(snapshot, meta = {}) {
+  if (snapshotOutcome(snapshot) === "unavailable") {
+    log("subagent state not secured: its session could not be read", {
+      handle: meta.handle,
+      sessionID: meta.sessionID,
+    })
+    return { text: "", path: null, error: null, cut: false, secured: false, holdReason: "unreadable" }
+  }
+  const result = capReplyForAgent(snapshot?.result, { ...meta, secure: true })
+  log("subagent state secured", {
+    handle: meta.handle,
+    sessionID: meta.sessionID,
+    file: result.path,
+    secured: result.secured,
+    holdReason: result.holdReason,
+  })
+  return result
 }
 
 // One pass over the results dir, dropping every file whose mtime is older than

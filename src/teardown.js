@@ -25,7 +25,9 @@ import {
   abortSession,
   forgetSessionDirectory,
   updateSessionTitle,
+  fetchSnapshot,
 } from "./client.js"
+import { secureSubagentState } from "./resultfile.js"
 import { getSettings, retentionOffered } from "./settings.js"
 import { settleChildWaiter, detachedParentOf, liveChildSessionIDs } from "./childwait.js"
 import { settleAsk } from "./agentmsg.js"
@@ -232,11 +234,24 @@ export async function postParentNotice(
 // own children first. No parent notice: the session that would be woken is the
 // one being torn down.
 //
+// A child is torn down MID-WORK — it was running when its parent ended — so it
+// falls under the same securing rule as every other mid-work ending: its state
+// is read one last time and written to its own result file before its session
+// goes (secureSubagentState, src/resultfile.js), and where that fails the child
+// is HELD instead of deleted.
+//
+// Holding a child is not enough on its own here, and that is what `unsecured`
+// is for. opencode's DELETE cascades recursively over child sessions, so a held
+// child still dies when its parent is deleted a moment later. Every child whose
+// state could not be secured is therefore pushed onto the caller's `unsecured`
+// array, and the caller holds ITSELF as well — teardownSubagent does exactly
+// that. A caller that passes no array gets the child's hold and nothing more.
+//
 // `seen` bounds the mutual recursion. The delegation design bounds the depth
 // structurally — the target table in agents.js admits no cycle and no chain
 // longer than caller → researcher → grounder — but a parentID cycle from a
 // reparent race must not spin here, and the cost of the guard is one Set.
-export async function endLiveChildrenOf(client, sessionID, { label = "", seen } = {}) {
+export async function endLiveChildrenOf(client, sessionID, { label = "", seen, unsecured } = {}) {
   const children = liveChildSessionIDs(sessionID)
   if (children.length === 0) return []
   const tag = label ? `${label}: ` : ""
@@ -256,6 +271,25 @@ export async function endLiveChildrenOf(client, sessionID, { label = "", seen } 
     } catch (err) {
       log(`${tag}child abort failed`, { childSessionID, err: errMsg(err) })
     }
+    // After the abort, so the step that was streaming has stopped and its parts
+    // stand still, and before the teardown that deletes the session.
+    const recovered = secureSubagentState(await fetchSnapshot(client, childSessionID), {
+      handle: child?.handle,
+      agent: child?.agent,
+      sessionID: childSessionID,
+      taskId: child?.taskId,
+      runs: child?.runs ?? 1,
+      directory: child?.directory,
+      retained: false,
+    })
+    if (!recovered.secured) {
+      unsecured?.push(childSessionID)
+      log(`${tag}child state could not be filed; holding it and its parent`, {
+        childSessionID,
+        parentSessionID: sessionID,
+        reason: recovered.holdReason,
+      })
+    }
     await teardownSubagent(
       client,
       {
@@ -270,6 +304,7 @@ export async function endLiveChildrenOf(client, sessionID, { label = "", seen } 
           detail: "its parent was torn down",
         },
         markAborted: true,
+        hold: !recovered.secured,
         label: label || "child-first",
         seen: visited,
       },
@@ -311,12 +346,14 @@ export async function endLiveChildrenOf(client, sessionID, { label = "", seen } 
 // `hold` is the other reason a session is not deleted, and it is not a
 // retention: the subagent is finished, its entry goes out of the registry and
 // its slot is freed exactly as on every ending path, but the opencode session
-// itself is left standing. It is passed when the reply crossing into the
-// orchestrator's context had to be cut and the overflow file could NOT be
-// written (capReplyForAgent, src/resultfile.js): the session is then the only
-// remaining copy of what the subagent produced, and deleting it would destroy
-// the state this plugin exists to hand over. Tearing a subagent down quickly is
-// worth less than the handover, so the session waits — the notice tells the
+// itself is left standing. It is passed when the subagent's state did not reach
+// a file — the write failed, or on a mid-work ending the session could not be
+// read at all (capReplyForAgent / secureSubagentState, src/resultfile.js): the
+// session is then the only remaining copy of what the subagent produced, and
+// deleting it would destroy the state this plugin exists to hand over. This
+// function raises it on its own account too, for a child of this session whose
+// state could not be secured (see endLiveChildrenOf). Tearing a subagent down
+// quickly is worth less than the handover, so the session waits — the notice tells the
 // orchestrator it is being held and why, and the orphan sweep at the next
 // plugin load is what eventually collects it. `retain` takes precedence where
 // both are set: it keeps the entry as well, which is strictly more.
@@ -456,8 +493,13 @@ export async function teardownSubagent(
     // Child-first: the delete below cascades recursively over child sessions,
     // so anything this session is still waiting on has to be ended before it
     // fires. A no-op for a leaf subagent, which is every subagent today.
+    //
+    // A child whose own state could not be secured comes back in
+    // `unsecuredChildren`, and holding that child is worth nothing unless this
+    // session is held too: the delete below would cascade straight onto it.
+    const unsecuredChildren = []
     try {
-      await endLiveChildrenOf(client, sessionID, { label, seen })
+      await endLiveChildrenOf(client, sessionID, { label, seen, unsecured: unsecuredChildren })
     } catch (err) {
       log(`${tag}ending live children failed`, { handle, sessionID, err: errMsg(err) })
     }
@@ -467,13 +509,17 @@ export async function teardownSubagent(
         log(`${tag}session quiescence timed out; deleting`, { handle, sessionID })
       }
     }
-    if (hold) {
+    if (hold || unsecuredChildren.length > 0) {
       // The state could not be secured to a file, so the session that holds it
       // stays. Everything above has already run — the notice is out, the entry
       // is gone, the slot is free — and only the delete is skipped. The
       // directory cache entry goes with the entry, like on every other ending:
       // nothing looks a held-for-state session up again.
-      log(`${tag}held opencode session: its result could not be filed`, { handle, sessionID })
+      log(`${tag}held opencode session: its result could not be filed`, {
+        handle,
+        sessionID,
+        forChildren: unsecuredChildren.length > 0 ? unsecuredChildren : undefined,
+      })
       forgetSessionDirectory(sessionID)
       return
     }

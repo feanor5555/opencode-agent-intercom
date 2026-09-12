@@ -52,6 +52,7 @@ import {
 } from "./registry.js"
 import { registerChildWaiter, settleChildWaiter } from "./childwait.js"
 import { settleAsk } from "./agentmsg.js"
+import { secureSubagentState } from "./resultfile.js"
 import {
   endLiveChildrenOf,
   waitForSessionQuiescence,
@@ -1330,6 +1331,11 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     const quiescence = waitForSessionQuiescence(entry.sessionID)
     aborted.add(entry.sessionID)
     entry.status = "aborted"
+    // What the securing step below decides, read again by the tool's own answer
+    // after the teardown block: whether the session was kept, and the file its
+    // state reached.
+    let held = false
+    let resultFile = null
     // This handler ends a subagent WITHOUT going through teardownSubagent, so
     // it settles the child-waiter itself; otherwise a session blocked on this
     // subagent would stay blocked until the waiter's own ceiling fired. No-op
@@ -1376,8 +1382,17 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       // delete: the session blocked on the subagent being aborted is freed
       // first and does not wait out the children's teardown, while the aborted
       // subagent's own children are gone before its rows are.
+      //
+      // A child whose own state could not be secured comes back in
+      // `unsecuredChildren`, and this session is then held with it: the delete
+      // below cascades recursively over child sessions, so a held child that
+      // hangs under a deleted parent is taken all the same.
+      const unsecuredChildren = []
       try {
-        await endLiveChildrenOf(client, entry.sessionID, { label: "abort" })
+        await endLiveChildrenOf(client, entry.sessionID, {
+          label: "abort",
+          unsecured: unsecuredChildren,
+        })
       } catch (err) {
         log("abort: ending live children failed", {
           handle: entry.handle,
@@ -1392,24 +1407,65 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
           sessionID: entry.sessionID,
         })
       }
-      // The caller of this abort is the session the aborted subagent hung
-      // under, so a user watching it is carried there rather than to the start
-      // page — the same targets every other ending path escapes to.
-      const ok = await deleteSession(client, entry.sessionID, {
-        parentID: entry.parentID,
-        fallbackID: rootPrimaryFor(entry.parentID),
-        cause: "abort",
+      // The securing rule, on the path the orchestrator itself takes: an abort
+      // stops a subagent in the MIDDLE of its work, and the delete below is the
+      // end of the only session that held it. So the session is read one last
+      // time — after the quiescence wait above, so the part it was streaming
+      // has been flushed — and what it produced is written to its result file
+      // whatever its size (secureSubagentState, src/resultfile.js). The session
+      // is deleted only where that write took; where it did not, or where the
+      // read itself failed, the session is HELD instead and the tool says so.
+      //
+      // This is the path the loss was measured on: an aborted coder's finished
+      // work was filed nowhere and its session deleted under it.
+      const recovered = secureSubagentState(await fetchSnapshot(client, entry.sessionID), {
+        handle: entry.handle,
+        agent: entry.agent,
+        sessionID: entry.sessionID,
+        taskId: entry.taskId,
+        runs: entry.runs ?? 1,
+        directory: entry.directory,
+        retained: false,
       })
-      if (ok) log("deleted opencode session (aborted)", { handle: entry.handle, sessionID: entry.sessionID })
+      held = !recovered.secured || unsecuredChildren.length > 0
+      resultFile = recovered.path
+      if (held) {
+        log("abort: holding the opencode session; its state could not be filed", {
+          handle: entry.handle,
+          sessionID: entry.sessionID,
+          reason: recovered.holdReason,
+        })
+      } else {
+        // The caller of this abort is the session the aborted subagent hung
+        // under, so a user watching it is carried there rather than to the start
+        // page — the same targets every other ending path escapes to.
+        const ok = await deleteSession(client, entry.sessionID, {
+          parentID: entry.parentID,
+          fallbackID: rootPrimaryFor(entry.parentID),
+          cause: "abort",
+        })
+        if (ok) log("deleted opencode session (aborted)", { handle: entry.handle, sessionID: entry.sessionID })
+      }
       forgetSessionDirectory(entry.sessionID)
     } finally {
       aborted.delete(entry.sessionID)
     }
 
+    // What the orchestrator is told about the work it just stopped: where that
+    // work now stands, and — where nothing could be filed — that the session
+    // is still there to be read.
+    const stateLine = held
+      ? ` Its state could NOT be filed, so its session ${entry.sessionID} is being HELD rather ` +
+        `than deleted: it is the only remaining copy of what it did — open it in the TUI to read it.`
+      : resultFile
+        ? ` What it had produced up to the abort is filed at ${resultFile} — read that before you ` +
+          `re-dispatch, and do not have the same ground covered twice.`
+        : ""
     return {
       output:
         `Abort signalled for "${entry.handle}"${confirmed ? "" : " (abort call did not confirm)"}. ` +
-        "Further tool calls from it will be denied. You can dispatch a fresh subagent now.",
+        "Further tool calls from it will be denied. You can dispatch a fresh subagent now." +
+        stateLine,
     }
   }
 

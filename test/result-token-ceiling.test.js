@@ -293,7 +293,16 @@ test("a reply under the ceiling passes verbatim and writes no file", () => {
 
   const capped = capReplyForAgent(reply, META)
 
-  assert.deepEqual(capped, { text: reply, path: null, error: null, cut: false })
+  // `secured` rides on every return: an ordinary crossing that needed no file
+  // has lost nothing, so the session it came from may go.
+  assert.deepEqual(capped, {
+    text: reply,
+    path: null,
+    error: null,
+    cut: false,
+    secured: true,
+    holdReason: null,
+  })
   assert.equal(existsSync(join(home, ".cache", "opencode-agent-intercom", "results")), false)
 })
 
@@ -324,7 +333,14 @@ test("resultTokens 0 for a type: no cut, no file, no marker", () => {
 
   const capped = capReplyForAgent(reply, META)
 
-  assert.deepEqual(capped, { text: reply, path: null, error: null, cut: false })
+  assert.deepEqual(capped, {
+    text: reply,
+    path: null,
+    error: null,
+    cut: false,
+    secured: true,
+    holdReason: null,
+  })
   assert.equal(existsSync(join(home, ".cache", "opencode-agent-intercom", "results")), false)
 })
 

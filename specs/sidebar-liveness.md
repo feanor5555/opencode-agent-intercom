@@ -268,14 +268,14 @@ nobody's child again and no spawn names it as a parent.
 ## 6. Teardown and the bootstrap sweep
 
 The plugin deletes the opencode session at every ending the plugin controls
-(`teardownSubagent`, `src/teardown.js:256`): the normal one-shot, an abort, an
+(`teardownSubagent`, `src/teardown.js:416`): the normal one-shot, an abort, an
 error, a timeout, a retention reap, a capacity eviction, a handoff drop, an
 endless freeze. That is what makes the existence rule exact — there is no
 ending the plugin knows about that does not pass through `teardownSubagent`.
 
 If the plugin process dies mid-run, its subagent rows stay until the bootstrap
 sweep clears the leftover sessions. `sweepOrphanedSubagentSessions`
-(`src/teardown.js:507`) runs once at plugin load (`src/index.js:100`), on the
+(`src/teardown.js:896`) runs once at plugin load (`src/index.js:146`), on the
 shipped default too — it is not gated on `retentionOffered()`. It deletes a
 session only when ALL of the following hold:
 
@@ -287,13 +287,28 @@ session only when ALL of the following hold:
    entry;
 5. it has been idle for longer than `ORPHAN_SWEEP_TTL_FACTOR *
    retainedSubagentTtlMs`, and in no case less than `ORPHAN_SWEEP_MIN_AGE_MS =
-   600000` (ten minutes).
+   600000` (ten minutes) or `ORPHAN_SWEEP_WATCHDOG_FACTOR = 8` times the wider
+   of `maxSubagentAgeMs` and `maxSubagentToolCallMs`.
 
 A running subagent is reaped by the inactivity watchdog at 90 s and a retained
-one at its TTL, so nothing alive is ever this old. The ten-minute floor is the
-whole bound wherever the configured retention window is shorter than half of
-it, and it clears the watchdog reap by a wide margin. Sessions that cannot be
-attributed with certainty are left standing, whatever it costs in leaked rows.
+one at its TTL, so nothing alive is ever this old. The ten-minute floor and
+the watchdog-derived bound keep the sweep safe when the configured retention
+window is short or one of the watchdog windows is widened. The sweep is
+unavailable when EITHER watchdog window is switched off (`<= 0`); without it
+there is no finite age at which an untracked foreign session can be known to
+be dead. Sessions that cannot be attributed with certainty are left standing,
+whatever it costs in leaked rows.
+
+A candidate is then SECURED before it is deleted. `secureSubagentState`
+(`src/resultfile.js`) reads the session once and writes what it holds to a
+result file with `ORPHAN_RESULT_HANDLE = "orphan"` and `ORPHAN_RESULT_AGENT =
+"unknown"` (`src/teardown.js:828-829`); the directory comes from the session
+record, with the sweep's `directory` argument and the cache dir as fallbacks
+(`sweptSessionDirectory`, `src/teardown.js:839`). A session whose state did
+not reach a file is held for another load, up to `ORPHAN_SWEEP_HOLD_GRACE_MS =
+RESULT_FILE_TTL_MS` past the age bound above (`src/teardown.js:820`); past
+that it is logged with its `unfiled:` reason and deleted anyway, because a
+hold nothing can ever release is the leak again.
 
 The "publishRetentionState is gated on retentionOffered" guard is gone from
 the sweep's precondition — that gate names a writer-side concern (whether this

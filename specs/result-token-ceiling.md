@@ -510,5 +510,12 @@ can be handed out on its own.
     marker names the cache location with the "outside the project" phrasing.
 12. A subagent whose session is HELD because the overflow file could not be
     written is not addressable by `reuse` — the entry has been removed and
-    only the opencode session remains. The orphan sweep at the next plugin
-    load reaps it.
+    only the opencode session remains. The orphan sweep
+    (`sweepOrphanedSubagentSessions`, `src/teardown.js`) secures its state
+    first through `secureSubagentState` (`src/resultfile.js`) and deletes
+    only a session whose state reached a file, or one past
+    `ORPHAN_SWEEP_HOLD_GRACE_MS` (a grace on top of the sweep's own minimum
+    age), which is then logged with its `unfiled:` reason. The result file's
+    directory comes from the session record, with the sweep's `directory`
+    argument and the cache dir as fallbacks; handle and agent read
+    `ORPHAN_RESULT_HANDLE = "orphan"` / `ORPHAN_RESULT_AGENT = "unknown"`.

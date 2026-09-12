@@ -699,7 +699,10 @@ exposes every runtime knob:
   to relay the substance itself. The part route the switch relies on is
   annotated experimental in opencode; a server that does not answer it, or
   refuses the PATCH, costs the retroactive rewrite on that flip and the
-  notices stay exactly as they were posted.
+  notices stay exactly as they were posted. Each parent notice is durable
+  through `src/noticejournal.js`: it is journalled before the post, confirmed
+  by a delivery id read back from the session tail, replayed at the next
+  plugin load, and reported as `notice delivery LOST` where it never lands.
 - **Per-agent LLM sampling** — temperature, top-p/top-k, max-tokens, plus
   llama.cpp keys (`min_p`, `repeat_penalty`, `chat_template_kwargs`) routed
   through `output.options`. Writes `~/.config/opencode/llm-params.json`.
@@ -1044,7 +1047,7 @@ removing every "do it yourself" tool from the primary is the enforcement lever.
   survive — the plugin's write wins, or the row would say something that is
   not in effect.
 - **Solo-maintainer surface area.** `pw` daemon, `gen` CLI, Exa SSE parser,
-  ctags subprocess, four opencode hooks. 2189 unit tests, no CI against real
+  ctags subprocess, four opencode hooks. 2291 unit tests, no CI against real
   opencode. Bugs are addressed at hobby-project pace.
 
 ## Development

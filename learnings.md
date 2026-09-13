@@ -617,3 +617,36 @@ What does NOT isolate today: the TUI build artefact. Two `run-all.sh` on one
 checkout still race `tui/dist/tui.js`. The in-place `npm run build` is the
 contract — there is no lock around it in the harness — so an outer lock or a
 separate checkout per suite is what serialises it.
+
+## Distinguishing the three abort callers in `~/.cache/opencode-agent-intercom/debug.log`
+
+When a subagent session ends with `subagent llm error … MessageAbortedError:
+Aborted` followed by `session.error: removed subagent` and
+`session.error: deleted opencode session`, three callers in the live build can
+have produced that pair. The diagnostic line one of them now writes settles
+which fired.
+
+- **Panel abort** — `abortSubagent` in `tui/src/tui.tsx:1428-1474` is the
+  single convergence point for the three panel gestures (row cross at
+  `tui/src/tui.tsx:2159`, the `x`/`d` keys handled by the focus-aware panel,
+  and the `agent-intercom.abort-selected` command palette entry at
+  `tui/src/tui.tsx:137`). It writes
+  `debugLog("tui abort issued", { sessionID, handle, agent, status, trigger })`
+  at `tui/src/tui.tsx:1445-1451` BEFORE the `api.client.session.abort` call
+  at `tui/src/tui.tsx:1453` goes out, then on a failed request emits
+  `tui abort request failed` with the same `trigger` field. The `trigger`
+  value names the gesture: `"row"`, `"key"`, or `"command"`. The line lands
+  immediately above the `subagent llm error` entry.
+- **Orchestrator abort tool** — `abortHandler` in `src/tools.js:1317-1360`
+  (registered at `src/tools.js:1702`) calls `signalAbort` →
+  `abortSession` (`src/tools.js:340-347`), then logs `log("aborted", {
+  handle, confirmed })` at `src/tools.js:1360` BEFORE the tool returns to
+  the model. The orchestrator wrote `"aborted"` iff it issued the abort.
+- **Watchdog** — `src/watchdog.js:458-463` calls
+  `abortSession(watchdogClient, sessionID)` and writes `watchdog:` lines
+  (`watchdog: removed subagent`, `watchdog: session quiescence timed out;
+  deleting`, `watchdog: deleted opencode session`) at the same points as the
+  event-hook teardown. Both watchdog windows (`maxSubagentAgeMs`,
+  `maxSubagentToolCallMs`) step to `0` in the sidebar — at `0` the row
+  renders `off` and the watchdog is disarmed; any abort attributed to the
+  watchdog while both are `0` is excluded.

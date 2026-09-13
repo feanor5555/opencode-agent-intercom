@@ -314,6 +314,120 @@ e2e_audit_recorded "11-endless" "${dir}/report.txt" && echo AUDIT_OK || echo "AU
   rmSync(dir, { recursive: true, force: true })
 })
 
+// ---------- the capture manifest is keyed on the driver invocation ---------
+
+// run-all.sh sequences eight run-task.sh invocations and four further drivers
+// against one out directory. Each of them audits over the captures IT recorded,
+// so the list one appends to may not be the list the next one reads: a capture
+// of an earlier driver — taken under another E2E_MODEL in an out directory that
+// is never emptied — would otherwise fail the later driver's audit.
+test("each driver invocation audits its own captures and no earlier invocation's", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
+  // What an earlier driver of the same run left behind, on the model it pinned.
+  capture(dir, "first.json", [["xai", "grok-4.6"]])
+  capture(dir, "second.json", [["openai", "gpt-5.6-luna"]])
+
+  const child = join(dir, "child.sh")
+  writeFileSync(
+    child,
+    `. "${LIB}"
+e2e_resolve_model
+echo "MANIFEST_$TAG=$E2E_AUDIT_MANIFEST"
+e2e_audit_record "$CAP"
+e2e_audit_recorded "$TAG" /dev/null > /dev/null && echo "OK_$TAG" || echo "FAILED_$TAG=$?"
+echo "LINE_$TAG=$E2E_AUDIT_LINE"
+`,
+  )
+  // The sequencing driver sources the library too, and exports what it holds:
+  // neither its own manifest nor its pid may reach the drivers it invokes.
+  const parent = join(dir, "parent.sh")
+  writeFileSync(
+    parent,
+    `. "${LIB}"
+export E2E_AUDIT_MANIFEST E2E_AUDIT_OWNER
+echo "MANIFEST_parent=$E2E_AUDIT_MANIFEST"
+TAG=first CAP="${dir}/first.json" bash "${child}"
+TAG=second CAP="${dir}/second.json" bash "${child}"
+`,
+  )
+  const r = spawnSync("bash", [parent], { encoding: "utf8", env: { ...process.env, TMPDIR: dir } })
+
+  const paths = [...r.stdout.matchAll(/^MANIFEST_\w+=(.+)$/gm)].map((m) => m[1])
+  assert.equal(paths.length, 3, r.stdout)
+  assert.equal(new Set(paths).size, 3, `three invocations, ${new Set(paths).size} manifest(s): ${paths.join(" ")}`)
+
+  // The first driver ran on a foreign model and fails on its own capture.
+  assert.match(r.stdout, /FAILED_first=1/, r.stdout + r.stderr)
+  // The second sees only what it recorded itself — not the first driver's turn.
+  assert.match(r.stdout, /OK_second/, r.stdout + r.stderr)
+  assert.match(r.stdout, /LINE_second=.*1 assistant message\(s\) over 1 capture\(s\)/)
+  assert.doesNotMatch(/LINE_second=.*/.exec(r.stdout)[0], /grok/)
+
+  rmSync(dir, { recursive: true, force: true })
+})
+
+// message-task.sh and ask-task.sh reach the library through lib/midrun-common.sh;
+// a driver that also sources it directly sources it twice in the one process.
+test("sourcing the library again in the same process keeps the captures already recorded", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
+  capture(dir, "early.json", [["openai", "gpt-5.6-luna"]])
+  capture(dir, "late.json", [["openai", "gpt-5.6-luna"]])
+  const script = join(dir, "run.sh")
+  writeFileSync(
+    script,
+    `. "${LIB}"
+e2e_resolve_model
+FIRST="$E2E_AUDIT_MANIFEST"
+e2e_audit_record "${dir}/early.json"
+# Every other piece of state the library holds is set afresh by a second
+# source — the pin included, which is why the driver resolves it after them.
+. "${LIB}"
+e2e_resolve_model
+[ "$E2E_AUDIT_MANIFEST" = "$FIRST" ] && echo SAME_MANIFEST || echo REKEYED
+e2e_audit_record "${dir}/late.json"
+e2e_audit_recorded "13-message" /dev/null > /dev/null && echo AUDIT_OK || echo "AUDIT_FAILED=$?"
+echo "LINE=$E2E_AUDIT_LINE"
+`,
+  )
+  const r = spawnSync("bash", [script], { encoding: "utf8", env: { ...process.env, TMPDIR: dir } })
+  assert.match(r.stdout, /SAME_MANIFEST/, r.stdout + r.stderr)
+  assert.match(r.stdout, /AUDIT_OK/, r.stdout + r.stderr)
+  assert.match(r.stdout, /2 assistant message\(s\) over 2 capture\(s\)/)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+// TMPDIR survives a run. A manifest an earlier run left there — including one
+// under the pid-keyed name runs before this keying wrote — must never be read:
+// it names captures of that run, on the model that run pinned.
+test("a manifest an earlier run left in TMPDIR is not the one this invocation reads", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
+  capture(dir, "stale.json", [["xai", "grok-4.6"]])
+  capture(dir, "mine.json", [["openai", "gpt-5.6-luna"]])
+  const script = join(dir, "run.sh")
+  writeFileSync(
+    script,
+    `STALE="$TMPDIR/e2e-audit-captures.$$.list"
+printf '%s\\n' "${dir}/stale.json" > "$STALE"
+chmod 444 "$STALE"
+. "${LIB}"
+e2e_resolve_model
+echo "MANIFEST=$E2E_AUDIT_MANIFEST"
+e2e_audit_record "${dir}/mine.json"
+e2e_audit_recorded "02-planner" /dev/null > /dev/null && echo AUDIT_OK || echo "AUDIT_FAILED=$?"
+echo "LINE=$E2E_AUDIT_LINE"
+printf 'STALE_INTACT=%s\\n' "$(cat "$STALE")"
+`,
+  )
+  const r = spawnSync("bash", [script], { encoding: "utf8", env: { ...process.env, TMPDIR: dir } })
+  const manifest = /^MANIFEST=(.+)$/m.exec(r.stdout)[1]
+  assert.doesNotMatch(manifest, /\.list$/, `the invocation took the stale pid-keyed name: ${manifest}`)
+  assert.match(r.stdout, /AUDIT_OK/, r.stdout + r.stderr)
+  assert.match(r.stdout, /1 assistant message\(s\) over 1 capture\(s\)/)
+  assert.doesNotMatch(r.stdout, /grok/)
+  assert.match(r.stdout, /STALE_INTACT=.*stale\.json/)
+  rmSync(dir, { recursive: true, force: true })
+})
+
 // ---------- the drivers ----------------------------------------------------
 
 test("every driver resolves its model through the library and none carries an own default", () => {

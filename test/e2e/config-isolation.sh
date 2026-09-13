@@ -329,22 +329,37 @@ e2e_iso_remove() {
 
 # ---------- the model audit ------------------------------------------------
 
-# The captures one run is audited over.
+# The captures one driver invocation is audited over.
 #
-# The audit may only read message trees THIS run wrote. The out directory is
-# shared between drivers and between runs and is never emptied, so a glob over
-# it also matches the captures runs before this one left behind — whose turns
-# answered on whatever model those runs pinned, and which then read as foreign
-# models the present run never used. Every driver therefore records each
-# capture as it writes it and is audited over exactly that list.
+# The audit may only read message trees THIS driver invocation wrote. The out
+# directory is shared between the drivers and between runs and is never emptied,
+# so a glob over it also matches what other drivers and earlier runs left behind
+# — turns that answered on whatever model those runs pinned, and which then read
+# as foreign models the present invocation never used. Every driver therefore
+# records each capture as it writes it and is audited over exactly that list.
 #
 # The list is kept in a file rather than in a variable because several drivers
 # take a capture inside a command substitution (`FLAT=$(mr_capture …)`), whose
-# subshell cannot write the parent's variables. `$$` is the invoking shell's pid
-# in a subshell too, so parent and subshell name the same file. Sourcing this
-# library empties it: one file per driver process, holding that process's run.
-E2E_AUDIT_MANIFEST="${TMPDIR:-/tmp}/e2e-audit-captures.$$.list"
-: > "$E2E_AUDIT_MANIFEST" 2>/dev/null || :
+# subshell cannot write the parent's variables. The subshell inherits the
+# variable holding the path, so parent and subshell name the same file.
+#
+# The file is keyed on the driver invocation, not on a name another invocation
+# could arrive at: `mktemp` hands every one a fresh name of its own, so the eight
+# `run-task.sh` invocations `run-all.sh` sequences keep eight separate lists, and
+# a manifest left in TMPDIR by an earlier run carries a name this one cannot
+# produce again and is therefore never read. E2E_AUDIT_OWNER holds the pid the
+# manifest was made for: sourcing this library a second time inside the SAME
+# process keeps the list already in hand, so a capture recorded before that
+# second source survives it, while any other process — including one the two
+# variables were exported to — gets a manifest of its own.
+E2E_AUDIT_MANIFEST="${E2E_AUDIT_MANIFEST:-}"
+E2E_AUDIT_OWNER="${E2E_AUDIT_OWNER:-}"
+if [ "$E2E_AUDIT_OWNER" != "$$" ] || [ -z "$E2E_AUDIT_MANIFEST" ] || [ ! -f "$E2E_AUDIT_MANIFEST" ]; then
+  E2E_AUDIT_MANIFEST=$(mktemp "${TMPDIR:-/tmp}/e2e-audit-captures.$(basename -- "${0:-driver}" .sh).XXXXXXXX" 2>/dev/null) ||
+    E2E_AUDIT_MANIFEST="${TMPDIR:-/tmp}/e2e-audit-captures.$$-$(date +%s%N)"
+  : > "$E2E_AUDIT_MANIFEST" 2>/dev/null || :
+  E2E_AUDIT_OWNER=$$
+fi
 
 # Usage: e2e_audit_record <json_file> [json_file ...]
 #

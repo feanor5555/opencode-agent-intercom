@@ -24,8 +24,8 @@
 
 import test from "node:test"
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
-import { spawnSync } from "node:child_process"
+import { existsSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs"
+import { spawn, spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -33,15 +33,18 @@ import { fileURLToPath } from "node:url"
 import {
   PLACEHOLDER_SERVER_URL,
   clientServerAddress,
+  panelRoleFor,
   pruneTuiRoutes,
   publishTuiRoute,
   routeSessionID,
   routeWriterAlive,
   serverIdentity,
+  setTuiRoutePanel,
   setTuiRoutePath,
   setTuiRouteServer,
   setTuiRouteServerFromClient,
   tuiRouteFilePath,
+  tuiRoutePanel,
   tuiRouteServer,
 } from "../tui/src/route-file.ts"
 import { PLACEHOLDER_SERVER_URL as PLUGIN_PLACEHOLDER } from "../src/client.js"
@@ -69,6 +72,7 @@ const SELF = serverIdentity("", process.pid)
 test.beforeEach(() => {
   writeFileSync(ROUTE_FILE, "{}\n")
   setTuiRouteServer("")
+  setTuiRoutePanel("primary")
 })
 
 // ------------------------------------------------- what a route says
@@ -93,7 +97,12 @@ test("a live writer's route is kept, a dead one's is dropped, and junk with it",
     deadPid + 1000000,
   )
   assert.deepEqual(Object.keys(kept), [String(process.pid)])
-  assert.deepEqual(kept[String(process.pid)], { sessionID: CHILD, at: 5, server: null })
+  assert.deepEqual(kept[String(process.pid)], {
+    sessionID: CHILD,
+    at: 5,
+    server: null,
+    panel: null,
+  })
 })
 
 test("this process's own key is dropped before it is written again", () => {
@@ -114,7 +123,7 @@ test("a writer that is gone cannot hold a route", () => {
 test("the route is published under this process's pid, with the sample time", () => {
   assert.equal(publishTuiRoute(CHILD, 1234), true)
   assert.deepEqual(body(), {
-    [String(process.pid)]: { sessionID: CHILD, at: 1234, server: SELF },
+    [String(process.pid)]: { sessionID: CHILD, at: 1234, server: SELF, panel: "primary" },
   })
   assert.equal(tuiRouteFilePath(), ROUTE_FILE)
 })
@@ -123,7 +132,7 @@ test("a route naming no session is published as null", () => {
   publishTuiRoute(CHILD, 1)
   publishTuiRoute(null, 2)
   assert.deepEqual(body(), {
-    [String(process.pid)]: { sessionID: null, at: 2, server: SELF },
+    [String(process.pid)]: { sessionID: null, at: 2, server: SELF, panel: "primary" },
   })
 })
 
@@ -145,8 +154,14 @@ test("another live instance's entry survives this one's write", () => {
     sessionID: OTHER,
     at: 7,
     server: "url:http://127.0.0.1:4788",
+    panel: null,
   })
-  assert.deepEqual(written[String(process.pid)], { sessionID: CHILD, at: 8, server: SELF })
+  assert.deepEqual(written[String(process.pid)], {
+    sessionID: CHILD,
+    at: 8,
+    server: SELF,
+    panel: "primary",
+  })
   assert.equal(
     Object.prototype.hasOwnProperty.call(written, String(deadPid)),
     false,
@@ -158,14 +173,14 @@ test("a file nobody can parse is replaced rather than propagated", () => {
   writeFileSync(ROUTE_FILE, "{ not json")
   assert.equal(publishTuiRoute(CHILD, 3), true)
   assert.deepEqual(body(), {
-    [String(process.pid)]: { sessionID: CHILD, at: 3, server: SELF },
+    [String(process.pid)]: { sessionID: CHILD, at: 3, server: SELF, panel: "primary" },
   })
 })
 
 test("the write is atomic and leaves no temp file behind", () => {
   publishTuiRoute(CHILD, 4)
   assert.deepEqual(
-    readdirSync(DIR).filter((f) => f.endsWith(".tmp")),
+    readdirSync(DIR).filter((f) => f.endsWith(".tmp") || f.endsWith(".lock")),
     [],
   )
   assert.equal(existsSync(ROUTE_FILE), true)
@@ -233,6 +248,7 @@ test("the published server is the one that was read off the client", () => {
       sessionID: CHILD,
       at: 11,
       server: "url:http://127.0.0.1:4788",
+      panel: "primary",
     },
   })
 })
@@ -256,6 +272,142 @@ test("another writer's server survives this panel's write, and none is invented"
   )
   assert.equal(kept[String(process.pid)].server, "url:http://127.0.0.1:4788")
   assert.equal(kept[String(process.ppid)].server, null, "an entry that named none keeps none")
+  assert.equal(kept[String(process.pid)].panel, null, "and neither is a panel role")
+  assert.equal(kept[String(process.ppid)].panel, null)
+})
+
+test("a second live writer on this server makes this panel an observer", () => {
+  const server = "url:http://127.0.0.1:4788"
+  const always = () => true
+  assert.equal(panelRoleFor(server, 100, {}, always), "primary", "an empty file is the first panel")
+  assert.equal(
+    panelRoleFor(
+      server,
+      100,
+      { "200": { sessionID: CHILD, at: 1, server, panel: "primary" } },
+      always,
+    ),
+    "observer",
+  )
+  assert.equal(
+    panelRoleFor(
+      server,
+      100,
+      { "200": { sessionID: CHILD, at: 1, server, panel: "observer" } },
+      always,
+    ),
+    "primary",
+    "another observer does not occupy the primary slot",
+  )
+  assert.equal(
+    panelRoleFor(
+      server,
+      100,
+      { "200": { sessionID: CHILD, at: 1, server: "url:http://127.0.0.1:9", panel: "primary" } },
+      always,
+    ),
+    "primary",
+    "another server's primary is not this one",
+  )
+  assert.equal(
+    panelRoleFor(server, 100, { "200": { sessionID: CHILD, at: 1 } }, always),
+    "primary",
+    "an unscoped entry occupies no server",
+  )
+})
+
+test("publish decides the role from the snapshot it writes, not from a latched copy", () => {
+  setTuiRouteServer(SELF)
+  writeFileSync(
+    ROUTE_FILE,
+    JSON.stringify({
+      [String(process.ppid)]: { sessionID: OTHER, at: 1, server: SELF, panel: "primary" },
+    }) + "\n",
+  )
+  setTuiRoutePanel("primary")
+  publishTuiRoute(CHILD, 13)
+  assert.equal(body()[String(process.pid)].panel, "observer")
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(body(), String(process.ppid)),
+    true,
+    "the other writer's key is still there",
+  )
+  writeFileSync(
+    ROUTE_FILE,
+    JSON.stringify({
+      [String(process.pid)]: { sessionID: CHILD, at: 13, server: SELF, panel: "observer" },
+    }) + "\n",
+  )
+  publishTuiRoute(CHILD, 14)
+  assert.equal(body()[String(process.pid)].panel, "primary", "no live primary left, this panel owns")
+  const kept = pruneTuiRoutes(
+    { [String(process.ppid)]: { sessionID: CHILD, at: 1, server: SELF, panel: "observer" } },
+    deadPid + 1000000,
+  )
+  assert.equal(kept[String(process.ppid)].panel, "observer")
+})
+
+test("two first publishes at once keep both keys and only one primary", { timeout: 15000 }, async () => {
+  const routeModule = fileURLToPath(new URL("../tui/src/route-file.ts", import.meta.url))
+  const goPath = join(DIR, "go-race")
+  const childPath = join(DIR, "race-publish.ts")
+  try {
+    unlinkSync(goPath)
+  } catch {
+    // first run
+  }
+  writeFileSync(
+    childPath,
+    `import { writeFileSync, existsSync } from "node:fs";
+import { setTuiRoutePath, setTuiRouteServer, publishTuiRoute } from ${JSON.stringify(routeModule)};
+setTuiRoutePath(${JSON.stringify(ROUTE_FILE)});
+setTuiRouteServer("url:http://127.0.0.1:4788");
+writeFileSync(${JSON.stringify(join(DIR, "ready."))} + String(process.pid), "1");
+const go = ${JSON.stringify(goPath)};
+while (!existsSync(go)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+const ok = publishTuiRoute(process.argv[1], Date.now());
+process.stdout.write(JSON.stringify({ pid: process.pid, ok }));
+`,
+  )
+  function waitChild(child) {
+    return new Promise((resolve, reject) => {
+      let stdout = ""
+      let stderr = ""
+      child.stdout.setEncoding("utf8")
+      child.stderr.setEncoding("utf8")
+      child.stdout.on("data", (c) => {
+        stdout += c
+      })
+      child.stderr.on("data", (c) => {
+        stderr += c
+      })
+      child.on("error", reject)
+      child.on("close", (code) => resolve({ code, stdout, stderr }))
+    })
+  }
+  const a = spawn(process.execPath, [childPath, CHILD], { stdio: ["ignore", "pipe", "pipe"] })
+  const b = spawn(process.execPath, [childPath, OTHER], { stdio: ["ignore", "pipe", "pipe"] })
+  const deadline = Date.now() + 5000
+  for (;;) {
+    const ready = readdirSync(DIR).filter((f) => f.startsWith("ready.")).length
+    if (ready >= 2) break
+    if (Date.now() >= deadline) {
+      a.kill()
+      b.kill()
+      assert.fail("the two publishers did not become ready")
+    }
+    await new Promise((r) => setTimeout(r, 20))
+  }
+  writeFileSync(goPath, "1")
+  const [ra, rb] = await Promise.all([waitChild(a), waitChild(b)])
+  assert.equal(ra.code, 0, ra.stderr)
+  assert.equal(rb.code, 0, rb.stderr)
+  const written = body()
+  const pids = Object.keys(written)
+  assert.equal(pids.length, 2, "a second write must not drop the other key")
+  const roles = pids.map((pid) => written[pid].panel)
+  assert.equal(roles.filter((role) => role === "primary").length, 1)
+  assert.equal(roles.filter((role) => role === "observer").length, 1)
 })
 
 test("both halves derive the identity the same way, character for character", () => {
@@ -292,25 +444,33 @@ test("the sample publishes and logs only what changed", () => {
   const sample = bodyOf("const sampleRoute = (): void => {")
   assert.match(sample, /const route = api\.route\.current;/)
   assert.match(sample, /const sessionID = routeSessionID\(route\);/)
-  assert.match(sample, /if \(sessionID === lastRouteSample\) return;/)
+  assert.match(sample, /const panel = setTuiRoutePanelFromFile\(\);/)
+  assert.match(sample, /if \(sessionID === lastRouteSample && panel === lastPanelSample\) return;/)
   assert.match(sample, /lastRouteSample = sessionID;/)
   assert.match(sample, /publishTuiRoute\(sessionID\)/)
+  assert.match(sample, /lastPanelSample = tuiRoutePanel\(\);/)
   assert.ok(
-    sample.indexOf("if (sessionID === lastRouteSample) return;") <
+    sample.indexOf("if (sessionID === lastRouteSample && panel === lastPanelSample) return;") <
       sample.indexOf("publishTuiRoute(sessionID)"),
-    "an unchanged route costs neither a write nor a log line",
+    "an unchanged session and role costs neither a write nor a log line",
   )
   assert.match(source, /let lastRouteSample: string \| null \| undefined = undefined;/)
+  assert.match(source, /let lastPanelSample: "primary" \| "observer" \| undefined = undefined;/)
   assert.match(
     source,
-    /import \{\n  publishTuiRoute,\n  routeSessionID,\n  setTuiRouteServerFromClient,\n\} from "\.\/route-file\.ts";/,
+    /import \{\n  publishTuiRoute,\n  routeSessionID,\n  setTuiRoutePanelFromFile,\n  setTuiRouteServerFromClient,\n  tuiRoutePanel,\n\} from "\.\/route-file\.ts";/,
   )
 })
 
 test("the sample writes one debug line carrying the route it moved to", () => {
   const sample = bodyOf("const sampleRoute = (): void => {")
   assert.match(sample, /debugLog\("tui route sample", \{/)
-  for (const field of [/route: route\.name,/, /routeSessionID: sessionID,/, /published,/]) {
+  for (const field of [
+    /route: route\.name,/,
+    /routeSessionID: sessionID,/,
+    /panel: lastPanelSample,/,
+    /published,/,
+  ]) {
     assert.match(sample, field)
   }
 })
@@ -339,12 +499,22 @@ test("the panel reads its server off the client once, at mount, before it publis
     /const routeServer = setTuiRouteServerFromClient\(api\.client\);/,
     "the identity comes from the client the panel holds, not from a request",
   )
-  assert.match(source, /debugLog\("tui route server", \{ server: routeServer \}\);/)
+  const mount = source.slice(source.indexOf("const routeServer = setTuiRouteServerFromClient"))
+  assert.match(mount, /const routePanel = setTuiRoutePanelFromFile\(\);/)
+  assert.match(
+    source,
+    /debugLog\("tui route server", \{ server: routeServer, panel: routePanel \}\);/,
+  )
   const reads = source.match(/setTuiRouteServerFromClient\(/g) ?? []
   assert.equal(reads.length, 1, "read once: the client cannot change under the panel")
   assert.ok(
-    source.indexOf("setTuiRouteServerFromClient(api.client)") <
-      source.indexOf("\n  sampleRoute();\n  const tick = setInterval"),
+    mount.indexOf("setTuiRouteServerFromClient(api.client)") <
+      mount.indexOf("const routePanel = setTuiRoutePanelFromFile()"),
+    "the panel role is decided against the server identity just read",
+  )
+  assert.ok(
+    mount.indexOf("const routePanel = setTuiRoutePanelFromFile()") <
+      mount.indexOf("\n  sampleRoute();\n  const tick = setInterval"),
     "an unscoped route must not reach the file",
   )
 })

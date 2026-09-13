@@ -15,7 +15,8 @@
 //
 //   ~/.cache/opencode-agent-intercom/tui-route.json
 //   { "<this process's pid>": { "sessionID": "ses_x" | null, "at": <epoch ms>,
-//                               "server": "pid:4711" | "url:http://127.0.0.1:4788" } }
+//                               "server": "pid:4711" | "url:http://127.0.0.1:4788",
+//                               "panel": "primary" | "observer" } }
 //
 // `sessionID` is null for a route that names no session — the start page, the
 // plugin's own route — because "the user is in no session" has to be a
@@ -37,8 +38,19 @@
 // listens on, so the process is the server. Written from `api.client`'s own
 // base URL, which the panel already holds, and never from a request.
 //
-// Written only when the route CHANGES (./tui.tsx: sampleRoute), so the steady
-// state costs nothing at all — one small write per navigation.
+// `panel` is `"observer"` when another live writer on this same server already
+// occupies the primary slot — a second TUI attached to the same `opencode
+// serve`. The plugin's select-session post is server-wide, so an observer is
+// not a reason to move while a primary is still live. A single panel, and the
+// first of several, is `"primary"`. The role is decided at each publish from
+// the file as it stands after prune, so a remaining panel becomes `"primary"`
+// once the owner is gone. Missing `panel` is `"primary"` on the plugin's read.
+//
+// Written when the route or the role CHANGES (./tui.tsx: sampleRoute), so the
+// steady state costs nothing at all — one small write per navigation or
+// ownership change. The write itself is locked (a sibling `.lock` file) so two
+// first publishes cannot both see an empty snapshot and both stay `"primary"`,
+// and a second write cannot drop a key the first just put there.
 //
 // Nothing here throws into the TUI: a write that fails costs the plugin its
 // knowledge of the route, which puts the escape back exactly where it stood
@@ -47,6 +59,8 @@
 import { readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+export type TuiPanelRole = "primary" | "observer";
 
 // One published route, as it stands in the file.
 export interface TuiRouteEntry {
@@ -57,6 +71,10 @@ export interface TuiRouteEntry {
   // The server this route belongs to, or null for an entry that names none —
   // a panel bundle from before this field.
   server: string | null;
+  // Whether this writer is the owning panel on its server, or a second TUI
+  // attached to the same one. Null for an entry that names none — a panel
+  // bundle from before this field; the plugin reads that as `"primary"`.
+  panel: TuiPanelRole | null;
 }
 
 export type TuiRouteFileBody = Record<string, TuiRouteEntry>;
@@ -78,6 +96,18 @@ let routePath = join(
 // `setTuiRouteServerFromClient` has run, and then never empty; `tuiRouteServer`
 // falls back to this process while it is.
 let serverKey = "";
+
+// The panel role last decided for this process. `"primary"` until a publish (or
+// `setTuiRoutePanelFromFile`) has run against the file; a single panel never
+// needs anything else. Live: each publish overwrites it from the snapshot it
+// writes, so a latched observer can become the owner once no primary remains.
+let panelKey: TuiPanelRole = "primary";
+
+// How long a publish waits on another writer's lock before giving up. The write
+// is a few syscalls; a holder that is gone is dropped as stale inside that
+// window. A timeout returns false and leaves the plugin without this sample.
+const ROUTE_LOCK_RETRY_MS = 5;
+const ROUTE_LOCK_GIVE_UP_MS = 2000;
 
 // Test seam: point reads and writes at another file.
 export function setTuiRoutePath(p: string): void {
@@ -153,6 +183,41 @@ export function tuiRouteServer(pid: number = process.pid): string {
   return serverKey || serverIdentity("", pid);
 }
 
+// Test seam: set the published panel role directly.
+export function setTuiRoutePanel(role: string): TuiPanelRole {
+  panelKey = role === "observer" ? "observer" : "primary";
+  return panelKey;
+}
+
+export function tuiRoutePanel(): TuiPanelRole {
+  return panelKey;
+}
+
+// Whether this writer is the owning panel on `server`, or a second TUI already
+// sharing that server with a live primary. Pure over the file body, so the
+// rule can be asserted without a filesystem. Another writer that names no
+// server, or that is itself an observer, does not occupy the primary slot.
+export function panelRoleFor(
+  server: string,
+  pid: number,
+  raw: unknown,
+  isAlive: (pid: number) => boolean = routeWriterAlive,
+): TuiPanelRole {
+  const others = pruneTuiRoutes(raw, pid, isAlive);
+  for (const entry of Object.values(others)) {
+    if (entry.server === server && entry.panel !== "observer") return "observer";
+  }
+  return "primary";
+}
+
+// Records which panel this process is on this server: primary unless another
+// live writer on the same server already occupies that slot. Called at each
+// sample (./tui.tsx) so a remaining observer can become the owner without
+// waiting for a route change, and at mount after the server identity is known.
+export function setTuiRoutePanelFromFile(pid: number = process.pid): TuiPanelRole {
+  return setTuiRoutePanel(panelRoleFor(tuiRouteServer(pid), pid, readRoutes()));
+}
+
 // Whether the process that wrote an entry is still running. `kill(pid, 0)`
 // sends no signal and only asks whether the id can be signalled: EPERM is a
 // live process owned by somebody else, ESRCH one that is gone.
@@ -182,7 +247,12 @@ export function pruneTuiRoutes(
     if (!Number.isInteger(pid) || pid <= 0 || pid === self) continue;
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     if (!isAlive(pid)) continue;
-    const entry = value as { sessionID?: unknown; at?: unknown; server?: unknown };
+    const entry = value as {
+      sessionID?: unknown;
+      at?: unknown;
+      server?: unknown;
+      panel?: unknown;
+    };
     out[key] = {
       sessionID:
         typeof entry.sessionID === "string" && entry.sessionID !== ""
@@ -194,6 +264,7 @@ export function pruneTuiRoutes(
       // invent one for an entry that named none.
       server:
         typeof entry.server === "string" && entry.server !== "" ? entry.server : null,
+      panel: entry.panel === "observer" || entry.panel === "primary" ? entry.panel : null,
     };
   }
   return out;
@@ -210,22 +281,72 @@ function readRoutes(): unknown {
   }
 }
 
-// Publishes this process's route. Atomic replace — a sibling temp file renamed
-// over the target — so the plugin never reads a half-written object. Returns
-// whether it reached the disk.
+// Exclusive create of a sibling lock file. A holder whose process is gone is
+// stale and is unlinked so the next create can succeed.
+function acquireRouteFileLock(
+  lockPath: string,
+  pid: number,
+  isAlive: (pid: number) => boolean,
+): boolean {
+  const deadline = Date.now() + ROUTE_LOCK_GIVE_UP_MS;
+  for (;;) {
+    try {
+      writeFileSync(lockPath, String(pid), { flag: "wx", mode: 0o600 });
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+      if (Date.now() >= deadline) return false;
+      try {
+        const holder = Number(readFileSync(lockPath, "utf8").trim());
+        if (!isAlive(holder)) unlinkSync(lockPath);
+      } catch {
+        // lock is gone or unreadable; retry the create
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ROUTE_LOCK_RETRY_MS);
+    }
+  }
+}
+
+function releaseRouteFileLock(lockPath: string): void {
+  try {
+    unlinkSync(lockPath);
+  } catch {
+    // already gone
+  }
+}
+
+// Publishes this process's route. The prune, the role decision and the write
+// run under a sibling lock so two first publishes cannot both become
+// `"primary"` and a second write cannot drop a key that is already there.
+// Atomic replace — a sibling temp file renamed over the target — so the plugin
+// never reads a half-written object. The role is taken from that locked
+// snapshot, not from a mount-time copy. Returns whether it reached the disk.
 export function publishTuiRoute(
   sessionID: string | null,
   now: number = Date.now(),
   pid: number = process.pid,
+  isAlive: (pid: number) => boolean = routeWriterAlive,
 ): boolean {
-  const body = pruneTuiRoutes(readRoutes(), pid);
-  body[String(pid)] = { sessionID, at: now, server: tuiRouteServer(pid) };
   const tmp = `${routePath}.${pid}.tmp`;
+  const lockPath = `${routePath}.lock`;
   try {
     mkdirSync(join(routePath, ".."), { recursive: true, mode: 0o700 });
-    writeFileSync(tmp, JSON.stringify(body, null, 2) + "\n", { mode: 0o600 });
-    renameSync(tmp, routePath);
-    return true;
+    if (!acquireRouteFileLock(lockPath, pid, isAlive)) return false;
+    try {
+      const body = pruneTuiRoutes(readRoutes(), pid, isAlive);
+      panelKey = panelRoleFor(tuiRouteServer(pid), pid, body, isAlive);
+      body[String(pid)] = {
+        sessionID,
+        at: now,
+        server: tuiRouteServer(pid),
+        panel: panelKey,
+      };
+      writeFileSync(tmp, JSON.stringify(body, null, 2) + "\n", { mode: 0o600 });
+      renameSync(tmp, routePath);
+      return true;
+    } finally {
+      releaseRouteFileLock(lockPath);
+    }
   } catch {
     try {
       unlinkSync(tmp);

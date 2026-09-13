@@ -25,7 +25,8 @@
 //
 //   ~/.cache/opencode-agent-intercom/tui-route.json
 //   { "<writer pid>": { "sessionID": "ses_x" | null, "at": <epoch ms>,
-//                       "server": "pid:4711" | "url:http://127.0.0.1:4788" } }
+//                       "server": "pid:4711" | "url:http://127.0.0.1:4788",
+//                       "panel": "primary" | "observer" } }
 //
 // One entry per TUI process, keyed by that process's pid, written by
 // tui/src/route-file.ts whenever the route CHANGES (and never on a timer that
@@ -68,6 +69,17 @@
 // moving it is the behaviour it was written under; the mixed state lasts until
 // that TUI restarts, and every read that meets one says so in the log
 // (`tui route scope`).
+//
+// `panel` is what keeps a SECOND TUI on THIS server out of the move. The
+// select-session post is server-wide: one writer whose sample names the dying
+// session is enough to navigate every panel attached to it. So a panel that is
+// not the owner publishes `panel: "observer"` and is not read as a reason to
+// move while a live primary remains. If this server has no live primary, one
+// remaining observer is taken as the owner (lowest pid) so delete-time does
+// not wait on that panel's next write. If several primaries are in the file —
+// two first publishes that raced — only one of them is a reason to move, the
+// same lowest-pid rule. Missing `panel` is `"primary"` — the behaviour the
+// field was written under, and the only value a single panel ever needs.
 //
 // The in-process latch is the other half of the reading. A plugin that has
 // just moved the view itself knows something no file sample older than that
@@ -148,10 +160,12 @@ export function routeWriterAlive(pid) {
 }
 
 // The entries in a parsed file body that are shaped like one and whose writer
-// is still running, as `{ pid, sessionID, at, server }`. Pure, so the drop
-// rules can be asserted without a filesystem or a process table. `sessionID` is
-// null for a route that names no session; `server` is null for an entry that
-// names no server — a panel bundle from before that field.
+// is still running, as `{ pid, sessionID, at, server, panel }`. Pure, so the
+// drop rules can be asserted without a filesystem or a process table.
+// `sessionID` is null for a route that names no session; `server` is null for
+// an entry that names no server — a panel bundle from before that field.
+// `panel` is `"observer"` only when the file says so; anything else, including
+// a missing field, is `"primary"`.
 export function parseTuiRoutes(raw, isAlive = routeWriterAlive) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return []
   const out = []
@@ -163,27 +177,51 @@ export function parseTuiRoutes(raw, isAlive = routeWriterAlive) {
     const sessionID =
       typeof value.sessionID === "string" && value.sessionID !== "" ? value.sessionID : null
     const server = typeof value.server === "string" && value.server !== "" ? value.server : null
-    out.push({ pid, sessionID, at: Number.isFinite(value.at) ? value.at : 0, server })
+    const panel = value.panel === "observer" ? "observer" : "primary"
+    out.push({ pid, sessionID, at: Number.isFinite(value.at) ? value.at : 0, server, panel })
   }
   return out
 }
 
+// The one same-server panel that is a reason to move: the live primary with
+// the lowest pid, or, if this server has no live primary, the remaining
+// observer with the lowest pid. A raced first-publish can leave two primaries
+// in the file; a primary that has just exited can leave only observers —
+// delete-time must not wait on the remaining panel's next write.
+function owningPanel(entries) {
+  if (!entries.length) return undefined
+  const primaries = []
+  for (const entry of entries) {
+    if (entry.panel !== "observer") primaries.push(entry)
+  }
+  const pool = primaries.length > 0 ? primaries : entries
+  let owner = pool[0]
+  for (const entry of pool) {
+    if (entry.pid < owner.pid) owner = entry
+  }
+  return owner
+}
+
 // The published entries this plugin's server may act on, split from the ones it
-// may not, as `{ mine, foreign, unscoped }` — `mine` holds the entries the
-// escape reads, `unscoped` the ones inside it that named no server, `foreign`
-// the count that was left alone. Pure over the entries, so the rule can be
-// asserted without a file.
+// may not, as `{ mine, foreign, unscoped, observers }` — `mine` holds the
+// entries the escape reads, `unscoped` the ones inside it that named no server,
+// `observers` a same-server panel that is not the owner, `foreign` the count
+// that was left alone. Pure over the entries, so the rule can be asserted
+// without a file.
 //
 // Three ways an entry is this server's:
 //   * its writer IS this process. An interactive `opencode` runs the server in
 //     the TUI's process, so this is the whole interactive case and it holds
 //     however either half read its own address.
-//   * it names this server's identity.
+//   * it names this server's identity. Among those, only the owning panel (see
+//     `owningPanel`) is a reason to move.
 //   * it names no server at all — the pre-field panel, moved as it was before.
 export function routesOnThisServer(entries, self = ownServerIdentity(), pid = process.pid) {
   const mine = []
   let foreign = 0
   let unscoped = 0
+  let observers = 0
+  const here = []
   for (const entry of entries ?? []) {
     if (entry.server === null || entry.server === undefined) {
       unscoped += 1
@@ -191,12 +229,17 @@ export function routesOnThisServer(entries, self = ownServerIdentity(), pid = pr
       continue
     }
     if (entry.pid === pid || entry.server === self) {
-      mine.push(entry)
+      here.push(entry)
       continue
     }
     foreign += 1
   }
-  return { mine, foreign, unscoped }
+  const owner = owningPanel(here)
+  for (const entry of here) {
+    if (owner && entry.pid === owner.pid) mine.push(entry)
+    else observers += 1
+  }
+  return { mine, foreign, unscoped, observers }
 }
 
 // The routes published by TUI processes that are still running. `[]` for a file
@@ -254,16 +297,18 @@ export function tuiSessionGone(sessionID) {
 // be showing this session, so nothing is moved.
 export function tuiRouteIsOnSession(sessionID) {
   if (typeof sessionID !== "string" || sessionID === "") return false
-  const { mine, foreign, unscoped } = routesOnThisServer(readPublishedTuiRoutes())
+  const { mine, foreign, unscoped, observers } = routesOnThisServer(readPublishedTuiRoutes())
   // Only when the file held something this decision had to rule on: an entry
-  // another server owns, or one from a panel that names no server.
-  if (foreign > 0 || unscoped > 0) {
+  // another server owns, one from a panel that names no server, or a second
+  // panel on this server.
+  if (foreign > 0 || unscoped > 0 || observers > 0) {
     log("tui route scope", {
       sessionID,
       server: ownServerIdentity(),
       mine: mine.length,
       foreign,
       unscoped,
+      observers,
     })
   }
   const fresh = mine.filter((entry) => entry.at >= routeLatch.at)

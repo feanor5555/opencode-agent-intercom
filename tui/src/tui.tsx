@@ -40,7 +40,9 @@ import { debugLog } from "./debug-log.ts";
 import {
   publishTuiRoute,
   routeSessionID,
+  setTuiRoutePanelFromFile,
   setTuiRouteServerFromClient,
+  tuiRoutePanel,
 } from "./route-file.ts";
 import {
   type EndlessPause,
@@ -598,9 +600,12 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // The route this panel last saw and published, so a sample that changed
   // nothing costs neither a write nor a log line. `undefined` is "never
   // sampled", which is distinct from the `null` of a route naming no session.
+  // The role is sampled the same way: an observer that becomes the owner has
+  // to reach the file even if the view has not moved.
   let lastRouteSample: string | null | undefined = undefined;
+  let lastPanelSample: "primary" | "observer" | undefined = undefined;
 
-  // Publish where the view is, and log it when it MOVED.
+  // Publish where the view is, and log it when the session or the role MOVED.
   //
   // Two things hang on this. The plugin moves the view off a session before it
   // deletes it (src/client.js: deleteSession → escapeTuiRouteOffSession), and
@@ -612,17 +617,21 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // which left a 33-minute hole around the one move that mattered.
   //
   // Sampled from the elapsed tick and from the file-state refresh, and written
-  // only on a change, so a session the user sits in for an hour is one write.
+  // only on a change of session or role, so a session the user sits in for an
+  // hour is one write until ownership itself changes.
   const sampleRoute = (): void => {
     if (disposed) return;
     const route = api.route.current;
     const sessionID = routeSessionID(route);
-    if (sessionID === lastRouteSample) return;
+    const panel = setTuiRoutePanelFromFile();
+    if (sessionID === lastRouteSample && panel === lastPanelSample) return;
     lastRouteSample = sessionID;
     const published = publishTuiRoute(sessionID);
+    lastPanelSample = tuiRoutePanel();
     debugLog("tui route sample", {
       route: route.name,
       routeSessionID: sessionID,
+      panel: lastPanelSample,
       published,
     });
   };
@@ -1535,8 +1544,12 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   // plugin moves the view only for its OWN server — a second TUI on the machine
   // is showing sessions this delete knows nothing about. Read off the client
   // the panel already holds, once: it cannot change while the panel lives.
+  // `panel` is observer when another live writer on that same server already
+  // occupies the primary slot; sampleRoute recomputes it on every tick so a
+  // remaining panel can become the owner after that writer exits.
   const routeServer = setTuiRouteServerFromClient(api.client);
-  debugLog("tui route server", { server: routeServer });
+  const routePanel = setTuiRoutePanelFromFile();
+  debugLog("tui route server", { server: routeServer, panel: routePanel });
 
   // The route rides on the elapsed tick as well as on the 30 s file refresh:
   // the plugin reads the published sample at the moment it deletes a session,

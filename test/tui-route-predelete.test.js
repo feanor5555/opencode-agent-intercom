@@ -130,7 +130,9 @@ test("a published route is read back, and a dead writer's is not", () => {
     [String(process.pid)]: { sessionID: CHILD, at: 5, server: SELF },
     [String(deadPid)]: { sessionID: PARENT, at: 9, server: SELF },
   })
-  assert.deepEqual(live, [{ pid: process.pid, sessionID: CHILD, at: 5, server: SELF }])
+  assert.deepEqual(live, [
+    { pid: process.pid, sessionID: CHILD, at: 5, server: SELF, panel: "primary" },
+  ])
 })
 
 test("an entry that names no server is read as naming none, not as this one's", () => {
@@ -140,6 +142,19 @@ test("an entry that names no server is read as naming none, not as this one's", 
     [String(process.pid)]: { sessionID: CHILD, at: 5, server: "" },
   })
   assert.equal(empty.server, null)
+})
+
+test("an entry that names no panel is primary, and observer is only what the file says", () => {
+  const [missing] = parseTuiRoutes({ [String(process.pid)]: { sessionID: CHILD, at: 5 } })
+  assert.equal(missing.panel, "primary")
+  const [observer] = parseTuiRoutes({
+    [String(process.pid)]: { sessionID: CHILD, at: 5, server: SELF, panel: "observer" },
+  })
+  assert.equal(observer.panel, "observer")
+  const [junk] = parseTuiRoutes({
+    [String(process.pid)]: { sessionID: CHILD, at: 5, server: SELF, panel: "owner" },
+  })
+  assert.equal(junk.panel, "primary")
 })
 
 test("a route naming no session is published as null, not as an absence", () => {
@@ -229,20 +244,20 @@ test("this server's own identity is its address, or its process where it has non
 })
 
 test("an entry is this server's by its writer, by its identity, or by naming none", () => {
-  const entries = [
-    { pid: process.pid, sessionID: CHILD, at: 1, server: "url:http://127.0.0.1:9999" },
-    { pid: process.ppid, sessionID: PARENT, at: 1, server: SELF },
-    { pid: process.ppid, sessionID: ROOT, at: 1, server: null },
-    { pid: process.ppid, sessionID: OTHER_SESSION, at: 1, server: FOREIGN_SERVER },
-  ]
-  const { mine, foreign, unscoped } = routesOnThisServer(entries, SELF, process.pid)
-  assert.deepEqual(
-    mine.map((entry) => entry.sessionID),
-    [CHILD, PARENT, ROOT],
-    "this process's own write, this server's identity, and the panel that names none",
-  )
+  const own = { pid: process.pid, sessionID: CHILD, at: 1, server: "url:http://127.0.0.1:9999", panel: "primary" }
+  const here = { pid: process.ppid, sessionID: PARENT, at: 1, server: SELF, panel: "primary" }
+  const none = { pid: process.ppid, sessionID: ROOT, at: 1, server: null, panel: "primary" }
+  const away = { pid: process.ppid, sessionID: OTHER_SESSION, at: 1, server: FOREIGN_SERVER, panel: "primary" }
+  const { mine, foreign, unscoped } = routesOnThisServer([own, here, none, away], SELF, process.pid)
   assert.equal(foreign, 1)
   assert.equal(unscoped, 1)
+  assert.ok(
+    mine.some((entry) => entry.sessionID === ROOT),
+    "the panel that names none is still moved",
+  )
+  const scoped = mine.filter((entry) => entry.server !== null)
+  assert.equal(scoped.length, 1, "only one live primary on this server is a reason to move")
+  assert.equal(scoped[0].pid, Math.min(process.pid, process.ppid))
 })
 
 test("a panel on another server is not moved, however fresh its sample", async () => {
@@ -283,6 +298,159 @@ test("another server's panel cannot outrank this process's own move either", asy
   assert.deepEqual(client.calls, [
     ["select", ROOT],
     ["delete", PARENT],
+  ])
+  setServerUrl("")
+})
+
+test("an observer on this server is not mine: only the owning panel is a reason to move", () => {
+  const entries = [
+    { pid: process.ppid, sessionID: CHILD, at: 1, server: SELF, panel: "primary" },
+    { pid: 999001, sessionID: CHILD, at: 1, server: SELF, panel: "observer" },
+  ]
+  const { mine, foreign, unscoped, observers } = routesOnThisServer(entries, SELF, process.pid)
+  assert.deepEqual(
+    mine.map((entry) => entry.pid),
+    [process.ppid],
+    "the observer shares the server and the session and is still not read",
+  )
+  assert.equal(observers, 1)
+  assert.equal(foreign, 0)
+  assert.equal(unscoped, 0)
+})
+
+test("a live observer is mine when no live primary remains on the dying session", async () => {
+  setServerUrl("http://127.0.0.1:4788")
+  const now = Date.now()
+  writeFileSync(
+    ROUTE_FILE,
+    JSON.stringify({
+      [String(deadPid)]: {
+        sessionID: CHILD,
+        at: now,
+        server: FOREIGN_SERVER,
+        panel: "primary",
+      },
+      [String(process.ppid)]: {
+        sessionID: CHILD,
+        at: now,
+        server: FOREIGN_SERVER,
+        panel: "observer",
+      },
+    }) + "\n",
+  )
+  assert.equal(tuiRouteIsOnSession(CHILD), true, "delete-time does not wait on the remaining write")
+  const client = fakeClient()
+  await deleteSession(client, CHILD, { parentID: PARENT })
+  assert.deepEqual(client.calls, [
+    ["select", PARENT],
+    ["delete", CHILD],
+  ])
+  setServerUrl("")
+})
+
+test("two live observers and no primary: only the lowest pid is mine", () => {
+  const low = 100
+  const high = 200
+  const { mine, observers } = routesOnThisServer(
+    [
+      { pid: high, sessionID: CHILD, at: 1, server: SELF, panel: "observer" },
+      { pid: low, sessionID: CHILD, at: 1, server: SELF, panel: "observer" },
+    ],
+    SELF,
+    process.pid,
+  )
+  assert.deepEqual(
+    mine.map((entry) => entry.pid),
+    [low],
+  )
+  assert.equal(observers, 1)
+})
+
+test("two live primaries on this server: only the lowest pid's session is a reason to move", async () => {
+  setServerUrl("http://127.0.0.1:4788")
+  const now = Date.now()
+  const low = Math.min(process.pid, process.ppid)
+  const high = Math.max(process.pid, process.ppid)
+  writeFileSync(
+    ROUTE_FILE,
+    JSON.stringify({
+      [String(low)]: {
+        sessionID: CHILD,
+        at: now,
+        server: FOREIGN_SERVER,
+        panel: "primary",
+      },
+      [String(high)]: {
+        sessionID: ROOT,
+        at: now,
+        server: FOREIGN_SERVER,
+        panel: "primary",
+      },
+    }) + "\n",
+  )
+  assert.equal(tuiRouteIsOnSession(CHILD), true)
+  assert.equal(tuiRouteIsOnSession(ROOT), false, "the other primary is not a reason to move")
+  const watching = fakeClient()
+  await deleteSession(watching, CHILD, { parentID: PARENT })
+  assert.deepEqual(watching.calls, [
+    ["select", PARENT],
+    ["delete", CHILD],
+  ])
+  const idle = fakeClient()
+  await deleteSession(idle, ROOT, { parentID: PARENT })
+  assert.deepEqual(idle.calls, [["delete", ROOT]])
+  setServerUrl("")
+})
+
+test("two panels on this server: only the owning panel being on the dying session moves", async () => {
+  setServerUrl("http://127.0.0.1:4788")
+  const now = Date.now()
+  writeFileSync(
+    ROUTE_FILE,
+    JSON.stringify({
+      [String(process.pid)]: {
+        sessionID: ROOT,
+        at: now,
+        server: FOREIGN_SERVER,
+        panel: "primary",
+      },
+      [String(process.ppid)]: {
+        sessionID: CHILD,
+        at: now,
+        server: FOREIGN_SERVER,
+        panel: "observer",
+      },
+    }) + "\n",
+  )
+  assert.equal(tuiRouteIsOnSession(CHILD), false, "the observer naming it is not a reason")
+  assert.equal(tuiRouteIsOnSession(ROOT), true)
+  const idle = fakeClient()
+  await deleteSession(idle, CHILD, { parentID: PARENT })
+  assert.deepEqual(idle.calls, [["delete", CHILD]], "nobody owning is there to move")
+
+  writeFileSync(
+    ROUTE_FILE,
+    JSON.stringify({
+      [String(process.pid)]: {
+        sessionID: CHILD,
+        at: now,
+        server: FOREIGN_SERVER,
+        panel: "primary",
+      },
+      [String(process.ppid)]: {
+        sessionID: CHILD,
+        at: now,
+        server: FOREIGN_SERVER,
+        panel: "observer",
+      },
+    }) + "\n",
+  )
+  assert.equal(tuiRouteIsOnSession(CHILD), true)
+  const watching = fakeClient()
+  await deleteSession(watching, CHILD, { parentID: PARENT })
+  assert.deepEqual(watching.calls, [
+    ["select", PARENT],
+    ["delete", CHILD],
   ])
   setServerUrl("")
 })

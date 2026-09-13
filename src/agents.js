@@ -767,6 +767,18 @@ export function installAgents(config, { directory, worktree } = {}) {
     if (base.permission || projectPermission) {
       merged.permission = { ...base.permission, ...projectPermission }
     }
+    // A subagent whose nestedSpawnTargets() is empty cannot use spawn however a
+    // project `permission.spawn` reads. The prompt already injects
+    // SUBAGENT_NO_SPAWN_GUIDE (delegatesNested) and the execute gate already
+    // refuses (nestedSpawnRefusal empty-target check). The schema strip has to
+    // match those two, or the model is shown a tool every call of which fails.
+    // Written AFTER the overlay so a project `spawn: "allow"` cannot put the
+    // tool back. The empty-target test lives here and not in
+    // resolveSpawnPermission: that function also serves the primary, whose
+    // nestedSpawnTargets() is empty and who must keep spawn.
+    if (isSubagentRole(name) && nestedSpawnTargets(name).length === 0) {
+      merged.permission = { ...merged.permission, spawn: "deny" }
+    }
     // In SOLO mode a subagent role has no way of being started that the mode
     // wants: the plugin registers no `spawn`, and opencode's native `task` is
     // denied on both sides. What is left is the role definition itself, and

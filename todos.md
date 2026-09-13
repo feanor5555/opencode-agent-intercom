@@ -11,7 +11,6 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- Decide O4 in `specs/nested-delegation.md` (a project can open `permission.spawn` on a role through the config but cannot give it a target, because `NESTED_SPAWN_TARGETS` has no runtime counterpart).
 - Verify whether `tool.execute.after` fires for MCP tools; if it does not, a subagent whose only work is an MCP call keeps the wide watchdog window instead of the silence one. The live end-to-end run that proved `after` fires could not cover the MCP case because no MCP server was reachable from that instance.
 - Concurrent end-to-end suite runs share one machine's `test/e2e/out` directory, one plugin project directory, and one process-global `debug.log`. Two suites at once can have their captures interleaved, file the audit reads overwritten with the other's, and their debug-log slices overlap; every driver would need to coordinate on a per-run out dir and a per-run slice window before this can run in parallel again.
 - The pre-delete route move escapes the view for any live route writer whose fresh sample names the dying session, so with two TUIs attached to one server the second is navigated too. Closing it needs the panel to publish which server it is attached to.

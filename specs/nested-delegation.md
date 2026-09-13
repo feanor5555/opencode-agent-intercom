@@ -40,7 +40,7 @@ definition with opencode's semantics (an explicit `deny` denies, an absent key
 allows), then deny. A role neither side defines is denied; an unreadable config
 falls through to the plugin's own map.
 
-`delegatesNested(client, role)` (`src/hooks.js:1033`) asks whether to give a role
+`delegatesNested(client, role)` (`src/hooks.js:1497`) asks whether to give a role
 the delegation block at all. It returns true only when the role is a subagent
 role, `maxNestedSpawns > 0`, its `NESTED_SPAWN_TARGETS` entry is non-empty, and
 `resolveSpawnPermission` returns null — so the prompt can never promise what
@@ -53,34 +53,49 @@ The resolved config is cached at module scope, so gate and prompt read one value
 and a config change takes effect on the next opencode start for both alike;
 unreadable configs fall through to the plugin's own role map. The one place with
 no resolved config to ask is `bin/init-prompts.js`, which writes the prompt
-files offline; `mayDelegate` (`src/agents.js:245`) is retained as that file's
+files offline; `mayDelegate` (`src/agents.js:283`) is retained as that file's
 answer and as the plugin's own default.
 
 **The grant is the absence of a deny.** `NO_SPAWN = { spawn: "deny" }`
-(`src/agents.js:183-185`) is carried by `grounder`, `designer` and `gitter`. The five
-repository-reading roles — `planner`, `coder`, `debugger`, `reviewer`, `documenter` — and
-`researcher` do not carry it, and that absence is the whole grant: the schema strip
-leaves the tool in their schema and `checkSpawnPermission` resolves the same map at run
-time.
+(`src/agents.js:219-221`) is carried by `grounder` alone among the shipped
+roles. The seven repository-reading roles — `planner`, `coder`, `debugger`,
+`reviewer`, `documenter`, `designer`, `gitter` — and `researcher` do not carry
+it, and that absence is the whole grant: the schema strip leaves the tool in
+their schema and `checkSpawnPermission` resolves the same map at run time.
 
 **The target table decides who they may name.** `NESTED_SPAWN_TARGETS`
-(`src/agents.js:204-211`) maps the five non-web roles to `researcher` — web search and
-fetching is the one thing they have no tool for — and `researcher` to `grounder`, the
-second, independent search path its own tools do not give it. Every other role answers
-the empty set, so the table and the permission maps say the same thing from two
-directions.
+(`src/agents.js:240-249`) maps the seven non-web roles to `researcher` — web
+search and fetching is the one thing they have no tool for — and `researcher`
+to `grounder`, the second, independent search path its own tools do not give
+it. Every other role answers the empty set, so the table and the permission
+maps say the same thing from two directions.
 
-**Depth is bounded at two nested levels by construction.** The five non-web roles reach
-`researcher`, which may itself spawn — that is the second level; `researcher` reaches
-`grounder`, which is a key of nothing in the table and carries `NO_SPAWN`, so there is no
-third. No counter and no walk of the session tree is needed: the graph is finite and
-acyclic, and the longest chain is caller → researcher → grounder.
+**Depth is bounded at two nested levels by construction.** The seven non-web
+roles reach `researcher`, which may itself spawn — that is the second level;
+`researcher` reaches `grounder`, which is a key of nothing in the table and
+carries `NO_SPAWN`, so there is no third. No counter and no walk of the
+session tree is needed: the graph is finite and acyclic, and the longest chain
+is caller → researcher → grounder.
 
-**Defence in depth, in the order it is met.** The schema strip is the primary defence: a
-role denied `spawn` never sees the tool. Behind it stands the runtime tool guard, and
-behind that `nestedSpawnRefusal`'s first check, which repeats the denial in the wording a
-caller received while no subagent could spawn at all — so a non-delegating role sees no
-change whatever. §8 bounds what a live run can show of those three.
+**Defence in depth, in the order it is met.** The schema strip is the primary
+defence: a role denied `spawn` never sees the tool. Behind it stands the
+runtime tool guard, and behind that `nestedSpawnRefusal`'s first check, which
+repeats the denial in the wording a caller received while no subagent could
+spawn at all — so a non-delegating role sees no change whatever. §8 bounds
+what a live run can show of those three.
+
+**A project `permission.spawn = "allow"` cannot put the tool back on a role
+with no target.** `installAgents` (`src/agents.js:779-781`) writes
+`spawn: "deny"` onto the merged permission map AFTER the project overlay when
+the role is a subagent and `nestedSpawnTargets(name).length === 0`, so the
+schema strip matches the prompt (`SUBAGENT_NO_SPAWN_GUIDE`) and the execute
+gate (`nestedSpawnRefusal`'s empty-target check) — three layers saying the
+same thing, with the schema strip the one a model sees. The empty-target test
+is subagent-only and is not consulted for the primary, whose targets are also
+empty and who must keep `spawn`. The patch is not in `resolveSpawnPermission`:
+that function also serves the primary and never reads `NESTED_SPAWN_TARGETS`,
+because the table has no runtime counterpart — the static map in `agents.js`
+is the single source, used by prompt, gate and schema strip alike.
 
 ## 3. What a nested `spawn` returns
 
@@ -426,23 +441,14 @@ completion notice at all, both sessions are gone afterwards and no cascade error
 plus the wrong-target refusal, the `⤷ nested:` line for the one nested run, and that a
 nested run ticks no TODO entry.
 
-## 9. Open points
+## 9. Current state
 
-**O4 — `permission.spawn` can open a role that has no target, and the converse cannot
-be set.** A project may write `agent.<role>.permission.spawn = "allow"` for a role
-that `NESTED_SPAWN_TARGETS` does not key, and the result is a role that is told it
-may delegate, carries a delegation guide that names a target it cannot in fact call,
-and is then refused at every spawn. The asymmetry is deliberate and survives on
-purpose: `NESTED_SPAWN_TARGETS` has no runtime counterpart, so the static table is
-the only place the graph is shaped, and shaping it from config would let a project
-add a target to a role that already has one and reach `grounder → researcher` — a
-spawn cycle the table is what makes structurally impossible. The cost of leaving
-this standing is a project that mis-sets `permission.spawn` gets the wrong guide
-on the way in and a refusal at the gate on the way out; a fresh opencode start
-clears both once the config is corrected. The fix would be either to deny
-`permission.spawn` for a role not in the table (cheap but surprises projects that
-extend with a target of their own in the same change), or to read the target set
-from config too (lets a cycle in), so the open point is left at the table.
+No open points. The asymmetry named in the earlier O4 — a project could open
+`permission.spawn` on a role the table did not key, producing a role that was
+told it could delegate but was refused at every spawn — is closed by the
+schema-strip patch in `installAgents`: `permission.spawn` is now denied
+after the overlay on every subagent with an empty target set, so the
+prompt, the schema strip and the execute gate all say the same thing.
 
 
 ## 10. Out of scope

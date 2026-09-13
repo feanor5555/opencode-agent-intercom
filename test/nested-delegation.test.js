@@ -44,6 +44,7 @@ import {
   NESTED_SPAWN_TARGETS,
   nestedSpawnTargets,
   mayDelegate,
+  installAgents,
 } from "../src/agents.js"
 import {
   SUBAGENT_DELEGATION_GUIDE,
@@ -222,6 +223,40 @@ test("the target table maps each spawning role to what it may name", () => {
   assert.notEqual(AGENTS.grounder.permission?.grounded_search, "deny")
   assert.equal(AGENTS.grounder.permission?.spawn, "deny")
   assert.equal(mayDelegate("grounder"), false)
+})
+
+// ---- the schema strip: empty-target subagents never see spawn --------------
+//
+// opencode hides a tool when the resolved permission is `"deny"`. The prompt
+// and the execute gate already refuse a subagent whose nestedSpawnTargets() is
+// empty; installAgents writes the same deny after the project overlay so the
+// schema matches those two. resolveSpawnPermission is left alone — it also
+// serves the primary.
+
+function installedAgents(projectAgent = {}) {
+  const config = { agent: { ...projectAgent } }
+  installAgents(config, { directory: fixtureDir, worktree: fixtureDir })
+  return config.agent
+}
+
+test("allow-without-target hides spawn", () => {
+  const agents = installedAgents({ grounder: { permission: { spawn: "allow" } } })
+  assert.equal(agents.grounder.permission.spawn, "deny")
+})
+
+test("a table-keyed role with allow still sees spawn", () => {
+  const agents = installedAgents({ planner: { permission: { spawn: "allow" } } })
+  assert.equal(agents.planner.permission.spawn, "allow")
+})
+
+test("primary still sees spawn", () => {
+  const agents = installedAgents()
+  assert.notEqual(agents.orchestrator.permission.spawn, "deny")
+})
+
+test("default grounder still has spawn denied", () => {
+  const agents = installedAgents()
+  assert.equal(agents.grounder.permission.spawn, "deny")
 })
 
 // ---- the prompts: exactly one of the two blocks ----------------------------

@@ -59,8 +59,10 @@
 #     eat it. This is what the first two-cycle run could not do: its stale entry
 #     was worked off inside cycle 1 and cycle 2 met a file without it. Every
 #     seeded task except T101 and T105 is GATED on a flag file under the fixture
-#     directory that no subagent may create — a subagent that finds its gate
-#     absent reports blocked and the plugin leaves the task in the file — and
+#     directory that no subagent may write — every such flag is seeded shut,
+#     carrying `closed` on its first line, and a subagent that reads a shut gate
+#     reports blocked at once, without waiting for it, so the plugin leaves the
+#     task in the file (see the gate note above seed_todo_file) — and
 #     the driver opens exactly ONE gate per cycle, after that cycle's rewrite is
 #     confirmed and before its work-off. T105 needs no gate either: it is gone
 #     from the file by the time cycle 1's work-off starts, because cycle 1 did
@@ -185,7 +187,13 @@
 #   ENDLESS_QUIESCE_TIMEOUT_MS 600000          the plugin's own quiesce bound. A
 #                      later cycle quiesces over the previous cycle's work-off
 #                      subagents as well, which the 120 s of a single-cycle run
-#                      does not cover
+#                      does not cover. It has to outlive MAX_SUBAGENT_TOOL_CALL_MS
+#                      by the watchdog's sweep margin, or the preflight refuses
+#                      the pair
+#   MAX_SUBAGENT_TOOL_CALL_MS 300000           the tool-call watchdog window
+#                      written into the isolated settings, the only thing that
+#                      frees a subagent stuck inside one long tool call; it is
+#                      what the quiesce above has to be able to wait out
 #   SEED_TODO          1                       1 seeds the project's todo file
 #                      and the fixture directory the seeded tasks work on; 0
 #                      drives whatever file is there. The seeded file carries a
@@ -261,6 +269,7 @@ ENDLESS_QUIESCE_TIMEOUT_MS=${ENDLESS_QUIESCE_TIMEOUT_MS:-600000}
 SEED_TODO=${SEED_TODO:-1}
 SPAWN_AGENT=${SPAWN_AGENT:-coder}
 SUBAGENT_SLEEP_S=${SUBAGENT_SLEEP_S:-45}
+MAX_SUBAGENT_TOOL_CALL_MS=${MAX_SUBAGENT_TOOL_CALL_MS:-300000}
 TURN_TIMEOUT_S=${TURN_TIMEOUT_S:-600}
 STEP_TIMEOUT_S=${STEP_TIMEOUT_S:-300}
 QUIESCE_WAIT_S=${QUIESCE_WAIT_S:-$((ENDLESS_QUIESCE_TIMEOUT_MS / 1000 + 60))}
@@ -629,12 +638,25 @@ task_title() {
 # is still open when a LATER cycle winds down, and a successor works its file
 # off in the meantime: the first two-cycle run watched the stale entry be
 # completed and removed inside cycle 1. Each of T102, T103 and T104 therefore
-# names a flag file no subagent may create; a subagent that finds its gate
-# absent reports blocked, no `DONE: T<n>` marker reaches the wake hook, and the
-# plugin leaves the task in the file. The driver opens `cycle<k>.flag` after
+# names a flag file no subagent may write; a subagent that finds its gate shut
+# reports blocked, no `DONE: T<n>` marker reaches the wake hook, and the plugin
+# leaves the task in the file. The driver flips `cycle<k>.flag` to `open` after
 # cycle k's rewrite is confirmed, so cycle k's work-off has exactly ONE task it
 # can finish — which is what criterion (e) removal needs — while T104's gate,
-# `owner.flag`, is never written by anything in this run.
+# `owner.flag`, stays shut for the whole run.
+#
+# WHY A GATE IS A FILE THAT IS ALREADY THERE AND WHY WAITING IS FORBIDDEN. Every
+# gate flag exists from the moment the fixture is seeded and carries `closed` on
+# its first line; opening one rewrites that line to `open`. A gate that only
+# appears when it opens reads as something to wait for, and a subagent of this
+# primary that waits for cycle k's flag can never be released: the flag is
+# written after cycle k's rewrite, the rewrite needs the quiesce, and the
+# quiesce counts every subagent of the primary — that subagent included
+# (`isQuiesced` -> `countActiveSubagentsFor`, src/registry.js). A polling
+# subagent is not reaped either, since the tool-call window is measured from the
+# current call's start (`watchdogLimit`, src/watchdog.js) and back-to-back waits
+# restart it. The gate text therefore demands ONE read and an immediate blocked
+# report, and forbids sleeping, polling and re-reading outright.
 seed_todo_file() {
   local path="$1"
   cat > "$path" <<'SEED'
@@ -654,14 +676,14 @@ before the first cycle and removed again when the run ends.
 - T101: Write e2e-endless-fixture/merged.md, holding the lines of e2e-endless-fixture/notes-a.md and then those of e2e-endless-fixture/notes-b.md
   accept: e2e-endless-fixture/merged.md carries every line of both note files, in that order, and both note files are still there
   link: e2e-endless-fixture/notes-a.md
-- T102: Once e2e-endless-fixture/cycle2.flag is there, write the number of lines in e2e-endless-fixture/merged.md to e2e-endless-fixture/count.txt
-  accept: e2e-endless-fixture/count.txt holds a single number. cycle2.flag is written by the run's owner and by nobody else — while it is absent, do not create it, do no other task's work, and report blocked so this task stays open.
+- T102: Write the number of lines in e2e-endless-fixture/merged.md to e2e-endless-fixture/count.txt, gated on e2e-endless-fixture/cycle2.flag
+  accept: e2e-endless-fixture/count.txt holds a single number. Read e2e-endless-fixture/cycle2.flag exactly ONCE before anything else: unless its first line is "open" this task is blocked — report blocked at once and end your turn, so the task stays open. Never wait for the flag, never sleep, never poll, never read it a second time, do no other task's work, and never write it: it is written by the run's owner and by nobody else.
   link: e2e-endless-fixture/count.txt
-- T103: Once e2e-endless-fixture/cycle3.flag is there, list the file names under e2e-endless-fixture/, one per line, in e2e-endless-fixture/index.md
-  accept: e2e-endless-fixture/index.md carries one line per file in that directory. cycle3.flag is written by the run's owner and by nobody else — while it is absent, do not create it, do no other task's work, and report blocked so this task stays open.
+- T103: List the file names under e2e-endless-fixture/, one per line, in e2e-endless-fixture/index.md, gated on e2e-endless-fixture/cycle3.flag
+  accept: e2e-endless-fixture/index.md carries one line per file in that directory. Read e2e-endless-fixture/cycle3.flag exactly ONCE before anything else: unless its first line is "open" this task is blocked — report blocked at once and end your turn, so the task stays open. Never wait for the flag, never sleep, never poll, never read it a second time, do no other task's work, and never write it: it is written by the run's owner and by nobody else.
   link: e2e-endless-fixture/index.md
-- T104: Waiting on T101 to produce e2e-endless-fixture/merged.md; once it is there and e2e-endless-fixture/owner.flag has been written, copy merged.md to e2e-endless-fixture/released.md
-  accept: e2e-endless-fixture/released.md holds the merged text. owner.flag is written by the run's owner and by nobody else — while it is absent, do not create it and report blocked so this task stays open.
+- T104: Waiting on T101 to produce e2e-endless-fixture/merged.md; once that file is there and e2e-endless-fixture/owner.flag reads open, copy merged.md to e2e-endless-fixture/released.md
+  accept: e2e-endless-fixture/released.md holds the merged text. Read e2e-endless-fixture/owner.flag exactly ONCE: unless its first line is "open" this task is blocked — report blocked at once and end your turn, so the task stays open. Never wait for the flag, never sleep, never poll, never read it a second time, and never write it: it is written by the run's owner and by nobody else.
   link: e2e-endless-fixture/merged.md
 - T105: Write e2e-endless-fixture/line-counts.md, holding one line per note file in e2e-endless-fixture/ in the form "<file name>: <number of lines>"
   accept: e2e-endless-fixture/line-counts.md carries one line per notes-*.md file with that file's line count, and the note files are unchanged
@@ -675,33 +697,70 @@ The `bytes()` helper in `src/format.js` is an artefact of the multi-agent run.
 SEED
 }
 
-# The two note files T101 merges and T104 waits for. No gate flag is created
-# here: every gate starts closed and the driver opens one per cycle.
+# The two note files T101 merges and T104 waits for, and every gate flag the
+# seeded tasks name. The flags are created SHUT — first line `closed` — so no
+# task's gate is a file a subagent could wait for the appearance of; opening one
+# rewrites that line. `cycle<k>.flag` covers the cycles the driver can open a
+# gate for, `owner.flag` is the one that stays shut for the whole run.
 seed_fixture() {
+  local k
   rm -rf "${PROJECT_DIR:?}/$FIXTURE_NAME" || return 1
   mkdir -p "$PROJECT_DIR/$FIXTURE_NAME" || return 1
   printf '%s\n' '# notes a' 'alpha one' 'alpha two' > "$PROJECT_DIR/$FIXTURE_NAME/notes-a.md" || return 1
   printf '%s\n' '# notes b' 'beta one' 'beta two' > "$PROJECT_DIR/$FIXTURE_NAME/notes-b.md" || return 1
+  k=2
+  while [ "$k" -le "$GATE_CYCLES_MAX" ]; do
+    printf 'closed\n' > "$PROJECT_DIR/$FIXTURE_NAME/cycle$k.flag" || return 1
+    k=$((k + 1))
+  done
+  printf 'closed\n' > "$PROJECT_DIR/$FIXTURE_NAME/owner.flag" || return 1
   FIXTURE_CREATED=1
 }
 
 # Opens the work-off gate of cycle $1: the one task that cycle's successor is
-# able to finish. Called once per cycle, AFTER the rewrite is confirmed — at
-# that moment the freeze is on, the quiesce has emptied the flight and the
-# successor session does not exist yet, so no subagent can have taken the task
-# before the gate was open, and none of the earlier cycles could drain it.
-# Cycle 1 needs no gate: T101 is finishable from the start.
+# able to finish. The flag is seeded shut and this rewrites its first line to
+# `open`, which is what the gated task reads. Called once per cycle, AFTER the
+# rewrite is confirmed — at that moment the freeze is on, the quiesce has
+# emptied the flight and the successor session does not exist yet, so no
+# subagent can have taken the task before the gate was open, and none of the
+# earlier cycles could drain it. Cycle 1 needs no gate: T101 is finishable from
+# the start.
 open_workoff_gate() {
   local k="$1" flag="$PROJECT_DIR/$FIXTURE_NAME/cycle$1.flag"
   [ "$TODO_SEEDED" = 1 ] || return 0
   [ "$k" -ge 2 ] 2>/dev/null || return 0
-  if printf 'opened by test/e2e/endless-task.sh for cycle %s at %s\n' "$k" "$(date -Is)" > "$flag"; then
+  if printf 'open\nopened by test/e2e/endless-task.sh for cycle %s at %s\n' "$k" "$(date -Is)" > "$flag"; then
     say "[$PREFIX] cycle $k work-off gate opened: $flag"
     printf 'gate                cycle %s: opened %s — the one task cycle %s can finish\n' \
       "$k" "$flag" "$k" >> "$REPORT_FILE"
   else
     say "[$PREFIX] WARNING: could not open the work-off gate $flag — cycle $k's work-off has nothing it can finish"
   fi
+}
+
+# Whether a quiesce window of $1 ms can wait out the tool-call watchdog window
+# of $2 ms. Prints the reason and returns 1 when it cannot, prints nothing and
+# returns 0 when it can. The margin covers the watchdog's 5 000 ms sweep plus
+# the abort, the wake notice and the entry removal that follow the reap.
+quiesce_window_conflict() {
+  local quiesce_ms="$1" tool_call_ms="$2" margin=30000
+  case "$tool_call_ms" in
+    '' | *[!0-9]*)
+      printf 'maxSubagentToolCallMs=%s is not a whole number of milliseconds — the run cannot tell whether a stuck subagent would be reaped inside the quiesce window' "$tool_call_ms"
+      return 1
+      ;;
+  esac
+  if [ "$tool_call_ms" -eq 0 ]; then
+    printf 'maxSubagentToolCallMs=0 switches the tool-call watchdog off, so a subagent inside a tool call is never reaped and the quiesce (ENDLESS_QUIESCE_TIMEOUT_MS=%s) could only ever time out — give the window a value below %s or raise the quiesce above it' \
+      "$quiesce_ms" "$((quiesce_ms - margin))"
+    return 1
+  fi
+  if [ $((tool_call_ms + margin)) -ge "$quiesce_ms" ]; then
+    printf 'ENDLESS_QUIESCE_TIMEOUT_MS=%s does not outlive maxSubagentToolCallMs=%s by the %s ms the watchdog needs to sweep and reap: a subagent stuck in a tool call would still be in flight when the quiesce gives up, and the cycle would abandon instead of winding down — raise the quiesce above %s or lower MAX_SUBAGENT_TOOL_CALL_MS below %s' \
+      "$quiesce_ms" "$tool_call_ms" "$margin" "$((tool_call_ms + margin))" "$((quiesce_ms - margin))"
+    return 1
+  fi
+  return 0
 }
 
 # Idle again: the newest message of the primary is an assistant message that has
@@ -950,7 +1009,12 @@ PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
 # machine's own ~/.config/opencode neither written nor read again. Built before
 # the wiring checks and before the settings are read, both of which resolve
 # against it.
-e2e_iso_create "$PLUGIN_ROOT" '{"maxSubagents":8,"maxContext":130000,"endlessMode":true,"agentMode":"orchestrator"}' ||
+# maxSubagentToolCallMs is pinned here rather than left at the plugin's own
+# default, which is wider than the quiesce window this driver runs with: the
+# reap of a subagent stuck in a tool call has to land inside that window, and
+# the preflight below refuses the pair when it does not.
+e2e_iso_create "$PLUGIN_ROOT" \
+  "$(printf '{"maxSubagents":8,"maxContext":130000,"endlessMode":true,"agentMode":"orchestrator","maxSubagentToolCallMs":%s}' "$MAX_SUBAGENT_TOOL_CALL_MS")" ||
   die "could not build the isolated opencode configuration"
 SETTINGS_FILE="$E2E_ISO_SETTINGS_FILE"
 
@@ -983,6 +1047,27 @@ PY
 if [ $((SUBAGENT_SLEEP_S * 1000 + 10000)) -ge "$MAX_AGE_MS" ]; then
   die "SUBAGENT_SLEEP_S=$SUBAGENT_SLEEP_S is too close to maxSubagentAgeMs=$MAX_AGE_MS — the watchdog would abort the in-flight subagent instead of letting the cycle wait for it"
 fi
+
+# The companion of that relation, on the other window. A cycle's quiesce waits
+# for every subagent of the primary to leave the flight; one that sits inside a
+# tool call is freed by nothing but the tool-call watchdog, which fires at
+# maxSubagentToolCallMs measured from that call's start (watchdogLimit,
+# src/watchdog.js) and is seen by a sweep every 5 000 ms. Unless that reap fits
+# inside the quiesce window, the cycle abandons over a subagent the run could
+# have waited out, and every criterion after (b) falls with it. 0 is the off
+# switch for that window (workingWindowMs, src/settings.js): with it no reap
+# comes at all.
+TOOL_CALL_MS=$(python3 - "$SETTINGS_FILE" <<'PY'
+import json, sys
+try:
+    raw = json.load(open(sys.argv[1]))
+    v = raw.get("maxSubagentToolCallMs")
+    print(int(v) if isinstance(v, int) and v >= 0 else 660000)
+except Exception:
+    print(660000)
+PY
+)
+QUIESCE_CONFLICT=$(quiesce_window_conflict "$ENDLESS_QUIESCE_TIMEOUT_MS" "$TOOL_CALL_MS") || die "$QUIESCE_CONFLICT"
 
 # ---------- settings -------------------------------------------------------
 
@@ -1102,11 +1187,11 @@ primary model       $MODEL   (every agent is pinned to it in the isolated llm-mo
 cycles driven       $ENDLESS_CYCLES in sequence, each from the file and the session the one before it left
 isolated config     $E2E_ISO_OPENCODE_DIR   (the machine's ~/.config/opencode is not written)
 settings file       $SETTINGS_FILE   (inside it; backup: $SETTINGS_BAK, existed=$SETTINGS_EXISTED)
-settings written    endlessMode=true endlessQuiesceTimeoutMs=$ENDLESS_QUIESCE_TIMEOUT_MS endlessMaxCycles=$ENDLESS_MAX_CYCLES
+settings written    endlessMode=true endlessQuiesceTimeoutMs=$ENDLESS_QUIESCE_TIMEOUT_MS endlessMaxCycles=$ENDLESS_MAX_CYCLES maxSubagentToolCallMs=$MAX_SUBAGENT_TOOL_CALL_MS
 endless ceiling     held at $ENDLESS_CONTEXT_CEILING between cycles, then ${ARMED_CONTEXT:-(armed per cycle after its spawn turn)}   (ENDLESS_CONTEXT=${ENDLESS_CONTEXT:-derive from the measured context}, margin $ENDLESS_CONTEXT_MARGIN, settings-cache wait ${SETTINGS_TTL_WAIT_S}s)
 debug log           $DEBUG_LOG   (read from byte $LOG_OFFSET)
 todo baseline       $TODO_BASELINE   (backup: $TODO_BAK)
-fixture             $PROJECT_DIR/$FIXTURE_NAME   (seeded=$TODO_SEEDED; T101 produces merged.md, which T104's title still calls outstanding; $FIRST_WORK_ID is cycle 1's own work, carried out before its trigger so that cycle has something finished to hand over; T102 and T103 are gated on a flag file, and the driver opens cycle<k>.flag after cycle k's rewrite is confirmed)
+fixture             $PROJECT_DIR/$FIXTURE_NAME   (seeded=$TODO_SEEDED; T101 produces merged.md, which T104's title still calls outstanding; $FIRST_WORK_ID is cycle 1's own work, carried out before its trigger so that cycle has something finished to hand over; T102, T103 and T104 are gated on a flag file seeded shut, and the driver writes open into cycle<k>.flag after cycle k's rewrite is confirmed)
 in-flight subagent  spawn("$SPAWN_AGENT", sleep ${SUBAGENT_SLEEP_S}s) -> handle ${SPAWN_HANDLE:-(spawned in the turn 2 of each cycle)}
 timeouts            turn=${TURN_TIMEOUT_S}s step=${STEP_TIMEOUT_S}s quiesce=${QUIESCE_WAIT_S}s work-off=${WORKOFF_TIMEOUT_S}s start=${SERVER_START_TIMEOUT_S}s poll=${POLL_S}s
 out dir             $OUT_DIR

@@ -259,8 +259,8 @@ against pre-existing entries passes over an empty comparison. That hole let the
 same class of defect through four times, each failure sitting in the second
 cycle on an accumulated file. The driver therefore
 
-- seeds the project's todo file with four ids (`T101`–`T104`) inside the
-  markers, human prose outside them and a `next-id T105` watermark, plus the
+- seeds the project's todo file with five ids (`T101`–`T105`) inside the
+  markers, human prose outside them and a `next-id T106` watermark, plus the
   fixture directory `e2e-endless-fixture/` the seeded tasks work on;
 - shapes two of those entries the way the live file was shaped: `T101` produces
   `merged.md`, and `T104`'s title still says it is waiting for `T101` to produce
@@ -268,17 +268,23 @@ cycle on an accumulated file. The driver therefore
   names work that is already landed and only the owner's release is left of it —
   which is what makes a wind-down subagent re-title a surviving id;
 - keeps that stale entry alive past the work-off phase that would otherwise eat
-  it. Every seeded task but `T101` is **gated** on a flag file under the fixture
-  directory that its own `accept:` line forbids the subagent to create: a
-  subagent that finds its gate absent reports blocked, no `DONE: T<n>` reaches
-  the wake hook, and the plugin leaves the task in the file. The driver opens
-  exactly one gate per cycle — `cycle<k>.flag`, written after cycle `k`'s
-  rewrite is confirmed, while the freeze is on, the quiesce has emptied the
-  flight and the successor does not exist yet — so cycle `k`'s work-off can
-  finish that one task and nothing else, and `T104`, whose gate `owner.flag`
-  nothing in the run writes, is still open when the last cycle winds down. This
-  is what the first two-cycle run could not do: its stale entry was worked off
-  inside cycle 1 and cycle 2 met a file without it;
+  it. Every seeded task but `T101` and `T105` is **gated** on a flag file under the
+  fixture directory that its own `accept:` line forbids the subagent to create:
+  every gate flag is created when the fixture is seeded and carries `closed` on
+  its first line, so a task that finds its gate shut reports blocked at once and
+  ends its turn, without waiting, sleeping, polling or re-reading — a subagent
+  that waits holds the cycle's quiesce open and no watchdog window reaps a
+  poller, since the tool-call window is measured from the current call's start
+  (`watchdogLimit`, `src/watchdog.js`) and back-to-back waits restart it. No
+  `DONE: T<n>` reaches the wake hook, and the plugin leaves the task in the file.
+  The driver opens exactly one gate per cycle — `cycle<k>.flag`, whose first
+  line `open_workoff_gate` rewrites to `open` after cycle `k`'s rewrite is
+  confirmed, while the freeze is on, the quiesce has emptied the flight and the
+  successor does not exist yet — so cycle `k`'s work-off can finish that one
+  task and nothing else, and `T104`, whose gate `owner.flag` nothing in the run
+  writes, is still open when the last cycle winds down. This is what the first
+  two-cycle run could not do: its stale entry was worked off inside cycle 1 and
+  cycle 2 met a file without it;
 - drives `ENDLESS_CYCLES` (2) cycles in sequence, each on the session and the
   file its predecessor left, with `ENDLESS_MAX_CYCLES` defaulting to the same
   number so the plugin's own ceiling stops the loop right after the last driven
@@ -475,7 +481,15 @@ the preflight: a later cycle's work-off would meet nothing it can finish),
 `ENDLESS_MAX_CYCLES` (`$ENDLESS_CYCLES`), `ENDLESS_QUIESCE_TIMEOUT_MS` (600000 —
 a later cycle quiesces over the previous cycle's work-off subagents as well),
 `QUIESCE_WAIT_S` (that bound + 60 s, the driver's own wait for the quiesce
-line), `SPAWN_AGENT`,
+line), `MAX_SUBAGENT_TOOL_CALL_MS` (300000 — the tool-call watchdog window
+written into the isolated settings, the only thing that frees a subagent stuck
+inside one long tool call; the shipped 660000 is wider than the driver's
+600000 quiesce, so the driver pins a narrower value into its isolated
+configuration and the preflight refuses a configuration where the quiesce
+window cannot outlast this one — `maxSubagentToolCallMs` of `0` or non-numeric,
+or `maxSubagentToolCallMs + 30000 >= ENDLESS_QUIESCE_TIMEOUT_MS` — so a subagent
+stuck in a tool call is still in flight when the quiesce gives up and the cycle
+abandons instead of winding down), `SPAWN_AGENT`,
 `SUBAGENT_SLEEP_S` (45, and the preflight refuses a value within 10 s of
 `maxSubagentAgeMs`, where the watchdog would abort the subagent instead),
 `TURN_TIMEOUT_S`, `STEP_TIMEOUT_S`, `WORKOFF_TIMEOUT_S` (600, the removal step's

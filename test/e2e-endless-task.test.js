@@ -274,13 +274,127 @@ test("the work-off gate opens for a cycle after the first and for no other", () 
 
   const second = runGate({ cycle: 2 })
   assert.equal(existsSync(second.flag), true)
-  assert.match(readFileSync(second.flag, "utf8"), /opened by test\/e2e\/endless-task\.sh for cycle 2/)
+  const opened = readFileSync(second.flag, "utf8")
+  // The gated task reads the FIRST line and nothing else: a flag that is there
+  // but does not say `open` is a shut gate.
+  assert.equal(opened.split("\n")[0], "open")
+  assert.match(opened, /opened by test\/e2e\/endless-task\.sh for cycle 2/)
   assert.match(second.result.stdout, /cycle 2 work-off gate opened/)
   rmSync(second.dir, { recursive: true, force: true })
 
   const unseeded = runGate({ cycle: 2, seeded: 0 })
   assert.equal(existsSync(unseeded.flag), false, "an unseeded run drives the file that is there and opens no gate of its own")
   rmSync(unseeded.dir, { recursive: true, force: true })
+})
+
+// Every gate is a file that is ALREADY THERE and says `closed`. A gate that
+// only appears when it opens reads as something to wait for, and a subagent of
+// the primary that waits for cycle k's flag deadlocks the run: the flag is
+// written after cycle k's rewrite, the rewrite needs the quiesce, and the
+// quiesce counts that very subagent.
+test("every gate flag is seeded shut, and opening one rewrites its first line", () => {
+  const dir = mkdtempSync(join(tmpdir(), "e2e-endless-fixture-"))
+  const gateCyclesMax = /^GATE_CYCLES_MAX=(\d+)$/m.exec(DRIVER_SOURCE)
+  assert.ok(gateCyclesMax, "the driver states no GATE_CYCLES_MAX")
+  const script = `say() { printf '%s\\n' "$*"; }
+PROJECT_DIR=${shellQuote(dir)}
+FIXTURE_NAME=e2e-endless-fixture
+GATE_CYCLES_MAX=${gateCyclesMax[1]}
+FIXTURE_CREATED=0
+${driverFunction("seed_fixture")}
+seed_fixture
+echo "created=$FIXTURE_CREATED"
+`
+  const result = spawnSync("bash", ["-c", script], { encoding: "utf8" })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /created=1/)
+  const fixture = join(dir, "e2e-endless-fixture")
+  const flags = ["owner.flag"]
+  for (let k = 2; k <= Number(gateCyclesMax[1]); k += 1) flags.push(`cycle${k}.flag`)
+  for (const flag of flags) {
+    assert.equal(
+      readFileSync(join(fixture, flag), "utf8").split("\n")[0],
+      "closed",
+      `${flag} is not seeded shut`,
+    )
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+// The task text is the only lever on a work-off subagent's behaviour — the
+// kickoff that starts that turn comes from the plugin — so the no-wait
+// instruction is pinned here beside the gate it belongs to.
+test("a gated task demands one read of its flag and forbids waiting for it", async () => {
+  const { dir, content } = runSeed()
+  const { parseTasks } = await import("../src/todofile.js")
+  const tasks = parseTasks(content)
+  for (const task of tasks.slice(1, -1)) {
+    assert.match(task.accept, /exactly ONCE/, `${task.id} does not bound the gate read to one`)
+    assert.match(task.accept, /first line is "open"/, `${task.id} does not read the gate's first line`)
+    assert.match(task.accept, /report blocked at once/, `${task.id} does not report blocked at once`)
+    assert.match(
+      task.accept,
+      /Never wait for the flag, never sleep, never poll, never read it a second time/,
+      `${task.id} leaves its subagent room to wait for the gate`,
+    )
+    assert.equal(
+      /Once .*\.flag is there/.test(task.text),
+      false,
+      `${task.id}'s title reads as something to wait for`,
+    )
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+// The quiesce waits out every subagent of the primary; one stuck inside a tool
+// call is freed by the tool-call watchdog alone. A configuration where that
+// reap cannot land inside the quiesce window is refused before the run starts.
+function runQuiesceCheck(quiesceMs, toolCallMs) {
+  const script = `${driverFunction("quiesce_window_conflict")}
+reason=$(quiesce_window_conflict ${shellQuote(String(quiesceMs))} ${shellQuote(String(toolCallMs))})
+status=$?
+printf '%s\\n' "status=$status"
+printf '%s\\n' "$reason"
+`
+  const result = spawnSync("bash", ["-c", script], { encoding: "utf8" })
+  assert.equal(result.status, 0, result.stderr)
+  const status = /status=(\d+)/.exec(result.stdout)
+  return { status: Number(status[1]), reason: result.stdout }
+}
+
+test("the preflight refuses a quiesce window the tool-call watchdog cannot be reaped inside", () => {
+  // The plugin's own default window (660 000) is wider than the driver's
+  // default quiesce (600 000): that pair has to be refused, not run.
+  const wide = runQuiesceCheck(600000, 660000)
+  assert.equal(wide.status, 1)
+  assert.match(wide.reason, /maxSubagentToolCallMs=660000/)
+  assert.match(wide.reason, /ENDLESS_QUIESCE_TIMEOUT_MS=600000/)
+
+  // Inside the margin the watchdog needs to sweep and reap.
+  assert.equal(runQuiesceCheck(600000, 590000).status, 1)
+
+  // The off switch: no reap ever comes.
+  const off = runQuiesceCheck(600000, 0)
+  assert.equal(off.status, 1)
+  assert.match(off.reason, /switches the tool-call watchdog off/)
+
+  assert.equal(runQuiesceCheck(600000, "").status, 1)
+  assert.equal(runQuiesceCheck(600000, 300000).status, 0)
+})
+
+test("the driver's own defaults pass that relation and reach the server", () => {
+  const quiesce = /^ENDLESS_QUIESCE_TIMEOUT_MS=\$\{ENDLESS_QUIESCE_TIMEOUT_MS:-(\d+)\}$/m.exec(DRIVER_SOURCE)
+  const toolCall = /^MAX_SUBAGENT_TOOL_CALL_MS=\$\{MAX_SUBAGENT_TOOL_CALL_MS:-(\d+)\}$/m.exec(DRIVER_SOURCE)
+  assert.ok(quiesce, "the driver states no default quiesce timeout")
+  assert.ok(toolCall, "the driver states no default tool-call window")
+  assert.equal(runQuiesceCheck(quiesce[1], toolCall[1]).status, 0)
+  // The window only holds if it is written into the isolated settings the
+  // server reads; the driver's own value wins over the carried-over keys there.
+  assert.match(
+    DRIVER_SOURCE,
+    /"maxSubagentToolCallMs":%s\}' "\$MAX_SUBAGENT_TOOL_CALL_MS"\)/,
+    "the isolated settings do not pin MAX_SUBAGENT_TOOL_CALL_MS",
+  )
 })
 
 test("the staleness precondition reports the cause's removal and the artefact it left", () => {

@@ -379,8 +379,6 @@ test("sourcing the library again in the same process keeps the captures already 
 e2e_resolve_model
 FIRST="$E2E_AUDIT_MANIFEST"
 e2e_audit_record "${dir}/early.json"
-# Every other piece of state the library holds is set afresh by a second
-# source — the pin included, which is why the driver resolves it after them.
 . "${LIB}"
 e2e_resolve_model
 [ "$E2E_AUDIT_MANIFEST" = "$FIRST" ] && echo SAME_MANIFEST || echo REKEYED
@@ -394,6 +392,154 @@ echo "LINE=$E2E_AUDIT_LINE"
   assert.match(r.stdout, /AUDIT_OK/, r.stdout + r.stderr)
   assert.match(r.stdout, /2 assistant message\(s\) over 2 capture\(s\)/)
   rmSync(dir, { recursive: true, force: true })
+})
+
+// The pin is kept across that second source the same way the manifest is, so a
+// driver resolves the model once and not after every source of the library.
+test("sourcing the library again in the same process keeps the pin already resolved", () => {
+  const r = runShell(`
+set -e
+. "$LIB"
+export E2E_MODEL="xai/grok-4.6"
+e2e_resolve_model
+. "$LIB"
+echo "REF=$E2E_MODEL_REF PROVIDER=$E2E_MODEL_PROVIDER ID=$E2E_MODEL_ID"
+e2e_iso_create "$PLUGIN_ROOT" '{"maxSubagents":1}'
+echo "ISO=$E2E_ISO_OPENCODE_DIR"
+`)
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  assert.match(r.stdout, /REF=xai\/grok-4\.6 PROVIDER=xai ID=grok-4\.6/, r.stdout + r.stderr)
+  // The pin that survived is the one the isolated config is then built around.
+  const iso = /ISO=(.*)/.exec(r.stdout)[1]
+  const models = JSON.parse(readFileSync(join(iso, "llm-models.json"), "utf8"))
+  assert.deepEqual(models.orchestrator, { providerID: "xai", modelID: "grok-4.6" })
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+// The keying is on the process, as the manifest's is: a pin reaching a driver
+// from outside has not been through the banned-model refusal, so it is dropped
+// rather than adopted. E2E_MODEL, which every driver does resolve from, is the
+// one way a pin travels between processes.
+test("a pin from another process is not adopted by a source of the library", () => {
+  const r = runShell(
+    `
+. "$LIB"
+echo "REF=[$E2E_MODEL_REF] PROVIDER=[$E2E_MODEL_PROVIDER] ID=[$E2E_MODEL_ID]"
+e2e_iso_create "$PLUGIN_ROOT" '{"maxSubagents":1}' && echo CREATED || echo REFUSED
+`,
+    {
+      E2E_MODEL_REF: "gpuserver/Qwen3.8 Flash Next",
+      E2E_MODEL_PROVIDER: "gpuserver",
+      E2E_MODEL_ID: "Qwen3.8 Flash Next",
+      E2E_MODEL_OWNER: String(process.pid),
+    },
+  )
+  assert.match(r.stdout, /REF=\[\] PROVIDER=\[\] ID=\[\]/, r.stdout + r.stderr)
+  assert.match(r.stdout, /REFUSED/, r.stdout + r.stderr)
+  assert.match(r.stderr, /call e2e_resolve_model first/)
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+// ---------- the isolated set travels to the drivers a driver invokes -------
+
+// run-all.sh builds the isolated home and exports the E2E_ISO_* set; the
+// drivers it sequences build none of their own and have to read THAT
+// configuration. message-task.sh and ask-task.sh resolve the settings file they
+// refuse a run over through e2e_opencode_config_dir (lib/midrun-common.sh), so a
+// child that blanked the inherited set would read the machine's
+// agent-intercom.json while the server runs on the isolated one.
+test("a driver invoked by another reads the isolated configuration, not the machine's", () => {
+  const r = runShell(
+    `
+set -e
+. "$LIB"
+e2e_resolve_model
+e2e_iso_create "$PLUGIN_ROOT" '{"maxSubagents":8}' > /dev/null
+echo "PARENT_DIR=$(e2e_opencode_config_dir)"
+cat > "$DIR/child.sh" <<'CHILD'
+. "$LIB"
+echo "CHILD_DIR=$(e2e_opencode_config_dir)"
+echo "CHILD_SETTINGS=$E2E_ISO_SETTINGS_FILE"
+echo "CHILD_MODELS=$E2E_ISO_MODELS_FILE"
+echo "CHILD_PIN=[$E2E_MODEL_REF]"
+CHILD
+bash "$DIR/child.sh"
+echo "HOME_WAS=$E2E_ISO_HOME"
+e2e_iso_remove > /dev/null
+`,
+    // Only the fallback of e2e_opencode_config_dir reads this; the machine
+    // config the library copies from is E2E_MACHINE_CONFIG_HOME.
+    { XDG_CONFIG_HOME: "/nowhere/machine" },
+  )
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  const parentDir = /PARENT_DIR=(.*)/.exec(r.stdout)[1]
+  const childDir = /CHILD_DIR=(.*)/.exec(r.stdout)[1]
+  assert.equal(childDir, parentDir, "the child resolved another config directory than the one in force")
+  assert.doesNotMatch(childDir, /nowhere\/machine/, `the child fell back to the machine's config: ${childDir}`)
+  assert.equal(/CHILD_SETTINGS=(.*)/.exec(r.stdout)[1], join(parentDir, "agent-intercom.json"))
+  assert.equal(/CHILD_MODELS=(.*)/.exec(r.stdout)[1], join(parentDir, "llm-models.json"))
+  // The pin's own rule is untouched by this: it is keyed on $$ and stays
+  // unadopted across a process boundary, because a model reference from outside
+  // has not been through the banned-model refusal.
+  assert.match(r.stdout, /CHILD_PIN=\[\]/, r.stdout)
+  rmSync(/HOME_WAS=(.*)/.exec(r.stdout)[1], { recursive: true, force: true })
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+// The marker for "already built" is the isolated opencode directory itself: a
+// set left in the environment by a run whose home is long gone names nothing
+// and is dropped, so the fallback is reached rather than a path that is not
+// there.
+test("an inherited E2E_ISO_* set whose directory is gone is dropped", () => {
+  const r = runShell(
+    `
+. "$LIB"
+echo "DIR=$(e2e_opencode_config_dir)"
+echo "HOME_VAR=[$E2E_ISO_HOME] SETTINGS=[$E2E_ISO_SETTINGS_FILE]"
+`,
+    {
+      E2E_ISO_HOME: "/tmp/e2e-opencode-home.gone",
+      E2E_ISO_CONFIG_HOME: "/tmp/e2e-opencode-home.gone/.config",
+      E2E_ISO_OPENCODE_DIR: "/tmp/e2e-opencode-home.gone/.config/opencode",
+      E2E_ISO_SETTINGS_FILE: "/tmp/e2e-opencode-home.gone/.config/opencode/agent-intercom.json",
+      E2E_ISO_MODELS_FILE: "/tmp/e2e-opencode-home.gone/.config/opencode/llm-models.json",
+      XDG_CONFIG_HOME: "/nowhere/machine",
+    },
+  )
+  assert.match(r.stdout, /DIR=\/nowhere\/machine\/opencode/, r.stdout)
+  assert.match(r.stdout, /HOME_VAR=\[\] SETTINGS=\[\]/, r.stdout)
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+// The paths travel, the claim to remove them does not. endless-task.sh and
+// nested-task.sh install their cleanup trap BEFORE building a home of their
+// own, so an early exit of a driver that run-all.sh invoked would otherwise
+// take the caller's live configuration with it.
+test("a driver that inherited the set does not remove the home its caller built", () => {
+  const r = runShell(`
+set -e
+. "$LIB"
+e2e_resolve_model
+e2e_iso_create "$PLUGIN_ROOT" '{}' > /dev/null
+HOME_WAS="$E2E_ISO_HOME"
+echo "HOME_WAS=$HOME_WAS"
+cat > "$DIR/child.sh" <<'CHILD'
+. "$LIB"
+e2e_iso_remove && echo CHILD_REMOVE_OK || echo "CHILD_REMOVE_FAILED=$?"
+CHILD
+bash "$DIR/child.sh"
+[ -d "$HOME_WAS/.config/opencode" ] && echo STILL_THERE || echo GONE_TOO_EARLY
+e2e_iso_remove > /dev/null
+[ -e "$HOME_WAS" ] && echo OWNER_KEPT || echo OWNER_REMOVED
+`)
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  assert.match(r.stdout, /CHILD_REMOVE_OK/, r.stdout + r.stderr)
+  assert.match(r.stdout, /isolated config kept/, "the child said nothing about leaving the home standing")
+  assert.match(r.stdout, /STILL_THERE/, r.stdout)
+  // The process that built it still removes it.
+  assert.match(r.stdout, /OWNER_REMOVED/, r.stdout)
+  rmSync(/HOME_WAS=(.*)/.exec(r.stdout)[1], { recursive: true, force: true })
+  rmSync(r.dir, { recursive: true, force: true })
 })
 
 // TMPDIR survives a run. A manifest an earlier run left there — including one

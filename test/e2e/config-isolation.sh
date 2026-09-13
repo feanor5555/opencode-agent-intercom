@@ -51,12 +51,18 @@
 #
 # State the functions set:
 #
-#   E2E_MODEL_REF / E2E_MODEL_PROVIDER / E2E_MODEL_ID   the resolved pin
+#   E2E_MODEL_REF / E2E_MODEL_PROVIDER / E2E_MODEL_ID   the resolved pin,
+#                             kept across a further source in the same process
+#   E2E_MODEL_OWNER           the pid the pin was resolved for
 #   E2E_ISO_HOME              the temporary HOME, removed by e2e_iso_remove
 #   E2E_ISO_CONFIG_HOME       $E2E_ISO_HOME/.config, exported
 #   E2E_ISO_OPENCODE_DIR      its opencode/ directory
 #   E2E_ISO_SETTINGS_FILE     the isolated agent-intercom.json
 #   E2E_ISO_MODELS_FILE       the isolated llm-models.json
+#                             — these five are exported, so a driver another
+#                             driver invokes reads the same isolated files
+#   E2E_ISO_OWNER             the pid that built the home; NOT exported, so only
+#                             that process removes it again
 #   E2E_SERVER_ENV            the assignments e2e_server_start puts in front of
 #                             the server process
 #
@@ -82,14 +88,63 @@ E2E_PINNED_AGENTS="orchestrator planner coder debugger reviewer documenter resea
 # web, and nothing that decides behaviour under test.
 E2E_CARRIED_SETTINGS="searxngUrl exaApiKey forumBangs"
 
-E2E_MODEL_REF=""
-E2E_MODEL_PROVIDER=""
-E2E_MODEL_ID=""
-E2E_ISO_HOME=""
-E2E_ISO_CONFIG_HOME=""
-E2E_ISO_OPENCODE_DIR=""
-E2E_ISO_SETTINGS_FILE=""
-E2E_ISO_MODELS_FILE=""
+# The resolved pin, keyed on the process like the audit manifest below and for
+# the same reason: sourcing this library a second time inside the SAME process
+# keeps a pin e2e_resolve_model has already validated, so a driver that reaches
+# the library through lib/midrun-common.sh and also sources it directly does not
+# lose it between the two. Any other process starts without a pin: these three
+# are not exported, and a value that arrives from outside anyway has not been
+# through the banned-model refusal, so it is dropped rather than adopted.
+E2E_MODEL_OWNER="${E2E_MODEL_OWNER:-}"
+if [ "$E2E_MODEL_OWNER" != "$$" ] || [ -z "${E2E_MODEL_REF:-}" ]; then
+  E2E_MODEL_REF=""
+  E2E_MODEL_PROVIDER=""
+  E2E_MODEL_ID=""
+  E2E_MODEL_OWNER=""
+fi
+
+# The isolated configuration, KEPT when it arrives exported. e2e_iso_create
+# exports these five precisely so a driver that another driver invokes resolves
+# the same isolated files: run-all.sh builds the home, and run-task.sh,
+# multi-task.sh, message-task.sh and ask-task.sh then read the configuration in
+# force through e2e_opencode_config_dir. Blanking them here would send every one
+# of those back to the machine's ~/.config/opencode while the server runs on
+# another set, which is exactly what rule 1 above forbids.
+#
+# The "already built" marker is the isolated opencode directory itself, on disk:
+# a set is kept only when it is complete AND that directory exists, so a stale
+# set left in the environment by a run whose home is long gone is dropped rather
+# than followed to a path that is not there.
+#
+# This is deliberately NOT the pin's rule above, and cannot be confused with it.
+# The pin is keyed on $$ and is dropped when it arrives from another process,
+# because a model reference from outside has not been through the banned-model
+# refusal and nothing about the value itself can show whether it has. These five
+# are paths: what they claim is checkable on the spot, and a driver that built
+# nothing MUST take its caller's set or it reads the wrong configuration. The
+# pin travels between processes through E2E_MODEL, which every driver resolves
+# again; the isolated home cannot be built again, so it travels as itself.
+E2E_ISO_HOME="${E2E_ISO_HOME:-}"
+E2E_ISO_CONFIG_HOME="${E2E_ISO_CONFIG_HOME:-}"
+E2E_ISO_OPENCODE_DIR="${E2E_ISO_OPENCODE_DIR:-}"
+E2E_ISO_SETTINGS_FILE="${E2E_ISO_SETTINGS_FILE:-}"
+E2E_ISO_MODELS_FILE="${E2E_ISO_MODELS_FILE:-}"
+if [ -z "$E2E_ISO_HOME" ] || [ -z "$E2E_ISO_CONFIG_HOME" ] || [ ! -d "$E2E_ISO_OPENCODE_DIR" ]; then
+  E2E_ISO_HOME=""
+  E2E_ISO_CONFIG_HOME=""
+  E2E_ISO_OPENCODE_DIR=""
+  E2E_ISO_SETTINGS_FILE=""
+  E2E_ISO_MODELS_FILE=""
+fi
+
+# Removal is owned, not inherited: the pid that built the home is the only one
+# that removes it. E2E_ISO_OWNER is never exported, so a driver that inherited
+# the five paths above holds no claim on them — see e2e_iso_remove. A further
+# source of this library inside the building process keeps the claim.
+E2E_ISO_OWNER="${E2E_ISO_OWNER:-}"
+
+# Never inherited: an array cannot be exported, and only a driver that starts a
+# server of its own needs it — that driver calls e2e_iso_create itself.
 E2E_SERVER_ENV=()
 
 # server-lifecycle.sh defines these two; standalone sourcing gets its own.
@@ -126,7 +181,9 @@ e2e_debug_log() {
 
 # Resolves E2E_MODEL into E2E_MODEL_REF/PROVIDER/ID and refuses the banned
 # model outright, before anything is started. Exports E2E_MODEL so a driver
-# this one sequences resolves the same pin.
+# this one sequences resolves the same pin, and marks E2E_MODEL_OWNER with the
+# pid, so a further source of this library inside the same process keeps the pin
+# instead of blanking it.
 e2e_resolve_model() {
   local ref=${E2E_MODEL:-$E2E_DEFAULT_MODEL}
   local provider=${ref%%/*} id=${ref#*/}
@@ -141,6 +198,7 @@ e2e_resolve_model() {
   E2E_MODEL_REF="$ref"
   E2E_MODEL_PROVIDER="$provider"
   E2E_MODEL_ID="$id"
+  E2E_MODEL_OWNER=$$
   E2E_MODEL="$ref"
   export E2E_MODEL
   return 0
@@ -287,7 +345,11 @@ PY
 
   E2E_ISO_SETTINGS_FILE="$iso_dir/agent-intercom.json"
   E2E_ISO_MODELS_FILE="$iso_dir/llm-models.json"
+  # Exported, so every driver this one invokes resolves this configuration and
+  # not the machine's. E2E_ISO_OWNER stays unexported: the paths travel, the
+  # claim to remove them does not.
   export E2E_ISO_HOME E2E_ISO_CONFIG_HOME E2E_ISO_OPENCODE_DIR E2E_ISO_SETTINGS_FILE E2E_ISO_MODELS_FILE
+  E2E_ISO_OWNER=$$
 
   # What e2e_server_start puts in front of the opencode process. XDG_DATA_HOME
   # and XDG_CACHE_HOME are named explicitly so an ambient value of the caller's
@@ -307,6 +369,12 @@ PY
 # Removes the isolated home. The two symlinks inside it are removed as links —
 # rm never follows one — so the machine's .cache and .local/share are safe.
 # A no-op when no home was created, and idempotent.
+#
+# A home built by ANOTHER process is left standing. A driver that run-all.sh or
+# nested-task.sh invokes inherits the exported paths, and several of those
+# drivers install a cleanup trap before building a home of their own: without
+# this guard an early exit of theirs would take the caller's live configuration
+# with it, out from under the server still reading it.
 e2e_iso_remove() {
   [ -n "${E2E_ISO_HOME:-}" ] || return 0
   case "$E2E_ISO_HOME" in
@@ -316,12 +384,17 @@ e2e_iso_remove() {
       return 1
       ;;
   esac
+  if [ "${E2E_ISO_OWNER:-}" != "$$" ]; then
+    e2e_say "isolated config kept ($E2E_ISO_HOME) — it was built by the driver that invoked this one, which removes it itself"
+    return 0
+  fi
   rm -rf -- "$E2E_ISO_HOME" && e2e_say "isolated config removed ($E2E_ISO_HOME)"
   E2E_ISO_HOME=""
   E2E_ISO_CONFIG_HOME=""
   E2E_ISO_OPENCODE_DIR=""
   E2E_ISO_SETTINGS_FILE=""
   E2E_ISO_MODELS_FILE=""
+  E2E_ISO_OWNER=""
   E2E_SERVER_ENV=()
   unset E2E_ISO_HOME E2E_ISO_CONFIG_HOME E2E_ISO_OPENCODE_DIR E2E_ISO_SETTINGS_FILE E2E_ISO_MODELS_FILE
   return 0

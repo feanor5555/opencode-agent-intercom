@@ -74,17 +74,27 @@ that opencode upgrades don't shift the system-prompt composition.
   than by luck. It then reads what the provider was actually handed out of the
   plugin's own request log and asserts the plan band, the reserve band, the
   lockdown and the carrier placement. See "The context bands" below.
+- `mcp-after-task.sh` — MCP `tool.execute.after` harness, and the fourth driver
+  that owns a server. It patches a local stdio MCP server (`test/e2e/lib/mcp-ping-server.js`,
+  one tool `ping` → `pong`, no network) into the isolated `opencode.json` only,
+  starts `opencode serve` on `MCP_AFTER_PORT` (default 4608) with
+  `OPENCODE_AGENT_INTERCOM_LOG_REQUESTS=1`, spawns a subagent told to call that
+  ping, and records `VERDICT FIRES` / `DOES_NOT_FIRE` / `TOOL_NOT_SEEN` from the
+  request log's `type=tool.execute.after` (and `type=tool.execute.before`)
+  records whose `tool` is that ping. `TOOL_NOT_SEEN` is a failed criterion, not
+  a silent skip. See "MCP `tool.execute.after`" below.
 - `todo-driver.mjs` — TODO.md auto-tracking harness. Drives DONE and BLOCKED
   markers through the wake hook and checks the resulting file.
 - `run-all.sh` — runs the 8 single-agent tests, the multi-agent test, the four
-  mid-run drivers, the context-band driver and the endless-mode cycles. The
-  mid-run drivers and the context-band driver are the ones in it that assert: a
-  failed criterion of theirs does not stop the suite — the endless cycle still
-  runs — but it decides the suite's exit code at the end (`ASSERTING_FAILED`).
+  mid-run drivers, the context-band driver, the MCP-after driver and the
+  endless-mode cycles. The mid-run drivers, the context-band driver and the
+  MCP-after driver are the ones in it that assert: a failed criterion of
+  theirs does not stop the suite — the endless cycle still runs — but it
+  decides the suite's exit code at the end (`ASSERTING_FAILED`).
   Owns the server every driver above `ask-expiry-task.sh` uses: builds the TUI, starts
   a fresh `opencode serve` in the configured directory (default
   `$HOME/testopencode`), and stops it again before `ask-expiry-task.sh`,
-  `context-bands-task.sh` and `endless-task.sh`, which need no server of this
+  `context-bands-task.sh`, `mcp-after-task.sh` and `endless-task.sh`, which need no server of this
   suite's and would be contaminated by its sessions —
   and once more on the way out, for every path that does not reach that stop.
 - `lib/` — the Python evidence readers used by `endless-task.sh` (the kickoff
@@ -95,10 +105,14 @@ that opencode upgrades don't shift the system-prompt composition.
   inside a call and `gap_ms` / `into_gap_ms` for one between two — covered
   without a server by `test/e2e-midrun-readers.test.js`; and
   `midrun-common.sh`, the report lines, session calls, capture and debug-log
-  slice they share; and `context-bands.py`, the reader `context-bands-task.sh`
+  slice they share; `context-bands.py`, the reader `context-bands-task.sh`
   decides on — the bands, their figures and their placement, read out of the
   plugin's request log — covered without a server by
-  `test/e2e-context-bands-reader.test.js`.
+  `test/e2e-context-bands-reader.test.js`; and `mcp-after.py`, the reader
+  `mcp-after-task.sh` decides on — FIRES / DOES_NOT_FIRE / TOOL_NOT_SEEN from
+  the request log — together with `mcp-ping-server.js`, the local stdio ping
+  server that driver patches in, both covered without a server by
+  `test/e2e-mcp-after-reader.test.js`.
 - `config-isolation.sh` — sourced library, not a driver. Builds the throwaway
   opencode configuration a run is carried out in (`e2e_resolve_model`,
   `e2e_iso_create`, `e2e_iso_remove`), and audits what answered
@@ -863,6 +877,10 @@ compaction off), the primary's own placement on its last user message, and the
 denial-loop notice to the parent — all three pinned without a server in
 `test/turn-notice-placement.test.js`, `test/context-budget.test.js` and
 `test/compaction.test.js`.
+
+## MCP `tool.execute.after`
+
+`mcp-after-task.sh` answers whether opencode fires `tool.execute.after` for an MCP tool. It owns a server on `MCP_AFTER_PORT` (default 4608), builds a throwaway HOME, patches a local stdio MCP server (`test/e2e/lib/mcp-ping-server.js`, one tool `ping` → `pong`, no network) into that isolated `opencode.json` only, starts with `OPENCODE_AGENT_INTERCOM_LOG_REQUESTS=1`, and has a subagent call that ping. The verdict is read out of the request log: `type=tool.execute.after` whose `tool` is the ping is `FIRES`; a `type=tool.execute.before` or a messages tool-part without an `after` is `DOES_NOT_FIRE`; neither is `TOOL_NOT_SEEN`, recorded as a failed criterion rather than skipped. Exit `0` / `1` / `2` like the other asserting drivers; captures and report land in `out/18-mcp-after.*`.
 
 ## Nested delegation
 

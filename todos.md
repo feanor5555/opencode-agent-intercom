@@ -11,7 +11,6 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 
 ## Pending
 
-- Verify whether `tool.execute.after` fires for MCP tools; if it does not, a subagent whose only work is an MCP call keeps the wide watchdog window instead of the silence one. The live end-to-end run that proved `after` fires could not cover the MCP case because no MCP server was reachable from that instance.
 - Concurrent end-to-end suite runs share one machine's `test/e2e/out` directory, one plugin project directory, and one process-global `debug.log`. Two suites at once can have their captures interleaved, file the audit reads overwritten with the other's, and their debug-log slices overlap; every driver would need to coordinate on a per-run out dir and a per-run slice window before this can run in parallel again.
 - The pre-delete route move escapes the view for any live route writer whose fresh sample names the dying session, so with two TUIs attached to one server the second is navigated too. Closing it needs the panel to publish which server it is attached to.
 - Who issued the abort of the `coder` subagent on 2026-09-12 at ≈20:48:27.78 is not formally settled, though the plugin's own log shows the sidebar was focused and being keyed 100 tokens at a time from 20:45:09 to 20:45:58, which fits an abort from the panel (`x`/`d` twice on the focused row). The panel now logs `tui abort issued` with target, handle and trigger, so a repeat decides it.

@@ -89,7 +89,7 @@ import { applyCompactionPolicy } from "./compaction.js"
 import { recordSessionAgent } from "./registry.js"
 import { chatParamsHook } from "./llmparams.js"
 import { chatMessageHook, applyModelChoices, messageAgent } from "./llmmodel.js"
-import { captureSystem, captureMessages, captureParams } from "./reqlog.js"
+import { captureSystem, captureMessages, captureParams, captureToolExecute } from "./reqlog.js"
 import { setServerUrl } from "./client.js"
 import { startAgentcomVisibilityWatch } from "./agentcomsync.js"
 import { sweepOrphanedSubagentSessions } from "./teardown.js"
@@ -187,6 +187,7 @@ export default async (ctx) => {
   const permissionGuard = createPermissionGuard(client)
   const transformSystem = createTransformSystem(client)
   const transformMessages = createTransformMessages(client)
+  const guardToolExecute = createGuardToolExecute(client, permissionGuard)
 
   return {
     // Inject the plugin's agent roles (orchestrator + 8 subagents) into the
@@ -312,7 +313,17 @@ export default async (ctx) => {
       }
     },
     event: createEventHandler(client),
-    "tool.execute.before": createGuardToolExecute(client, permissionGuard),
+    // Logged first so a throw out of the guard still leaves a `before` record:
+    // the MCP-after driver decides FIRES / DOES_NOT_FIRE off this JSONL, and a
+    // denied call is still evidence that opencode invoked the hook.
+    "tool.execute.before": async (input, output) => {
+      try {
+        captureToolExecute("before", input)
+      } catch (err) {
+        log("reqlog tool.execute.before error", err?.message ?? String(err))
+      }
+      return await guardToolExecute(input, output)
+    },
     // The end of a tool call, and the only event the plugin gets about a
     // session that has been silent inside one: it takes the call out of the
     // entry's in-flight map, which is what puts the subagent back on the
@@ -320,7 +331,15 @@ export default async (ctx) => {
     //
     // Wrapped like every other hook here: a throw out of this one would turn a
     // tool call that succeeded into a failed one for the subagent that made it.
+    // The reqlog write is first and independent: whether `after` ran for an
+    // MCP tool is the question the e2e driver answers, and it must not depend
+    // on the watchdog bookkeeping succeeding.
     "tool.execute.after": async (input) => {
+      try {
+        captureToolExecute("after", input)
+      } catch (err) {
+        log("reqlog tool.execute.after error", err?.message ?? String(err))
+      }
       try {
         recordToolCallFinished(input)
       } catch (err) {

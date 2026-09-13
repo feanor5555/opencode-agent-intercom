@@ -1,6 +1,10 @@
 // Opt-in request logger. Captures everything opencode hands to the LLM:
-// system prompt array, full messages history, sampling params. Writes one
-// JSONL record per hook call to a file. Off unless OPENCODE_AGENT_INTERCOM_LOG_REQUESTS=1.
+// system prompt array, full messages history, sampling params — and, when a
+// tool actually runs, the `tool.execute.before` / `tool.execute.after` hook
+// pair (type, tool, sessionID, callID). Writes one JSONL record per hook call
+// to a file. Off unless OPENCODE_AGENT_INTERCOM_LOG_REQUESTS=1. The tool-hook
+// records are what an end-to-end run reads to see whether opencode fired
+// `after` for an MCP tool; the LLM captures cannot show that.
 
 import { appendFileSync, mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -71,5 +75,20 @@ export function captureParams(input, output) {
       maxOutputTokens: output?.maxOutputTokens,
       options: output?.options,
     },
+  })
+}
+
+// phase is "before" or "after". The record's `type` is `tool.execute.<phase>`
+// and `tool` is the name opencode put on the call — MCP tools included, with
+// whatever namespace opencode gave them.
+export function captureToolExecute(phase, input) {
+  if (!ENABLED) return
+  const kind = phase === "after" ? "after" : "before"
+  write({
+    type: `tool.execute.${kind}`,
+    ts: new Date().toISOString(),
+    sessionID: input?.sessionID,
+    tool: input?.tool,
+    callID: input?.callID,
   })
 }

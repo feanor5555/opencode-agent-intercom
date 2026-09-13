@@ -1,9 +1,10 @@
 #!/bin/bash
 # Runs all 8 single-agent end-to-end tests, the multi-agent test, the four
-# mid-run-channel drivers, the context-band driver and the endless-mode cycle,
-# writes captures under ./out. The asserting drivers — the four mid-run ones and
-# the context-band one — decide the suite's exit code: a failed criterion of
-# theirs does not stop the suite but is collected and exited on at the end.
+# mid-run-channel drivers, the context-band driver, the MCP-after driver and
+# the endless-mode cycle, writes captures under ./out. The asserting drivers —
+# the four mid-run ones, the context-band one and the MCP-after one — decide
+# the suite's exit code: a failed criterion of theirs does not stop the suite
+# but is collected and exited on at the end.
 #
 # It owns the server the message-tree drivers use: it builds the TUI half of the
 # plugin, starts a fresh `opencode serve` in the configured project, exports
@@ -33,17 +34,21 @@
 #                          pinned to and the only one a turn may answer on
 #   SERVER_START_TIMEOUT_S 60     readiness probe budget
 #
-# ask-expiry-task.sh, context-bands-task.sh and endless-task.sh run last and are
-# the three drivers that do NOT use this server: each needs settings of its own
-# in the agent-intercom.json a server was started with — the expiry driver an
-# `answerWaitMs` / `maxSubagentToolCallMs` pair per phase, the context-band
-# driver an `agentContext` budget low enough for one subagent to cross it and
-# the request log switched on, the endless driver a threshold the primary is
-# known to cross — so each builds its own isolated configuration and starts and
-# stops its own server, on ASK_EXPIRY_PORT (default 4588), CONTEXT_BANDS_PORT
-# (default 4606) resp. ENDLESS_PORT (default 4599). See their headers for their
-# own parameters. This script stops its own server before the three, so no
-# session of the drivers above is still alive under the settings those write.
+# ask-expiry-task.sh, context-bands-task.sh, mcp-after-task.sh and
+# endless-task.sh run last and are the four drivers that do NOT use this
+# server: each needs settings of its own in the agent-intercom.json a server
+# was started with — the expiry driver an `answerWaitMs` /
+# `maxSubagentToolCallMs` pair per phase, the context-band driver an
+# `agentContext` budget low enough for one subagent to cross it and the
+# request log switched on, the MCP-after driver an MCP server patched into
+# its isolated opencode.json and the request log switched on, the endless
+# driver a threshold the primary is known to cross — so each builds its own
+# isolated configuration and starts and stops its own server, on
+# ASK_EXPIRY_PORT (default 4588), CONTEXT_BANDS_PORT (default 4606),
+# MCP_AFTER_PORT (default 4608) resp. ENDLESS_PORT (default 4599). See their
+# headers for their own parameters. This script stops its own server before
+# those four, so no session of the drivers above is still alive under the
+# settings those write.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
@@ -184,11 +189,16 @@ e2e_server_stop
 # of this suite's is alive under the low budget it pins.
 "$HERE/context-bands-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED context-bands-task.sh(exit $?)"
 
+# Does opencode fire `tool.execute.after` for MCP tools? Own server, own port,
+# MCP patched into the isolated opencode.json only, request log on. Sequenced
+# after context-bands so the two request-log servers never share a process.
+"$HERE/mcp-after-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED mcp-after-task.sh(exit $?)"
+
 "$HERE/endless-task.sh"
 
 # The asserting drivers' verdict, held back above so the endless cycle still ran.
 if [ -n "$ASSERTING_FAILED" ]; then
   echo ""
-  echo "asserting driver(s) failed:$ASSERTING_FAILED — see $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt, $OUTDIR/16-between-steps.report.txt, $OUTDIR/15-ask-expiry.report.txt and $OUTDIR/17-context-bands.report.txt" >&2
+  echo "asserting driver(s) failed:$ASSERTING_FAILED — see $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt, $OUTDIR/16-between-steps.report.txt, $OUTDIR/15-ask-expiry.report.txt, $OUTDIR/17-context-bands.report.txt and $OUTDIR/18-mcp-after.report.txt" >&2
   exit 1
 fi

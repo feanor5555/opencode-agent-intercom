@@ -14,45 +14,88 @@ and `tui/src/` (TUI half, TS, separate npm package, no import across the two).
 
 Read out of the source, each claim with its line:
 
-- One flat setting: `maxContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_CONTEXT", DEFAULT_MAX_CONTEXT)`
-  (`src/settings.js:171`), overridden by the file key at `src/settings.js:192-194`
-  (`Number.isInteger(raw?.maxContext) && raw.maxContext >= 0`), default
-  `export const DEFAULT_MAX_CONTEXT = 40000` (`src/settings.js:49`), whole
-  tokens, cached `TTL_MS = 2000` (`src/settings.js:92,168`).
-- **Exactly three production readers**, confirmed by a tree-wide grep for
-  `maxContext` across `src/`, `tui/src/`, `README.md`:
-  1. `const maxContext = getSettings().maxContext` (`src/hooks.js:348`) — the
-     escalating pre-call STOP injection; `0` disables (`src/hooks.js:349`),
-     the near-budget cache bypass is `entry.ctxTokens > maxContext * CTX_NEAR_BUDGET`
-     (`src/hooks.js:354`), the bite is `entry.ctxTokens < maxContext` (`src/hooks.js:370`).
-  2. `const maxContext = getSettings().maxContext` (`src/hooks.js:910`) — the
-     hard tool-call deny, `if (maxContext > 0 && entry.ctxTokens != null && entry.ctxTokens >= maxContext)`
-     (`src/hooks.js:911`).
-  3. `const ctx = s.maxContext > 0 ? ... : "disabled"` (`src/hooks.js:462`) in
-     `formatLimitsNotice()` (`src/hooks.js:460-468`), which feeds `{{limits}}`
-     into the **orchestrator** prompt only — `limits = formatLimitsNotice()`
-     sits in the non-subagent branch (`src/hooks.js:227`), consumed at
-     `src/hooks.js:241,266` and declared at `src/promptsfile.js:21,174,214`.
-  `denialLoopNotice` prints only `fmtTokens(entry.ctxTokens)`
-  (`src/notices.js:123-133`) and needs no budget.
+- The context budget is **per agent type**. The file key `agentContext` maps an
+  agent name to its ceiling in whole tokens and is resolved by
+  `contextBudgetFor(agent)` (`src/settings.js:725`); the legacy flat key
+  `maxContext` and the env var `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` are the
+  value for every type without an own entry (`src/settings.js:6-21`,
+  `src/settings.js:478`); the built-in per-type default table is
+  `DEFAULT_AGENT_CONTEXT` (`src/settings.js:123-133`) and an unknown name
+  falls back to `DEFAULT_MAX_CONTEXT = 100000` (`src/settings.js:116`). Whole
+  tokens, settings cached for `TTL_MS = 2000` (`src/settings.js:486-488`).
+  `0` is a real value at every level and disables the budget for that type.
+- The legacy flat key is parsed (`src/settings.js:540-555`) and recorded with
+  the level that produced it as `maxContextSource`
+  (`src/settings.js:494-508`), because "the user set 100000" and "nobody set
+  anything" pick different budgets for a type that has a built-in default.
+- **Three enforcement points**, confirmed by a tree-wide grep for
+  `contextBudgetFor` across `src/`:
+  1. `const maxContext = contextBudgetFor(entry.agent)` (`src/hooks.js:1061`)
+     at the head of `contextLimitNotice(client, entry)` (`src/hooks.js:1060`).
+     `0` disables (`src/hooks.js:1062`). The `ctxTokens == null` or
+     pre-band guard is `entry.ctxTokens < maxContext * CTX_NEAR_BUDGET`
+     (`src/hooks.js:1091`). The reserve-band open is
+     `entry.ctxTokens < maxContext * CTX_STOP_RESERVE` (`src/hooks.js:1107`).
+     The lockdown open is `entry.ctxTokens < maxContext` (`src/hooks.js:1143`).
+     The constants are `CTX_NEAR_BUDGET = 0.7` and `CTX_STOP_RESERVE = 0.9`
+     (`src/hooks.js:326,337`).
+  2. `const maxContext = contextBudgetFor(entry.agent)` (`src/hooks.js:2701`)
+     at the head of the tool-call guard. The hard-deny condition is
+     `maxContext > 0 && entry.ctxTokens != null && entry.ctxTokens >= maxContext`
+     (`src/hooks.js:2702-2705`). `MID_RUN_MESSAGING_TOOLS` is exempted
+     (`src/hooks.js:2706-2712`).
+  3. The orchestrator-only `{{limits}}` block. The per-type row in
+     `formatLimitsNotice` is built by iterating the spawnable roles and
+     resolving each through `contextBudgetFor` (`src/hooks.js:1488,1495`); the
+     block feeds the orchestrator prompt only
+     (`src/promptsfile.js:21,174,214`).
+- `contextLimitNotice` is **three bands, not two**: plan, reserve, lockdown.
+  Split by `CTX_NEAR_BUDGET` and `CTX_STOP_RESERVE` (`src/hooks.js:1022-1034`).
+  Plan band (`>= CTX_NEAR_BUDGET`, `< CTX_STOP_RESERVE`): denies nothing,
+  demands nothing, names the room left and the reserve threshold in tokens,
+  adds `resultCeilingPlan` (`src/prompts.js:384`). Counted in
+  `entry.contextPlanNotices` (`src/hooks.js:1108`). Reserve band
+  (`>= CTX_STOP_RESERVE`, `< budget`): tools still work, demands the `Done:`
+  / `Blocked:` summary NOW while both the tools and the room remain, adds
+  `resultCeilingDemand` (`src/prompts.js:414`). Counted in
+  `entry.contextWarnings` (`src/hooks.js:1144`). Lockdown (`>= budget`):
+  `guardToolExecute` is denying every work tool, the block escalates over
+  successive LLM turns and notifies the parent at `BUDGET_NOTIFY_AFTER = 3`
+  (`src/hooks.js:350`); counted in `entry.stopInjections` (`src/hooks.js:1199`).
+  Every band re-fires on each crossing turn — the block rides on the
+  per-request copy of the message array and is never written back to the
+  session (`src/hooks.js:1051-1059`).
+- **Compaction instead of lockdown, when switched on for the type.** The
+  crossing buys a `client.session.summarize` instead of the lockdown, up to
+  `MAX_SUBAGENT_COMPACTIONS`; `startSubagentCompaction` (`src/hooks.js:1182`)
+  takes the decision and owns the latch. False means the crossing is the
+  lockdown's after all — switch off, cap spent, or a question open. The
+  reserve band is untouched either way.
+- The subagent's notice rides in a **carrier message appended at the END of
+  the per-request array** (`isNoticeCarrier` / `tailNoticeCarrier`,
+  `src/hooks.js:776,797`), not on the last user message — which in a subagent
+  session is message 0. The primary's placement is unchanged: its notice
+  hangs off its own last user message (`src/hooks.js:891-894`).
 - Both enforcement points already hold the registry `entry`:
-  `async function contextLimitNotice(client, entry)` (`src/hooks.js:347`), and
-  the guard runs right after `permissionGuard.checkToolPermission(entry.agent, input.tool)`
-  (`src/hooks.js:899`). So `entry.agent` is in hand at both, for free.
+  `contextLimitNotice(client, entry)` (`src/hooks.js:1060`), and the guard
+  runs after `permissionGuard.checkToolPermission` (`src/hooks.js:2715-2718`).
+  `entry.agent` is in hand at both, for free.
 - The type is on the entry: `upsertSession(sessionID, { agent: args.agent, ... })`
   (`src/tools.js:276-282`), stored by `createEntry(sessionID, agent || "subagent", ...)`
   (`src/registry.js:261`), re-keyed by `upgradeProvisionalAgent`
   (`src/registry.js:281-288`), whose first guard is
   `if (!agent || agent === "subagent" || entry.agent !== "subagent") return`
   (`src/registry.js:282`).
-- Per-agent config already exists twice, in its own file each time, and is the
-  pattern this design follows: `export type LlmParams = Record<string, Record<string, number>>`
+- Per-agent config already exists in its own files and is the pattern this
+  design follows: `export type LlmParams = Record<string, Record<string, number>>`
   (`tui/src/llm-params-file.ts:26`) with `export function resolveForAgent(agent)`
-  (`src/llmparams.js:63`), and `export type LlmModels = Record<string, ModelRef>`
-  (`tui/src/llm-models-file.ts:30`). Both are edited in the TUI through **one
-  agent cycler plus one row per value** (`tui/src/tui.tsx:1354-1364`), with `★`
-  marking an own value against an inherited one (`tui/src/tui.tsx:1394-1396`)
-  and `[reset current agent]` (`tui/src/tui.tsx:1400-1405`).
+  (`src/llmparams.js:63`), `export type LlmModels = Record<string, ModelRef>`
+  (`tui/src/llm-models-file.ts:30`), and the same shape for `agentContext`
+  itself through `tui/src/settings-file.ts`. All three are edited in the TUI
+  through **one agent cycler plus one row per value**
+  (`tui/src/tui.tsx:1354-1364`), with `★` marking an own value against an
+  inherited one (`tui/src/tui.tsx:1394-1396`) and `[reset current agent]`
+  (`tui/src/tui.tsx:1400-1405`).
 - The TUI already fetches the live agent list: `const res = await api.client.app.agents({})`
   (`tui/src/tui.tsx:387`), whose records are typed
   `mode: "subagent" | "primary" | "all"` (`@opencode-ai/sdk` `types.gen.d.ts:1399-1402`).
@@ -62,8 +105,6 @@ Read out of the source, each claim with its line:
   coder, debugger, reviewer, documenter, researcher, designer, gitter }`
   (`src/agents.js:138-217`), merged non-destructively by `installAgents`
   (`src/agents.js:229-244`).
-
----
 
 ## 2. Target state
 

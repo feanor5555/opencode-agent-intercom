@@ -372,11 +372,11 @@ const BUDGET_NOTIFY_AFTER = 3
 // stable mass in element [0].
 //
 // Nothing in either element varies from turn to turn, on either branch. What
-// moves inside a session is delivered by transformMessages on the last user
-// message instead: the primary's active-subagent snapshot, the subagent's
-// over-budget STOP notice, the abort notice, and a delegating subagent's
-// remaining nested-spawn quota — the one figure that counts down as the run
-// spends it. Both branches are pinned as such in
+// moves inside a session is delivered by transformMessages on the message array
+// instead — on the primary's last user message, and at the tail for a subagent:
+// the primary's active-subagent snapshot, the subagent's over-budget STOP
+// notice, the abort notice, and a delegating subagent's remaining nested-spawn
+// quota — the one figure that counts down as the run spends it. Both branches are pinned as such in
 // test/system-prompt-stability.test.js.
 //
 // The blocks that stay here move only where a person moves them: a settings
@@ -772,27 +772,81 @@ function snapshotForTurn(primaryID, userMessageID) {
 // replaces its own part instead of appending a duplicate.
 const TURN_NOTICE_SUFFIX = "-agent-intercom-turn"
 
+// True for a carrier this hook appended on an earlier pass over the same array.
+function isNoticeCarrier(message) {
+  const id = message?.info?.id
+  return typeof id === "string" && id.endsWith(TURN_NOTICE_SUFFIX)
+}
+
+// The carrier of a tail-positioned notice: a user message of this plugin's own,
+// appended to the END of the per-request message array. Its id is derived from
+// the last real user message, so a second pass over the same array finds the
+// carrier again and replaces its text instead of appending a second one.
+//
+// opencode's conversion (`MessageV2.toModelMessages`) walks the array it was
+// handed, and for a `role: "user"` entry it emits one model message out of
+// every part with `type: "text"`, a non-empty `text` and no `ignored` flag —
+// `synthetic` is not read there. A whole message of that shape therefore
+// converts exactly as the part on message 0 did, and nothing between the
+// `experimental.chat.messages.transform` trigger and the conversion reads the
+// array again: the message opencode files the answer under, the assistant
+// message's `parentID` and the agent resolution are all taken from the array
+// BEFORE the hook runs, so a message appended here reaches the provider and
+// changes nothing else. The info is copied off the real user message, so the
+// carrier carries that session's role, model and agent fields.
+function tailNoticeCarrier(messages, userMessage, noticeID) {
+  const last = messages[messages.length - 1]
+  if (last?.info?.id === noticeID && Array.isArray(last.parts)) return last
+  const carrier = { info: { ...userMessage.info, id: noticeID }, parts: [] }
+  messages.push(carrier)
+  return carrier
+}
+
 // Delivers the blocks whose text moves from turn to turn: the abort notice, the
-// primary's active-subagent snapshot, the subagent's over-budget STOP notice
-// and a delegating subagent's remaining nested-spawn quota. They ride on the
-// LAST USER message as a synthetic text part — the
-// same mechanism opencode uses for its own per-turn reminders — rather than in
-// the system prompt, so that the cached prefix (tool definitions plus system
+// primary's active-subagent snapshot, the subagent's context bands and
+// over-budget STOP notice, and a delegating subagent's remaining nested-spawn
+// quota. They ride on the message array as a synthetic text part — the same
+// mechanism opencode uses for its own per-turn reminders — rather than in the
+// system prompt, so that the cached prefix (tool definitions plus system
 // prompt) stays byte-identical across the turns of a session.
 //
-// The cost is deliberate and is the cheapest one available: the breakpoint on
-// the trailing messages misses, while everything ahead of it — tools, system
-// prompt and all prior history — still matches.
+// WHERE on the array decides both whether the model acts on the text and what
+// it costs, and the two sessions differ:
+//
+//   primary — its last user message is the tail of the array at the start of a
+//     turn, and the block is memoised per turn (snapshotForTurn) so the text
+//     stays put for every step of that turn's tool loop. The notice hangs off
+//     that message. Everything ahead of the last user message stays cached and
+//     the cached prefix advances turn by turn.
+//   subagent — its ONLY user message is the task prompt, message 0, because
+//     opencode files tool results as parts of the ASSISTANT message. Hanging
+//     the notice there puts a demand about the run's LAST turn at the TOP of a
+//     history of tens of thousands of tokens, and puts moving text AHEAD of
+//     the whole history: measured live, the provider's `cache.read` collapsed
+//     at the first notice and never advanced again, every later turn re-billing
+//     the full history. The notice therefore goes into a carrier message at the
+//     TAIL instead, where the model's latest work is and where the cached
+//     prefix of everything before it still matches.
+//
+// A subagent whose user message IS the tail — its first request, before any
+// assistant message — needs no carrier and keeps the part on that message; that
+// is the same position and avoids two user messages in a row.
 //
 // The array is the per-request copy opencode transforms and never writes back,
-// so the push is in memory only and nothing is persisted to the session.
+// so both the push and the appended carrier are in memory only and nothing is
+// persisted to the session.
 //
 // The hook's `input` is empty, so the session is read off the message itself,
 // the same field opencode's own reminder code reads.
 export function createTransformMessages(client) {
   return async function transformMessages(messages) {
     if (!Array.isArray(messages)) return
-    const userMessage = messages.findLast((m) => m?.info?.role === "user")
+    // A carrier this hook appended on an earlier pass over the same array is a
+    // user message too, and picking it up as THE user message would derive a
+    // second notice id from it and push a second copy.
+    const userMessage = messages.findLast(
+      (m) => m?.info?.role === "user" && !isNoticeCarrier(m),
+    )
     if (!userMessage || !Array.isArray(userMessage.parts)) return
     const sessionID = userMessage.info.sessionID
     if (!sessionID) return
@@ -832,17 +886,23 @@ export function createTransformMessages(client) {
     if (!text) return
 
     const id = userMessage.info.id + TURN_NOTICE_SUFFIX
+    // A subagent gets the notice at the tail, unless its user message already
+    // is the tail; the primary keeps it on its last user message.
+    const carrier =
+      entry && messages[messages.length - 1] !== userMessage
+        ? tailNoticeCarrier(messages, userMessage, id)
+        : userMessage
     const part = {
       id,
-      messageID: userMessage.info.id,
+      messageID: carrier.info.id,
       sessionID,
       type: "text",
       text,
       synthetic: true,
     }
-    const existing = userMessage.parts.findIndex((p) => p?.id === id)
-    if (existing >= 0) userMessage.parts[existing] = part
-    else userMessage.parts.push(part)
+    const existing = carrier.parts.findIndex((p) => p?.id === id)
+    if (existing >= 0) carrier.parts[existing] = part
+    else carrier.parts.push(part)
   }
 }
 
@@ -1422,8 +1482,8 @@ async function delegatingRolesAmong(client, agents) {
 // the life of the run and belongs in the cached element. The fourth figure a
 // delegating subagent needs — how much of the per-run nested quota is left —
 // counts down WITHIN the run off the caller's registry entry, so it rides on
-// the last user message instead (nestedQuotaNotice, delivered by
-// transformMessages).
+// the message array instead (nestedQuotaNotice, delivered by transformMessages
+// at the tail of a subagent's array).
 function formatDelegationLimitsNotice(agent, { projectMd, agentsMd, snapshot, delegatingRoles }) {
   const own = contextBudgetFor(agent)
   const targets = nestedSpawnTargets(agent)

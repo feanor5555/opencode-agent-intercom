@@ -646,7 +646,10 @@ which fired.
   `abortSession(watchdogClient, sessionID)` and writes `watchdog:` lines
   (`watchdog: removed subagent`, `watchdog: session quiescence timed out;
   deleting`, `watchdog: deleted opencode session`) at the same points as the
-  event-hook teardown. Both watchdog windows (`maxSubagentAgeMs`,
+  event-hook teardown. The two inactivity windows (`maxSubagentAgeMs`,
   `maxSubagentToolCallMs`) step to `0` in the sidebar — at `0` the row
-  renders `off` and the watchdog is disarmed; any abort attributed to the
-  watchdog while both are `0` is excluded.
+  renders `off` and that watchdog is disarmed; any abort attributed to the
+  watchdog while both are `0` is excluded. The third window
+  (`maxSubagentRunMs`) is the wall-clock ceiling on ONE RUN and uses the same
+  `0`/`off` rendering; `0` there means NO run ceiling, not that the watchdog
+  is disarmed.

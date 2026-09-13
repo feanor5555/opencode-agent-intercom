@@ -156,8 +156,7 @@ on the caller having read this document.
 - Together they admit three concurrent live opencode sessions per orchestrator slot at
   the shipped defaults: the primary's subagent, its `researcher`, and that researcher's
   `grounder`. The chain is serial and two levels deep, so three is the worst case. The
-  cap figure the orchestrator is shown counts none of the nested ones. That is deliberate
-  under the assumption in O2.
+  cap figure the orchestrator is shown counts none of the nested ones.
 
 **The two counters and why they are two.** `nestedSpawns` counts spawns ADMITTED: the
 decision and the charge sit in one synchronous block with no await between them, so two
@@ -444,13 +443,6 @@ clears both once the config is corrected. The fix would be either to deny
 `permission.spawn` for a role not in the table (cheap but surprises projects that
 extend with a target of their own in the same change), or to read the target set
 from config too (lets a cycle in), so the open point is left at the table.
-
-**O2 — assumption: `maxSubagents` is the orchestrator's serialisation of its own
-attention, not a resource or rate bound on the process.** The cap exemption in §4 is
-right only under that reading. It would be shown wrong by a `maxSubagents` set to protect
-a provider rate limit or the host machine, in which case a nested chain breaches the very
-bound it was set for, three sessions deep, without the orchestrator's cap figure showing
-it. Nothing in the settings distinguishes the two readings.
 
 
 ## 10. Out of scope

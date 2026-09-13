@@ -451,7 +451,7 @@ export const AGENTS = {
   },
   designer: {
     description:
-      "Generates images (UI mockups, screen designs, icons, illustrations, hero graphics) from a written brief. Saves files to disk; does not write source code.",
+      "Generates images (UI mockups, screen designs, icons, illustrations, hero graphics) from a written brief. Saves files to disk; does not write source code. Visual references come from a researcher.",
     mode: "subagent",
     hidden: true,
     permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, outline: "deny" },
@@ -459,7 +459,7 @@ export const AGENTS = {
   },
   gitter: {
     description:
-      "Handles repository operations (commits, branches, rebases, tags, PR descriptions) matching the project's existing git style. Does not edit source code.",
+      "Handles repository operations (commits, branches, rebases, tags, PR descriptions) matching the project's existing git style. Does not edit source code. An unfamiliar git or forge error is looked up by a researcher.",
     mode: "subagent",
     hidden: true,
     permission: {

@@ -7,10 +7,12 @@
 # driver is the only place where a real opencode, a real model and the real
 # session lifecycle decide:
 #
-#   admitted   a GRANTED role (coder) spawns a `researcher` and blocks
+#   admitted   a GRANTED role (coder) spawns the nested target its own row in
+#              NESTED_SPAWN_TARGETS names — a `researcher` for the default
+#              caller — and blocks
 #                                                → `nested spawn: caller blocks until its child ends`
-#   result     the researcher's reply is the RESULT OF THE CALLER'S OWN
-#              `spawn` call                      → `… (researcher) finished and is gone. Its reply:`
+#   result     the child's reply is the RESULT OF THE CALLER'S OWN
+#              `spawn` call                      → `… (<child role>) finished and is gone. Its reply:`
 #   not-a-wake the caller's transcript carries NO completion notice for that
 #              child                             → zero `🔔 agent-intercom: your subagent` in it
 #   survives   neither the orchestrator nor the blocked caller is torn down
@@ -20,8 +22,8 @@
 #                                                → `notified primary of completion`
 #   nested-line the caller's completion notice bills the delegation
 #                                                → `⤷ nested: 1 run, …`
-#   target     the same granted role asking for a NON-researcher is refused
-#                                                → `Spawn refused: a "<caller>" may spawn "researcher" …`
+#   target     the same granted role asking for a target OUTSIDE its own set is
+#              refused                           → `Spawn refused: a "<caller>" may spawn <its set> …`
 #   denied     a role that may NOT delegate gets no child at all, and the run
 #              records WHICH of the three layers refused it
 #   gone       the nested child's session is deleted afterwards and the caller's
@@ -55,15 +57,25 @@
 #                      the message-tree drivers cannot redirect this run
 #   NESTED_PORT        4602                   own port, clear of run-all's 4567
 #                      and endless-task's 4599
-#   NESTED_CALLER      coder                  the granted role that delegates
+#   NESTED_CALLER      coder                  the granted role that delegates.
+#                      What it delegates TO is not a parameter of its own: the
+#                      child role is read out of NESTED_SPAWN_TARGETS
+#                      (src/agents.js) for exactly this caller, so every caller
+#                      runs against its OWN legitimate target — the
+#                      `researcher` for the seven non-web roles, the `grounder`
+#                      for the `researcher`
+#   NESTED_CHILD       (the caller's own target)  picks which of the caller's
+#                      own targets is used, for a caller whose set holds more
+#                      than one. A role outside that set is a setup error and
+#                      is refused here rather than asserted against
 #   NESTED_WRONG_TARGET planner                what it asks for first and must
-#                      not get — any spawnable type that is not the researcher
+#                      not get — any spawnable type outside the caller's set
 #   NESTED_DENIED_ROLE grounder                the role whose permission map
 #                      denies `spawn`. It is the only one — every other subagent
 #                      role may delegate — so this phase has no second value to
 #                      take and a different one would assert nothing
-#   NESTED_MARKER      NESTED-RESEARCH-OK      the exact line the researcher is
-#                      told to reply with. The child's answer is proven to be
+#   NESTED_MARKER      NESTED-RESEARCH-OK      the exact line the nested child
+#                      is told to reply with. The child's answer is proven to be
 #                      the caller's tool result by finding this literal inside
 #                      that tool result, so it must be a string nothing else in
 #                      a transcript produces
@@ -86,7 +98,7 @@
 # out), the todo file of the driven project (backed up, and restored only if the
 # run changed it — which is itself a failed criterion), and the server.
 #
-# Prerequisites: curl, python3, setsid, npm, stat, an `opencode` on PATH, a
+# Prerequisites: curl, python3, setsid, node, npm, stat, an `opencode` on PATH, a
 # provider serving E2E_MODEL, configured in the machine's opencode.json — the
 # driver carries that provider block into the isolated configuration it builds
 # and pins every agent to E2E_MODEL there.
@@ -113,6 +125,12 @@ MODEL_PROVIDER="$E2E_MODEL_PROVIDER"
 MODEL_ID="$E2E_MODEL_ID"
 CALLER_ROLE=${NESTED_CALLER:-coder}
 WRONG_TARGET=${NESTED_WRONG_TARGET:-planner}
+# The child role is not defaulted here: it is resolved in the preflight out of
+# the plugin's own NESTED_SPAWN_TARGETS for this caller. NESTED_CHILD only
+# PICKS from that resolved set and can never widen it.
+CHILD_ROLE=""
+CHILD_TARGETS=""
+ALLOWED_TARGETS=""
 DENIED_ROLE=${NESTED_DENIED_ROLE:-grounder}
 MARKER=${NESTED_MARKER:-NESTED-RESEARCH-OK}
 TURN_TIMEOUT_S=${TURN_TIMEOUT_S:-900}
@@ -429,13 +447,53 @@ trap 'exit 130' INT TERM
 
 : > "$REPORT_FILE"
 
-for tool in curl python3 setsid stat npm cmp; do
+for tool in curl python3 setsid stat node npm cmp; do
   command -v "$tool" >/dev/null || die "$tool is not on PATH"
 done
 command -v opencode >/dev/null || die "opencode is not on PATH"
 [ -d "$PROJECT_DIR" ] || die "NESTED_PROJECT_DIR does not exist: $PROJECT_DIR"
 
 PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
+
+# ---------- the caller's own nested target ---------------------------------
+#
+# NESTED_SPAWN_TARGETS (src/agents.js) is the authority for what a given caller
+# may name, so the driver imports it rather than carrying a copy: a `coder`
+# reaches the `researcher`, and the `researcher` reaches the `grounder` and
+# nothing else. Everything phase 1 says about the child — the spawn the caller
+# is told to make, the head of the tool result it gets back, the criterion
+# names, the refusal for the wrong target — is built from what this prints, so
+# NESTED_CALLER may name any delegating role and the run still asks for that
+# role's own legitimate target.
+#
+# The second field is the allowed set rendered exactly as wrongTargetRefusal
+# (src/tools.js) renders it: each name in quotes, joined with " or ". That
+# function is module-local and cannot be imported, so the refusal literal
+# asserted below reproduces it — a change to that shape has to be made here too
+# and shows up as a failed "target" criterion.
+TARGET_LINE=$(node --input-type=module -e '
+const [root, caller] = process.argv.slice(1)
+const { nestedSpawnTargets } = await import(new URL("src/agents.js", `file://${root}/`).href)
+const targets = nestedSpawnTargets(caller)
+process.stdout.write(targets.join(" ") + "\t" + targets.map((n) => `"${n}"`).join(" or "))
+' "$PLUGIN_ROOT" "$CALLER_ROLE" 2>&1) ||
+  die "could not read NESTED_SPAWN_TARGETS from $PLUGIN_ROOT/src/agents.js — node said: $TARGET_LINE"
+CHILD_TARGETS=${TARGET_LINE%%$'\t'*}
+ALLOWED_TARGETS=${TARGET_LINE#*$'\t'}
+[ -n "$CHILD_TARGETS" ] ||
+  die "NESTED_CALLER=$CALLER_ROLE names no nested target in NESTED_SPAWN_TARGETS (src/agents.js) — it may spawn nothing at all, so there is no admitted nested spawn to observe. Phase 2 is where a role that may not delegate belongs; name a delegating role here."
+
+CHILD_ROLE=${NESTED_CHILD:-${CHILD_TARGETS%% *}}
+case " $CHILD_TARGETS " in
+  *" $CHILD_ROLE "*) ;;
+  *) die "NESTED_CHILD=$CHILD_ROLE is not one of the targets a \"$CALLER_ROLE\" may name ($CHILD_TARGETS) — the run would assert a refusal, not a nested spawn. This driver never widens a role's grant." ;;
+esac
+
+# The refused target has to be genuinely outside the caller's set, or phase 1's
+# first step would be admitted and its second would hit the nested quota.
+case " $CHILD_TARGETS " in
+  *" $WRONG_TARGET "*) die "NESTED_WRONG_TARGET=$WRONG_TARGET is one of the targets a \"$CALLER_ROLE\" may legitimately name ($CHILD_TARGETS) — that spawn would be admitted, not refused. Choose a spawnable role outside that set." ;;
+esac
 
 # The throwaway configuration: every agent on the pin, this plugin wired, the
 # machine's providers carried over, and the machine's own ~/.config/opencode
@@ -638,7 +696,8 @@ primary model       $MODEL   (every agent is pinned to it in the isolated llm-mo
 isolated config     $E2E_ISO_OPENCODE_DIR   (the machine's ~/.config/opencode is not written)
 settings file       $SETTINGS_FILE   (inside the isolated config)
 resolved settings   maxNestedSpawns=$MAX_NESTED_SPAWNS maxSubagentAgeMs=$MAX_SUBAGENT_AGE_MS endlessMode=$ENDLESS_MODE endlessContext=$ENDLESS_CONTEXT maxRetainedSubagents=$MAX_RETAINED_SUBAGENTS
-delegating caller   $CALLER_ROLE   (spawns "researcher", must block)
+delegating caller   $CALLER_ROLE   (spawns "$CHILD_ROLE", must block)
+nested child        $CHILD_ROLE   (its own target, out of NESTED_SPAWN_TARGETS: $CALLER_ROLE may spawn $ALLOWED_TARGETS)
 refused target      $WRONG_TARGET   (asked for first, must be refused)
 denied role         $DENIED_ROLE   (permission map still denies spawn)
 child marker        $MARKER
@@ -690,9 +749,9 @@ say "[$PREFIX] plugin loaded (slice line $WAIT_LINENO)"
 
 # The caller's task is written as three ordered steps because both negative and
 # positive path have to come out of ONE subagent run: the refused target costs
-# no nested quota (it is refused before the quota is charged), so the researcher
-# spawn that follows it is still the run's first admitted one.
-CALLER_TASK="This is a deliberate test of the spawn tool's own behaviour. Do exactly these three steps in order and nothing else. Step 1: call spawn(\"$WRONG_TARGET\", \"Say hello.\") exactly once. You are expected to be refused and the refusal text IS the result this step is for, so make the call even though you know it will fail; do not skip it, do not reason about it instead, do not retry it. Step 2: call spawn(\"researcher\", \"Do not use any tool and do not search. Reply with exactly this one line and nothing else: $MARKER\") exactly once and wait for it to return. Step 3: reply with exactly two lines: first line 'STEP1: ' followed by the first sentence of what step 1 returned, second line 'STEP2: ' followed by the one line the researcher replied with. Do not read or write any file, do not run any shell command, do not use any other tool."
+# no nested quota (it is refused before the quota is charged), so the spawn of
+# the caller's own target that follows it is still the run's first admitted one.
+CALLER_TASK="This is a deliberate test of the spawn tool's own behaviour. Do exactly these three steps in order and nothing else. Step 1: call spawn(\"$WRONG_TARGET\", \"Say hello.\") exactly once. You are expected to be refused and the refusal text IS the result this step is for, so make the call even though you know it will fail; do not skip it, do not reason about it instead, do not retry it. Step 2: call spawn(\"$CHILD_ROLE\", \"Do not use any tool and do not search. Reply with exactly this one line and nothing else: $MARKER\") exactly once and wait for it to return. Step 3: reply with exactly two lines: first line 'STEP1: ' followed by the first sentence of what step 1 returned, second line 'STEP2: ' followed by the one line the $CHILD_ROLE replied with. Do not read or write any file, do not run any shell command, do not use any other tool."
 TURN1="Call spawn(\"$CALLER_ROLE\", \"$CALLER_TASK\") exactly once, passing that prompt through unchanged. That is your entire task. Do not spawn anything else, do not call list(), do not poll. End your turn as soon as spawn returns."
 
 # The POST blocks for the orchestrator's FIRST turn only — the one that calls
@@ -711,7 +770,7 @@ if wait_for_pattern "the caller was spawned" "spawned .*\"agent\":\"$CALLER_ROLE
   CALLER_HANDLE=$(log_field "$WAIT_LINE" handle)
   say "[$PREFIX] caller=$CALLER_HANDLE session=$CALLER_SID $(date +%H:%M:%S)"
 else
-  record "admitted — a granted \"$CALLER_ROLE\" spawned a researcher and blocked on it" 0 \
+  record "admitted — a granted \"$CALLER_ROLE\" spawned a $CHILD_ROLE and blocked on it" 0 \
     "the orchestrator never spawned a \"$CALLER_ROLE\" at all: $WAIT_REASON"
   wait "$POST_PID" 2>/dev/null
   capture_session "$SID" primary > /dev/null
@@ -798,7 +857,7 @@ say "[$PREFIX] caller loop ended: $LOOP_REASON ($PROBE_ROUNDS probe rounds) $(da
 
 # admitted — the precondition of everything below it
 if [ -z "$BLOCK_LINE" ]; then
-  record "admitted — a granted \"$CALLER_ROLE\" spawned a researcher and blocked on it" 0 \
+  record "admitted — a granted \"$CALLER_ROLE\" spawned a $CHILD_ROLE and blocked on it" 0 \
     "no \"nested spawn: caller blocks until its child ends\" line in $SLICE_FILE — $LOOP_REASON"
   say ""
   say "the nested spawn never happened — nothing below it can be observed"
@@ -806,9 +865,9 @@ if [ -z "$BLOCK_LINE" ]; then
   say "=== $((ASSERTED - FAILURES))/$ASSERTED asserted criteria passed ==="
   exit 1
 elif [ "$BLOCK_AGENT" = "$CALLER_ROLE" ]; then
-  record "admitted — a granted \"$CALLER_ROLE\" spawned a researcher and blocked on it" 1 "$BLOCK_LINE"
+  record "admitted — a granted \"$CALLER_ROLE\" spawned a $CHILD_ROLE and blocked on it" 1 "$BLOCK_LINE"
 else
-  record "admitted — a granted \"$CALLER_ROLE\" spawned a researcher and blocked on it" 0 \
+  record "admitted — a granted \"$CALLER_ROLE\" spawned a $CHILD_ROLE and blocked on it" 0 \
     "the blocking caller is a \"$BLOCK_AGENT\", not the \"$CALLER_ROLE\" this run spawned: $BLOCK_LINE"
 fi
 
@@ -865,10 +924,10 @@ CALLER_FLAT=$(capture_session "$CALLER_SID" caller)
 PRIMARY_FLAT=$(capture_session "$SID" primary)
 CHILD_FLAT=$(capture_session "$CHILD_SID" child)
 
-# result — the researcher's reply is the caller's own tool result.
+# result — the child's reply is the caller's own tool result.
 # `nestedSpawnOutput` renders the child as `<handle> (<agent>)`, so the literal
 # below is the exact head of that tool result for this run's child.
-RESULT_HEAD="$CHILD_HANDLE (researcher) finished and is gone. Its reply:"
+RESULT_HEAD="$CHILD_HANDLE ($CHILD_ROLE) finished and is gone. Its reply:"
 if [ "$(count_in "$CALLER_FLAT" "$RESULT_HEAD")" -gt 0 ] && [ "$(count_in "$CALLER_FLAT" "$MARKER")" -gt 0 ]; then
   record "result — the child's answer came back as the result of the caller's own spawn call" 1 \
     "$(first_in "$CALLER_FLAT" "$RESULT_HEAD")"
@@ -898,8 +957,9 @@ else
     "$WAKE_IN_CALLER occurrences — the child's result reached the caller as a wake, not as its tool result: $(first_in "$CALLER_FLAT" "🔔 agent-intercom: your subagent")"
 fi
 
-# target — the wrong target, refused, word for word out of src/tools.js.
-TARGET_REFUSAL="Spawn refused: a \"$CALLER_ROLE\" may spawn \"researcher\" and nothing else — you asked for a \"$WRONG_TARGET\"."
+# target — the wrong target, refused, word for word out of src/tools.js. The
+# allowed set is rendered as wrongTargetRefusal renders it, for this caller.
+TARGET_REFUSAL="Spawn refused: a \"$CALLER_ROLE\" may spawn $ALLOWED_TARGETS and nothing else — you asked for a \"$WRONG_TARGET\"."
 if [ "$(count_in "$CALLER_FLAT" "$TARGET_REFUSAL")" -gt 0 ]; then
   record "target — the granted caller's spawn of a \"$WRONG_TARGET\" was refused with the refusal the code produces" 1 \
     "$(first_in "$CALLER_FLAT" "$TARGET_REFUSAL")"
@@ -1101,7 +1161,7 @@ else
 fi
 
 note_uncovered "the nested quota's own refusal (maxNestedSpawns exhausted)" \
-  "it needs a caller that spawns $MAX_NESTED_SPAWNS researchers and then a further one; test/nested-delegation.test.js covers nestedQuotaDecision and the refusal text against the registry"
+  "it needs a caller that spawns $MAX_NESTED_SPAWNS ${CHILD_ROLE}s and then a further one; test/nested-delegation.test.js covers nestedQuotaDecision and the refusal text against the registry"
 note_uncovered "the TUI's rendering of the grandchild row" \
   "it needs a screenshot of the rendered sidebar, which this driver does not take"
 

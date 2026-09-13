@@ -732,11 +732,18 @@ test("the denied roles' prompts route a lookup to the researcher instead of sear
   // the two prompts that used to search now name the researcher route.
   assert.match(AGENTS.planner.prompt, /versions and their compatibility come from a `researcher`/)
   assert.match(AGENTS.debugger.prompt, /cryptic error the lookup comes from a `researcher`/)
-  // designer and gitter search as little as before and advertise nothing of it,
-  // but both name the researcher route their spawn grant opens.
-  assert.doesNotMatch(AGENTS.designer.description, /research|web/i)
+  // designer and gitter search as little as before — no web tool of their own —
+  // but both name the researcher route their spawn grant opens, in the prompt
+  // AND in the description the orchestrator picks the role by.
+  assert.match(AGENTS.designer.description, /Visual references come from a researcher\./)
+  assert.doesNotMatch(AGENTS.designer.description, /\bweb\b/i)
   assert.match(AGENTS.designer.prompt, /no web tools/)
   assert.match(AGENTS.designer.prompt, /Visual references come from a `researcher`/)
+  assert.match(
+    AGENTS.gitter.description,
+    /An unfamiliar git or forge error is looked up by a researcher\./,
+  )
+  assert.doesNotMatch(AGENTS.gitter.description, /\bweb\b/i)
   assert.match(AGENTS.gitter.prompt, /the lookup comes from a `researcher`/)
   // the researcher's carve-out: it searches itself and hands only the grounded
   // path on, and only where its briefing asked for one.

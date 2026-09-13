@@ -597,9 +597,14 @@ question left to expire unanswered, and the clamp of `answerWaitMs` against
 ## Nested delegation
 
 `nested-task.sh` is the live proof of the delegation rule
-(`concepts/role-delegation-and-web-access.md`, step S7): a granted role spawns a
-`researcher`, blocks, and gets the child's reply as the result of its own
-`spawn` call. Like `endless-task.sh` it owns its server — its own port
+(`concepts/role-delegation-and-web-access.md`, step S7): a granted role spawns
+the nested target its own row in `NESTED_SPAWN_TARGETS` (`src/agents.js`) names,
+blocks, and gets the child's reply as the result of its own `spawn` call. The
+driver imports that table and resolves the child from the caller, so
+`NESTED_CALLER=researcher` runs against a `grounder` and every other delegating
+role against a `researcher`; `NESTED_CHILD` picks among a caller's own targets
+and a role outside the caller's set is a setup error, never an assertion. Like
+`endless-task.sh` it owns its server — its own port
 (`NESTED_PORT`, default 4602) and its own debug-log offset — but unlike it, it
 writes no settings key and so has nothing to restore.
 
@@ -608,6 +613,8 @@ bash test/e2e/nested-task.sh                            # defaults, ~3-5 min
 OUT_DIR=/somewhere/kept bash test/e2e/nested-task.sh    # keep the captures
 NESTED_CALLER=planner \
   bash test/e2e/nested-task.sh                          # other callers, grounder is the default denied role
+NESTED_CALLER=researcher \
+  bash test/e2e/nested-task.sh                          # the researcher against its own target, the grounder
 ```
 
 Exit `0` = every asserted criterion passed, `1` = at least one failed, `2` =
@@ -618,9 +625,9 @@ preflight/setup error. Captures and report land in `out/12-nested.*`.
 | grant | `GET /agent` carries no `spawn` deny rule on the eight delegating roles and one (`grounder`) on the other one |
 | admitted | `nested spawn: caller blocks until its child ends` with `callerAgent` = the caller's role |
 | survives | orchestrator, blocked caller and child all answer `200` on `GET /session/<id>` in every probe round of the wait |
-| result | the caller's own `spawn` tool result reads `<handle> (researcher) finished and is gone. Its reply:` and holds the marker line the child was told to reply with |
+| result | the caller's own `spawn` tool result reads `<handle> (<child role>) finished and is gone. Its reply:` and holds the marker line the child was told to reply with |
 | not-a-wake | zero `🔔 agent-intercom: your subagent` in the caller's transcript |
-| target | the caller's spawn of a non-researcher returns the caller-specific `Spawn refused: a "<caller>" may spawn "researcher" and nothing else — you asked for a "<target>".` |
+| target | the caller's spawn of a role outside its own set returns the caller-specific `Spawn refused: a "<caller>" may spawn "<its set>" and nothing else — you asked for a "<target>".` |
 | woken | `🔔 agent-intercom: your subagent "<handle>" (<role>) has finished. Its session is being HELD, not destroyed.` in the primary — the held head, since the caller hangs off the primary and is retained under the shipped `maxRetainedSubagents` default |
 | nested-line | `⤷ nested: 1 run, …(not counted in the figure above).` in that same notice |
 | denied | a role that may not delegate has no child session under it, and the run names which of the three layers refused it |

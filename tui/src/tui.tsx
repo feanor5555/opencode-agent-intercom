@@ -113,6 +113,7 @@ import {
   compactionRowNote,
   compactionRowState,
 } from "./compaction-row.ts";
+import { runCeilingRowNote } from "./run-ceiling-row.ts";
 import {
   AGENT_MODE_CONFIRM_MS,
   type AgentMode,
@@ -2046,6 +2047,11 @@ function SubagentPanel(props: {
   const endlessNote = createMemo(() =>
     endlessRowNote(endlessState(), props.endlessPause()?.reason ?? "", panelWidth()),
   );
+  // The `run (min)` row's own note: what the run ceiling cannot do at the value
+  // the row shows, resolved against the two windows inside it.
+  const runCeilingNote = createMemo(() =>
+    runCeilingRowNote(props.settings(), panelWidth()),
+  );
 
   // Whether the `mode` row is holding its switch question. Read against the
   // panel's own clock rather than the presence of the arming alone, so an
@@ -2342,7 +2348,7 @@ function SubagentPanel(props: {
               {"[+]"}
             </text>
           </box>
-          {/* The watchdog, as its two windows over one subagent: "silence" is
+          {/* The watchdog, as its windows over one subagent: "silence" is
               the window for one with nothing in flight, "in tool" the window
               for one inside a tool call or a session opencode still reports as
               busy. "off" is a 0 on either, and it means a different thing on
@@ -2411,6 +2417,53 @@ function SubagentPanel(props: {
               {"[+]"}
             </text>
           </box>
+          {/* The watchdog's third window: the wall-clock ceiling on one RUN,
+              whatever the subagent is doing. It is the only one of the three
+              the subagent cannot renew, so it is what bounds one that polls —
+              short `bash` waits restart the in-tool window at every call and
+              never go silent long enough for the row above it. Stepped in the
+              same whole minutes as `in tool`, because the two are read against
+              each other; "off" here is no run ceiling at all, and the value
+              rounds up so a sub-minute setting never reads as off.
+
+              The line under the row is what the number alone does not say: a
+              ceiling inside the in-tool window, or one with no room left after
+              the wrap-up warning, cannot do what the row suggests, and neither
+              can any ceiling while the inactivity watchdog is off
+              (run-ceiling-row.ts). */}
+          <box flexDirection="row">
+            <text fg={props.theme.textMuted}>{rowLabel("run (min)")}</text>
+            <text
+              fg={props.theme.accent}
+              {...holdRepeat(
+                "subagent-run-decrease",
+                () => props.onAdjust("maxSubagentRunMs", -SUBAGENT_TOOL_CALL_STEP_MS),
+              )}
+            >
+              {"[-]"}
+            </text>
+            <text fg={props.theme.text}>
+              {numCell(
+                props.settings().maxSubagentRunMs === 0
+                  ? "off"
+                  : Math.ceil(props.settings().maxSubagentRunMs / SUBAGENT_TOOL_CALL_STEP_MS),
+              )}
+            </text>
+            <text
+              fg={props.theme.accent}
+              {...holdRepeat(
+                "subagent-run-increase",
+                () => props.onAdjust("maxSubagentRunMs", SUBAGENT_TOOL_CALL_STEP_MS),
+              )}
+            >
+              {"[+]"}
+            </text>
+          </box>
+          <Show when={runCeilingNote() !== ""}>
+            <box flexDirection="row">
+              <text fg={props.theme.textMuted}>{runCeilingNote()}</text>
+            </box>
+          </Show>
           {/* Four states on one switch. `on` and `off` are the setting;
               `paused` is the mode having stopped ITSELF for this session — the
               switch is still on, nothing was written, and the row stays the

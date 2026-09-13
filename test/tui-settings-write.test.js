@@ -48,6 +48,7 @@ import {
   DEFAULT_MAX_SUBAGENTS,
   DEFAULT_MAX_SUBAGENT_AGE_MS,
   DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
+  DEFAULT_MAX_SUBAGENT_RUN_MS,
   DEFAULT_MAX_PRIMARY_CONTEXT,
   DEFAULT_SHOW_AGENTCOM,
   DEFAULT_COMPACTION,
@@ -88,6 +89,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_RUN_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS
   delete process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT
@@ -111,6 +113,10 @@ const state = (over = {}) => ({
   agentContext: {},
   maxSubagentAgeMs: DEFAULT_MAX_SUBAGENT_AGE_MS,
   maxSubagentToolCallMs: DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
+  // The watchdog's third window, stepped by the `run (min)` row, and the
+  // per-type map over it, which no row edits and every resolved state carries.
+  maxSubagentRunMs: DEFAULT_MAX_SUBAGENT_RUN_MS,
+  agentRunMs: {},
   // The primary's own context threshold: read and preserved by the store,
   // stepped by no row, and read by the `compaction` row to say whether that
   // threshold is armed at all.
@@ -758,6 +764,85 @@ test("a rejected watchdog value is dropped by the next write and the other windo
 
   assert.deepEqual(onDisk(), { maxSubagentToolCallMs: 360000 })
   assert.deepEqual(merged, state({ maxSubagentToolCallMs: 360000 }))
+})
+
+test("the run ceiling steps by whole minutes and is written in milliseconds", () => {
+  const merged = stepSetting("maxSubagentRunMs", -SUBAGENT_TOOL_CALL_STEP_MS)
+
+  // The same unit as the in-tool window, because the two are read against each
+  // other: 44 minutes by default, one minute at a step.
+  assert.equal(SUBAGENT_TOOL_CALL_STEP_MS, 60000)
+  assert.deepEqual(onDisk(), {
+    maxSubagentRunMs: DEFAULT_MAX_SUBAGENT_RUN_MS - 60000,
+  })
+  assert.equal(merged.maxSubagentRunMs, DEFAULT_MAX_SUBAGENT_RUN_MS - 60000)
+})
+
+// 0 here is "no run ceiling", the value the row renders as "off", so the row
+// has to reach it and stop there.
+test("the run ceiling steps down to 0, its no-ceiling value, and stops there", () => {
+  writeFileSync(file, JSON.stringify({ maxSubagentRunMs: SUBAGENT_TOOL_CALL_STEP_MS }))
+
+  const merged = stepSetting("maxSubagentRunMs", -SUBAGENT_TOOL_CALL_STEP_MS)
+
+  assert.deepEqual(onDisk(), { maxSubagentRunMs: 0 })
+  assert.equal(merged.maxSubagentRunMs, 0)
+
+  assert.equal(
+    stepSetting("maxSubagentRunMs", -SUBAGENT_TOOL_CALL_STEP_MS).maxSubagentRunMs,
+    0,
+  )
+})
+
+// The three windows are stepped independently, and the per-type map beside them
+// is edited by no row: a step on the run ceiling must carry neither the other
+// windows nor the map into the file, and must leave a map that is already there
+// standing.
+test("a run-ceiling step leaves the other windows and the agentRunMs map alone", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({
+      maxSubagentAgeMs: 0,
+      maxSubagentToolCallMs: 300000,
+      agentRunMs: { researcher: 7200000 },
+    }),
+  )
+
+  const merged = stepSetting("maxSubagentRunMs", SUBAGENT_TOOL_CALL_STEP_MS)
+
+  assert.deepEqual(onDisk(), {
+    maxSubagentAgeMs: 0,
+    maxSubagentToolCallMs: 300000,
+    agentRunMs: { researcher: 7200000 },
+    maxSubagentRunMs: DEFAULT_MAX_SUBAGENT_RUN_MS + 60000,
+  })
+  assert.deepEqual(
+    merged,
+    state({
+      maxSubagentAgeMs: 0,
+      maxSubagentToolCallMs: 300000,
+      agentRunMs: { researcher: 7200000 },
+      maxSubagentRunMs: DEFAULT_MAX_SUBAGENT_RUN_MS + 60000,
+    }),
+  )
+})
+
+// The map is pruned exactly as the three ceiling maps are: a bad entry costs
+// the user that entry, an unusable map costs the key, and neither costs the
+// setting the user just stepped.
+test("a write drops the unusable agentRunMs entries and keeps the rest", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ agentRunMs: { coder: 600000, planner: "an hour" } }),
+  )
+
+  const merged = stepSetting("maxSubagentRunMs", -SUBAGENT_TOOL_CALL_STEP_MS)
+
+  assert.deepEqual(onDisk(), {
+    agentRunMs: { coder: 600000 },
+    maxSubagentRunMs: DEFAULT_MAX_SUBAGENT_RUN_MS - 60000,
+  })
+  assert.deepEqual(merged.agentRunMs, { coder: 600000 })
 })
 
 test("the first reuse ceiling edit freezes every listed agent and drops the flat key", () => {

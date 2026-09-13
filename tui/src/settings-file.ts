@@ -12,7 +12,7 @@
 // toggleAgentMode at the end of this module, the values and the row's
 // arm-and-confirm in agent-mode.ts.
 //
-// The watchdog is two windows over one subagent, and which of them applies is
+// The watchdog is three windows over one subagent, and which of them applies is
 // decided by what the subagent is doing at that moment. `maxSubagentAgeMs` is
 // the window for one with NOTHING in flight — silence with no tool call open;
 // `maxSubagentToolCallMs` is the window for one that is inside a tool call, or
@@ -21,7 +21,10 @@
 // the tool-call window it means no ceiling while the subagent works, and the
 // silence window still governs every subagent that is not working. Both are
 // scalars stepped through the ordinary [-]/[+] pair, the silence one in whole
-// seconds and the tool-call one in whole minutes.
+// seconds and the tool-call one in whole minutes. `maxSubagentRunMs` is the
+// third: the wall-clock ceiling on one RUN, whatever the subagent is doing, and
+// `0` on it means no run ceiling. It is stepped in whole minutes too, and the
+// per-type map over it, `agentRunMs`, is read and preserved without a row.
 //
 // The context budget is a value PER AGENT TYPE, held in the `agentContext` map.
 // There is no single user-facing ceiling: a type with no entry of its own falls
@@ -118,6 +121,8 @@ export interface Settings {
   agentContext: AgentContext;
   maxSubagentAgeMs: number;
   maxSubagentToolCallMs: number;
+  maxSubagentRunMs: number;
+  agentRunMs: AgentContext;
   maxPrimaryContext: number;
   endlessMode: boolean;
   endlessContext: number;
@@ -155,6 +160,7 @@ export type LimitKey =
   | "maxSubagents"
   | "maxSubagentAgeMs"
   | "maxSubagentToolCallMs"
+  | "maxSubagentRunMs"
   | "endlessContext"
   | "maxRetainedSubagents"
   | "retainedSubagentTtlMs";
@@ -224,6 +230,19 @@ export const SUBAGENT_AGE_STEP_MS = 15000;
 // second-sized step could not cross it, and a minute puts both `0` and the hour
 // mark within a hold of the default.
 export const SUBAGENT_TOOL_CALL_STEP_MS = 60000;
+// The same watchdog's third window: the wall-clock ceiling on one subagent RUN,
+// whatever that subagent is doing. It is the only one of the three the subagent
+// cannot renew — the other two are counted from the call in flight right now
+// and from the last sign of life — so a subagent polling in short `bash` waits
+// is bounded by this one alone. `0` means no run ceiling. The plugin's own copy
+// is DEFAULT_MAX_SUBAGENT_RUN_MS in src/settings.js, pinned the same indirect
+// way as the two windows above. Stepped by the panel's "run (min)" row, which
+// shows and steps it in whole minutes — 44 of them by default.
+//
+// The row steps this flat key. A type carrying its own `agentRunMs` entry is
+// governed by that entry instead, and no row edits the map: it is read and
+// preserved so a write from this panel cannot drop a key the plugin honours.
+export const DEFAULT_MAX_SUBAGENT_RUN_MS = 2640000;
 // How many finished subagents may be held alive as re-promptable sessions at
 // once; 0 switches retention off. Two is the shipped default: it is the rung
 // between the mid-run `message` channel and a fresh spawn, so a subagent stays
@@ -325,6 +344,8 @@ const SETTING_VALIDATORS: { [K in FileKey]: (v: unknown) => boolean } = {
   agentContext: (v) => filterAgentContext(v) !== null,
   maxSubagentAgeMs: isLimit,
   maxSubagentToolCallMs: isLimit,
+  maxSubagentRunMs: isLimit,
+  agentRunMs: (v) => filterAgentContext(v) !== null,
   maxPrimaryContext: isLimit,
   endlessMode: isFlag,
   endlessContext: isLimit,
@@ -384,6 +405,11 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
       "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS",
       DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
     ),
+    maxSubagentRunMs: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_RUN_MS",
+      DEFAULT_MAX_SUBAGENT_RUN_MS,
+    ),
+    agentRunMs: {},
     maxPrimaryContext: envNum(
       "OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT",
       DEFAULT_MAX_PRIMARY_CONTEXT,
@@ -436,6 +462,9 @@ function resolveSettings(raw: Record<string, unknown>): Settings {
   if (isLimit(raw.maxSubagentToolCallMs)) {
     s.maxSubagentToolCallMs = raw.maxSubagentToolCallMs;
   }
+  if (isLimit(raw.maxSubagentRunMs)) s.maxSubagentRunMs = raw.maxSubagentRunMs;
+  const perAgentRun = filterAgentContext(raw.agentRunMs);
+  if (perAgentRun !== null) s.agentRunMs = perAgentRun;
   if (isLimit(raw.maxPrimaryContext)) s.maxPrimaryContext = raw.maxPrimaryContext;
   if (isFlag(raw.endlessMode)) s.endlessMode = raw.endlessMode;
   if (isLimit(raw.endlessContext)) s.endlessContext = raw.endlessContext;
@@ -564,7 +593,12 @@ function pruneSettings(merged: Record<string, unknown>): Record<string, unknown>
   if ("agentMode" in merged && !isAgentMode(merged.agentMode)) {
     delete merged.agentMode;
   }
-  for (const key of ["agentContext", "reuseContext", "resultTokens"] as const) {
+  for (const key of [
+    "agentContext",
+    "reuseContext",
+    "resultTokens",
+    "agentRunMs",
+  ] as const) {
     if (!(key in merged)) continue;
     const kept = filterAgentContext(merged[key]);
     if (kept === null || Object.keys(kept).length === 0) delete merged[key];
@@ -618,15 +652,17 @@ export function setSetting(key: LimitKey, value: number): Settings {
   return applySetting(key, () => value);
 }
 
-// The value each limit steps down to at its lowest. Zero for the five that are
+// The value each limit steps down to at its lowest. Zero for the six that are
 // switched off by being zero — no cap, no inactivity watchdog, no ceiling while
-// a subagent works, no armed endless cycle, no retention — and one whole minute
+// a subagent works, no ceiling on a whole run, no armed endless cycle, no
+// retention — and one whole minute
 // for the retention window, which has no off state of its own and is stepped in
 // minutes.
 const LIMIT_FLOOR: Record<LimitKey, number> = {
   maxSubagents: 0,
   maxSubagentAgeMs: 0,
   maxSubagentToolCallMs: 0,
+  maxSubagentRunMs: 0,
   endlessContext: 0,
   maxRetainedSubagents: 0,
   retainedSubagentTtlMs: RETAINED_SUBAGENT_TTL_STEP_MS,

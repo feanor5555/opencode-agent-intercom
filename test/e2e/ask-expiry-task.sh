@@ -162,9 +162,12 @@ UNANSWERED_MARKER="No answer came within"
 NOT_WAITING_MARKER="this run does not wait for answers"
 # The answered form, looked for so a phase can say it did NOT happen.
 ANSWERED_MARKER="The orchestrator answers:"
-# The two causes the not-waiting form names, one per way into that branch
+# The causes the not-waiting form names, one per way into that branch
 # (src/midrun.js). The no-room phase must be told the first and not the second.
-NOROOM_CAUSE_MARKER="watchdog window this call sits in leaves no room for it"
+# The first is the working-window clamp's own half of that sentence: the run
+# ceiling is the other clamp and names itself instead, so matching this phrase
+# tells the two apart.
+NOROOM_CAUSE_MARKER="watchdog window this call sits in"
 OFF_CAUSE_MARKER="the wait is switched off"
 
 SETTINGS_FILE=""

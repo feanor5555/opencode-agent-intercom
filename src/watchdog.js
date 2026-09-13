@@ -54,7 +54,11 @@ import { log, errMsg } from "./log.js"
 // hang over the configured threshold is 5 s. The sweep is asynchronous, but
 // the work per tick is small (a Map scan + maybe one abort call) so it
 // doesn't need to be unref'd.
-const WATCHDOG_INTERVAL_MS = 5000
+// Exported because the `ask` clamp keeps its wait one tick clear of the run
+// ceiling (ASK_WAIT_RUN_MARGIN_MS, src/agentmsg.js) and the two numbers are
+// pinned equal in test/ask-waiter.test.js; agentmsg.js cannot import it, since
+// this module imports agentmsg.js.
+export const WATCHDOG_INTERVAL_MS = 5000
 
 // Module-level: the interval handle + the flag that ensures we only arm the
 // timer once per process. createEventHandler may be invoked more than once

@@ -16,10 +16,11 @@
 // What it is NOT is a second watchdog. The blocked `ask` call is an ordinary
 // tool call of a tracked subagent — `beginToolCall` runs for every tool before
 // any deny (src/hooks.js) — so the entry is already measured against
-// `maxSubagentToolCallMs` from that call's start. This module's own ceiling is
-// therefore CLAMPED to stay inside that window rather than exempting anything
-// from it: an exemption would need its own lifting condition and its own bound,
-// a clamp needs neither. See askWaitMs.
+// `maxSubagentToolCallMs` from that call's start AND against the run ceiling
+// `maxSubagentRunMs` its whole run sits under. This module's own ceiling is
+// therefore CLAMPED to stay inside BOTH windows rather than exempting anything
+// from either: an exemption would need its own lifting condition and its own
+// bound, a clamp needs neither. See askWaitDecision.
 //
 // Every function in this module is SYNCHRONOUS and takes no lock, so it can be
 // called from inside a `registryMutex.runExclusive` section without nesting the
@@ -28,7 +29,7 @@
 // running.
 
 import { pendingAsks } from "./state.js"
-import { getSettings, workingWindowMs } from "./settings.js"
+import { getSettings, runCeilingFor, workingWindowMs } from "./settings.js"
 import { log } from "./log.js"
 
 // How a question ended. The subagent's `ask` tool call renders its tool result
@@ -37,9 +38,9 @@ import { log } from "./log.js"
 //   answered    — the caller replied; `answer` carries the text
 //   unanswered  — the wait window ran out; the caller never answered
 //   not-waiting — no wait was taken at all: the question was delivered and the
-//                 call returned at once, because `answerWaitMs` is 0 or the
-//                 clamp left no room. An answer may still arrive later, as an
-//                 ordinary queued message
+//                 call returned at once, because `answerWaitMs` is 0 or one of
+//                 the two clamps left no room. An answer may still arrive
+//                 later, as an ordinary queued message
 //   aborted     — the asking subagent was aborted
 //   timeout     — the inactivity watchdog reaped the asking subagent
 //   ended       — the subagent was torn down by a path that named no outcome
@@ -56,32 +57,108 @@ export const ASK_OUTCOMES = Object.freeze([
 // in flight.
 export const ASK_WAIT_WATCHDOG_MARGIN_MS = 60000
 
-// The wait in ms this process will actually take on one question, or 0 for "do
-// not wait at all".
+// The margin the wait keeps below what is LEFT of the run ceiling. One watchdog
+// sweep tick (WATCHDOG_INTERVAL_MS, src/watchdog.js): the run ceiling is
+// compared against the run's own wall clock on every tick, so a wait that ended
+// exactly at the ceiling would be settled by the same tick that reaps the
+// session. It is not imported from there — watchdog.js imports this module, so
+// the dependency could only run the other way — and test/ask-waiter.test.js
+// pins the two numbers equal.
 //
-// Two numbers decide it. `answerWaitMs` is what the user asked for, and 0 there
-// means the question is delivered and the tool returns at once. Against it
-// stands the watchdog window the blocked call sits on, resolved by the one
-// helper `watchdogLimit` (src/watchdog.js) resolves it with — `workingWindowMs`
-// in src/settings.js — so the clamp is measured against the window that will
-// really fire rather than against a second reading of the same two settings.
+// Smaller than ASK_WAIT_WATCHDOG_MARGIN_MS on purpose: the working window's
+// margin buys the whole round trip of an answer (the caller's `message`, this
+// call's return, the subagent's next step) INSIDE the window, because a reap on
+// that window throws away only the call. A run that is one tick from its
+// ceiling is over whatever the answer says, so there is nothing to buy room
+// for — only the reap-during-the-wait to avoid.
+export const ASK_WAIT_RUN_MARGIN_MS = 5000
+
+// The names the two clamps are reported under, and the one value that means
+// nothing clamped. `askWaitDecision` returns one of them so the tool result can
+// say WHICH bound cut the wait down instead of guessing a cause.
 //
-// An explicit 0 on that window means "no ceiling while a subagent works", so
-// there is nothing to clamp against and the requested wait stands unclamped.
-// Any finite window is clamped to `window - ASK_WAIT_WATCHDOG_MARGIN_MS`, and
-// where that leaves nothing — a window at or below the margin — the answer is 0
-// rather than a negative or zero wait: there is no room to wait inside a window
-// that short, and blocking anyway would only hand the subagent a reap instead
-// of an answer. At the shipped defaults the clamp is inert, 300 s of wait under
-// a 660 s window.
-export function askWaitMs(settings = getSettings()) {
+//   answer-wait     — nothing clamped: the wait is `answerWaitMs` as asked for,
+//                     or 0 because `answerWaitMs` itself is 0
+//   working-window  — the watchdog window this blocked call sits on
+//                     (`workingWindowMs`: `maxSubagentToolCallMs`, or the
+//                     silence window where the settings name no tool-call one)
+//   run-ceiling     — what is left of this RUN's ceiling
+//                     (`maxSubagentRunMs` / `agentRunMs`, runCeilingFor)
+export const ASK_WAIT_BOUNDS = Object.freeze(["answer-wait", "working-window", "run-ceiling"])
+
+// The wait this process will actually take on one question, as
+// `{ waitMs, requestedMs, bound, boundMs }`: the wait in ms after both clamps
+// (0 for "do not wait at all"), what the user asked for, which bound produced
+// the figure, and that bound's own value — the ms of the window or of the run
+// ceiling, never the remainder, so the text built from it names a setting the
+// user can find.
+//
+// Three numbers decide it. `answerWaitMs` is what the user asked for, and 0
+// there means the question is delivered and the tool returns at once. Against
+// it stand the two windows the blocked call is measured against, each resolved
+// by the helper `watchdogLimit` (src/watchdog.js) resolves it with —
+// `workingWindowMs` and `runCeilingFor` in src/settings.js — so each clamp is
+// measured against the window that will really fire rather than against a
+// second reading of the same settings.
+//
+// The working window: an explicit 0 means "no ceiling while a subagent works",
+// so there is nothing to clamp against and the requested wait stands. Any
+// finite window is clamped to `window - ASK_WAIT_WATCHDOG_MARGIN_MS`, and where
+// that leaves nothing — a window at or below the margin — the wait is 0 rather
+// than negative: there is no room to wait inside a window that short, and
+// blocking anyway would only hand the subagent a reap instead of an answer.
+//
+// The run ceiling: clamped to `ceiling - elapsed - ASK_WAIT_RUN_MARGIN_MS`,
+// counted from `entry.runStartedAt`. 0 on the ceiling means the type has none,
+// and an entry with no run stamp — no entry passed at all, or a hand-built one
+// in a test — has no run clock to clamp against, exactly as `watchdogLimit`
+// reads it. This is the clamp the wrap-up band makes necessary: that band
+// points a subagent at `ask` at 0.75 of its ceiling, so without it the plugin
+// would offer a wait it is itself about to cut off.
+//
+// Both clamps are strict — a bound is only named where it cuts the wait BELOW
+// what stands so far — so `bound` is the one that actually decided the figure.
+// At the shipped defaults both are inert: 300 s of wait under a 660 s window
+// and a 44 min ceiling.
+export function askWaitDecision(settings = getSettings(), entry = undefined, now = Date.now()) {
   const requested = settings?.answerWaitMs
-  if (!Number.isFinite(requested) || requested <= 0) return 0
+  if (!Number.isFinite(requested) || requested <= 0) {
+    return { waitMs: 0, requestedMs: 0, bound: "answer-wait", boundMs: 0 }
+  }
+  let waitMs = requested
+  let bound = "answer-wait"
+  let boundMs = requested
+
   const windowMs = workingWindowMs(settings)
-  if (!Number.isFinite(windowMs) || windowMs <= 0) return requested
-  const room = windowMs - ASK_WAIT_WATCHDOG_MARGIN_MS
-  if (room <= 0) return 0
-  return Math.min(requested, room)
+  if (Number.isFinite(windowMs) && windowMs > 0) {
+    const room = windowMs - ASK_WAIT_WATCHDOG_MARGIN_MS
+    if (room < waitMs) {
+      waitMs = Math.max(0, room)
+      bound = "working-window"
+      boundMs = windowMs
+    }
+  }
+
+  const ceilingMs = runCeilingFor(entry?.agent, settings)
+  const runStartedAt = entry?.runStartedAt
+  if (ceilingMs > 0 && Number.isFinite(runStartedAt)) {
+    const room = ceilingMs - (now - runStartedAt) - ASK_WAIT_RUN_MARGIN_MS
+    if (room < waitMs) {
+      waitMs = Math.max(0, room)
+      bound = "run-ceiling"
+      boundMs = ceilingMs
+    }
+  }
+
+  return { waitMs, requestedMs: requested, bound, boundMs }
+}
+
+// The wait alone, for a caller that has no use for the bound that produced it.
+// Same two clamps, same arguments: a caller holding the registry entry passes
+// it and gets the run clamp too, one that does not gets the working-window
+// clamp only.
+export function askWaitMs(settings = getSettings(), entry = undefined, now = Date.now()) {
+  return askWaitDecision(settings, entry, now).waitMs
 }
 
 // Monotonic within one process, so a question can be named in a log line, in
@@ -126,6 +203,10 @@ export function registerAskWaiter(sessionID, parentID, { question, id, timeoutMs
 
   const askId = id || nextAskId()
   const askedAt = Date.now()
+  // The tool passes the figure it already resolved, because it needs the bound
+  // that produced it for its own text (askWaitDecision, midrun.js). The
+  // fallback is the same resolution without a registry entry in hand, i.e.
+  // without the run clamp.
   const waitMs = timeoutMs === undefined ? askWaitMs() : timeoutMs
   const descriptor = { id: askId, question, askedAt }
 

@@ -168,6 +168,62 @@ test("a wait the watchdog window leaves no room for names the clamp, not a zero 
   assert.equal(entry.asksUnanswered, 0, "no wait was taken, so nobody failed to answer")
 })
 
+test("a wait the run ceiling leaves no room for names the run ceiling", async () => {
+  const { ctx, posted } = makeCtx()
+  const hooks = await plugin(ctx)
+  const entry = register()
+  // The wait would fit the working window comfortably; what leaves no room is
+  // what is left of the RUN, and the text has to say so rather than blame
+  // either of the other two numbers.
+  settings({ answerWaitMs: 30000, maxSubagentToolCallMs: 660000, maxSubagentRunMs: 600000 })
+  entry.runStartedAt = Date.now() - 599000
+
+  const result = await hooks.tool.ask.execute({ question: "which one?" }, subCtx)
+  assert.match(result.output, /does not wait for answers/)
+  assert.match(result.output, /answerWaitMs is 30s/)
+  assert.match(result.output, /what is left of this run's 10 min ceiling \(maxSubagentRunMs\)/)
+  assert.match(result.output, /leaves no room for it/)
+  assert.doesNotMatch(result.output, /the wait is switched off/)
+  assert.doesNotMatch(result.output, /watchdog window this call sits in/)
+  assert.equal(posted.length, 1, "the question still reaches the caller")
+  assert.equal(pendingAsks.size, 0)
+  assert.equal(entry.asksOut, 1)
+  assert.equal(entry.asksUnanswered, 0, "no wait was taken, so nobody failed to answer")
+})
+
+// A wait that was taken but cut down: the subagent sees one figure and asked
+// for another, and the expiry text is the only place that can reconcile them.
+test("an expired wait that was cut down names the bound that cut it", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  const entry = register()
+  settings({ answerWaitMs: 300000, maxSubagentToolCallMs: 660000, maxSubagentRunMs: 600000 })
+  // 600 000 - 599 950 - one sweep tick is a wait of milliseconds, so the call
+  // expires inside the test rather than after five minutes.
+  entry.runStartedAt = Date.now() - 594950
+
+  const result = await hooks.tool.ask.execute({ question: "which one?" }, subCtx)
+  assert.match(result.output, /No answer came within/)
+  assert.match(result.output, /answerWaitMs is 300s, cut down to fit /)
+  assert.match(result.output, /what is left of this run's 10 min ceiling \(maxSubagentRunMs\)/)
+  assert.match(result.output, /best reading you can defend/)
+  assert.equal(entry.asksUnanswered, 1, "a wait was taken and nobody answered it")
+  assert.equal(pendingAsks.size, 0)
+})
+
+// The unclamped case keeps the plain sentence: nothing was cut, so there is no
+// bound to name and naming one would be an invented cause.
+test("an expired wait that was not cut down names no bound", async () => {
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  register()
+  settings({ answerWaitMs: 60, maxSubagentToolCallMs: 660000, maxSubagentRunMs: 2640000 })
+
+  const result = await hooks.tool.ask.execute({ question: "which one?" }, subCtx)
+  assert.match(result.output, /No answer came within/)
+  assert.doesNotMatch(result.output, /cut down to fit/)
+})
+
 test("a nested subagent is refused: its caller is blocked and could never answer", async () => {
   const { ctx, posted } = makeCtx()
   const hooks = await plugin(ctx)

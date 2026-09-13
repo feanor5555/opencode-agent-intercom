@@ -78,6 +78,7 @@ import {
   DEFAULT_MAX_SUBAGENTS as TUI_DEFAULT_MAX_SUBAGENTS,
   DEFAULT_MAX_SUBAGENT_AGE_MS as TUI_DEFAULT_MAX_SUBAGENT_AGE_MS,
   DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS as TUI_DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
+  DEFAULT_MAX_SUBAGENT_RUN_MS as TUI_DEFAULT_MAX_SUBAGENT_RUN_MS,
   DEFAULT_MAX_PRIMARY_CONTEXT as TUI_DEFAULT_MAX_PRIMARY_CONTEXT,
   DEFAULT_MID_RUN_MESSAGING as TUI_DEFAULT_MID_RUN_MESSAGING,
   DEFAULT_RETAINED_SUBAGENT_TTL_MS as TUI_DEFAULT_RETAINED_SUBAGENT_TTL_MS,
@@ -112,6 +113,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_MESSAGE_TOKENS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS
+  delete process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_RUN_MS
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT
   delete process.env.OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS
   delete process.env.OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS
@@ -130,8 +132,8 @@ const MID_RUN_DEFAULTS = {
   maxMessageTokens: DEFAULT_MAX_MESSAGE_TOKENS,
 }
 
-// The two watchdog windows as every case below expects them when neither the
-// file nor the env names one. src/settings.js keeps its own two defaults
+// The three watchdog windows as every case below expects them when neither the
+// file nor the env names one. src/settings.js keeps all three defaults
 // module-private, so the sidebar's copies are the only named constants for
 // them; what pins the plugin against those constants is the dedicated test
 // further down, which reads the value the plugin resolves with an empty file
@@ -139,6 +141,7 @@ const MID_RUN_DEFAULTS = {
 const WATCHDOG_DEFAULTS = {
   maxSubagentAgeMs: TUI_DEFAULT_MAX_SUBAGENT_AGE_MS,
   maxSubagentToolCallMs: TUI_DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
+  maxSubagentRunMs: TUI_DEFAULT_MAX_SUBAGENT_RUN_MS,
 }
 
 // The primary's own context threshold as every case below expects it when
@@ -166,6 +169,8 @@ function bothSides() {
       agentContext: plugin.agentContext,
       maxSubagentAgeMs: plugin.maxSubagentAgeMs,
       maxSubagentToolCallMs: plugin.maxSubagentToolCallMs,
+      maxSubagentRunMs: plugin.maxSubagentRunMs,
+      agentRunMs: plugin.agentRunMs,
       maxPrimaryContext: plugin.maxPrimaryContext,
       endlessMode: plugin.endlessMode,
       endlessContext: plugin.endlessContext,
@@ -339,6 +344,7 @@ test("with neither file nor env both resolve the built-in defaults", () => {
     maxContextSource: "default",
     agentContext: {},
     ...WATCHDOG_DEFAULTS,
+    agentRunMs: {},
     ...PRIMARY_CONTEXT_DEFAULT,
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
@@ -371,6 +377,7 @@ test("with env alone both resolve the env value", () => {
     maxContextSource: "env",
     agentContext: {},
     ...WATCHDOG_DEFAULTS,
+    agentRunMs: {},
     ...PRIMARY_CONTEXT_DEFAULT,
     endlessMode: true,
     endlessContext: 300000,
@@ -414,6 +421,7 @@ test("with file and env both let the file win", () => {
     maxContextSource: "file",
     agentContext: {},
     ...WATCHDOG_DEFAULTS,
+    agentRunMs: {},
     ...PRIMARY_CONTEXT_DEFAULT,
     endlessMode: false,
     endlessContext: 120000,
@@ -445,6 +453,7 @@ test("both reject the same file values and fall back to env or default", () => {
     maxContextSource: "default",
     agentContext: {},
     ...WATCHDOG_DEFAULTS,
+    agentRunMs: {},
     ...PRIMARY_CONTEXT_DEFAULT,
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: DEFAULT_ENDLESS_CONTEXT,
@@ -475,6 +484,7 @@ test("both keep 0 as a value in its own right", () => {
     maxContextSource: "file",
     agentContext: {},
     ...WATCHDOG_DEFAULTS,
+    agentRunMs: {},
     ...PRIMARY_CONTEXT_DEFAULT,
     endlessMode: DEFAULT_ENDLESS_MODE,
     endlessContext: 0,
@@ -692,6 +702,7 @@ test("both carry the same watchdog defaults", () => {
   const [plugin, tui] = bothSides()
   assert.equal(plugin.maxSubagentAgeMs, TUI_DEFAULT_MAX_SUBAGENT_AGE_MS)
   assert.equal(plugin.maxSubagentToolCallMs, TUI_DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS)
+  assert.equal(plugin.maxSubagentRunMs, TUI_DEFAULT_MAX_SUBAGENT_RUN_MS)
   assert.deepEqual(tui, plugin)
 })
 
@@ -774,6 +785,73 @@ test("both keep a watchdog window of 0 as the off value it is", () => {
   assert.equal(plugin.maxSubagentAgeMs, 0)
   assert.equal(plugin.maxSubagentToolCallMs, 0)
   assert.deepEqual(tui, plugin)
+})
+
+// The third window, the run ceiling. It resolves file > env > default like the
+// two above it, and the sidebar's "run (min)" row steps the flat key, so a
+// divergence would step a number that governs nothing.
+test("both resolve maxSubagentRunMs file > env > default and reject the same values", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_RUN_MS = "1800000"
+  const [envOnly, tuiEnvOnly] = bothSides()
+  assert.equal(envOnly.maxSubagentRunMs, 1800000, "env over the built-in default")
+  assert.deepEqual(tuiEnvOnly, envOnly)
+
+  writeFileSync(file, JSON.stringify({ maxSubagentRunMs: 900000 }))
+  const [fromFile, tuiFromFile] = bothSides()
+  assert.equal(fromFile.maxSubagentRunMs, 900000, "the file wins over the env var")
+  assert.deepEqual(tuiFromFile, fromFile)
+
+  for (const bad of [1.5, -1, "900000", null]) {
+    writeFileSync(file, JSON.stringify({ maxSubagentRunMs: bad }))
+    const [plugin, tui] = bothSides()
+    assert.equal(plugin.maxSubagentRunMs, 1800000, `${bad} must be rejected by both`)
+    assert.deepEqual(tui, plugin)
+  }
+})
+
+// 0 on this window means no run ceiling for that type — the `0` of the two
+// windows beside it, and the value the row renders as "off". Neither side may
+// floor it.
+test("both keep a run ceiling of 0 as the off value it is", () => {
+  writeFileSync(file, JSON.stringify({ maxSubagentRunMs: 0 }))
+  const [plugin, tui] = bothSides()
+  assert.equal(plugin.maxSubagentRunMs, 0)
+  assert.deepEqual(tui, plugin)
+})
+
+// The per-type map over that window. No sidebar row edits it, and it is carried
+// for the reason maxNestedSpawns is: a write from the panel must not drop a key
+// the plugin honours, and a type whose run ceiling the two read differently
+// would be reaped on one number and displayed at another.
+test("both read the same agentRunMs map and let a type's own entry stand", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ maxSubagentRunMs: 900000, agentRunMs: { researcher: 7200000 } }),
+  )
+  const [plugin, tui] = bothSides()
+  assert.deepEqual(plugin.agentRunMs, { researcher: 7200000 })
+  assert.deepEqual(tui, plugin)
+})
+
+test("both drop the same agentRunMs entries and keep the rest of the map", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({
+      agentRunMs: { coder: 600000, planner: -1, reviewer: 2.5, designer: "an hour" },
+    }),
+  )
+  const [plugin, tui] = bothSides()
+  assert.deepEqual(plugin.agentRunMs, { coder: 600000 })
+  assert.deepEqual(tui, plugin)
+})
+
+test("both ignore an agentRunMs that is not a plain object", () => {
+  for (const bad of [[600000], "600000", 600000, null]) {
+    writeFileSync(file, JSON.stringify({ agentRunMs: bad }))
+    const [plugin, tui] = bothSides()
+    assert.deepEqual(plugin.agentRunMs, {})
+    assert.deepEqual(tui, plugin)
+  }
 })
 
 // The two retention keys the plugin gates the feature on. The sidebar carries

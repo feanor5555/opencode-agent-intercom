@@ -25,12 +25,16 @@ import { pendingAsks, resetState } from "../src/state.js"
 import { getSettings, resetSettings, setSettingsPath } from "../src/settings.js"
 import {
   ASK_OUTCOMES,
+  ASK_WAIT_BOUNDS,
+  ASK_WAIT_RUN_MARGIN_MS,
   ASK_WAIT_WATCHDOG_MARGIN_MS,
+  askWaitDecision,
   askWaitMs,
   openAskFor,
   registerAskWaiter,
   settleAsk,
 } from "../src/agentmsg.js"
+import { WATCHDOG_INTERVAL_MS } from "../src/watchdog.js"
 
 const dir = mkdtempSync(join(tmpdir(), "ask-waiter-"))
 const file = join(dir, "agent-intercom.json")
@@ -39,7 +43,17 @@ const ENV = [
   "OPENCODE_AGENT_INTERCOM_ANSWER_WAIT_MS",
   "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS",
   "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS",
+  "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_RUN_MS",
 ]
+
+const NOW = 1_700_000_000_000
+
+// A running subagent as the clamp reads it: its type, which decides the run
+// ceiling, and the stamp its run is counted from (`entry.runStartedAt`,
+// src/registry.js).
+function running(elapsedMs, agent = "coder") {
+  return { agent, runStartedAt: NOW - elapsedMs }
+}
 
 beforeEach(() => {
   resetState()
@@ -95,6 +109,118 @@ test("a settings object carrying no tool-call window is clamped against the sile
   // an explicit 0, and the silence window is what would fire.
   assert.equal(askWaitMs({ answerWaitMs: 300000, maxSubagentAgeMs: 90000 }), 30000)
   assert.equal(askWaitMs({ answerWaitMs: 300000, maxSubagentAgeMs: 0 }), 300000)
+})
+
+// The second clamp, over the same wait: the run ceiling is the window the whole
+// RUN sits under, and the wrap-up band points a subagent at `ask` at 0.75 of
+// it — so without this clamp the plugin would offer a wait it is itself about
+// to cut off, on the very path it recommends.
+test("the wait is clamped a sweep tick under what is left of the run ceiling", () => {
+  // One sweep tick, because that is how often the ceiling is compared against
+  // the run's wall clock: a wait ending exactly at the ceiling would be settled
+  // by the tick that reaps the session.
+  assert.equal(ASK_WAIT_RUN_MARGIN_MS, WATCHDOG_INTERVAL_MS)
+
+  const settings = withSettings({ answerWaitMs: 300000, maxSubagentRunMs: 600000 })
+
+  // Early in the run there is more room left than the wait asks for, so nothing
+  // is cut and the working-window clamp is the only one that could speak.
+  assert.equal(askWaitMs(settings, running(60000), NOW), 300000)
+
+  // Late in the run the remainder decides: 600 000 - 500 000 - one tick.
+  assert.equal(askWaitMs(settings, running(500000), NOW), 95000)
+
+  // Past the ceiling — the sweep has not reached this entry yet — there is
+  // nothing left to wait inside.
+  assert.equal(askWaitMs(settings, running(600000), NOW), 0)
+  assert.equal(askWaitMs(settings, running(900000), NOW), 0)
+})
+
+test("the run clamp reads the type's own agentRunMs entry", () => {
+  const settings = withSettings({
+    answerWaitMs: 300000,
+    maxSubagentRunMs: 600000,
+    agentRunMs: { researcher: 7200000 },
+  })
+
+  // The flat ceiling still governs a type without an entry of its own.
+  assert.equal(askWaitMs(settings, running(500000, "coder"), NOW), 95000)
+  // The type with one is measured against it and keeps the whole wait.
+  assert.equal(askWaitMs(settings, running(500000, "researcher"), NOW), 300000)
+})
+
+test("no run ceiling and no run stamp both leave the wait unclamped", () => {
+  // 0 means the type has no run ceiling, exactly as it does on the other two
+  // windows: there is nothing to stay under.
+  const off = withSettings({ answerWaitMs: 300000, maxSubagentRunMs: 0 })
+  assert.equal(askWaitMs(off, running(900000), NOW), 300000)
+
+  // An entry with no run clock — a hand-built one, or no entry at all — is read
+  // as having none, the way watchdogLimit reads it: the run case fails open.
+  const on = withSettings({ answerWaitMs: 300000, maxSubagentRunMs: 600000 })
+  assert.equal(askWaitMs(on, { agent: "coder" }, NOW), 300000)
+  assert.equal(askWaitMs(on, undefined, NOW), 300000)
+})
+
+// The figure alone cannot say which setting to raise, and the tool result has
+// to: a subagent told `answerWaitMs` is 0 when it is 300 s acts on the wrong
+// number.
+test("the decision names the bound that produced the wait", () => {
+  assert.deepEqual([...ASK_WAIT_BOUNDS], ["answer-wait", "working-window", "run-ceiling"])
+
+  // Nothing clamped: the wait is what was asked for.
+  const inert = withSettings({ answerWaitMs: 300000, maxSubagentRunMs: 2640000 })
+  assert.deepEqual(askWaitDecision(inert, running(60000), NOW), {
+    waitMs: 300000,
+    requestedMs: 300000,
+    bound: "answer-wait",
+    boundMs: 300000,
+  })
+
+  // answerWaitMs itself is 0: no bound cut anything.
+  assert.deepEqual(askWaitDecision(withSettings({ answerWaitMs: 0 }), running(60000), NOW), {
+    waitMs: 0,
+    requestedMs: 0,
+    bound: "answer-wait",
+    boundMs: 0,
+  })
+
+  // The working window cuts it, and `boundMs` is the window itself rather than
+  // the room left inside it, so the text built from it names a real setting.
+  const narrowWindow = withSettings({
+    answerWaitMs: 300000,
+    maxSubagentToolCallMs: 200000,
+    maxSubagentRunMs: 2640000,
+  })
+  assert.deepEqual(askWaitDecision(narrowWindow, running(60000), NOW), {
+    waitMs: 140000,
+    requestedMs: 300000,
+    bound: "working-window",
+    boundMs: 200000,
+  })
+
+  // The run ceiling cuts it below what the window left: the tighter of the two
+  // is the one named.
+  const shortRun = withSettings({
+    answerWaitMs: 300000,
+    maxSubagentToolCallMs: 200000,
+    maxSubagentRunMs: 600000,
+  })
+  assert.deepEqual(askWaitDecision(shortRun, running(520000), NOW), {
+    waitMs: 75000,
+    requestedMs: 300000,
+    bound: "run-ceiling",
+    boundMs: 600000,
+  })
+
+  // And where the window is the tighter of the two, the run does not take the
+  // name from it: a bound is only reported where it actually decided.
+  assert.deepEqual(askWaitDecision(shortRun, running(60000), NOW), {
+    waitMs: 140000,
+    requestedMs: 300000,
+    bound: "working-window",
+    boundMs: 200000,
+  })
 })
 
 test("answerWaitMs 0 takes no wait, registers nothing and resolves not-waiting", async () => {

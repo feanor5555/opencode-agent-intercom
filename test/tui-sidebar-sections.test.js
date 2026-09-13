@@ -212,22 +212,48 @@ test("the effort row cycles the ladder of the model under the cursor", () => {
 // Both watchdog windows are flat scalars over every subagent, not per-type
 // ceilings, so they sit with the other limit rows in the Subagents body rather
 // than in the LLM params body with the agent cycler.
-test("the two watchdog rows stay in the Subagents body, silence before in tool", () => {
+test("the three watchdog rows stay in the Subagents body, in their window order", () => {
   const silence = row("silence (s)")
   const inTool = row("in tool (min)")
+  const run = row("run (min)")
 
-  for (const [label, at] of [["silence (s)", silence], ["in tool (min)", inTool]]) {
+  for (const [label, at] of [
+    ["silence (s)", silence],
+    ["in tool (min)", inTool],
+    ["run (min)", run],
+  ]) {
     assert.ok(at > SUBAGENTS_HEADER, `${label} stands after the Subagents header`)
     assert.ok(at < TUI_SETTINGS_HEADER, `${label} stands before the TUI settings header`)
   }
 
+  // Narrowest window first, widest last: the run ceiling is the one the other
+  // two are read against, and its note line names that relation.
   assert.ok(silence < inTool, "the silence window stands before the tool-call window")
+  assert.ok(inTool < run, "the run ceiling stands directly under the tool-call window")
+})
+
+// The run ceiling's own line, in the register the compaction row's note is in:
+// it is rendered only when it says something, from a pure function over the
+// settings (run-ceiling-row.ts), and it sits under the row it explains.
+test("the run row carries its note line under itself", () => {
+  // The guard is the unique anchor: an empty note renders no line at all, so
+  // the row's line exists exactly where this Show does.
+  const note = only('<Show when={runCeilingNote() !== ""}>')
+  assert.ok(note > row("run (min)"), "the note stands under the row")
+  assert.ok(note < TUI_SETTINGS_HEADER, "the note stays in the Subagents body")
+  assert.ok(
+    source.includes("runCeilingRowNote(props.settings(), panelWidth())"),
+    "the note is composed by run-ceiling-row.ts over the settings and the panel width",
+  )
 })
 
 test("each watchdog row steps its own key in its own unit", () => {
   for (const [key, step] of [
     ["maxSubagentAgeMs", "SUBAGENT_AGE_STEP_MS"],
     ["maxSubagentToolCallMs", "SUBAGENT_TOOL_CALL_STEP_MS"],
+    // The run ceiling steps in the same whole minutes as the tool-call window,
+    // and shares its unit constant: the two are read against each other.
+    ["maxSubagentRunMs", "SUBAGENT_TOOL_CALL_STEP_MS"],
   ]) {
     assert.ok(
       source.includes(`props.onAdjust("${key}", -${step})`),
@@ -245,8 +271,8 @@ test("each watchdog row steps its own key in its own unit", () => {
 // reading that value has. Matched over the source with its line breaks and
 // indentation collapsed, so re-wrapping the expression does not fail the test.
 const flat = source.replace(/\s+/g, " ")
-test("both watchdog rows render a 0 as off rather than as a number", () => {
-  for (const key of ["maxSubagentAgeMs", "maxSubagentToolCallMs"]) {
+test("every watchdog row renders a 0 as off rather than as a number", () => {
+  for (const key of ["maxSubagentAgeMs", "maxSubagentToolCallMs", "maxSubagentRunMs"]) {
     assert.ok(
       flat.includes(`props.settings().${key} === 0 ? "off"`),
       `${key} renders 0 as off`,

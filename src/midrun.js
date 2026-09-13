@@ -24,14 +24,13 @@ import {
   LIFECYCLE_RUNNING,
 } from "./registry.js"
 import { promptSession } from "./client.js"
-import { registerAskWaiter, settleAsk } from "./agentmsg.js"
+import { askWaitDecision, registerAskWaiter, settleAsk } from "./agentmsg.js"
 import { postParentNotice, publishMidRunState } from "./teardown.js"
 import {
   getSettings,
   contextBudgetFor,
   retentionActive,
   soloModeActive,
-  workingWindowMs,
 } from "./settings.js"
 import { tokens as fmtTokens, estimateTokens, estimateReplyTokens } from "./format.js"
 import { askNotice, framedAgentMessage } from "./notices.js"
@@ -41,6 +40,28 @@ import { log, errMsg } from "./log.js"
 // refusal an unresolvable or foreign handle gets, owned by tools.js so that all
 // four handle-taking tools answer it with the same words.
 export function createMidRunTools({ client, unknown }) {
+  // Which bound produced the wait one question was given, in the words the
+  // subagent is shown. `askWaitDecision` (src/agentmsg.js) resolves one wait
+  // out of three numbers — what the user asked for, the watchdog window this
+  // blocked call sits on, and what is left of the run's ceiling — and names the
+  // one that decided it, so neither text below has to guess a cause.
+  //
+  // "" for `answer-wait`: nothing clamped there, so there is no bound to name
+  // and both texts say what they say about `answerWaitMs` itself.
+  function waitBoundPhrase(wait) {
+    if (wait.bound === "run-ceiling") {
+      const ceiling =
+        wait.boundMs >= 60000
+          ? `${Math.round(wait.boundMs / 60000)} min`
+          : `${Math.round(wait.boundMs / 1000)}s`
+      return `what is left of this run's ${ceiling} ceiling (maxSubagentRunMs)`
+    }
+    if (wait.bound === "working-window") {
+      return `the ${Math.round(wait.boundMs / 1000)}s watchdog window this call sits in`
+    }
+    return ""
+  }
+
   // When the subagent will actually read what was just queued for it, as a
   // clause to hang on the tool result. opencode drains a queued user message at
   // the next STEP boundary of the loop that is already running, so a subagent
@@ -310,7 +331,15 @@ export function createMidRunTools({ client, unknown }) {
       }
     }
 
-    const waiter = registerAskWaiter(sessionID, entry.parentID, { question })
+    // Resolved once, here, because the texts below need the bound that produced
+    // it and not only the figure: the wait is clamped against the watchdog
+    // window this call will sit on AND against what is left of this run's
+    // ceiling, and a subagent told the wrong cause cannot act on it.
+    const wait = askWaitDecision(settings, entry)
+    const waiter = registerAskWaiter(sessionID, entry.parentID, {
+      question,
+      timeoutMs: wait.waitMs,
+    })
     if (!openAsk(entry, waiter)) {
       settleAsk(sessionID, { status: "ended", detail: "a second question raced the first" })
       return {
@@ -366,21 +395,19 @@ export function createMidRunTools({ client, unknown }) {
       }
     }
     if (outcome.status === "not-waiting") {
-      // Which of the two ways into this branch the run took, in the words the
-      // subagent is shown. `askWaitMs` (src/agentmsg.js) takes no wait either
-      // because none was asked for, or because the watchdog window the blocked
-      // call sits on leaves no room after its margin. Only the second reaches
-      // here with a positive `answerWaitMs`, and only under a window that is
-      // finite and positive — an absent or switched-off window leaves the
-      // requested wait unclamped — so that branch renders both figures
-      // unguarded.
-      const requestedWaitMs = settings.answerWaitMs
+      // Which of the three ways into this branch the run took, in the words the
+      // subagent is shown. `askWaitDecision` (src/agentmsg.js) takes no wait
+      // for one of three reasons — none was asked for, the watchdog window the
+      // blocked call sits on leaves no room after its margin, or this run is
+      // within a sweep tick of its ceiling — and it names which, so the text
+      // cannot claim `answerWaitMs` is 0 when it is not. The two clamped
+      // branches reach here only with a positive `answerWaitMs` and a bound
+      // that is finite and positive, so both figures render unguarded.
       const cause =
-        Number.isFinite(requestedWaitMs) && requestedWaitMs > 0
-          ? `answerWaitMs is ${Math.round(requestedWaitMs / 1000)}s, and the ` +
-            `${Math.round(workingWindowMs(settings) / 1000)}s ` +
-            `watchdog window this call sits in leaves no room for it`
-          : "the wait is switched off (answerWaitMs is 0)"
+        wait.bound === "answer-wait"
+          ? "the wait is switched off (answerWaitMs is 0)"
+          : `answerWaitMs is ${Math.round(wait.requestedMs / 1000)}s, and ` +
+            `${waitBoundPhrase(wait)} leaves no room for it`
       return {
         output:
           `Your question was delivered, but this run does not wait for answers — ${cause}. Go on ` +
@@ -389,10 +416,19 @@ export function createMidRunTools({ client, unknown }) {
       }
     }
     if (outcome.status === "unanswered") {
+      // A wait shorter than the one asked for is the plugin's own doing, and
+      // the figure above is the only one the subagent ever saw. Naming the
+      // bound that cut it keeps the two numbers from contradicting each other
+      // and tells the subagent which setting to have raised.
+      const cut =
+        wait.waitMs < wait.requestedMs
+          ? ` — answerWaitMs is ${Math.round(wait.requestedMs / 1000)}s, cut down to fit ` +
+            `${waitBoundPhrase(wait)}`
+          : ""
       return {
         output:
-          `No answer came within ${waitedSec}s. Go on with the best reading you can defend, or ` +
-          `finish now with a \`Blocked:\` reply naming the question. Do not ask again.`,
+          `No answer came within ${waitedSec}s${cut}. Go on with the best reading you can ` +
+          `defend, or finish now with a \`Blocked:\` reply naming the question. Do not ask again.`,
       }
     }
     return {

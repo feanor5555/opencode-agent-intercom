@@ -128,12 +128,16 @@ mr_init() {
     mr_die "OPENCODE_AGENT_INTERCOM_DEBUG=0 switches the plugin's log off; this driver reads the spawned subagent's session id out of it"
 }
 
-# Refuses the two settings under which the scenario cannot happen at all:
-# the channel switched off, and an endless threshold this run would cross —
-# a cycle freezes every spawn from the moment it is scheduled.
-# Usage: mr_check_settings
+# Refuses the settings under which the scenario cannot happen at all: solo
+# mode (no spawn), and an endless threshold this run would cross — a cycle
+# freezes every spawn from the moment it is scheduled. The mid-run channel
+# is required by default because the message/ask drivers observe it; pass
+# `skip-midrun` where the driver only needs spawn/abort.
+# Usage: mr_check_settings [skip-midrun]
 mr_check_settings() {
+  local require_midrun=1
   local line
+  [ "${1:-}" = skip-midrun ] && require_midrun=0
   line=$(python3 - "$(e2e_opencode_config_dir)/agent-intercom.json" <<'PY'
 import json, os, sys
 
@@ -185,8 +189,10 @@ PY
   )
   read -r MR_MID_RUN MR_ANSWER_WAIT_MS MR_MAX_MESSAGE_TOKENS MR_MAX_TOOL_CALL_MS MR_ENDLESS_MODE MR_ENDLESS_CONTEXT MR_AGENT_MODE <<< "$line"
   [ -n "${MR_AGENT_MODE:-}" ] || mr_die "could not resolve the plugin settings — python3 returned: '$line'"
-  [ "$MR_MID_RUN" = true ] ||
-    mr_die "midRunMessaging is off in $(e2e_opencode_config_dir)/agent-intercom.json — neither message nor ask is registered, so there is no channel to observe"
+  if [ "$require_midrun" = 1 ]; then
+    [ "$MR_MID_RUN" = true ] ||
+      mr_die "midRunMessaging is off in $(e2e_opencode_config_dir)/agent-intercom.json — neither message nor ask is registered, so there is no channel to observe"
+  fi
   [ "$MR_AGENT_MODE" = orchestrator ] ||
     mr_die "agentMode is \"$MR_AGENT_MODE\" — in solo mode no subagent starts and neither tool is registered"
   if [ "$MR_ENDLESS_MODE" = true ] && [ "$MR_ENDLESS_CONTEXT" -gt 0 ] && [ "$MR_ENDLESS_CONTEXT" -lt 40000 ]; then

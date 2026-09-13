@@ -83,14 +83,24 @@ that opencode upgrades don't shift the system-prompt composition.
   request log's `type=tool.execute.after` (and `type=tool.execute.before`)
   records whose `tool` is that ping. `TOOL_NOT_SEEN` is a failed criterion, not
   a silent skip. See "MCP `tool.execute.after`" below.
+- `tui-route-task.sh` — server-scoped pre-delete route-move harness. Three Node
+  writers (`lib/tui-route-writer.ts`) publish into the shared `tui-route.json`:
+  a same-server primary, a same-server observer, and a foreign-server primary,
+  all parked on one subagent session. Aborting that subagent is the live
+  `deleteSession` path. It asserts the plugin posts once because that owning
+  same-server primary is on the dying session; foreign writers are not a reason
+  to post; actual TUI navigation is not observed. Sequenced by `run-all.sh` on
+  the suite server; started on its own it owns a server on `TUI_ROUTE_PORT`
+  (default 4610). See "The server-scoped route move" below.
 - `todo-driver.mjs` — TODO.md auto-tracking harness. Drives DONE and BLOCKED
   markers through the wake hook and checks the resulting file.
-- `run-all.sh` — runs the 8 single-agent tests, the multi-agent test, the four
-  mid-run drivers, the context-band driver, the MCP-after driver and the
-  endless-mode cycles. The mid-run drivers, the context-band driver and the
-  MCP-after driver are the ones in it that assert: a failed criterion of
-  theirs does not stop the suite — the endless cycle still runs — but it
-  decides the suite's exit code at the end (`ASSERTING_FAILED`).
+- `run-all.sh` — runs the 8 single-agent tests, the multi-agent test, the
+  route-move driver, the four mid-run drivers, the context-band driver, the
+  MCP-after driver and the endless-mode cycles. The route-move driver, the
+  mid-run drivers, the context-band driver and the MCP-after driver are the
+  ones in it that assert: a failed criterion of theirs does not stop the suite
+  — the endless cycle still runs — but it decides the suite's exit code at the
+  end (`ASSERTING_FAILED`).
   Owns the server every driver above `ask-expiry-task.sh` uses: builds the TUI, starts
   a fresh `opencode serve` in the configured directory (default
   `$HOME/testopencode`), and stops it again before `ask-expiry-task.sh`,
@@ -112,7 +122,8 @@ that opencode upgrades don't shift the system-prompt composition.
   `mcp-after-task.sh` decides on — FIRES / DOES_NOT_FIRE / TOOL_NOT_SEEN from
   the request log — together with `mcp-ping-server.js`, the local stdio ping
   server that driver patches in, both covered without a server by
-  `test/e2e-mcp-after-reader.test.js`.
+  `test/e2e-mcp-after-reader.test.js`; and `tui-route-writer.ts`, the long-lived
+  Node publisher `tui-route-task.sh` starts three of.
 - `config-isolation.sh` — sourced library, not a driver. Builds the throwaway
   opencode configuration a run is carried out in (`e2e_resolve_model`,
   `e2e_iso_create`, `e2e_iso_remove`), and audits what answered
@@ -153,9 +164,9 @@ opencode instance on the machine reads, and it asserts on the todo file of
 session left alive there is a second primary under the same low ceiling: a
 straggler subagent wakes it, its next turn crosses the threshold, and it runs a
 wind-down cycle of its own that rewrites the todo file the endless driver reads
-and appends to the process-global debug log the driver slices. Nothing after the
-multi-agent driver uses the suite server, so it goes down there; the trap's own
-stop is then a no-op.
+and appends to the process-global debug log the driver slices. The suite server
+stays up through the route-move driver and the mid-run drivers that inherit it,
+and is stopped before `ask-expiry-task.sh`; the trap's own stop is then a no-op.
 
 ```bash
 cd ~/opencode-agent-intercom
@@ -304,10 +315,13 @@ configuration are the evidence, and nothing in the audit's output claims
 otherwise.
 
 A driver that uses a server it does not own — `run-task.sh`, `multi-task.sh`,
-`message-task.sh`, `ask-task.sh`, `todo-driver.mjs` — builds no configuration:
-it inherits the `E2E_ISO_*` variables `run-all.sh` exports. Started standalone
-against a server somebody else launched, it audits that server's answers but
-cannot isolate its configuration — that belongs to whoever starts it.
+`tui-route-task.sh` when `OPENCODE_URL` already answers, `message-task.sh`,
+`ask-task.sh`, `todo-driver.mjs` — builds no configuration: it inherits the
+`E2E_ISO_*` variables `run-all.sh` exports. Started standalone against a server
+somebody else launched, it audits that server's answers but cannot isolate its
+configuration — that belongs to whoever starts it. `tui-route-task.sh` started
+with no healthy `OPENCODE_URL` owns a server of its own instead, like
+`mcp-after-task.sh`.
 
 ## Endless mode
 
@@ -891,6 +905,63 @@ denial-loop notice to the parent — all three pinned without a server in
 ## MCP `tool.execute.after`
 
 `mcp-after-task.sh` answers whether opencode fires `tool.execute.after` for an MCP tool. It owns a server on `MCP_AFTER_PORT` (default 4608), builds a throwaway HOME, patches a local stdio MCP server (`test/e2e/lib/mcp-ping-server.js`, one tool `ping` → `pong`, no network) into that isolated `opencode.json` only, starts with `OPENCODE_AGENT_INTERCOM_LOG_REQUESTS=1`, and has a subagent call that ping. The verdict is read out of the request log: `type=tool.execute.after` whose `tool` is the ping is `FIRES`; a `type=tool.execute.before` or a messages tool-part without an `after` is `DOES_NOT_FIRE`; neither is `TOOL_NOT_SEEN`, recorded as a failed criterion rather than skipped. Exit `0` / `1` / `2` like the other asserting drivers; captures and report land in `out/18-mcp-after.*`.
+
+## The server-scoped route move
+
+`tui-route-task.sh` is the live proof that a session delete posts
+`/tui/select-session` once, because the owning same-server primary is on the
+dying session. `select-session` is server-wide: an observer is not a reason
+to post, but one post navigates every panel attached to that serve. Foreign
+writers are not a reason to post. The writers never consume the post, so
+actual TUI navigation is not observed. Unit tests pin `serverIdentity` and
+`panel` against a fake route file; this driver is the case those fields exist
+for — two TUIs on one machine, the plugin posting because of the owner —
+against a running `opencode serve`.
+
+Three Node writers (`lib/tui-route-writer.ts`) publish into the shared
+`~/.cache/opencode-agent-intercom/tui-route.json` with the panel's own
+`publishTuiRoute`. The `panel` argv is the expected computed role, not a
+value the writer writes: A then B then C is what makes C the observer.
+
+| writer | `server` | computed `panel` | parked on |
+|---|---|---|---|
+| A | `url:<this serve>` | `primary` (owning) | the subagent session |
+| B | `url:http://127.0.0.1:<foreign port>` | `primary` | the same session id |
+| C | `url:<this serve>` | `observer` | the same session |
+
+The orchestrator then `abort`s that subagent, which is the live path through
+`deleteSession` → `escapeTuiRouteOffSession`. The plugin must emit one
+`tui route escape before delete` whose `target` is the parent, and a
+`tui route scope` of `mine=1` / `observers=1` with B's pid among foreign.
+The copied pre-delete route file is what pins A/B/C's `server`/`panel` and
+that C is observer and B is foreign. The driver dies during setup if another
+live writer already claims this serve as primary, or if the foreign identity
+equals this serve.
+
+`run-all.sh` sequences it on the suite server, after `multi-task.sh` and
+before the mid-run drivers. Started on its own it owns a server on
+`TUI_ROUTE_PORT` (default 4610) through `config-isolation.sh` and
+`server-lifecycle.sh`, like `mcp-after-task.sh`.
+
+```bash
+bash test/e2e/tui-route-task.sh
+OPENCODE_URL=http://127.0.0.1:4567 bash test/e2e/tui-route-task.sh
+```
+
+Exit `0` / `1` / `2` like the other asserting drivers; captures and report
+land in `out/19-tui-route.*`.
+
+| criterion | evidence |
+|---|---|
+| writers published | copied `route.before.json` has keys A/B/C with the expected `server`/`panel` on the subagent session |
+| scope | `tui route scope` for that session: `mine=1`, `observers=1`, B's pid among foreign, `server` this serve |
+| escape-target | exactly one `tui route escape before delete` for the subagent, `target` and `parentID` the primary |
+| observer-untouched | pre-delete snapshot: C's pid in the observer bucket, not in `mine` |
+| foreign-untouched | pre-delete snapshot: B's pid among foreign, not in `mine` |
+| moved | that escape's `moved` is true — `POST /tui/select-session` accepted |
+| model-pin | every captured assistant message names `E2E_MODEL` |
+
+Not asserted: writers following `/tui/select-session` — they republish the argv session id.
 
 ## Nested delegation
 

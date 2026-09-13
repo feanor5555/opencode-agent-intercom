@@ -1,10 +1,11 @@
 #!/bin/bash
-# Runs all 8 single-agent end-to-end tests, the multi-agent test, the four
-# mid-run-channel drivers, the context-band driver, the MCP-after driver and
-# the endless-mode cycle, writes captures under ./out. The asserting drivers —
-# the four mid-run ones, the context-band one and the MCP-after one — decide
-# the suite's exit code: a failed criterion of theirs does not stop the suite
-# but is collected and exited on at the end.
+# Runs all 8 single-agent end-to-end tests, the multi-agent test, the
+# route-move driver, the four mid-run-channel drivers, the context-band
+# driver, the MCP-after driver and the endless-mode cycle, writes captures
+# under ./out. The asserting drivers — the route-move one, the four mid-run
+# ones, the context-band one and the MCP-after one — decide the suite's exit
+# code: a failed criterion of theirs does not stop the suite but is collected
+# and exited on at the end.
 #
 # It owns the server the message-tree drivers use: it builds the TUI half of the
 # plugin, starts a fresh `opencode serve` in the configured project, exports
@@ -153,13 +154,16 @@ unset OPENCODE_AGENT_INTERCOM_LOG_REQUESTS
 "$HERE/run-task.sh" gitter     "Show me the style of the last 5 commits in this repo. Report subject style, language, and whether bodies are used. Do NOT make any new commit." 09-gitter
 "$HERE/multi-task.sh"
 
-# The mid-run-channel drivers. Unlike everything above they ASSERT and exit
-# non-zero on a failed criterion, so their status is collected instead of
-# ending the suite here: the drivers below still have to run, and their servers
-# have to be started and stopped whatever these three found. The collected
-# status is what this script exits on at the very end, and every asserting
-# driver of the run joins it.
+# The asserting drivers. Unlike everything above they ASSERT and exit non-zero
+# on a failed criterion, so their status is collected instead of ending the
+# suite here: the drivers below still have to run, and their servers have to
+# be started and stopped whatever these found. The collected status is what
+# this script exits on at the very end.
 ASSERTING_FAILED=""
+# Server-scoped route move. Three writers publish into the shared tui-route.json
+# the suite server already reads; aborting a parked subagent is the live
+# deleteSession path.
+"$HERE/tui-route-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED tui-route-task.sh(exit $?)"
 "$HERE/message-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED message-task.sh(exit $?)"
 "$HERE/ask-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED ask-task.sh(exit $?)"
 # The other half of the delivery moment: message-task.sh sends only into a
@@ -210,6 +214,6 @@ e2e_server_stop
 # The asserting drivers' verdict, held back above so the endless cycle still ran.
 if [ -n "$ASSERTING_FAILED" ]; then
   echo ""
-  echo "asserting driver(s) failed:$ASSERTING_FAILED — see $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt, $OUTDIR/16-between-steps.report.txt, $OUTDIR/15-ask-expiry.report.txt, $OUTDIR/17-context-bands.report.txt and $OUTDIR/18-mcp-after.report.txt" >&2
+  echo "asserting driver(s) failed:$ASSERTING_FAILED — see $OUTDIR/19-tui-route.report.txt, $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt, $OUTDIR/16-between-steps.report.txt, $OUTDIR/15-ask-expiry.report.txt, $OUTDIR/17-context-bands.report.txt and $OUTDIR/18-mcp-after.report.txt" >&2
   exit 1
 fi

@@ -287,3 +287,121 @@ test("every band is recorded in both branches and uncovered where it was not rea
   )
   assert.match(DRIVER, /mr_die "the subagent's FIRST measured turn already reads/)
 })
+
+// ---------- the step sizing -------------------------------------------------
+
+// The driver's shipped defaults, read out of the driver itself, and the two
+// shares read out of src/hooks.js: the same three figures the preflight
+// computes with. A default that stopped landing a sample in the reserve band
+// fails here, without a server and without cost.
+function driverDefault(name, envName = name) {
+  const hit = new RegExp(`^${name}=\\$\\{${envName}:-(\\d+)\\}`, "m").exec(DRIVER)
+  assert.ok(hit, `the driver no longer defaults ${name} out of ${envName}`)
+  return Number(hit[1])
+}
+
+const HOOKS_SOURCE = readFileSync(HOOKS, "utf8")
+function share(name) {
+  const hit = new RegExp(`^const ${name} = ([0-9.]+)`, "m").exec(HOOKS_SOURCE)
+  assert.ok(hit, `src/hooks.js no longer declares ${name}`)
+  return Number(hit[1])
+}
+
+test("a default run lands at least one sample in the reserve band by construction", () => {
+  const budget = driverDefault("BUDGET", "CONTEXT_BUDGET")
+  const blockChars = driverDefault("BLOCK_CHARS")
+  const perKchar = driverDefault("STEP_TOKENS_PER_KCHAR")
+  const nearShare = share("CTX_NEAR_BUDGET")
+  const reserveShare = share("CTX_STOP_RESERVE")
+
+  const step = Math.floor((blockChars * perKchar) / 1000)
+  const reserveWidth = budget - Math.round(budget * reserveShare)
+  // The relation the preflight enforces: a step is at most half the narrowest
+  // band, so two samples land in it and one still does at twice the growth.
+  assert.ok(
+    step * 2 <= reserveWidth,
+    `a step of ~${step} tokens against a reserve range ${reserveWidth} wide can jump the band`,
+  )
+  // Both thresholds have to be whole tokens, or the driver refuses the budget.
+  assert.equal(budget * nearShare, Math.round(budget * nearShare))
+  assert.equal(budget * reserveShare, Math.round(budget * reserveShare))
+  // The measured baseline of a subagent on this driver's first live run was
+  // ~7100 tokens; the plan threshold has to sit clear of it by half as much
+  // again, or a slightly heavier baseline ends the run as a setup error before
+  // a band can be observed opening. The shipped default sits at 14000, 1.97x
+  // that baseline.
+  assert.ok(
+    budget * nearShare >= 1.5 * 7100,
+    `the plan threshold at ${budget * nearShare} leaves too little room over a ~7100-token baseline`,
+  )
+  // And the climb has to stay short enough to be worth running: every step is
+  // an LLM turn carrying the whole context so far.
+  assert.ok(
+    Math.floor(budget / step) <= 40,
+    `the climb to ${budget} takes up to ${Math.floor(budget / step)} turns`,
+  )
+})
+
+test("the preflight refuses a block that could jump the reserve band", () => {
+  // The relation itself, not just the defaults that satisfy it today.
+  assert.match(DRIVER, /RESERVE_WIDTH=\$\(\( BUDGET - RESERVE_AT \)\)/)
+  assert.match(DRIVER, /STEP_TOKENS=\$\(\( BLOCK_CHARS \* STEP_TOKENS_PER_KCHAR \/ 1000 \)\)/)
+  assert.match(DRIVER, /\[ \$\(\(STEP_TOKENS \* 2\)\) -le "\$RESERVE_WIDTH" \] \|\|/)
+  // The plugin's characters-over-four estimate is what let a whole band be
+  // stepped over; it must not come back as the sizing figure.
+  assert.ok(
+    !/BLOCK_TOKENS=\$\(\(BLOCK_CHARS \/ 4\)\)/.test(DRIVER),
+    "the driver is sizing its step off estimateTokens again",
+  )
+})
+
+// ---------- the call the lockdown has to refuse -----------------------------
+
+test("the subagent is told to test the lockdown's claim with one more call", () => {
+  const task = DRIVER.slice(DRIVER.indexOf("cb_sub_task() {"), DRIVER.indexOf("cb_turn_prompt() {"))
+  assert.ok(task.includes("NO notice ends this task"), "a notice may still end the task")
+  assert.ok(
+    task.includes("make the next call anyway"),
+    "nothing tells the subagent to attempt a call after the lockdown, so no call is there to be denied",
+  )
+  assert.ok(
+    task.includes("comes back as an error refusing to run it"),
+    "the stopping condition is no longer an actual refusal",
+  )
+  // None of the literals the criteria decide on may stand in the prompt: a hit
+  // has to be the plugin speaking, never the task text echoed back.
+  for (const literal of [
+    PLAN_HEAD,
+    RESERVE_HEAD,
+    STOP_BODY,
+    "Your context budget is exhausted; work tools are disabled",
+  ]) {
+    assert.ok(!task.includes(literal), `the subagent's prompt carries the criterion literal ${literal}`)
+  }
+})
+
+test("the denial stays able to come back NOT ASSERTED", () => {
+  // Telling the subagent to attempt a call does not make the denial green: the
+  // three outcomes stand unchanged — denied (PASS), went on calling and nothing
+  // was refused (FAIL), attempted nothing (NOT ASSERTED).
+  const lines = DRIVER.split("\n").filter((line) =>
+    line.includes("lockdown — a work-tool call was denied over the budget"),
+  )
+  assert.ok(lines.length >= 4, `the denial is recorded in ${lines.length} branch(es), expected 4`)
+  assert.ok(
+    lines.some((line) => line.includes("mr_record") && line.trimEnd().endsWith(" 1 \\")),
+    "no passing branch",
+  )
+  assert.ok(
+    lines.some((line) => line.includes("mr_record") && line.trimEnd().endsWith(" 0 \\")),
+    "no failing branch for a subagent that went on calling and was never refused",
+  )
+  assert.ok(
+    lines.some((line) => line.includes("mr_note_uncovered")),
+    "no NOT ASSERTED branch for a lockdown with no call attempted after it",
+  )
+  assert.match(
+    DRIVER,
+    /NOT REACHED: the lockdown fired, and the subagent attempted no further work tool afterwards/,
+  )
+})

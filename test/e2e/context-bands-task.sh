@@ -34,9 +34,29 @@
 # 40-character command and the shell produces the tokens, so the growth per step
 # is a figure the driver picked rather than one the model happened to produce,
 # and the list is seeded LONGER than the budget needs, so a run cannot run out
-# of material before the lockdown. The subagent is told to keep going until a
-# call is actually REFUSED — which is what makes the reserve band's "your tools
-# still work" and the lockdown's denial observable instead of hypothetical.
+# of material before the lockdown.
+#
+# THE STEP IS SIZED AGAINST THE NARROWEST BAND. The reserve band is only
+# (1 - CTX_STOP_RESERVE) of the budget wide — a tenth of it at the shipped
+# shares — so a step of that width or more can carry the subagent from below the
+# reserve threshold to past the budget in one go and leave the band with no
+# sample in it at all. The preflight therefore demands a step of AT MOST HALF
+# that range: two samples land in the reserve band by construction, and one
+# still lands there if the real growth comes out at twice the estimate. The
+# estimate is STEP_TOKENS_PER_KCHAR, measured off this driver's own first live
+# run (7088, 12893, 18496, 24088, 29741, 35587, 41194 tokens at BLOCK_CHARS
+# =8000, i.e. 5684 tokens a step, 0.71 per byte of block) and NOT the plugin's
+# characters-over-four estimate, which underestimates high-entropy filler by
+# nearly three times — which is how a whole reserve band came to be stepped
+# over while the preflight called the block small enough.
+#
+# The subagent is told that no notice ends its task, that the one thing which
+# does is a call actually coming back REFUSED, and that a notice claiming its
+# tools are disabled is a claim to TEST with one more call rather than a fact to
+# accept. That is what makes the reserve band's "your tools still work" and the
+# lockdown's denial observable instead of hypothetical: with no call attempted
+# after the lockdown there is nothing there to be refused, and the driver can
+# then only record the denial NOT ASSERTED.
 #
 # HOW THE THRESHOLDS ARE DERIVED. The budget is not a default and not a guess:
 # the driver pins CONTEXT_BUDGET for the one agent type it drives, through
@@ -51,9 +71,9 @@
 # cache.write` sum `latestContextTokens` (src/client.js) feeds the bands from.
 # A band is REACHED when some step of that trajectory lands inside its range. A
 # band that was reached and produced no notice FAILS; a band no step ever landed
-# in is recorded NOT ASSERTED, naming the two samples that straddle it. The
-# preflight keeps a single step from stepping over a whole band: it refuses a
-# block whose estimated size is a sixth of the budget or more.
+# in is recorded NOT ASSERTED, naming the two samples that straddle it. What
+# keeps a single step from stepping over a whole band is the preflight relation
+# above: a block estimated at more than half the reserve range is refused.
 #
 # The one reading a failing band owes a second look: the plugin re-reads the
 # live token count at most every CTX_TTL_MS (3 000 ms, src/registry.js) until
@@ -106,11 +126,24 @@
 #                          4567, ask-expiry's 4588, endless' 4599, nested's 4602
 #   CONTEXT_AGENT          coder               the role that is driven; it needs
 #                          `bash`, which planner / reviewer / documenter deny
-#   CONTEXT_BUDGET         40000               the budget pinned for that type
-#                          through `agentContext`
-#   BLOCK_CHARS            8000                bytes of filler per block
+#   CONTEXT_BUDGET         20000               the budget pinned for that type
+#                          through `agentContext`. Low enough that the climb
+#                          from a subagent's own ~7k baseline is short, high
+#                          enough that the baseline stays well under the plan
+#                          threshold at 0.7 of it
+#   BLOCK_CHARS            1200                bytes of filler per block: ~852
+#                          tokens a step against a reserve range 2000 wide, so
+#                          two to three samples land in that range
+#   STEP_TOKENS_PER_KCHAR  710                 tokens the context grows per 1000
+#                          bytes of block, measured (see above). Re-measure it
+#                          off a run's trajectory when the model changes; the
+#                          preflight sizes the step with it
 #   CONTEXT_BLOCKS         (derived)           blocks seeded; by default enough
 #                          to cover the whole budget from zero, plus four
+#
+# What a default run costs: ~17 turns of the subagent, ~2 to 3 minutes of wall
+# clock, and a request log of roughly a megabyte — the log grows with the SUM of
+# the contexts, so it is the budget and not the block size that drives it.
 #   SUB_AGE_MS             300000              the silence watchdog window for
 #                          this run, wide enough that no band turn is reaped
 #   SUB_TOOL_CALL_MS       300000              the in-tool watchdog window
@@ -148,8 +181,9 @@ PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
 
 AGENT=${CONTEXT_AGENT:-coder}
 PORT=${CONTEXT_BANDS_PORT:-4606}
-BUDGET=${CONTEXT_BUDGET:-40000}
-BLOCK_CHARS=${BLOCK_CHARS:-8000}
+BUDGET=${CONTEXT_BUDGET:-20000}
+BLOCK_CHARS=${BLOCK_CHARS:-1200}
+STEP_TOKENS_PER_KCHAR=${STEP_TOKENS_PER_KCHAR:-710}
 SUB_AGE_MS=${SUB_AGE_MS:-300000}
 SUB_TOOL_CALL_MS=${SUB_TOOL_CALL_MS:-300000}
 SPAWN_TIMEOUT_S=${SPAWN_TIMEOUT_S:-240}
@@ -235,23 +269,42 @@ PY
 [ "${ROUND_CLEAN:-0}" = 1 ] ||
   mr_die "CONTEXT_BUDGET=$BUDGET does not give whole thresholds at $NEAR_SHARE / $RESERVE_SHARE of it — pick a budget whose two band thresholds are whole tokens, so the figures this run compares are not a rounding"
 
-# A single step must not be able to step over a whole band: the plan band is
-# one fifth of the budget wide and the reserve band one tenth, so a block
-# estimated at a sixth of the budget or more could carry the subagent from
-# below the plan threshold to above the reserve one in one go and leave a band
-# unreachable rather than untested. The estimate is the plugin's own
-# (estimateTokens, src/format.js: characters over four) and the filler is
-# deliberately high-entropy, so the real count comes out at or above it.
-BLOCK_TOKENS=$((BLOCK_CHARS / 4))
-[ "$BLOCK_TOKENS" -gt 0 ] ||
-  mr_die "BLOCK_CHARS=$BLOCK_CHARS is too small to grow a context at all"
-[ $((BLOCK_TOKENS * 6)) -lt "$BUDGET" ] ||
-  mr_die "BLOCK_CHARS=$BLOCK_CHARS is an estimated $BLOCK_TOKENS tokens against a CONTEXT_BUDGET of $BUDGET — one step could cross a whole band. Lower BLOCK_CHARS below $((BUDGET / 6 * 4)) or raise the budget"
+# A single step must not be able to step over a band, and the narrowest of the
+# three decides: the reserve band is (1 - CTX_STOP_RESERVE) of the budget wide,
+# a tenth of it at the shipped shares, while the plan band is twice that. A step
+# is therefore held to AT MOST HALF the reserve range — two samples inside it by
+# construction, one still inside it if the growth comes out at twice the
+# estimate — and the estimate is the measured one, characters times
+# STEP_TOKENS_PER_KCHAR over a thousand. The plugin's own estimateTokens
+# (src/format.js: characters over four) is NOT used here: it is a floor for
+# ordinary prose and comes out at about a third of what this high-entropy filler
+# really costs, which is loose enough to let a whole band be jumped.
+# Both are read from the environment, so they are checked to be numbers before
+# any arithmetic is done with them.
+[ "$BLOCK_CHARS" -gt 0 ] 2>/dev/null ||
+  mr_die "BLOCK_CHARS=$BLOCK_CHARS is not a positive number of bytes"
+[ "$STEP_TOKENS_PER_KCHAR" -gt 0 ] 2>/dev/null ||
+  mr_die "STEP_TOKENS_PER_KCHAR=$STEP_TOKENS_PER_KCHAR is not a positive number of tokens per 1000 characters"
+RESERVE_WIDTH=$(( BUDGET - RESERVE_AT ))
+STEP_TOKENS=$(( BLOCK_CHARS * STEP_TOKENS_PER_KCHAR / 1000 ))
+[ "$STEP_TOKENS" -gt 0 ] ||
+  mr_die "BLOCK_CHARS=$BLOCK_CHARS at $STEP_TOKENS_PER_KCHAR tokens per 1000 chars is too small to grow a context at all"
+[ "$RESERVE_WIDTH" -gt 0 ] ||
+  mr_die "the reserve range [$RESERVE_AT, $BUDGET) is empty — CTX_STOP_RESERVE=$RESERVE_SHARE leaves no room below the budget"
+[ $((STEP_TOKENS * 2)) -le "$RESERVE_WIDTH" ] ||
+  mr_die "BLOCK_CHARS=$BLOCK_CHARS grows the context an estimated $STEP_TOKENS tokens a step against a reserve range [$RESERVE_AT, $BUDGET) only $RESERVE_WIDTH wide — a step may jump the band and leave it with no sample in it. Lower BLOCK_CHARS to at most $(( RESERVE_WIDTH * 1000 / (2 * STEP_TOKENS_PER_KCHAR) )), or raise CONTEXT_BUDGET until that range is at least $(( STEP_TOKENS * 2 )) tokens wide"
+
+# And the step must not be so small that the run never ends: the climb from zero
+# to the budget is this many steps at most, and every one of them is an LLM turn
+# carrying the whole context so far.
+MAX_STEPS=$(( BUDGET / STEP_TOKENS ))
+[ "$MAX_STEPS" -le 40 ] ||
+  mr_die "BLOCK_CHARS=$BLOCK_CHARS is an estimated $STEP_TOKENS tokens a step, so the climb to a CONTEXT_BUDGET of $BUDGET takes up to $MAX_STEPS turns — raise BLOCK_CHARS, or lower the budget"
 
 # Enough blocks to carry the context from zero past the budget, plus four, so
 # the run cannot run out of material before the lockdown however large the
 # subagent's own baseline turns out to be.
-BLOCKS=${CONTEXT_BLOCKS:-$(( BUDGET / BLOCK_TOKENS + 4 ))}
+BLOCKS=${CONTEXT_BLOCKS:-$(( MAX_STEPS + 4 ))}
 [ "$BLOCKS" -ge 4 ] 2>/dev/null ||
   mr_die "CONTEXT_BLOCKS=$BLOCKS — too few steps to cross three thresholds"
 
@@ -413,7 +466,8 @@ context budget      agentContext.$AGENT=$BUDGET tokens   (compaction off, so the
 band shares         CTX_NEAR_BUDGET=$NEAR_SHARE CTX_STOP_RESERVE=$RESERVE_SHARE   (read from src/hooks.js)
 band thresholds     plan >= $PLAN_AT, reserve >= $RESERVE_AT, lockdown >= $BUDGET   (the notices render them $RESERVE_AT_FMT and $BUDGET_FMT)
 watchdog windows    maxSubagentAgeMs=$SUB_AGE_MS maxSubagentToolCallMs=$SUB_TOOL_CALL_MS
-fixture             $FIXTURE_DIR   ($BLOCKS blocks of $BLOCK_CHARS chars, ~$BLOCK_TOKENS estimated tokens each, ${FIXTURE_BYTES:-?} bytes; removed in cleanup)
+fixture             $FIXTURE_DIR   ($BLOCKS blocks of $BLOCK_CHARS chars, ${FIXTURE_BYTES:-?} bytes; removed in cleanup)
+step sizing         ~$STEP_TOKENS tokens a step (BLOCK_CHARS=$BLOCK_CHARS at $STEP_TOKENS_PER_KCHAR per 1000 chars) against a reserve range $RESERVE_WIDTH wide   (>= $(( RESERVE_WIDTH / STEP_TOKENS )) sample(s) expected in [$RESERVE_AT, $BUDGET); at most $MAX_STEPS steps from zero to the budget)
 request log         $REQUEST_LOG   (OPENCODE_AGENT_INTERCOM_LOG_REQUESTS=1 for this server alone)
 resolved settings   midRunMessaging=$MR_MID_RUN maxSubagentToolCallMs=$MR_MAX_TOOL_CALL_MS agentMode=$MR_AGENT_MODE
 timeouts            spawn=${SPAWN_TIMEOUT_S}s finish=${FINISH_TIMEOUT_S}s turn=${TURN_TIMEOUT_S}s settle=${SETTLE_TIMEOUT_S}s poll=${MR_POLL_S}s
@@ -425,12 +479,16 @@ mr_say ""
 # ---------- the run ---------------------------------------------------------
 
 # The subagent's task. Every byte it carries comes out of a file the driver
-# wrote; the model only names the next one. It is told to carry on past the
-# first two bands and to stop at the first REFUSED call, which is what makes
-# "the reserve band demands while the tools still work" and "the lockdown
-# denies" observable instead of hypothetical.
+# wrote; the model only names the next one. Its stopping condition is a REFUSED
+# call and nothing else: a notice — including the lockdown's own demand that the
+# next message be the summary — is explicitly named as something to carry on
+# past, and a notice saying the tools are off is named as a CLAIM TO TEST with
+# the next call. Without that, the subagent concludes on the lockdown's word and
+# the denial has no call to refuse, which is how `lockdown — denied` came back
+# NOT ASSERTED on the first live run. None of the literals the criteria decide
+# on appears here, so every hit of them stays the plugin speaking.
 cb_sub_task() {
-  printf '%s' "This is a deliberate test of the plugin's context-budget bands, not a coding job. The directory $FIXTURE_NAME/ in this project holds $BLOCKS files named block-01.txt to block-$(printf '%02d' "$BLOCKS").txt. Work through them IN ORDER, one per step: for block N, make exactly ONE tool call, bash with the command cat $FIXTURE_NAME/block-NN.txt, and then say one short line CARRIED-BLOCK-NN before you go on to the next file. Rules: one file per call, never two in one command; read each file WHOLE — no head, tail, sed, grep, awk, cut, wc, no pipes and no redirection; write no file and edit nothing; do not summarise the content and do not stop because it looks like meaningless filler, which it is by design. The plugin will send you notices about your context as you go; note each one in your next CARRIED line and KEEP GOING to the next block — a notice is not the end of this task. Stop only when a tool call of yours actually comes back REFUSED: from that moment make no further tool call at all and reply with one plain-text line beginning with Done: naming the last block you carried and what refused you."
+  printf '%s' "This is a deliberate test of the plugin's context-budget bands, not a coding job. The directory $FIXTURE_NAME/ in this project holds $BLOCKS files named block-01.txt to block-$(printf '%02d' "$BLOCKS").txt. Work through them IN ORDER, one per step: for block N, make exactly ONE tool call, bash with the command cat $FIXTURE_NAME/block-NN.txt, and then say one short line CARRIED-BLOCK-NN before you go on to the next file. Rules: one file per call, never two in one command; read each file WHOLE — no head, tail, sed, grep, awk, cut, wc, no pipes and no redirection; write no file and edit nothing; do not summarise the content and do not stop because it looks like meaningless filler, which it is by design. The plugin will send you notices about your context as you go. NO notice ends this task: note each one in your next CARRIED line and go straight on to the next block — that holds for a notice telling you to wrap up or to summarise now, and just as much for one telling you that your tools are off or dictating what your next message has to be. A notice claiming you can no longer call a tool is precisely the claim this test exists to check, and the only way to check it is to make the next call anyway. So keep going, one block per call, until a call of yours actually comes back as an error refusing to run it instead of the file's content. THAT refusal is the one thing that ends this task: from that moment make no further tool call at all, and reply with one plain-text line beginning with Done: naming the last block you carried whole and quoting what refused you. A call you expected to be refused that returns the file content after all is not the end either — carry on with the next block."
 }
 
 cb_turn_prompt() {
@@ -743,7 +801,7 @@ if [ "${T_in_stop:-0}" -ge 1 ]; then
         "the subagent went on calling work tools after the lockdown (${R_stop_tool_parts:-0} tool parts on the lockdown's own request, ${R_last_tool_parts:-0} on its last) and NONE of them was refused — no denial line for $SUB_HANDLE and nothing in its transcript"
     else
       mr_note_uncovered "lockdown — a work-tool call was denied over the budget" \
-        "NOT REACHED: the lockdown fired, and the subagent attempted no further work tool afterwards (${R_stop_tool_parts:-0} tool parts on the lockdown's request, ${R_last_tool_parts:-0} on its last), so no call was there to be denied"
+        "NOT REACHED: the lockdown fired, and the subagent attempted no further work tool afterwards (${R_stop_tool_parts:-0} tool parts on the lockdown's request, ${R_last_tool_parts:-0} on its last), so no call was there to be denied — its task tells it to test that claim with one more call, and it concluded on the block's word instead"
     fi
   else
     mr_record "lockdown — the STOP block fired at or above the budget" 0 \

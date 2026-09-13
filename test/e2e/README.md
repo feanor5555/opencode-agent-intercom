@@ -759,7 +759,7 @@ alone until this driver: no live run had ever crossed the thresholds and looked
 at what the provider was handed.
 
 **The budget is pinned, not defaulted.** The driver writes
-`agentContext: { "<role>": CONTEXT_BUDGET }` (default 40 000) into its own
+`agentContext: { "<role>": CONTEXT_BUDGET }` (default 20 000) into its own
 isolated `agent-intercom.json` — the shipped `maxContext` of 130 000 every other
 driver runs under is far too high for a subagent to reach — and derives every
 expected figure from that pin and the two shares it reads out of `src/hooks.js`
@@ -770,18 +770,39 @@ relieved by a compaction and the lockdown never fires (`startSubagentCompaction`
 
 **The context grows by construction.** The driver seeds
 `e2e-context-bands-fixture/` in the driven project with `CONTEXT_BLOCKS` files
-of `BLOCK_CHARS` (8 000) bytes of seeded high-entropy filler, each between a
+of `BLOCK_CHARS` (1 200) bytes of seeded high-entropy filler, each between a
 `BLOCK-NN-START` and a `BLOCK-NN-END` marker, and the subagent's whole task is
 to `cat` them one per step, in order, whole — no `head`, no pipe, no summary.
 The model writes a 40-character command and the shell produces the tokens, so
 the growth per step is a figure the driver chose. The list is seeded longer than
 the budget needs (enough to cover it from zero, plus four), so a run cannot run
-out of material before the lockdown, and the preflight refuses a block estimated
-at a sixth of the budget or more, at which point one step could carry the
-subagent over a whole band. The subagent is told that a notice does not end its
-task and to stop only at its first REFUSED call — which is what makes the
-reserve band's "your tools still work" and the lockdown's denial observable
-rather than hypothetical.
+out of material before the lockdown.
+
+**The step is sized against the narrowest band.** The reserve band is only
+`(1 - CTX_STOP_RESERVE)` of the budget wide — a tenth of it at the shipped
+shares, 2 000 tokens at the default budget — so a step of that width or more can
+carry the subagent from below the reserve threshold to past the budget in one go
+and leave the band with no sample in it, which is what a first live run did at
+the old defaults. The preflight therefore refuses a block estimated at more than
+HALF the reserve range: two samples land in the band by construction, one still
+does if the growth comes out at twice the estimate. The estimate is
+`STEP_TOKENS_PER_KCHAR` (710 tokens per 1 000 bytes of block), measured off that
+run's own trajectory, and not the plugin's characters-over-four
+`estimateTokens`, which underestimates high-entropy filler about threefold. At
+the defaults a step is ~852 tokens: roughly 17 turns from a subagent's ~7 000
+baseline to the lockdown, 2 to 3 minutes of wall clock, and a request log of
+about a megabyte. `test/e2e-context-bands-reader.test.js` re-derives that
+relation from the driver's defaults and the shares in `src/hooks.js`, so a
+default that stopped landing a sample in the reserve band fails without a run.
+
+**The subagent stops at a refusal and at nothing else.** It is told that no
+notice ends its task — neither the reserve band's demand to wrap up nor the
+lockdown's demand that its next message be the summary — and that a notice
+saying its tools are off is a claim to TEST with one more call rather than a
+fact to accept. That is what makes the reserve band's "your tools still work"
+and the lockdown's denial observable rather than hypothetical: with no call
+attempted after the lockdown there is nothing there to be refused, and the
+driver can only record the denial NOT ASSERTED.
 
 **The placement is read out of the request log.** The carrier is never
 persisted — `createTransformMessages` works on the per-request copy of the
@@ -796,8 +817,8 @@ on a real one, on message 0 or not.
 
 ```bash
 bash test/e2e/context-bands-task.sh          # starts its own server on 4606
-CONTEXT_BUDGET=30000 BLOCK_CHARS=6000 \
-  bash test/e2e/context-bands-task.sh        # a tighter budget and smaller steps
+CONTEXT_BUDGET=30000 BLOCK_CHARS=1800 \
+  bash test/e2e/context-bands-task.sh        # a wider budget and larger steps
 CONTEXT_AGENT=debugger \
   bash test/e2e/context-bands-task.sh        # another role; it needs `bash`
 ```

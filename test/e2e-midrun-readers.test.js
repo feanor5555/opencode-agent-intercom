@@ -400,7 +400,7 @@ test("between-steps-task.sh: a run that missed the moment fails its gate rather 
 })
 
 test("run-all.sh: the between-steps driver runs in the suite and its status decides the exit code", () => {
-  assert.match(RUN_ALL, /"\$HERE\/between-steps-task\.sh" \|\| MIDRUN_FAILED=/)
+  assert.match(RUN_ALL, /"\$HERE\/between-steps-task\.sh" \|\| ASSERTING_FAILED=/)
   assert.ok(
     RUN_ALL.includes("16-between-steps.report.txt"),
     "the suite's failure line names no report for it",

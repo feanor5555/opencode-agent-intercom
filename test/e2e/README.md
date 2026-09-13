@@ -66,17 +66,26 @@ that opencode upgrades don't shift the system-prompt composition.
   60 000 ms window that leaves no room at all. The two clamp phases are decided
   on the `waitMs` of the plugin's own `ask registered` line and wait for no
   timer. See "The mid-run channel" below for its criteria table.
+- `context-bands-task.sh` — context-band and tail-placement harness, and the
+  third driver that owns a server. It pins a per-agent context budget
+  (`agentContext`) low enough for one subagent to cross all three thresholds,
+  seeds a fixture of numbered filler blocks in the driven project and has the
+  subagent `cat` them one per step, so the context grows by construction rather
+  than by luck. It then reads what the provider was actually handed out of the
+  plugin's own request log and asserts the plan band, the reserve band, the
+  lockdown and the carrier placement. See "The context bands" below.
 - `todo-driver.mjs` — TODO.md auto-tracking harness. Drives DONE and BLOCKED
   markers through the wake hook and checks the resulting file.
 - `run-all.sh` — runs the 8 single-agent tests, the multi-agent test, the four
-  mid-run drivers and the endless-mode cycles. The mid-run drivers are the only
-  ones in it that assert: a failed criterion of theirs does not stop the suite —
-  the endless cycle still runs — but it decides the suite's exit code at the
-  end. Owns the server every driver above `ask-expiry-task.sh` uses: builds the TUI, starts
+  mid-run drivers, the context-band driver and the endless-mode cycles. The
+  mid-run drivers and the context-band driver are the ones in it that assert: a
+  failed criterion of theirs does not stop the suite — the endless cycle still
+  runs — but it decides the suite's exit code at the end (`ASSERTING_FAILED`).
+  Owns the server every driver above `ask-expiry-task.sh` uses: builds the TUI, starts
   a fresh `opencode serve` in the configured directory (default
-  `$HOME/testopencode`), and stops it again before `ask-expiry-task.sh` and
-  `endless-task.sh`, which need no server of this suite's and would be
-  contaminated by its sessions —
+  `$HOME/testopencode`), and stops it again before `ask-expiry-task.sh`,
+  `context-bands-task.sh` and `endless-task.sh`, which need no server of this
+  suite's and would be contaminated by its sessions —
   and once more on the way out, for every path that does not reach that stop.
 - `lib/` — the Python evidence readers used by `endless-task.sh` (the kickoff
   ids, the successor's first turn, and the child session id of the driver's own
@@ -86,7 +95,10 @@ that opencode upgrades don't shift the system-prompt composition.
   inside a call and `gap_ms` / `into_gap_ms` for one between two — covered
   without a server by `test/e2e-midrun-readers.test.js`; and
   `midrun-common.sh`, the report lines, session calls, capture and debug-log
-  slice they share.
+  slice they share; and `context-bands.py`, the reader `context-bands-task.sh`
+  decides on — the bands, their figures and their placement, read out of the
+  plugin's request log — covered without a server by
+  `test/e2e-context-bands-reader.test.js`.
 - `config-isolation.sh` — sourced library, not a driver. Builds the throwaway
   opencode configuration a run is carried out in (`e2e_resolve_model`,
   `e2e_iso_create`, `e2e_iso_remove`), and audits what answered
@@ -190,7 +202,8 @@ server's working directory and the `?directory=` every session is created with,
 which is what keeps subagent reads on real paths (see "Known caveats").
 
 `endless-task.sh` and `nested-task.sh` make the same two checks against
-`ENDLESS_PROJECT_DIR` and `NESTED_PROJECT_DIR`.
+`ENDLESS_PROJECT_DIR` and `NESTED_PROJECT_DIR`; `ask-expiry-task.sh` and
+`context-bands-task.sh` make them against `PROJECT_DIR`.
 
 The setup the drivers are written against:
 - `agent-intercom.json` → `maxSubagents: 8, maxContext: 130000`, written into
@@ -215,8 +228,12 @@ removed with it at the end. The machine's own `~/.config/opencode` is read
 exactly once — for the provider block, the `AGENTS.md`, the config-directory
 `node_modules` and the search credentials — and never written. `endless-task.sh`
 arms its ceiling in the isolated `agent-intercom.json`, not in the machine's,
-and `ask-expiry-task.sh` rewrites its two `ask` keys in the same isolated file
-between its phases.
+`ask-expiry-task.sh` rewrites its two `ask` keys in the same isolated file
+between its phases, and `context-bands-task.sh` writes its `agentContext` budget
+and `compaction: false` into its own. The last one also starts its server with
+`OPENCODE_AGENT_INTERCOM_LOG_REQUESTS=1` and points the request log at its own
+`out/` file, so the plugin's shared cache directory takes none of it; both
+variables are exported around that start alone.
 
 `HOME` and not `XDG_CONFIG_HOME` is the lever, because the plugin resolves its
 own three files through `os.homedir()` (`src/llmmodel.js`, `src/settings.js`,
@@ -732,6 +749,99 @@ bash test/e2e/ask-expiry-task.sh          # starts its own server on 4588
 
 It writes `out/15-ask-expiry.report.txt` and exits `0` / `1` / `2` like the two
 above.
+
+## The context bands
+
+`context-bands-task.sh` is the live proof of the three bands
+`contextLimitNotice` (`src/hooks.js`) fires as a subagent's context fills, and
+of where each of them is delivered. Both halves were pinned by the unit suite
+alone until this driver: no live run had ever crossed the thresholds and looked
+at what the provider was handed.
+
+**The budget is pinned, not defaulted.** The driver writes
+`agentContext: { "<role>": CONTEXT_BUDGET }` (default 40 000) into its own
+isolated `agent-intercom.json` — the shipped `maxContext` of 130 000 every other
+driver runs under is far too high for a subagent to reach — and derives every
+expected figure from that pin and the two shares it reads out of `src/hooks.js`
+at run time, `CTX_NEAR_BUDGET` and `CTX_STOP_RESERVE`. It also writes
+`compaction: false`: with compaction on for the type, the budget crossing is
+relieved by a compaction and the lockdown never fires (`startSubagentCompaction`,
+`src/compaction.js`).
+
+**The context grows by construction.** The driver seeds
+`e2e-context-bands-fixture/` in the driven project with `CONTEXT_BLOCKS` files
+of `BLOCK_CHARS` (8 000) bytes of seeded high-entropy filler, each between a
+`BLOCK-NN-START` and a `BLOCK-NN-END` marker, and the subagent's whole task is
+to `cat` them one per step, in order, whole — no `head`, no pipe, no summary.
+The model writes a 40-character command and the shell produces the tokens, so
+the growth per step is a figure the driver chose. The list is seeded longer than
+the budget needs (enough to cover it from zero, plus four), so a run cannot run
+out of material before the lockdown, and the preflight refuses a block estimated
+at a sixth of the budget or more, at which point one step could carry the
+subagent over a whole band. The subagent is told that a notice does not end its
+task and to stop only at its first REFUSED call — which is what makes the
+reserve band's "your tools still work" and the lockdown's denial observable
+rather than hypothetical.
+
+**The placement is read out of the request log.** The carrier is never
+persisted — `createTransformMessages` works on the per-request copy of the
+message array and opencode never writes it back — so a session capture cannot
+show it. The driver therefore starts its server with
+`OPENCODE_AGENT_INTERCOM_LOG_REQUESTS=1` and a log file of its own under `out/`,
+because that record is written AFTER the transform hook (`src/index.js`) and
+holds the array as it went out. `lib/context-bands.py` streams it, keeps the
+records of the subagent's session, classifies each notice by its own head and
+reports where it sat: at the tail or not, on a message this plugin appended or
+on a real one, on message 0 or not.
+
+```bash
+bash test/e2e/context-bands-task.sh          # starts its own server on 4606
+CONTEXT_BUDGET=30000 BLOCK_CHARS=6000 \
+  bash test/e2e/context-bands-task.sh        # a tighter budget and smaller steps
+CONTEXT_AGENT=debugger \
+  bash test/e2e/context-bands-task.sh        # another role; it needs `bash`
+```
+
+Exit `0` = every asserted criterion passed, `1` = at least one failed, `2` =
+preflight/setup error. Captures, the request log, the per-band dumps of what the
+subagent was told, and the report land in `out/17-context-bands.*`.
+
+| criterion | evidence |
+|---|---|
+| `budget` | the budget named in the notices, and the `limit` on the plugin's own band line, is the pinned `CONTEXT_BUDGET` |
+| `plan band` | a request of that session carried `🧭 PLAN YOUR HANDOVER.` while the measured trajectory was in `[0.7·budget, 0.9·budget)` |
+| `plan — room left` | it names the tokens reached, the budget and the room left, and budget − reached is that figure to within the 0.1k it is rendered at |
+| `plan — no demand` | it carries `Nothing is denied on this turn …` and neither the reserve band's summary demand nor the lockdown's, and no work tool was denied before the budget was breached |
+| `reserve band` | a request carried `⚠️ WRAP UP NOW.` while the trajectory was in `[0.9·budget, budget)` |
+| `reserve — demand` | it demands the `Done:` / `Blocked:` summary |
+| `reserve — tools` | it says the tools still work, and no work-tool call of that subagent was refused before the lockdown line — the demand really was made while they did |
+| `lockdown` | a request carried `Your work tools are now DISABLED` at or above the budget |
+| `lockdown — denied` | `denied tool call: subagent over context budget` for that handle, and the refusal in the subagent's own transcript |
+| `placement` | every band notice was the LAST message of its request, on a `user` message this plugin appended, and none of them on message 0 |
+| `model-pin` | every assistant message of both captured sessions names `E2E_MODEL` |
+
+**A band the run did not reach is never a silent pass, and never a failure
+either.** The driver measures the subagent's own token trajectory independently
+of the plugin — the `input + output + cache.read + cache.write` sum per
+assistant message off `GET /session/<id>/message`, which is what
+`latestContextTokens` (`src/client.js`) feeds the bands from — and a band counts
+as REACHED when some step of that trajectory lands inside its range. Reached and
+no notice is a `FAIL` quoting the trajectory; never reached is `NOT ASSERTED`,
+naming the two samples that straddle the range, and everything hanging off that
+band is recorded uncovered with it. The lockdown's denial has the same
+distinction one level down: with no denial anywhere, the driver compares the
+tool calls standing on the lockdown's own request against those on the
+subagent's last one — more of them means it went on calling work tools and none
+was refused, which `FAIL`s, equal means it attempted none, which is `NOT
+ASSERTED`. A subagent whose very first measured turn already sits in the plan
+band ends the run as a setup error (exit `2`) naming the measurement and the
+budget to raise: nothing below could be judged.
+
+Not asserted, and reported as such: the compaction HOLD band (this run pins
+compaction off), the primary's own placement on its last user message, and the
+denial-loop notice to the parent — all three pinned without a server in
+`test/turn-notice-placement.test.js`, `test/context-budget.test.js` and
+`test/compaction.test.js`.
 
 ## Nested delegation
 

@@ -1,8 +1,9 @@
 #!/bin/bash
 # Runs all 8 single-agent end-to-end tests, the multi-agent test, the four
-# mid-run-channel drivers and the endless-mode cycle, writes captures under
-# ./out. The mid-run drivers assert; a failed criterion of theirs does not stop
-# the suite but decides its exit code at the end.
+# mid-run-channel drivers, the context-band driver and the endless-mode cycle,
+# writes captures under ./out. The asserting drivers — the four mid-run ones and
+# the context-band one — decide the suite's exit code: a failed criterion of
+# theirs does not stop the suite but is collected and exited on at the end.
 #
 # It owns the server the message-tree drivers use: it builds the TUI half of the
 # plugin, starts a fresh `opencode serve` in the configured project, exports
@@ -32,15 +33,17 @@
 #                          pinned to and the only one a turn may answer on
 #   SERVER_START_TIMEOUT_S 60     readiness probe budget
 #
-# ask-expiry-task.sh and endless-task.sh run last and are the two drivers that
-# do NOT use this server: each needs settings of its own in the
-# agent-intercom.json a server was started with — the expiry driver an
-# `answerWaitMs` / `maxSubagentToolCallMs` pair per phase, the endless driver a
-# threshold the primary is known to cross — so each builds its own isolated
-# configuration and starts and stops its own server, on ASK_EXPIRY_PORT (default
-# 4588) resp. ENDLESS_PORT (default 4599). See their headers for their own
-# parameters. This script stops its own server before the two, so no session of
-# the drivers above is still alive under the settings those two write.
+# ask-expiry-task.sh, context-bands-task.sh and endless-task.sh run last and are
+# the three drivers that do NOT use this server: each needs settings of its own
+# in the agent-intercom.json a server was started with — the expiry driver an
+# `answerWaitMs` / `maxSubagentToolCallMs` pair per phase, the context-band
+# driver an `agentContext` budget low enough for one subagent to cross it and
+# the request log switched on, the endless driver a threshold the primary is
+# known to cross — so each builds its own isolated configuration and starts and
+# stops its own server, on ASK_EXPIRY_PORT (default 4588), CONTEXT_BANDS_PORT
+# (default 4606) resp. ENDLESS_PORT (default 4599). See their headers for their
+# own parameters. This script stops its own server before the three, so no
+# session of the drivers above is still alive under the settings those write.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
@@ -136,17 +139,17 @@ unset OPENCODE_AGENT_INTERCOM_LOG_REQUESTS
 
 # The mid-run-channel drivers. Unlike everything above they ASSERT and exit
 # non-zero on a failed criterion, so their status is collected instead of
-# ending the suite here: the fourth mid-run driver and the endless cycle below
-# still have to run, and their servers have to be started and stopped whatever
-# these three found. The collected status is what this script exits on at the
-# very end.
-MIDRUN_FAILED=""
-"$HERE/message-task.sh" || MIDRUN_FAILED="$MIDRUN_FAILED message-task.sh(exit $?)"
-"$HERE/ask-task.sh" || MIDRUN_FAILED="$MIDRUN_FAILED ask-task.sh(exit $?)"
+# ending the suite here: the drivers below still have to run, and their servers
+# have to be started and stopped whatever these three found. The collected
+# status is what this script exits on at the very end, and every asserting
+# driver of the run joins it.
+ASSERTING_FAILED=""
+"$HERE/message-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED message-task.sh(exit $?)"
+"$HERE/ask-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED ask-task.sh(exit $?)"
 # The other half of the delivery moment: message-task.sh sends only into a
 # running tool call, this one only into the gap between two steps. It needs no
 # setting of its own either, so it runs on this server beside the two above.
-"$HERE/between-steps-task.sh" || MIDRUN_FAILED="$MIDRUN_FAILED between-steps-task.sh(exit $?)"
+"$HERE/between-steps-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED between-steps-task.sh(exit $?)"
 
 # The suite server goes down HERE, before the last driver, not only in the EXIT
 # trap. endless-task.sh starts a server of its own, but it arms endless mode
@@ -171,13 +174,21 @@ e2e_server_stop
 # for the same reason that driver does: a session of this suite's left alive
 # would be a second primary under settings this one rewrites between phases. Its
 # status joins the two collected above.
-"$HERE/ask-expiry-task.sh" || MIDRUN_FAILED="$MIDRUN_FAILED ask-expiry-task.sh(exit $?)"
+"$HERE/ask-expiry-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED ask-expiry-task.sh(exit $?)"
+
+# The three context bands and the tail placement. It owns a server of its own
+# for the same reason the driver above does: the budget it drives a subagent
+# across is an `agentContext` entry in the agent-intercom.json a server was
+# started with, and the placement is only readable with the plugin's request log
+# switched on at that server's load. It runs after the stop above so no session
+# of this suite's is alive under the low budget it pins.
+"$HERE/context-bands-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED context-bands-task.sh(exit $?)"
 
 "$HERE/endless-task.sh"
 
-# The mid-run drivers' verdict, held back above so the endless cycle still ran.
-if [ -n "$MIDRUN_FAILED" ]; then
+# The asserting drivers' verdict, held back above so the endless cycle still ran.
+if [ -n "$ASSERTING_FAILED" ]; then
   echo ""
-  echo "mid-run driver(s) failed:$MIDRUN_FAILED — see $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt, $OUTDIR/16-between-steps.report.txt and $OUTDIR/15-ask-expiry.report.txt" >&2
+  echo "asserting driver(s) failed:$ASSERTING_FAILED — see $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt, $OUTDIR/16-between-steps.report.txt, $OUTDIR/15-ask-expiry.report.txt and $OUTDIR/17-context-bands.report.txt" >&2
   exit 1
 fi

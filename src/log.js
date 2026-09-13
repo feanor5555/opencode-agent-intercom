@@ -25,7 +25,10 @@ export function ensureCacheDir() {
   return dir
 }
 
-const LOG_PATH = path.join(cacheDir(), "debug.log")
+// File the debug log is appended to. OPENCODE_AGENT_INTERCOM_DEBUG_LOG
+// redirects it; unset, it is cacheDir()/debug.log. Read at module load.
+export const LOG_PATH =
+  process.env.OPENCODE_AGENT_INTERCOM_DEBUG_LOG || path.join(cacheDir(), "debug.log")
 
 // Normalizes a thrown value to a short message string.
 export function errMsg(err) {
@@ -39,7 +42,15 @@ function formatArgs(args) {
 export function log(...args) {
   if (!DEBUG) return
   try {
-    ensureCacheDir()
+    const cache = cacheDir()
+    if (LOG_PATH.startsWith(cache + path.sep) || path.dirname(LOG_PATH) === cache) {
+      ensureCacheDir()
+    }
+    try {
+      fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true, mode: 0o700 })
+    } catch {
+      // ignore — the append below fails and is swallowed if the dir is missing
+    }
     fs.appendFileSync(LOG_PATH, `${new Date().toISOString()} ${formatArgs(args)}\n`)
   } catch {
     // logging must never break the plugin

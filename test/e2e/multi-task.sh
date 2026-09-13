@@ -8,6 +8,10 @@
 #   OPENCODE_URL    default http://localhost:4567
 #   PROJECT_DIR     default $HOME/testopencode
 #   OUT_DIR         default ./out
+#   OPENCODE_AGENT_INTERCOM_DEBUG_LOG
+#                   plugin debug log; default
+#                   ~/.cache/opencode-agent-intercom/debug.log. Against a
+#                   run-all.sh server, typically $OUT_DIR/00-suite.debug.log
 #   E2E_MODEL       default openai/gpt-5.6-luna (provider/model for this run)
 #
 # It uses a server somebody else owns and writes no configuration of its own;

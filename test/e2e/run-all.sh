@@ -30,6 +30,12 @@
 #   PROJECT_DIR            $HOME/testopencode by default — the project
 #                          sessions are created against, passed on to the drivers
 #   OUT_DIR                ./out  captures, server log and pid file
+#   OPENCODE_AGENT_INTERCOM_DEBUG_LOG
+#                          $OUT_DIR/00-suite.debug.log — the plugin debug log
+#                          this suite's servers write and the drivers slice
+#   OPENCODE_AGENT_INTERCOM_LOG_REQUESTS_FILE
+#                          $OUT_DIR/00-suite.requests.jsonl — the request log
+#                          this suite's server writes (src/reqlog.js)
 #   E2E_MODEL              openai/gpt-5.6-luna — the model every agent is
 #                          pinned to and the only one a turn may answer on
 #   SERVER_START_TIMEOUT_S 60     readiness probe budget
@@ -74,6 +80,11 @@ OPENCODE_URL=$(e2e_server_url "$PORT")
 export OPENCODE_URL
 export PROJECT_DIR="$PROJECT"
 export OUT_DIR="$OUTDIR"
+# Per-suite log files under OUT_DIR so two run-all invocations on one checkout
+# do not share debug.log or requests.jsonl. A caller that already set either
+# path keeps it.
+export OPENCODE_AGENT_INTERCOM_DEBUG_LOG="${OPENCODE_AGENT_INTERCOM_DEBUG_LOG:-$OUTDIR/00-suite.debug.log}"
+export OPENCODE_AGENT_INTERCOM_LOG_REQUESTS_FILE="${OPENCODE_AGENT_INTERCOM_LOG_REQUESTS_FILE:-$OUTDIR/00-suite.requests.jsonl}"
 
 # The pin, resolved and refused before anything starts. Exported, so every
 # driver below runs on the same one.

@@ -559,3 +559,61 @@ Between a tool call's announcement and its result opencode publishes nothing, so
 neither the plugin nor opencode can see inside a call. A subagent inside a long
 `bash` is therefore reached exactly when that call returns — nothing can be
 faster.
+
+## Two e2e suites on one checkout share four things; four knobs isolate them
+
+Two `run-all.sh` invocations on the same plugin checkout reach for the same
+process-global state on this machine:
+
+- the captures directory under `OUT_DIR` — every driver resolves
+  `OUT_DIR=${OUT_DIR:-$(dirname "$0")/out}` and `mkdir -p`s it, and `run-all.sh`
+  pins all its children to one `OUT_DIR` via `test/e2e/run-all.sh:76`. Two suites
+  sharing the checkout also share `test/e2e/out` and the `E2E_AUDIT_MANIFEST`
+  files (`test/e2e/config-isolation.sh:404-471`) the audit reads back over.
+- the plugin's debug log at `~/.cache/opencode-agent-intercom/debug.log` —
+  hard-coded in `src/log.js:13` as `cacheDir()` and written by `appendFileSync`
+  (`src/log.js:46`). Each driver takes a byte offset and tails from there; two
+  suites started at the same wall-clock moment both tail from the SAME file
+  and so each other's earlier lines. The byte-offset slice is a per-run window
+  over a process-global file.
+- the project directory `?directory=` is handed to `opencode serve` — the
+  default `$HOME/testopencode` (`test/e2e/run-all.sh:69`). Two suites running
+  the default share sessions, the endless driver's seeded todo file, and
+  `e2e-endless-fixture/`.
+- the TUI build artefact `tui/dist/tui.js` — `e2e_build_tui`
+  (`test/e2e/server-lifecycle.sh:177-200`) writes that bundle in place.
+  `E2E_TUI_BUILT=1` only suppresses a second build in the same process tree;
+  two suites on the same checkout race `npm run build`.
+
+Four knobs, all already in the harness, isolate them:
+
+- **`OUT_DIR`** — a per-driver env with the script-local default. A wrapper
+  script that sets `OUT_DIR=<fresh path>` before each `run-all.sh` lands both
+  suites' captures in different roots; the per-driver audit follows.
+- **`OPENCODE_AGENT_INTERCOM_DEBUG_LOG`** — read at module load in
+  `src/log.js:30-31` as `LOG_PATH`; unset, it is `cacheDir()/debug.log`. `run-all.sh:86`
+  exports it as `$OUTDIR/00-suite.debug.log` unless the caller already set it.
+  `e2e_debug_log` (`test/e2e/config-isolation.sh:178-184`) reads the same env,
+  so drivers and server agree on the file path with no further plumbing.
+- **`OPENCODE_AGENT_INTERCOM_LOG_REQUESTS_FILE`** — `src/reqlog.js:14-16`,
+  redirecting the per-server request log; `run-all.sh:87` exports it as
+  `$OUTDIR/00-suite.requests.jsonl` the same way.
+- **Per-driver project dir / port envs** — `PROJECT_DIR` (and
+  `NESTED_PROJECT_DIR`, `ENDLESS_PROJECT_DIR`, `ASK_EXPIRY_PROJECT_DIR`,
+  `CONTEXT_BANDS_PROJECT_DIR`, `MCP_AFTER_PROJECT_DIR`) plus
+  `RUN_ALL_PORT` / `NESTED_PORT` / `ENDLESS_PORT` / `ASK_EXPIRY_PORT` /
+  `CONTEXT_BANDS_PORT` / `MCP_AFTER_PORT`. `run-all.sh:93-96` refuses a busy
+  `RUN_ALL_PORT`; each suite picks a free one.
+
+The isolated `HOME` is already per-suite: `e2e_iso_create`
+(`test/e2e/config-isolation.sh:223`) builds `${TMPDIR:-/tmp}/e2e-opencode-home.XXXXXXXX`
+per process. The symlink into `~/.cache` is what makes the debug log shared
+in the first place; with `OPENCODE_AGENT_INTERCOM_DEBUG_LOG` set, the symlink
+stays and the file inside it becomes per-suite. The machine's
+`~/.local/share/opencode` symlink likewise stays — `auth.json` and
+`opencode.db` are shared, sessions are created and deleted there.
+
+What does NOT isolate today: the TUI build artefact. Two `run-all.sh` on one
+checkout still race `tui/dist/tui.js`. The in-place `npm run build` is the
+contract — there is no lock around it in the harness — so an outer lock or a
+separate checkout per suite is what serialises it.

@@ -393,9 +393,8 @@ die() {
 
 # ---------- debug log ------------------------------------------------------
 
-# The plugin logs to ~/.cache/opencode-agent-intercom/debug.log and appends
-# forever. The driver never truncates that file: it records its size before the
-# server starts and reads only what was appended after it.
+# The plugin appends to e2e_debug_log (OPENCODE_AGENT_INTERCOM_DEBUG_LOG when set,
+# else the cache path); the driver only tails from a recorded offset.
 refresh_slice() {
   local cur
   cur=$(stat -c %s "$DEBUG_LOG" 2>/dev/null || echo 0)

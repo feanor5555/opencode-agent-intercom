@@ -163,17 +163,27 @@ bash test/e2e/run-all.sh
 ```
 
 `run-task.sh` and `multi-task.sh` keep their own env contract — `OPENCODE_URL`,
-`PROJECT_DIR`, `OUT_DIR` — and stay usable on their own against a server that is
-already running:
+`PROJECT_DIR`, `OUT_DIR`, `OPENCODE_AGENT_INTERCOM_DEBUG_LOG` — and stay usable
+on their own against a server that is already running. Against a `run-all.sh`
+server the debug log is the suite file, typically `$OUT_DIR/00-suite.debug.log`:
 
 ```bash
 OPENCODE_URL=http://127.0.0.1:4567 \
+  OPENCODE_AGENT_INTERCOM_DEBUG_LOG=./out/00-suite.debug.log \
   bash test/e2e/run-task.sh coder "What does src/log.js do?" 03-coder
 ```
 
 `run-all.sh` refuses to start when something already answers on its port; give
 it a free one with `RUN_ALL_PORT` or stop the other server. Its own server log,
 pid file and health capture land in `out/00-suite.*`.
+
+Two suite runs on one checkout keep their captures and debug-log slices apart
+by giving each its own `OUT_DIR`, `OPENCODE_AGENT_INTERCOM_DEBUG_LOG`,
+`PROJECT_DIR` (and the matching `*_PROJECT_DIR` on the drivers that own a
+server) and ports (`RUN_ALL_PORT` and the four other port envs). `run-all.sh`
+writes `00-suite.debug.log` and `00-suite.requests.jsonl` under its `OUT_DIR`
+when those two log envs are unset. The TUI build still writes `tui/dist/tui.js`
+in place: two suites on the same checkout can race that step.
 
 **Both halves have to be wired where opencode will read them.** A server that
 loads neither half comes up with no `spawn` tool and no diagnostic saying so,
@@ -259,7 +269,7 @@ Three paths stay shared on purpose:
 | path | why |
 |---|---|
 | `~/.local/share/opencode` | symlinked in: `auth.json` and `opencode.db`. A fresh one has no provider credentials and no run could authenticate. Sessions are created and deleted there, as they always were. |
-| `~/.cache/opencode-agent-intercom` | symlinked in, so the plugin's `debug.log` stays where every driver slices it. A cache is not a setting. |
+| `~/.cache/opencode-agent-intercom` | symlinked in. The plugin's `debug.log` lives here unless `OPENCODE_AGENT_INTERCOM_DEBUG_LOG` points it elsewhere; `e2e_debug_log` reads the same env. A cache is not a setting. |
 | the driven project (`PROJECT_DIR`) | the drivers work on real files there; each puts back what it seeded (`endless-task.sh`'s todo file and fixture directory). |
 
 And one that deliberately is not: `~/.local/state/opencode/model.json`,
@@ -961,3 +971,8 @@ without subscribing to the event stream.
 - The bytes() implementation and its tests are themselves a test artifact
   from the multi-agent run (kept on purpose — see `src/format.js`). If you
   revert them, the multi-agent run will recreate them on the next pass.
+- **Two concurrent `run-all.sh` on the same checkout race `tui/dist/tui.js`.**
+  `e2e_build_tui` writes that bundle in place; `E2E_TUI_BUILT=1` only
+  suppresses a second build in the same process tree. Captures and the debug
+  log are isolated by `OUT_DIR` and `OPENCODE_AGENT_INTERCOM_DEBUG_LOG`; the
+  TUI artefact is not.

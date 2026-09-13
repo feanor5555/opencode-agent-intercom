@@ -318,10 +318,8 @@ mr_load_kv() {
 
 # ---------- the plugin's debug log ------------------------------------------
 
-# The plugin appends to ~/.cache/opencode-agent-intercom/debug.log forever. The
-# driver never truncates it: it records the size it found and reads only what is
-# appended from there on, so a shared server's earlier runs stay out of the
-# slice.
+# The plugin appends to e2e_debug_log (OPENCODE_AGENT_INTERCOM_DEBUG_LOG when set,
+# else the cache path); the driver only tails from a recorded offset.
 mr_debug_start() {
   MR_LOG_OFFSET=$(stat -c %s "$MR_DEBUG_LOG" 2>/dev/null || echo 0)
 }

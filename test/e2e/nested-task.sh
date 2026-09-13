@@ -142,7 +142,7 @@ OUT_DIR=${OUT_DIR:-$HERE/out}
 KEEP_SERVER=${KEEP_SERVER:-0}
 
 # Both are resolved once the isolated configuration exists — the settings file
-# is the one inside it, the debug log the shared cache's.
+# is the one inside it, the debug log is e2e_debug_log (env, else the cache path).
 SETTINGS_FILE=""
 DEBUG_LOG=$(e2e_debug_log)
 
@@ -213,9 +213,8 @@ die() {
 
 # ---------- debug log ------------------------------------------------------
 
-# The plugin logs to ~/.cache/opencode-agent-intercom/debug.log and appends
-# forever. The driver never truncates that file: it records its size before the
-# server starts and reads only what was appended after it.
+# The plugin appends to e2e_debug_log (OPENCODE_AGENT_INTERCOM_DEBUG_LOG when set,
+# else the cache path); the driver only tails from a recorded offset.
 refresh_slice() {
   local cur
   cur=$(stat -c %s "$DEBUG_LOG" 2>/dev/null || echo 0)

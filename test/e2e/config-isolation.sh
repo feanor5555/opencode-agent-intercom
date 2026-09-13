@@ -29,8 +29,9 @@
 #                      opencode.db; a fresh one has no provider credentials and
 #                      no run could authenticate.
 #      .cache        → symlinked to the real one, so the plugin's debug log
-#                      stays at ~/.cache/opencode-agent-intercom/debug.log,
-#                      which every driver slices. A cache is not a setting.
+#                      stays at ~/.cache/opencode-agent-intercom/debug.log
+#                      unless OPENCODE_AGENT_INTERCOM_DEBUG_LOG points it
+#                      elsewhere. A cache is not a setting.
 #      .local/state  → NOT symlinked. `applyModelChoices` writes opencode's
 #                      per-model variant store there (src/variantstore.js), and
 #                      that is machine state a run must not rewrite.
@@ -171,9 +172,14 @@ e2e_machine_config_dir() {
   printf '%s/opencode' "${E2E_MACHINE_CONFIG_HOME:-${XDG_CONFIG_HOME:-${HOME:-}/.config}}"
 }
 
-# The plugin's debug log of the run: the cache is shared with the machine, so
-# this is the path it has always been.
+# The plugin's debug log of the run. OPENCODE_AGENT_INTERCOM_DEBUG_LOG
+# redirects it (src/log.js reads the same env); unset, it is the shared cache
+# path every driver slices.
 e2e_debug_log() {
+  if [ -n "${OPENCODE_AGENT_INTERCOM_DEBUG_LOG:-}" ]; then
+    printf '%s' "$OPENCODE_AGENT_INTERCOM_DEBUG_LOG"
+    return 0
+  fi
   printf '%s/.cache/opencode-agent-intercom/debug.log' "${HOME:-}"
 }
 
@@ -361,6 +367,9 @@ PY
     "XDG_STATE_HOME=$E2E_ISO_HOME/.local/state"
     "XDG_CACHE_HOME=$E2E_ISO_HOME/.cache"
   )
+  if [ -n "${OPENCODE_AGENT_INTERCOM_DEBUG_LOG:-}" ]; then
+    E2E_SERVER_ENV+=("OPENCODE_AGENT_INTERCOM_DEBUG_LOG=$OPENCODE_AGENT_INTERCOM_DEBUG_LOG")
+  fi
 
   e2e_say "isolated config: $iso_dir (model pin $E2E_MODEL_REF, every agent; the machine's ~/.config/opencode is untouched)"
   return 0

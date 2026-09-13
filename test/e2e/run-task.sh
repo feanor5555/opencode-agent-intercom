@@ -23,6 +23,10 @@
 #                   inside the session's project (opencode 1.15 stalls reads
 #                   outside the session directory on a permission prompt).
 #   OUT_DIR         default ./out (created if missing)
+#   OPENCODE_AGENT_INTERCOM_DEBUG_LOG
+#                   plugin debug log; default
+#                   ~/.cache/opencode-agent-intercom/debug.log. Against a
+#                   run-all.sh server, typically $OUT_DIR/00-suite.debug.log
 #   E2E_MODEL       default openai/gpt-5.6-luna (provider/model for this run)
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)

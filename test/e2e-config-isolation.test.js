@@ -161,6 +161,98 @@ echo "AFTER=\${E2E_ISO_CONFIG_HOME:-unset}"
   rmSync(r.dir, { recursive: true, force: true })
 })
 
+test("e2e_debug_log defaults to the shared cache path when the env is unset", () => {
+  const r = runShell(
+    `
+. "$LIB"
+e2e_debug_log
+echo
+`,
+    { OPENCODE_AGENT_INTERCOM_DEBUG_LOG: "" },
+  )
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  assert.equal(r.stdout.trim(), `${process.env.HOME}/.cache/opencode-agent-intercom/debug.log`)
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("e2e_debug_log uses OPENCODE_AGENT_INTERCOM_DEBUG_LOG when set", () => {
+  const dest = join(tmpdir(), "aic-e2e-debug-override.log")
+  const r = runShell(
+    `
+. "$LIB"
+e2e_debug_log
+echo
+`,
+    { OPENCODE_AGENT_INTERCOM_DEBUG_LOG: dest },
+  )
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  assert.equal(r.stdout.trim(), dest)
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("e2e_iso_create puts OPENCODE_AGENT_INTERCOM_DEBUG_LOG on the server env when set", () => {
+  const dest = join(tmpdir(), "aic-e2e-debug-server.log")
+  const r = runShell(
+    `
+set -e
+. "$LIB"
+e2e_resolve_model
+e2e_iso_create "$PLUGIN_ROOT" '{}'
+echo "ENV=\${E2E_SERVER_ENV[*]}"
+`,
+    { OPENCODE_AGENT_INTERCOM_DEBUG_LOG: dest },
+  )
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  const env = /ENV=(.*)/.exec(r.stdout)[1]
+  assert.ok(env.includes(`OPENCODE_AGENT_INTERCOM_DEBUG_LOG=${dest}`), env)
+  const home = /HOME=(\S+)/.exec(env)[1]
+  rmSync(home, { recursive: true, force: true })
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("e2e_iso_create leaves the debug-log env off the server env when unset", () => {
+  const r = runShell(
+    `
+set -e
+. "$LIB"
+e2e_resolve_model
+e2e_iso_create "$PLUGIN_ROOT" '{}'
+echo "ENV=\${E2E_SERVER_ENV[*]}"
+`,
+    { OPENCODE_AGENT_INTERCOM_DEBUG_LOG: "" },
+  )
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  const env = /ENV=(.*)/.exec(r.stdout)[1]
+  assert.ok(!env.includes("OPENCODE_AGENT_INTERCOM_DEBUG_LOG="), env)
+  const home = /HOME=(\S+)/.exec(env)[1]
+  rmSync(home, { recursive: true, force: true })
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("the plugin and e2e_debug_log agree on OPENCODE_AGENT_INTERCOM_DEBUG_LOG", () => {
+  const dest = join(tmpdir(), "aic-e2e-debug-agree.log")
+  const logJs = resolve(import.meta.dirname, "../src/log.js")
+  const plugin = spawnSync(
+    process.execPath,
+    ["--input-type=module", "-e", `import { LOG_PATH } from ${JSON.stringify(logJs)}; process.stdout.write(LOG_PATH)`],
+    { encoding: "utf8", env: { ...process.env, OPENCODE_AGENT_INTERCOM_DEBUG_LOG: dest } },
+  )
+  assert.equal(plugin.status, 0, plugin.stderr)
+  const helper = runShell(
+    `
+. "$LIB"
+e2e_debug_log
+`,
+    { OPENCODE_AGENT_INTERCOM_DEBUG_LOG: dest },
+  )
+  assert.equal(helper.status, 0, `stdout:\n${helper.stdout}\nstderr:\n${helper.stderr}`)
+  assert.equal(plugin.stdout, dest)
+  assert.equal(helper.stdout, dest)
+  assert.match(readFileSync(logJs, "utf8"), /OPENCODE_AGENT_INTERCOM_DEBUG_LOG/)
+  assert.match(readFileSync(LIB, "utf8"), /OPENCODE_AGENT_INTERCOM_DEBUG_LOG/)
+  rmSync(helper.dir, { recursive: true, force: true })
+})
+
 test("e2e_iso_create refuses a home it did not create", () => {
   const r = runShell(`
 . "$LIB"

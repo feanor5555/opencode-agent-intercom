@@ -544,3 +544,136 @@ test("the driver captures the primary's own wind-down turn and audits it", () =>
     "the wind-down turn is captured but never recorded for the model audit",
   )
 })
+
+// ---------------------------------------------------------------------------
+// The model audit over a session the CYCLE spawned. Every other capture the
+// driver records is a primary session, and a primary's message tree carries its
+// own assistant messages only — a child that answered on another model appears
+// in none of them. The child's session is deleted when it finishes, so the
+// capture has to happen while it is in flight.
+// ---------------------------------------------------------------------------
+
+const ISO_LIB = resolve(import.meta.dirname, "e2e/config-isolation.sh")
+
+// The driver's child capture, run over the real audit library with curl stubbed
+// out. `body` is what the fake server answers for the session tree.
+function runChildCapture({ body, preExisting = null, cycle = 2, sid = "ses_child" }) {
+  const dir = mkdtempSync(join(tmpdir(), "e2e-endless-child-"))
+  const out = join(dir, "out")
+  mkdir(out)
+  const report = join(dir, "report.txt")
+  const answer = join(dir, "answer.json")
+  writeFileSync(answer, body)
+  if (preExisting !== null) {
+    writeFileSync(join(out, `11-endless.cycle${cycle}.audit-${sid}.json`), preExisting)
+  }
+  const script = `set -u
+say() { printf '%s\\n' "$*"; }
+. ${shellQuote(ISO_LIB)}
+e2e_resolve_model
+curl() { cat ${shellQuote(answer)}; }
+PREFIX=11-endless
+CYCLE=${cycle}
+BASE=http://127.0.0.1:4599
+OUT_DIR=${shellQuote(out)}
+REPORT_FILE=${shellQuote(report)}
+CHILD_AUDIT_CAPTURES=0
+${driverFunction("capture_cycle_child")}
+capture_cycle_child ${shellQuote(sid)} "before the ceiling was armed"
+capture_cycle_child "" "no session id at all"
+echo "CAPTURES=$CHILD_AUDIT_CAPTURES"
+e2e_audit_recorded "11-endless" /dev/null > /dev/null; echo "AUDIT=$?"
+echo "LINE=$E2E_AUDIT_LINE"
+`
+  const result = spawnSync("bash", ["-c", script], {
+    encoding: "utf8",
+    env: { ...process.env, TMPDIR: dir },
+  })
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+  return {
+    dir,
+    result,
+    capture: join(out, `11-endless.cycle${cycle}.audit-${sid}.json`),
+    report,
+  }
+}
+
+const CHILD_TREE = JSON.stringify([
+  {
+    info: { id: "msg_1", role: "user", sessionID: "ses_child" },
+    parts: [{ type: "text", text: "sleep 45" }],
+  },
+  {
+    info: {
+      id: "msg_2",
+      role: "assistant",
+      sessionID: "ses_child",
+      mode: "coder",
+      providerID: "gpuserver",
+      modelID: "Qwen3.8 Flash Next",
+    },
+    parts: [{ type: "text", text: "slept 45 seconds" }],
+  },
+])
+
+test("the cycle's own subagent session is captured and reaches the model audit", () => {
+  const r = runChildCapture({ body: CHILD_TREE })
+  assert.match(r.result.stdout, /CAPTURES=1/, r.result.stdout)
+  assert.equal(existsSync(r.capture), true, "the child's message tree was not written")
+  // The child answered on the banned model: without this capture the audit
+  // would have passed the run, which is exactly the hole being closed.
+  assert.match(r.result.stdout, /AUDIT=1/, r.result.stdout)
+  assert.match(r.result.stdout, /banned gpuserver\/Qwen3\.8 Flash Next/)
+  assert.match(
+    readFileSync(r.report, "utf8"),
+    /child audit +cycle 2: subagent session ses_child captured before the ceiling was armed/,
+  )
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("a subagent session that answers no tree is no failure and overwrites no earlier snapshot", () => {
+  const earlier = JSON.stringify([
+    {
+      info: {
+        id: "msg_1",
+        role: "assistant",
+        sessionID: "ses_child",
+        mode: "coder",
+        providerID: "openai",
+        modelID: "gpt-5.6-luna",
+      },
+      parts: [],
+    },
+  ])
+  // What a finished — and therefore deleted — subagent session answers.
+  const r = runChildCapture({ body: '{"error":"session not found"}', preExisting: earlier })
+  assert.match(r.result.stdout, /CAPTURES=0/, r.result.stdout)
+  assert.match(r.result.stdout, /answered no message tree .* — not captured/)
+  assert.equal(readFileSync(r.capture, "utf8"), earlier, "the snapshot taken while it was alive was overwritten")
+  assert.equal(existsSync(r.report), false, "a capture that did not happen wrote a report line")
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("the driver captures the child at both in-flight gates and calls no cycle without one a failure", () => {
+  const gate1 = DRIVER_SOURCE.indexOf('require_subagent_in_flight "before the ceiling was armed"')
+  const gate2 = DRIVER_SOURCE.indexOf('require_subagent_in_flight "while the ceiling was being armed"')
+  assert.ok(gate1 > 0 && gate2 > gate1, "the two in-flight gates are not where they were")
+  const first = DRIVER_SOURCE.indexOf('capture_cycle_child "$child_id"', gate1)
+  const second = DRIVER_SOURCE.indexOf('capture_cycle_child "$child_id"', gate2)
+  assert.ok(first > gate1 && first < gate2, "no child capture at the gate before the arming")
+  assert.ok(second > gate2, "no child capture at the gate before the crossing turn")
+  // A cycle that produced no child capture is named as uncovered, not recorded
+  // as a failed criterion.
+  const zero = DRIVER_SOURCE.indexOf('if [ "$CHILD_AUDIT_CAPTURES" = 0 ]; then')
+  assert.ok(zero > 0, "the run never says whether a subagent session was audited at all")
+  assert.match(
+    DRIVER_SOURCE.slice(zero, zero + 400),
+    /note_uncovered "model-pin over a subagent session"/,
+    "a run without a child capture does not read as uncovered",
+  )
+  assert.doesNotMatch(
+    DRIVER_SOURCE.slice(zero, zero + 400),
+    /\brecord\b/,
+    "a run without a child capture is recorded as an asserted criterion",
+  )
+})

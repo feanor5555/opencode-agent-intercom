@@ -100,7 +100,10 @@
 #             `notified primary of completion` names it. The line is matched on
 #             its ABSENT `taskId` field, so a work-off spawn of the previous
 #             cycle (which always carries `"taskId":"T<n>"`) is never mistaken
-#             for it.
+#             for it. That subagent's own session is captured for the model
+#             audit while it is still in flight, at each of the two gates below:
+#             a subagent session is deleted when it finishes, and no primary's
+#             message tree carries a child's turns.
 #   arming  the driver reads the primary's REAL context off the session
 #           (the sum `latestContextTokens` computes, src/client.js) and only then
 #           writes `endlessContext` below it. Until this moment the key sits at
@@ -339,6 +342,9 @@ CYCLE_SAVED_IDS=""
 CYCLE_SAVED_FILE=""
 CYCLE_SAVED_LINE=0
 CYCLE_CONFIRMED_TODO=""
+# How many subagent sessions this run captured for the model audit, over every
+# cycle. Zero is reported as an uncovered criterion, never as a failure.
+CHILD_AUDIT_CAPTURES=0
 # The re-title, collected across the cycles and asserted once at the end: the
 # ids an accepted rewrite re-bound to a different title, the file evidence for
 # them, the plugin's own V6 observation line, and — per cycle — what the
@@ -1188,6 +1194,38 @@ require_subagent_in_flight() {
   die "cycle $CYCLE: the in-flight subagent $SPAWN_HANDLE finished $where — criterion (b) needs it still running when the cycle starts waiting, and a quiesce with activeAtStart=0 asserts nothing. Its completion notice: ${done_line#*:} — raise SUBAGENT_SLEEP_S (it has to stay below maxSubagentAgeMs=$MAX_AGE_MS) or use a faster SPAWN_AGENT model"
 }
 
+# The message tree of the subagent session $1, captured for the model audit
+# WHILE that subagent is still in flight, with $2 naming the moment for the
+# report.
+#
+# Every other capture this driver records is a PRIMARY session — this cycle's
+# own, its successor's, and the successor's first work turn — so a child that
+# answered on a model other than the pin appears in none of them: a session's
+# message tree carries only its own assistant messages, and a spawn tool call in
+# the parent's tree carries the child's prompt, not the child's turns. A
+# subagent session is deleted the moment it finishes (`teardownSubagent`), so the
+# capture cannot wait for the end of the run either. e2e_audit_fetch_sessions
+# writes only a non-empty tree, so calling this twice over the same subagent
+# keeps the fuller snapshot and a later 404 overwrites nothing.
+#
+# Recorded, never asserted here: a cycle that produced no capture is not a
+# failure of that cycle. Whether any cycle produced one at all is reported once,
+# beside the model-pin criterion at the end of the run.
+capture_cycle_child() {
+  local sid="$1" when="$2" file
+  [ -n "$sid" ] || return 0
+  file=$(e2e_audit_fetch_sessions "$BASE" "$OUT_DIR/$PREFIX.cycle$CYCLE" "$sid" | tail -n 1)
+  if [ -z "$file" ]; then
+    say "[$PREFIX] cycle $CYCLE subagent session $sid answered no message tree $when — not captured"
+    return 0
+  fi
+  CHILD_AUDIT_CAPTURES=$((CHILD_AUDIT_CAPTURES + 1))
+  say "[$PREFIX] cycle $CYCLE subagent session $sid captured $when: $file"
+  printf 'child audit         cycle %s: subagent session %s captured %s -> %s\n' \
+    "$CYCLE" "$sid" "$when" "$file" >> "$REPORT_FILE"
+  return 0
+}
+
 # Puts `endlessContext` where the primary's MEASURED context is known to reach
 # it, so the crossing of the next turn follows from a figure read off the session
 # rather than from a guessed constant. Until this runs the key sits at
@@ -1339,6 +1377,9 @@ run_cycle() {
 
   # Gate 1: still in flight before the ceiling is armed.
   require_subagent_in_flight "before the ceiling was armed"
+  # And, at that same still-alive moment, the child's own session for the model
+  # audit — the one turn of a cycle no primary capture can show.
+  capture_cycle_child "$child_id" "before the ceiling was armed"
 
   # The ceiling, derived from the primary's real context rather than guessed.
   arm_ceiling
@@ -1347,6 +1388,9 @@ run_cycle() {
   # crosses. Everything between here and the cycle's own quiesce is one short
   # turn.
   require_subagent_in_flight "while the ceiling was being armed"
+  # The same session again, now that it has had the arming's length to answer:
+  # the fuller tree replaces the first snapshot, an empty one leaves it standing.
+  capture_cycle_child "$child_id" "immediately before the crossing turn"
 
   # Turn 3 — the crossing. Its transform hook re-reads the same context the
   # arming measured, finds it at or above the armed ceiling and latches the
@@ -1883,17 +1927,28 @@ fi
 # ---------- the model -------------------------------------------------------
 
 # What answered, over the captures THIS run recorded as it wrote them — the
-# primary's message tree per cycle, the successor's, and the successor's first
-# work turn. Never a glob over the out directory: it holds the captures of
-# earlier runs too, whose turns answered on whatever model those runs pinned.
-# The pin lives in the isolated llm-models.json because `applyModelChoices`
-# (src/llmmodel.js) writes that file's entry into `config.agent[<name>].model`
-# and beats the model each prompt names.
+# primary's message tree per cycle, the successor's, the successor's first work
+# turn, and the session of the subagent each cycle spawned, taken while that
+# subagent was still in flight. Never a glob over the out directory: it holds the
+# captures of earlier runs too, whose turns answered on whatever model those runs
+# pinned. The pin lives in the isolated llm-models.json because
+# `applyModelChoices` (src/llmmodel.js) writes that file's entry into
+# `config.agent[<name>].model` and beats the model each prompt names.
 say ""
 if e2e_audit_recorded "$PREFIX" /dev/null > /dev/null 2>&1; then
-  record "model-pin — every captured turn ran on the pinned model" 1 "$E2E_AUDIT_LINE"
+  record "model-pin — every captured turn ran on the pinned model" 1 \
+    "$E2E_AUDIT_LINE (subagent session captures: $CHILD_AUDIT_CAPTURES)"
 else
-  record "model-pin — every captured turn ran on the pinned model" 0 "$E2E_AUDIT_LINE"
+  record "model-pin — every captured turn ran on the pinned model" 0 \
+    "$E2E_AUDIT_LINE (subagent session captures: $CHILD_AUDIT_CAPTURES)"
+fi
+# A run whose cycles produced no readable child tree audited primary sessions
+# only. That is not a failure of the model pin — nothing says a swapped child
+# model was accepted, only that none was looked at — so it is named as uncovered
+# rather than recorded as a pass or a fail.
+if [ "$CHILD_AUDIT_CAPTURES" = 0 ]; then
+  note_uncovered "model-pin over a subagent session" \
+    "no cycle's subagent session answered a message tree while it was in flight, so the audit read primary sessions only and a child on another model would not have been seen"
 fi
 
 # ---------- what this driver does not assert -------------------------------

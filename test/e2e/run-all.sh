@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs all 8 single-agent end-to-end tests, the multi-agent test, the three
+# Runs all 8 single-agent end-to-end tests, the multi-agent test, the four
 # mid-run-channel drivers and the endless-mode cycle, writes captures under
 # ./out. The mid-run drivers assert; a failed criterion of theirs does not stop
 # the suite but decides its exit code at the end.
@@ -136,13 +136,17 @@ unset OPENCODE_AGENT_INTERCOM_LOG_REQUESTS
 
 # The mid-run-channel drivers. Unlike everything above they ASSERT and exit
 # non-zero on a failed criterion, so their status is collected instead of
-# ending the suite here: the third mid-run driver and the endless cycle below
+# ending the suite here: the fourth mid-run driver and the endless cycle below
 # still have to run, and their servers have to be started and stopped whatever
-# these two found. The collected status is what this script exits on at the very
-# end.
+# these three found. The collected status is what this script exits on at the
+# very end.
 MIDRUN_FAILED=""
 "$HERE/message-task.sh" || MIDRUN_FAILED="$MIDRUN_FAILED message-task.sh(exit $?)"
 "$HERE/ask-task.sh" || MIDRUN_FAILED="$MIDRUN_FAILED ask-task.sh(exit $?)"
+# The other half of the delivery moment: message-task.sh sends only into a
+# running tool call, this one only into the gap between two steps. It needs no
+# setting of its own either, so it runs on this server beside the two above.
+"$HERE/between-steps-task.sh" || MIDRUN_FAILED="$MIDRUN_FAILED between-steps-task.sh(exit $?)"
 
 # The suite server goes down HERE, before the last driver, not only in the EXIT
 # trap. endless-task.sh starts a server of its own, but it arms endless mode
@@ -159,7 +163,7 @@ echo ""
 echo "--- stopping the suite server before the endless driver ---"
 e2e_server_stop
 
-# The third mid-run driver, and the one that needs no server of this suite's:
+# The fourth mid-run driver, and the one that needs no server of this suite's:
 # its three phases each run under an `answerWaitMs` / `maxSubagentToolCallMs`
 # pair of their own, which only the agent-intercom.json a server was started
 # with can carry, so it builds an isolated configuration and starts a server on
@@ -174,6 +178,6 @@ e2e_server_stop
 # The mid-run drivers' verdict, held back above so the endless cycle still ran.
 if [ -n "$MIDRUN_FAILED" ]; then
   echo ""
-  echo "mid-run driver(s) failed:$MIDRUN_FAILED — see $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt and $OUTDIR/15-ask-expiry.report.txt" >&2
+  echo "mid-run driver(s) failed:$MIDRUN_FAILED — see $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt, $OUTDIR/16-between-steps.report.txt and $OUTDIR/15-ask-expiry.report.txt" >&2
   exit 1
 fi

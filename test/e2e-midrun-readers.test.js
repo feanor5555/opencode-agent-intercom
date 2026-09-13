@@ -95,6 +95,29 @@ test("midrun-message: a message between two steps is no in-flight landing", { sk
   assert.equal(figures.inflight_tool, "")
   assert.equal(figures.tools_after, "1")
   assert.equal(figures.step_after_inflight_ms, "-1")
+  // The between-steps figures themselves, which between-steps-task.sh decides
+  // its `in-the-gap` criterion on: the message sits in the 700 ms between one
+  // call's end and the next one's start, 500 ms into it.
+  assert.equal(figures.prev_tool_end, "2000")
+  assert.equal(figures.next_tool_start, "2700")
+  assert.equal(figures.gap_ms, "700")
+  assert.equal(figures.into_gap_ms, "500")
+})
+
+test("midrun-message: a mid-flight landing yields no gap figure", { skip: !HAVE_PYTHON }, () => {
+  // The guard that keeps the two drivers apart: a message that landed INSIDE a
+  // call must not offer between-steps-task.sh a gap to pass on.
+  const figures = read(MESSAGE_READER, steeredSession(), FRAMED_OPENING)
+  assert.equal(figures.inflight_tool, "bash")
+  assert.equal(figures.gap_ms, "-1")
+  assert.equal(figures.prev_tool_end, "0")
+})
+
+test("midrun-message: a session without the framed message carries the gap keys too", { skip: !HAVE_PYTHON }, () => {
+  const figures = read(MESSAGE_READER, [user(1000, "your task"), step(1100)], FRAMED_OPENING)
+  assert.equal(figures.gap_ms, "-1")
+  assert.equal(figures.into_gap_ms, "-1")
+  assert.equal(figures.next_tool_start, "0")
 })
 
 test("midrun-message: a session without the framed message says so", { skip: !HAVE_PYTHON }, () => {
@@ -291,4 +314,95 @@ test("ask-expiry-task.sh: the orchestrator is told to leave the question unanswe
   assert.ok(task, "ask-expiry-task.sh carries no ae_sub_task body")
   assert.match(task[1], /call ask\('/, "the task does not tell the subagent to call ask")
   assert.match(task[1], /make no other tool call at all/)
+})
+
+// ---------------------------------------------------------------------------
+// The between-steps driver. `message-task.sh` sends only into a running tool
+// call; this one sends only into the gap between two steps, and the branch of
+// `deliveryMomentPhrase` (src/midrun.js) it lands in is decided by the shape of
+// the task it hands the subagent. Both the literals it tells the two branches
+// apart by and that task's shape are pinned here, without a server: a driver
+// whose phrasing has drifted away from the plugin would otherwise pass every
+// run by finding neither literal, and one whose task no longer builds a window
+// would assert the moment it happened to get.
+// ---------------------------------------------------------------------------
+
+const BETWEEN_DRIVER = readFileSync(resolve(import.meta.dirname, "e2e/between-steps-task.sh"), "utf8")
+const RUN_ALL = readFileSync(resolve(import.meta.dirname, "e2e/run-all.sh"), "utf8")
+
+function betweenDriverString(name) {
+  const m = new RegExp(`^${name}="((?:[^"\\\\]|\\\\.)*)"$`, "m").exec(BETWEEN_DRIVER)
+  assert.ok(m, `between-steps-task.sh carries no ${name} assignment on one line`)
+  return m[1]
+}
+
+test("between-steps-task.sh: the two delivery-moment literals are the ones src/midrun.js renders", () => {
+  for (const name of ["BETWEEN_MOMENT_MARKER", "INTOOL_MOMENT_MARKER"]) {
+    const literal = betweenDriverString(name)
+    assert.ok(
+      MIDRUN_SRC.includes(literal),
+      `${name}="${literal}" is not rendered anywhere in src/midrun.js`,
+    )
+  }
+  // And they are the two branches of one function, not two readings of one
+  // branch: the in-tool phrase must not stand inside the between-steps one.
+  const between = betweenDriverString("BETWEEN_MOMENT_MARKER")
+  const inTool = betweenDriverString("INTOOL_MOMENT_MARKER")
+  assert.equal(between.includes(inTool), false)
+  assert.equal(inTool.includes(between), false)
+})
+
+test("between-steps-task.sh: the subagent's task builds the window instead of hoping for one", () => {
+  const task = betweenDriverString("SUB_TASK")
+  // The step whose ARGUMENT is the window: a list the model has to write out
+  // itself, with every shortcut that would collapse it forbidden.
+  assert.match(task, /echo TICK-001 TICK-002/)
+  assert.match(task, /do not use seq, brace expansion, a loop, a variable, a file or an ellipsis/)
+  assert.match(task, /do not shorten the list/)
+  // Every other command is an echo that returns at once, so the run spends
+  // almost none of its wall clock inside a call.
+  assert.equal(/sleep/.test(task), false, "a sleeping baseline step would put the subagent INSIDE a call")
+  // Steps that must still be outstanding when the steering lands, so `stopped`
+  // asserts something.
+  for (const tail of ["TAIL-1-DONE", "TAIL-2-DONE", "TAIL-3-DONE"]) {
+    assert.ok(task.includes(tail), `the baseline has no ${tail} step left to stop`)
+  }
+})
+
+test("between-steps-task.sh: the steered line is composed, not quoted to the subagent", () => {
+  const steer = betweenDriverString("STEER")
+  assert.match(steer, /the word STEERED, then a hyphen/)
+  // The literal the `acted` criterion greps for must not stand in the steering
+  // text itself, which is in the primary's transcript whatever the subagent did.
+  assert.equal(/STEERED-/.test(steer), false, "the steering text spells the composed line out")
+  assert.match(steer, /make no further tool call/)
+})
+
+test("between-steps-task.sh: its default word count clears its own preflight floor", () => {
+  const ticks = /^TICKS=\$\{BETWEEN_TICKS:-(\d+)\}$/m.exec(BETWEEN_DRIVER)
+  assert.ok(ticks, "between-steps-task.sh carries no BETWEEN_TICKS default")
+  const floor = /\[ "\$TICKS" -ge (\d+) \]/.exec(BETWEEN_DRIVER)
+  assert.ok(floor, "between-steps-task.sh refuses no word count at all")
+  assert.ok(
+    Number(ticks[1]) >= Number(floor[1]),
+    `the default ${ticks[1]} is below the ${floor[1]} the preflight demands`,
+  )
+})
+
+test("between-steps-task.sh: a run that missed the moment fails its gate rather than passing quietly", () => {
+  // The gate is a recorded criterion in every branch — a run that landed
+  // in-tool, and one that queued nothing at all, both reach an mr_record with 0.
+  const gate = "moment — the tool answer named the BETWEEN-STEPS delivery moment"
+  const records = BETWEEN_DRIVER.split("\n").filter((line) => line.includes(gate))
+  assert.ok(records.length >= 3, `the gate is recorded in ${records.length} branch(es), expected 3`)
+  assert.match(BETWEEN_DRIVER, /did not produce the moment/)
+  assert.match(BETWEEN_DRIVER, /mr_note_uncovered "in-the-gap \/ read \/ one-turn/)
+})
+
+test("run-all.sh: the between-steps driver runs in the suite and its status decides the exit code", () => {
+  assert.match(RUN_ALL, /"\$HERE\/between-steps-task\.sh" \|\| MIDRUN_FAILED=/)
+  assert.ok(
+    RUN_ALL.includes("16-between-steps.report.txt"),
+    "the suite's failure line names no report for it",
+  )
 })

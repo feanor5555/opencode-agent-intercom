@@ -36,6 +36,16 @@ Prints `key=value` lines, one per line, and nothing else:
   tools_after            tool calls started after it landed
   tool_names             every tool call's name, in order, comma-separated
   last_tool_end          the last tool call's end, ms epoch
+  prev_tool_end          the end of the last tool call that had returned when
+                         the message landed, ms epoch, 0 for none
+  next_tool_start        the start of the first tool call that began after it,
+                         ms epoch, 0 for none
+  into_gap_ms            ms from that previous call's end to the message, -1
+                         when no call had returned yet
+  gap_ms                 the width of the gap between those two calls, and -1
+                         whenever the message landed INSIDE a call or one of
+                         the two ends is missing — the between-steps figure,
+                         the complement of step_after_inflight_ms
 """
 
 import json
@@ -122,6 +132,10 @@ def main():
                 "step_after_inflight_ms": -1,
                 "tools_before": len(tools),
                 "tools_after": 0,
+                "prev_tool_end": 0,
+                "next_tool_start": 0,
+                "into_gap_ms": -1,
+                "gap_ms": -1,
             }
         )
         emit(result)
@@ -144,6 +158,30 @@ def main():
             "inflight_end": inflight["end"] if inflight else 0,
             "tools_before": sum(1 for call in tools if call["start"] < framed_time),
             "tools_after": sum(1 for call in tools if call["start"] > framed_time),
+        }
+    )
+    # The gap the between-steps case lives in: the message landed after one
+    # call had returned and before the next one started, with no call spanning
+    # it. `gap_ms` is deliberately -1 whenever a call WAS in flight, so a
+    # driver cannot read a gap figure off a mid-flight landing.
+    prev_tool_end = max(
+        (call["end"] for call in tools if call["end"] and call["end"] <= framed_time),
+        default=0,
+    )
+    next_tool_start = min(
+        (call["start"] for call in tools if call["start"] and call["start"] > framed_time),
+        default=0,
+    )
+    result.update(
+        {
+            "prev_tool_end": prev_tool_end,
+            "next_tool_start": next_tool_start,
+            "into_gap_ms": framed_time - prev_tool_end if prev_tool_end else -1,
+            "gap_ms": (
+                next_tool_start - prev_tool_end
+                if inflight is None and prev_tool_end and next_tool_start
+                else -1
+            ),
         }
     )
     # The step boundary itself: the first step that began after the in-flight

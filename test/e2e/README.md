@@ -37,6 +37,15 @@ that opencode upgrades don't shift the system-prompt composition.
   subagent's own session: the framed block landed inside that call, sits between
   two steps of the same run, the next step began once the call returned, and no
   tool call started after it. See "The mid-run channel" below.
+- `between-steps-task.sh` — mid-run MESSAGE harness for the OTHER delivery
+  moment. The subagent's baseline is four instant `echo` commands plus one
+  whose argument it has to write out word by word (`echo TICK-001 …
+  TICK-400 TICKS-WRITTEN`); a call enters the plugin's in-flight map only when
+  it is executed, so that whole generation is time with nothing in flight. The
+  driver waits until the subagent's session shows the probe returned and no
+  `running` tool part, then has the orchestrator `message(...)` it, and asserts
+  that the tool answer named the between-steps branch of `deliveryMomentPhrase`
+  and not the in-tool one. See "The mid-run channel" below.
 - `ask-task.sh` — mid-run ASK harness. Spawns a subagent whose whole task is
   to report ONE word that ONLY THE CALLER HOLDS: the variant name stands
   nowhere in the subagent's prompt, in no file and in no candidate list it
@@ -59,11 +68,11 @@ that opencode upgrades don't shift the system-prompt composition.
   timer. See "The mid-run channel" below for its criteria table.
 - `todo-driver.mjs` — TODO.md auto-tracking harness. Drives DONE and BLOCKED
   markers through the wake hook and checks the resulting file.
-- `run-all.sh` — runs the 8 single-agent tests, the multi-agent test, the three
+- `run-all.sh` — runs the 8 single-agent tests, the multi-agent test, the four
   mid-run drivers and the endless-mode cycles. The mid-run drivers are the only
   ones in it that assert: a failed criterion of theirs does not stop the suite —
   the endless cycle still runs — but it decides the suite's exit code at the
-  end. Owns the server the first ten use: builds the TUI, starts
+  end. Owns the server every driver above `ask-expiry-task.sh` uses: builds the TUI, starts
   a fresh `opencode serve` in the configured directory (default
   `$HOME/testopencode`), and stops it again before `ask-expiry-task.sh` and
   `endless-task.sh`, which need no server of this suite's and would be
@@ -72,10 +81,12 @@ that opencode upgrades don't shift the system-prompt composition.
 - `lib/` — the Python evidence readers used by `endless-task.sh` (the kickoff
   ids, the successor's first turn, and the child session id of the driver's own
   spawn), plus their shared recursive payload walker; `midrun-message.py` and
-  `midrun-ask.py`, the readers the two mid-run drivers decide on, covered
+  `midrun-ask.py`, the readers the mid-run drivers decide on — the first of
+  them carries both delivery moments, `step_after_inflight_ms` for a landing
+  inside a call and `gap_ms` / `into_gap_ms` for one between two — covered
   without a server by `test/e2e-midrun-readers.test.js`; and
   `midrun-common.sh`, the report lines, session calls, capture and debug-log
-  slice those two share.
+  slice they share.
 - `config-isolation.sh` — sourced library, not a driver. Builds the throwaway
   opencode configuration a run is carried out in (`e2e_resolve_model`,
   `e2e_iso_create`, `e2e_iso_remove`), and audits what answered
@@ -558,22 +569,25 @@ server's process group and removes its isolated home.
 
 ## The mid-run channel
 
-`message-task.sh` and `ask-task.sh` are the only proof of the two claims in
-`specs/mid-run-messaging.md` that no unit test can reach: WHEN a message queued
-into a busy session is read, and that a caller's answer comes back as the result
-of the subagent's own `ask` call.
+`message-task.sh`, `between-steps-task.sh` and `ask-task.sh` are the only proof
+of the two claims in `specs/mid-run-messaging.md` that no unit test can reach:
+WHEN a message queued into a busy session is read — in both of the moments
+`deliveryMomentPhrase` (`src/midrun.js`) distinguishes — and that a caller's
+answer comes back as the result of the subagent's own `ask` call.
 
-Both use the server `run-all.sh` owns — they start none of their own, write no
+All three use the server `run-all.sh` owns — they start none of their own, write no
 setting and build no configuration — and both take the driver env contract `OPENCODE_URL`,
 `PROJECT_DIR`, `OUT_DIR`, `E2E_MODEL`. Standalone:
 
 ```bash
 OPENCODE_URL=http://127.0.0.1:4567 bash test/e2e/message-task.sh
+OPENCODE_URL=http://127.0.0.1:4567 bash test/e2e/between-steps-task.sh
 OPENCODE_URL=http://127.0.0.1:4567 bash test/e2e/ask-task.sh
 ```
 
 They exit `0` when every criterion passed, `1` on a failed one, `2` on a setup
-error, and each writes `out/13-message.report.txt` resp. `out/14-ask.report.txt`
+error, and each writes `out/13-message.report.txt`, `out/16-between-steps.report.txt`
+resp. `out/14-ask.report.txt`
 with one `PASS` / `FAIL` line per criterion and the evidence that decided it.
 The evidence itself is read off the live session by `lib/midrun-message.py` and
 `lib/midrun-ask.py`.
@@ -585,7 +599,7 @@ shows a `running` tool part. The steered reply is a line the subagent has to
 COMPOSE (`STEERED-STEP-<n>-DONE`), because any literal spelled out in the
 steering text stands in both transcripts whatever the subagent did.
 
-Both drivers need the plugin's debug log (`~/.cache/opencode-agent-intercom/
+All three need the plugin's debug log (`~/.cache/opencode-agent-intercom/
 debug.log`): the spawned subagent's session id is read out of it, and it is
 read from the byte the driver found rather than truncated. They end their
 capture loop on either way a run ends — the session deleted, or the plugin
@@ -604,10 +618,60 @@ What a green run establishes, from the run of 2026-09-11 against opencode
   tool calls inside that window, and the orchestrator's answer came back as that
   call's own output.
 
-What the two of them do NOT cover: a message into a subagent that is BETWEEN
-steps, a question left to expire unanswered, and the clamp of `answerWaitMs`
-against `maxSubagentToolCallMs`. Each run names those in its report as
-`NOT ASSERTED`. The last two are what `ask-expiry-task.sh` covers.
+What those two do NOT cover: a question left to expire unanswered and the clamp
+of `answerWaitMs` against `maxSubagentToolCallMs`, which `ask-expiry-task.sh`
+covers, and a message into a subagent that is BETWEEN steps, which
+`between-steps-task.sh` covers. Each run names what it leaves out in its own
+report as `NOT ASSERTED`.
+
+### `between-steps-task.sh` — the message that arrives between two steps
+
+`deliveryMomentPhrase` (`src/midrun.js`) has two branches and `oldestToolCall`
+(`src/registry.js`) decides between them: with a call in flight the tool answer
+names it, with nothing in flight it reads `it reads it at its next step, which
+is the next model call it makes`. No setting reaches the second branch — the
+moment has to be produced by the task the subagent is given.
+
+This driver produces it by construction rather than by luck. Every command of
+its baseline is an `echo` that returns in milliseconds, and step 2 is one
+command whose argument the model has to write out word by word:
+`echo TICK-001 TICK-002 … TICK-400 TICKS-WRITTEN`, with `seq`, brace expansion,
+loops, variables and ellipses forbidden. A tool call only enters the in-flight
+map when it is EXECUTED — opencode stamps `state.time.start` there too, seconds
+after the assistant message carrying the call was opened — so the whole of that
+argument generation is time with nothing in flight. On top of that the driver
+sends on an observation and not on a clock: it waits until the subagent's own
+session shows the step-1 probe completed with no `running` tool part, and a part
+still streaming its arguments shows as `pending`, which counts as further
+evidence of the window rather than against it.
+
+| criterion | what decides it |
+|---|---|
+| `queued` | `Queued for "<handle>"` in the primary's transcript |
+| `moment` | that same answer carries `it reads it at its next step, which is the next model call it makes` and NOT `right now, so the moment` — the gate |
+| `framed` | the framed block is a persisted user message in the subagent's own session |
+| `in-the-gap` | the subagent's session corroborates the answer independently: no call spans the framed message, and `gap_ms` / `into_gap_ms` (`lib/midrun-message.py`) place it strictly between one call's end and the next one's start |
+| `read` | at least one step of the subagent began after it landed |
+| `one-turn` | two user messages in that session — the briefing and the framed block |
+| `stopped` | at most the one call its own step had already committed to started after it, and fewer than the baseline's 5 commands ran |
+| `acted` | `STEERED-TICKS-WRITTEN` — the word, a hyphen and the last word its most recent command printed, composed by the subagent because the steering text spells no such literal out |
+| `exchange` | the completion notice carries `1 message down` |
+| `seen` | and does not say the message was never read |
+| `model-pin` | every captured turn of both sessions answered on the pin |
+
+A run that did not reach the moment FAILS the `moment` criterion and records
+everything hanging off it as `NOT ASSERTED`, naming the branch the answer took
+instead — the in-tool case stays `message-task.sh`'s and is never reported as a
+pass here. `BETWEEN_TICKS` (400) is the width of the window in words; the
+preflight refuses anything below 120, at which point the argument is written in
+a couple of seconds and the window would be narrower than the orchestrator's own
+turn. Each run notes the gap it actually measured and whether the last TICK word
+reached the subagent's session, so a model that shortened the list is visible
+rather than silently assumed away.
+
+```bash
+bash test/e2e/between-steps-task.sh        # on the suite's server, like message-task.sh
+```
 
 ### `ask-expiry-task.sh` — the unanswered path and the clamp
 

@@ -390,7 +390,7 @@ fi
 mr_note "which baseline step it was in when the message landed" \
   "${ACTED_LINE:-not named — the steered line is missing}"
 mr_note_uncovered "a message into a subagent that is between steps" \
-  "this run sends into a tool call on purpose; the between-steps wording of the tool answer is covered by the unit suite alone"
+  "this run sends into a tool call on purpose; the between-steps branch of deliveryMomentPhrase is between-steps-task.sh's case, which builds that window and asserts it"
 
 # What answered. Both sessions of this run were captured above, so the audit
 # reads the subagent's turns as well as the orchestrator's.

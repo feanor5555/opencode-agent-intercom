@@ -84,6 +84,8 @@ import {
   endlessModeInEffect,
   contextBudgetFor,
   compactionEnabledFor,
+  runCeilingFor,
+  runWrapUpAt,
   reuseCeilingFor,
   retentionOffered,
   retentionActive,
@@ -105,7 +107,13 @@ import { overrideBlock, overrideToastText } from "./overrides.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
 import { log, errMsg } from "./log.js"
-import { ABORT_NOTICE, guideBlocks, resultCeilingDemand, resultCeilingPlan } from "./prompts.js"
+import {
+  ABORT_NOTICE,
+  guideBlocks,
+  resultCeilingDemand,
+  resultCeilingPlan,
+  runWrapUpBlock,
+} from "./prompts.js"
 import {
   loadCustomPrompt,
   applyCustomPrompt,
@@ -876,6 +884,11 @@ export function createTransformMessages(client) {
       // as a persisted user message of its own.
       markMessagesSeen(entry)
       volatile = await contextLimitNotice(client, entry)
+      // The run clock's own band, beside the context ones and on the same
+      // carrier. Not given to an ABORTED subagent, the gate the quota line
+      // below uses: one that is told to stop and call no further tool is not
+      // also told to pace itself against a ceiling it will never reach.
+      if (!aborted.has(sessionID)) volatile += runCeilingNotice(entry)
       if (!aborted.has(sessionID) && (await delegatesNested(client, entry.agent))) {
         volatile += nestedQuotaNotice(sessionID)
       }
@@ -1263,6 +1276,51 @@ async function contextLimitNotice(client, entry) {
     resultCeilingDemand(entry.agent, { canWrite: false }) +
     "\n---\n"
   )
+}
+
+// The wrap-up band of the RUN clock, per LLM turn: "" until this run has spent
+// RUN_WRAP_UP of its run ceiling, the block from there on.
+//
+// Sibling of contextLimitNotice and delivered on the same path, and the two are
+// deliberately independent — a run can reach its ceiling having spent almost no
+// context (a poll loop whose every answer is "no such file") and can spend its
+// whole budget in three minutes. Both blocks can land on one turn; each says
+// what its own axis is doing.
+//
+// One band and no second one: nothing changes for the subagent between here and
+// the ceiling — no tool is withdrawn, no figure moves against it — so a second
+// nag would buy the orchestrator nothing this one did not already buy it.
+//
+// Re-fires on every crossing turn, like the context bands and for the same
+// reason: the block rides on the per-request copy of the message array and is
+// never written back to the session, so a one-shot band would exist for a
+// single LLM call and a subagent that spent that call inside a tool loop would
+// hear nothing of its ceiling at all.
+//
+// Silent where the run ceiling cannot fire, so the block never announces a cut
+// that is not coming: with the type's ceiling at 0, and with the inactivity
+// watchdog switched off (`maxSubagentAgeMs <= 0`), which disables the sweep's
+// whole running branch — the run ceiling included.
+//
+// Counted in `entry.runWarnings`, apart from the three context counters. For
+// the log only; nothing escalates on it.
+function runCeilingNotice(entry) {
+  const settings = getSettings()
+  if (settings.maxSubagentAgeMs <= 0) return ""
+  const ceilingMs = runCeilingFor(entry.agent, settings)
+  if (!(ceilingMs > 0)) return ""
+  const startedAt = entry.runStartedAt
+  if (!Number.isFinite(startedAt)) return ""
+  const elapsedMs = Date.now() - startedAt
+  if (elapsedMs < runWrapUpAt(entry.agent, settings)) return ""
+  entry.runWarnings = (entry.runWarnings ?? 0) + 1
+  log("subagent entering run wrap-up band", {
+    handle: entry.handle,
+    elapsedMs,
+    ceilingMs,
+    runWarnings: entry.runWarnings,
+  })
+  return runWrapUpBlock({ elapsedMs, ceilingMs })
 }
 
 // Tells the primary that a subagent is stuck in a denial loop — over budget,

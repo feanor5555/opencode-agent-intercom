@@ -426,23 +426,35 @@ export function timeoutNotice(
   const silentSec = Math.round(silentMs / 1000)
   const limitSec = Math.round(limit.ms / 1000)
   const held = `(limit ${limitSec}s, ${limit.setting})`
+  // The run ceiling is a ceiling on the RUN, not a verdict on the subagent: it
+  // may have been working steadily for the whole of it. Saying "no sign of
+  // life" here would be false, and the orchestrator's next move differs — a
+  // hang is re-dispatched as it was, a run that ran out of ceiling is re-cut or
+  // given a wider `agentRunMs`.
   const cause =
-    limit.kind === "tool-call"
-      ? `spent ${silentSec}s inside a single \`${limit.tool ?? "unknown"}\` tool call ${held} ` +
-        `and was cut off`
-      : `gave no sign of life for ${silentSec}s ${held} and was cut off`
+    limit.kind === "run"
+      ? `ran for ${silentSec}s ${held} and was cut off on its run ceiling`
+      : limit.kind === "tool-call"
+        ? `spent ${silentSec}s inside a single \`${limit.tool ?? "unknown"}\` tool call ${held} ` +
+          `and was cut off`
+        : `gave no sign of life for ${silentSec}s ${held} and was cut off`
   const lastSeen = lastSeenPhrase(entry)
   const seen = lastSeen
     ? `Last seen doing: ${lastSeen}. `
     : `Nothing is known of what it was doing — no text and no tool call of its own has reached ` +
       `this plugin. `
   const judgement =
-    limit.kind === "tool-call"
-      ? `It was still working when it was cut off, so this is a limit on how long one step may ` +
-        `take and not proof of a hang: raise \`${limit.setting}\` if that step legitimately ` +
-        `needs longer. `
-      : `The clock ran out with no tool call of its own in flight, so this reads as a hung step ` +
-        `rather than a long one, and not as work that needed more room. `
+    limit.kind === "run"
+      ? `This is a ceiling on the whole run, and nothing it did could renew it: it says how much ` +
+        `wall clock this type is budgeted, not that the subagent hung. Re-dispatch it with the ` +
+        `work cut smaller, or raise \`${limit.setting}\` (or \`agentRunMs\` for this type alone) ` +
+        `if a run of that length is legitimate. `
+      : limit.kind === "tool-call"
+        ? `It was still working when it was cut off, so this is a limit on how long one step may ` +
+          `take and not proof of a hang: raise \`${limit.setting}\` if that step legitimately ` +
+          `needs longer. `
+        : `The clock ran out with no tool call of its own in flight, so this reads as a hung step ` +
+          `rather than a long one, and not as work that needed more room. `
   const recovered = result
     ? `\nWhat it produced before it was cut off — this is the only account of the work it ` +
       `managed, read it before you re-dispatch and do not have the same ground covered twice:\n${result}\n`

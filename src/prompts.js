@@ -431,6 +431,52 @@ export function resultCeilingDemand(agent, { canWrite = true } = {}) {
   )
 }
 
+// Whole minutes of a ms figure, floored at 1: the unit the run ceiling is
+// stated in everywhere the subagent and the sidebar see it. A sub-minute
+// remainder reads as "1 min left" rather than "0 min left", which would say
+// there is no room for the handover the block is asking for.
+function minutesOf(ms) {
+  return Math.max(1, Math.round(ms / 60000))
+}
+
+// The wrap-up band of the RUN clock: injected on every LLM turn from
+// RUN_WRAP_UP of the run ceiling on (runCeilingNotice, src/hooks.js).
+//
+// It denies nothing and demands nothing, unlike the context reserve band. On
+// the token axis the tokens really are spent and the lockdown that follows is a
+// fact about what is left; on the time axis nothing is consumed by the reply
+// and the plugin cannot tell a wait that is about to pay off from one that
+// never will. So this block announces the ceiling and names the two moves the
+// subagent has, and leaves the judgement with the one party that can make it —
+// the model, and behind it the orchestrator it can ask.
+//
+// `ask` is named unconditionally, as SUBAGENT_GUIDE_CORE names it: both mid-run
+// tools are registered outside solo mode whatever `midRunMessaging` says, and
+// the switch is read live inside the handler, which refuses with its own
+// wording.
+export function runWrapUpBlock({ elapsedMs, ceilingMs }) {
+  const elapsed = minutesOf(elapsedMs)
+  const ceiling = minutesOf(ceilingMs)
+  const left = minutesOf(Math.max(0, ceilingMs - elapsedMs))
+  return (
+    `\n\n---\n⏳ RUN CEILING AHEAD. agent-intercom: this run has been going for ${elapsed} min ` +
+    `of the ${ceiling} min run ceiling (\`maxSubagentRunMs\`) — about ${left} min left. Nothing ` +
+    `is denied on this turn: every tool still works and nothing is being wound up for you.\n\n` +
+    `At the ceiling this run is CUT OFF where it stands — the session is aborted and deleted, ` +
+    `and the orchestrator inherits only what can be read off it at that moment. The clock is ` +
+    `wall clock over the whole run and NOTHING you do renews it: not a further tool call, not ` +
+    `a wait, not a message.\n\n` +
+    `You have two moves, and both beat being cut off:\n` +
+    `1. Hand back NOW — a plain-text message beginning "Blocked:" that names exactly what you ` +
+    `are waiting for and what you already have. The orchestrator can re-dispatch you the moment ` +
+    `that thing exists, and nothing you did is lost.\n` +
+    `2. Ask — \`ask(...)\` your caller whether to keep waiting. One answer decides it, and you ` +
+    `go on with a decision instead of a guess.\n\n` +
+    `If the work is genuinely moving, carry on: this is the ceiling being announced, not a ` +
+    `demand that you stop.\n---\n`
+  )
+}
+
 // The guide blocks one agent is given, in the order they are injected. One
 // assembly for three call sites — the auto-assembled system prompt, the
 // `{{guide}}` placeholder of a user's prompt file, and the spawn-size overhead

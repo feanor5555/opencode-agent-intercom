@@ -668,6 +668,13 @@ export function retainEntryLocked(sessionID, now = Date.now()) {
 //     stranding the answer and holding the concurrency slot for good;
 //   - `lastActivityAt` to now, so the run is measured from the reuse and the
 //     first watchdog tick after admission cannot reap it on run 1's silence;
+//   - `runStartedAt` to now and `runWarnings` back to 0, for the same reason
+//     with the longer clock: the run ceiling (`maxSubagentRunMs`) bounds one
+//     RUN, and a follow-up prompt is a new task rather than a continuation of
+//     the one that already ended. Left standing, run 1's stamp would have run 2
+//     reaped on time run 1 spent — a held session that was reused an hour after
+//     it answered would be cut off on its first tick — and run 2 would be
+//     counted as already warned;
 //   - `toolCalls` replaced by an empty map, for the same reason with the
 //     stronger consequence: run 1 ended, so nothing it started is still in
 //     flight, and a leftover call would put run 2 on the working window from
@@ -711,6 +718,8 @@ export function reviveRetainedEntryLocked(
     ctxTokens: entry.ctxTokens,
     lastTokensFetchAt: entry.lastTokensFetchAt,
     lastActivityAt: entry.lastActivityAt,
+    runStartedAt: entry.runStartedAt,
+    runWarnings: entry.runWarnings,
     toolCalls: entry.toolCalls,
     status: entry.status,
     messagesIn: entry.messagesIn,
@@ -724,6 +733,8 @@ export function reviveRetainedEntryLocked(
   entry.errored = false
   entry.timedOut = false
   entry.lastActivityAt = now
+  entry.runStartedAt = now
+  entry.runWarnings = 0
   entry.toolCalls = new Map()
   entry.retainedAt = undefined
   entry.messagesIn = []
@@ -763,6 +774,10 @@ export function restoreRetainedEntryLocked(sessionID, previous) {
   entry.ctxTokens = previous.ctxTokens
   entry.lastTokensFetchAt = previous.lastTokensFetchAt
   entry.lastActivityAt = previous.lastActivityAt
+  // The run clock goes back with them: no run started, so the run the ceiling
+  // would be measured against is still run 1's, which has already ended.
+  entry.runStartedAt = previous.runStartedAt
+  entry.runWarnings = previous.runWarnings
   if (previous.toolCalls) entry.toolCalls = previous.toolCalls
   entry.status = previous.status
   // The mid-run counters go back with the rest: no run started, so run 1's
@@ -2083,6 +2098,20 @@ function createEntry(
     // here and nowhere else, so every registry entry is "running".
     lifecycle: LIFECYCLE_RUNNING,
     spawnedAt: now,
+    // When the RUN in hand started. Seeded here and re-seeded by every accepted
+    // reuse (reviveRetainedEntryLocked), so it is the one clock on this entry
+    // that nothing the subagent does can push out: the working window restarts
+    // with every tool call it starts and the silence window with every event it
+    // emits, while this stamp stands still for the whole run. It is what the
+    // run ceiling is measured against (`maxSubagentRunMs`, watchdogLimit in
+    // watchdog.js) and what the wrap-up band counts from (runCeilingNotice,
+    // hooks.js).
+    //
+    // Deliberately NOT `spawnedAt`, which is set once and never moved, so the
+    // age column keeps telling the truth about how long the session has
+    // existed. A reuse is a new task and gets a new run clock, exactly as
+    // `lastActivityAt`, `toolCalls` and the mid-run counters are reset there.
+    runStartedAt: now,
     // Wall-clock ms of the most recent lifecycle event observed for this
     // subagent (session.created / .status / .idle / any). Initialized at
     // spawnedAt; bumped on every event by the event handler. Read by the
@@ -2129,6 +2158,12 @@ function createEntry(
     // the tool lockdown and is what the denial-loop notice to the parent
     // reads. For logs only; nothing escalates on it.
     contextWarnings: 0,
+    // Number of LLM turns on which the run-ceiling WRAP-UP band was injected —
+    // the turns this run spent past RUN_WRAP_UP of its run ceiling, told how
+    // much of the ceiling is left and what its two moves are while nothing was
+    // denied to it. Per RUN, not per session: reset by every reuse, like the
+    // run clock it is counted against. For logs only; nothing escalates on it.
+    runWarnings: 0,
     // Latch: true after notifyParentOfDenialLoop has fired for this subagent
     // so the parent isn't spammed every subsequent over-budget turn.
     notifiedParentOfLoop: false,

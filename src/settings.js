@@ -165,6 +165,53 @@ const DEFAULT_MAX_SUBAGENT_AGE_MS = 90000
 // The child-waiter's rescue ceiling is 4 × the wider of the silence and this
 // window; either window at 0 lifts that ceiling entirely — see childwait.js.
 const DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS = 660000
+// The ceiling on one subagent RUN, wall-clock, counted from the moment the run
+// started (`entry.runStartedAt`) and from nothing the subagent does afterwards.
+// 0 means no run ceiling for that type.
+//
+// It is the third watchdog window and the only one the subagent cannot renew.
+// The other two are per-CALL and per-SILENCE: the working window is counted
+// from the start of the oldest call in flight, so a subagent making back-to-back
+// short calls restarts it at every call, and the silence window never fires on
+// one that is emitting parts the whole time. A subagent polling for a file in
+// repeated short `bash` waits therefore clears both forever, holding a
+// concurrency slot, its parent's blocked `spawn` call and an endless cycle's
+// quiesce open with it.
+//
+// 2 640 000 ms (44 minutes) is the default, derived and not guessed:
+//   - it must clear the widest stretch the rest of the plugin already calls
+//     healthy — four maximal opencode `bash` calls in a row, a fetch, a build,
+//     a test suite and a second build, is ordinary work, and one such call is
+//     already 600 000 ms with the working window at 660 000;
+//   - it is the project's own figure for how long a healthy subagent may
+//     plausibly live: CHILD_WAITER_TIMEOUT_FACTOR = 4 over the working window
+//     (childwait.js), 4 × 660 000. The child-waiter's ceiling is the moment the
+//     PARENT stops believing in the child, so the child's own ceiling at the
+//     same number makes the two agree by construction — the reap settles the
+//     waiter with a real outcome instead of re-arming forever;
+//   - it stays well under the orphan sweep's age bound
+//     (ORPHAN_SWEEP_WATCHDOG_FACTOR × max(windows) = 5 280 000, teardown.js),
+//     so no live subagent falls into another instance's kill range. A run
+//     ceiling only ever makes lives shorter, so that sweep's premise is
+//     strengthened and it needs no change.
+//
+// It is deliberately NOT derived from either of the other two windows: a
+// lifetime tied to a per-call number moves whenever a user raises that number
+// to admit one long build, and a derived value could not be switched off on its
+// own. Wide on purpose — a backstop against unboundedness, not a schedule.
+// Whoever wants a schedule sets `agentRunMs` per role.
+const DEFAULT_MAX_SUBAGENT_RUN_MS = 2640000
+// The share of the run ceiling at which the subagent is told the ceiling is
+// coming: the wrap-up band of the run clock (runCeilingNotice, src/hooks.js).
+// Nothing is denied there — the plugin cannot tell a long wait that is about to
+// pay off from one that never will, so it must not punish, only announce.
+//
+// 0.75 because at the defaults it leaves 660 000 ms — exactly one working
+// window — for the handover, the same guarantee the context reserve band gives
+// on the token axis: room to write while the tools still work. The guarantee is
+// a property of the default rather than of this constant; a user who raises
+// `maxSubagentToolCallMs` past a quarter of the run ceiling loses it.
+export const RUN_WRAP_UP = 0.75
 // How many finished subagents may be held as retained sessions in this
 // process at once. A retained subagent has delivered its result and had its
 // wake posted, but its opencode session was NOT deleted, so it stays
@@ -427,7 +474,11 @@ function envStr(name, def) {
 // maxSubagentAgeMs is the watchdog window for a subagent with nothing in
 // flight; 0 disables the watchdog. maxSubagentToolCallMs is the same
 // watchdog's window for one that is inside a tool call; 0 means no ceiling
-// while it works.
+// while it works. maxSubagentRunMs is that watchdog's third window, the
+// wall-clock ceiling on one RUN whatever the subagent is doing, and agentRunMs
+// is the per-agent map over it exactly as the file holds it (empty when the
+// file names none) — read both through runCeilingFor rather than directly; 0
+// means no run ceiling.
 // maxPrimaryContext is the orchestrator primary-session context-refresh
 // threshold (tokens); 0 disables auto-handoff. agentContext is the per-agent
 // context budget map exactly as the file holds it (empty when the file names
@@ -484,6 +535,11 @@ export function getSettings() {
       "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS",
       DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS,
     ),
+    maxSubagentRunMs: envNum(
+      "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_RUN_MS",
+      DEFAULT_MAX_SUBAGENT_RUN_MS,
+    ),
+    agentRunMs: {},
     maxRetainedSubagents: envNum(
       "OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS",
       DEFAULT_MAX_RETAINED_SUBAGENTS,
@@ -554,6 +610,22 @@ export function getSettings() {
     }
     if (Number.isInteger(raw?.maxSubagentToolCallMs) && raw.maxSubagentToolCallMs >= 0) {
       resolved.maxSubagentToolCallMs = raw.maxSubagentToolCallMs
+    }
+    if (Number.isInteger(raw?.maxSubagentRunMs) && raw.maxSubagentRunMs >= 0) {
+      resolved.maxSubagentRunMs = raw.maxSubagentRunMs
+    }
+    // Per-agent run ceilings, read with exactly the discipline agentContext,
+    // reuseContext and resultTokens are read with: a key survives only as a
+    // whole non-negative integer, one garbage entry costs the user that entry
+    // and not the map, and a value that is not a plain object leaves the map
+    // empty so every type falls through to the flat value. Nothing is
+    // materialised — a type absent from the file stays absent.
+    if (raw?.agentRunMs && typeof raw.agentRunMs === "object" && !Array.isArray(raw.agentRunMs)) {
+      const perAgent = {}
+      for (const [name, value] of Object.entries(raw.agentRunMs)) {
+        if (name !== "" && Number.isInteger(value) && value >= 0) perAgent[name] = value
+      }
+      resolved.agentRunMs = perAgent
     }
     if (Number.isInteger(raw?.maxRetainedSubagents) && raw.maxRetainedSubagents >= 0) {
       resolved.maxRetainedSubagents = raw.maxRetainedSubagents
@@ -834,6 +906,50 @@ export function workingWindowMs(settings = getSettings()) {
   return Number.isFinite(settings?.maxSubagentToolCallMs)
     ? settings.maxSubagentToolCallMs
     : settings?.maxSubagentAgeMs
+}
+
+// The run ceiling in effect for one agent type, in ms: how long ONE run of that
+// type may take, wall-clock, before the watchdog cuts it off. Order, the two
+// levels resultCeilingFor and compactionEnabledFor have:
+//   1. the type's own `agentRunMs` entry from the file,
+//   2. the flat `maxSubagentRunMs` — file, else the env var
+//      OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_RUN_MS, else
+//      DEFAULT_MAX_SUBAGENT_RUN_MS.
+//
+// `0` is a real value at both levels and means NO run ceiling for that type —
+// the `0` of the two windows next to it, not reuseCeilingFor's. A plausible
+// lifetime is a property of the ROLE, which is what the map is for: a
+// `researcher` still running after half an hour is a different fact from a
+// `coder` that is.
+//
+// Takes the settings object the way workingWindowMs does, and for the same
+// reason: two callers have to agree on the number — the sweep, which reaps on
+// it (watchdogLimit, src/watchdog.js), and the wrap-up band, which announces it
+// (runCeilingNotice, src/hooks.js) — and the sweep already holds one resolved
+// settings object for the whole tick.
+//
+// A settings object carrying no run ceiling at all is read as "no run ceiling",
+// unlike workingWindowMs's reading of an absent tool-call window: a run ceiling
+// is the newest of the three windows, nothing else stands behind it to fall
+// back to, and a hand-built settings object naming only the two older windows
+// means exactly the two windows it names.
+//
+// Resolved per call, never cached on a registry entry, for the reason
+// contextBudgetFor states: a freshly spawned subagent is tracked under a
+// provisional type name until the spawn tool upgrades it.
+export function runCeilingFor(agent, settings = getSettings()) {
+  const perAgent = settings?.agentRunMs
+  if (perAgent && Object.hasOwn(perAgent, agent)) return perAgent[agent]
+  const flat = settings?.maxSubagentRunMs
+  return Number.isFinite(flat) ? flat : 0
+}
+
+// When the wrap-up band starts for one agent type, as ms of elapsed run —
+// RUN_WRAP_UP of that type's run ceiling. 0 where the type has no ceiling, so
+// a caller can treat "no band" and "no ceiling" as the one condition they are.
+export function runWrapUpAt(agent, settings = getSettings()) {
+  const ceiling = runCeilingFor(agent, settings)
+  return ceiling > 0 ? ceiling * RUN_WRAP_UP : 0
 }
 
 // Whether this process offers retention at all, decided at the first read and

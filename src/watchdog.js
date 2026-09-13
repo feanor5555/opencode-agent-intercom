@@ -30,7 +30,7 @@
 // See watchdogLimit.
 
 import { registry, aborted } from "./state.js"
-import { getSettings, retentionCapacity, workingWindowMs } from "./settings.js"
+import { getSettings, retentionCapacity, runCeilingFor, workingWindowMs } from "./settings.js"
 import { abortSession, fetchSnapshot } from "./client.js"
 import {
   countRetainedSubagents,
@@ -86,8 +86,10 @@ export function ensureWatchdogStarted(client) {
 // Sweeps the registry once. Two clocks run on this one tick, one per
 // lifecycle, and they never meet:
 //
-//   running  — times out any subagent whose last event is older than the
-//              configured inactivity window (`maxSubagentAgeMs`).
+//   running  — times out any subagent past the window it is measured against
+//              right now (watchdogLimit): the run ceiling on the run's own wall
+//              clock, the working window on a call in flight, or the inactivity
+//              window (`maxSubagentAgeMs`) on its last event.
 //   retained — reaps any finished subagent whose retention window
 //              (`retainedSubagentTtlMs`, measured from `retainedAt`) is up.
 //   closing  — skipped; a teardown is already in flight.
@@ -167,8 +169,25 @@ export async function sweepWatchdog() {
       // because the child is watchdogged on its own clock, whereas a working
       // subagent has no second clock behind it, and bumping would push its
       // ceiling out on every tick — i.e. never reap it.
-      const limit = watchdogLimit(entry, settings)
+      const limit = watchdogLimit(entry, settings, now)
       if (limit.ms <= 0) continue // this window switched off
+      // The run ceiling defers to a compaction the plugin itself started and is
+      // still inside its own working window: reaping in the middle of the very
+      // relief this subagent was given throws that work away for nothing, and
+      // the compaction is bounded anyway — at most MAX_SUBAGENT_COMPACTIONS of
+      // them, each one capped by the working window. The deferral lapses with
+      // that window, so a compaction that overruns it stops holding the run
+      // ceiling off.
+      //
+      // The deferral needs a window to be bounded by: with the working window
+      // switched off (`maxSubagentToolCallMs: 0`) there is none, so the run
+      // ceiling fires rather than becoming a wait nothing ends. Only
+      // `maxSubagentAgeMs = 0` lifts the run ceiling, and it does so above,
+      // where the whole running branch is skipped.
+      if (limit.kind === "run" && entry.compactingSince) {
+        const compactionMs = workingWindowMs(settings)
+        if (compactionMs > 0 && now - entry.compactingSince <= compactionMs) continue
+      }
       const last = limit.since ?? entry.lastActivityAt ?? entry.spawnedAt
       const silentMs = now - last
       if (silentMs <= limit.ms) continue
@@ -279,7 +298,23 @@ export function isWaitingOnWatchdoggedChild(sessionID) {
 }
 
 // Which window one entry is measured against, what to call it when it fires,
-// and from when it is counted. Three cases, two windows:
+// and from when it is counted. Four cases, three windows:
+//
+//   run        — the RUN's own wall clock is past the run ceiling for this
+//                agent type (`maxSubagentRunMs` / `agentRunMs`, runCeilingFor
+//                in settings.js), counted from `entry.runStartedAt`. Checked
+//                FIRST, and only once it is already exceeded, so the two
+//                windows below keep governing every entry that is still inside
+//                its ceiling and nothing about their behaviour moves.
+//
+//                First because it is the only one of the three the subagent
+//                cannot renew: the working window is counted from the start of
+//                the call in flight right now, so back-to-back short calls
+//                restart it at every call, and the silence window never fires
+//                on a subagent that is emitting parts the whole time. A
+//                subagent polling for a file in short `bash` waits clears both
+//                forever. Were the run checked last, the same polling would
+//                keep it out of reach too.
 //
 //   tool-call  — the subagent has at least one tool call IN FLIGHT
 //                (`entry.toolCalls`, filled by `tool.execute.before` and emptied
@@ -300,10 +335,15 @@ export function isWaitingOnWatchdoggedChild(sessionID) {
 //                built for: `maxSubagentAgeMs`, counted from the last sign of
 //                life.
 //
-// The order of the three: a tool call in flight wins, because it is the case
-// with a `tool` name to report and the compaction latch can only be set on an
-// entry whose crossing found none. A compaction beats silence for the reason
+// The order of the other three: a tool call in flight wins, because it is the
+// case with a `tool` name to report and the compaction latch can only be set on
+// an entry whose crossing found none. A compaction beats silence for the reason
 // the tool call does.
+//
+// An entry carrying no `runStartedAt` — nothing in this process creates one,
+// but a hand-built entry in a test does — is read as having no run clock and
+// falls through to the two older windows. The run case fails open: a reap is
+// the destructive answer, and it is not given on a stamp nobody set.
 //
 // What is deliberately NOT a case: `entry.status === "busy"`. That field is
 // this plugin's own — `createEntry` seeds it on every spawn and
@@ -335,8 +375,18 @@ export function isWaitingOnWatchdoggedChild(sessionID) {
 // (`silentMs <= undefined` is false) and report a NaN limit to the parent. That
 // reading is `workingWindowMs` (src/settings.js), shared with the clamp
 // `askWaitMs` puts on a blocked `ask` so the two cannot drift apart.
-export function watchdogLimit(entry, settings = getSettings()) {
+export function watchdogLimit(entry, settings = getSettings(), now = Date.now()) {
   const toolCallMs = workingWindowMs(settings)
+  const runMs = runCeilingFor(entry?.agent, settings)
+  const runStartedAt = entry?.runStartedAt
+  if (runMs > 0 && Number.isFinite(runStartedAt) && now - runStartedAt > runMs) {
+    return {
+      ms: runMs,
+      setting: "maxSubagentRunMs",
+      kind: "run",
+      since: runStartedAt,
+    }
+  }
   const oldest = oldestToolCall(entry)
   if (oldest) {
     return {
@@ -394,7 +444,10 @@ export async function timeoutSubagent(entry, limit, silentMs) {
   const openQuestion = entry.pendingAsk
   settleAsk(sessionID, {
     status: "timeout",
-    detail: "the subagent was cut off by the inactivity watchdog while its question was open",
+    // Named after the window that actually fired rather than after the
+    // inactivity one: a run-ceiling reap cuts off a subagent that may have been
+    // working the whole time, and the ask it settles is read by that subagent.
+    detail: `the subagent was cut off by the watchdog (${limit.setting}) while its question was open`,
   })
   clearAsk(entry, "timeout")
 
@@ -485,7 +538,13 @@ export async function timeoutSubagent(entry, limit, silentMs) {
       agent,
       result: rescued,
       detail:
-        `no sign of life for ${silentMs} ms (${limit.setting} ${limit.ms} ms)` +
+        // "no sign of life" is false on the run path: that subagent may have
+        // been busy the whole time and was cut off on its ceiling, not on its
+        // silence, and the nested parent this detail settles decides its next
+        // move on the difference.
+        (limit.kind === "run"
+          ? `ran for ${silentMs} ms (${limit.setting} ${limit.ms} ms)`
+          : `no sign of life for ${silentMs} ms (${limit.setting} ${limit.ms} ms)`) +
         (lastSeen ? `; last seen: ${lastSeen}` : ""),
     },
     notice: watchdogClient

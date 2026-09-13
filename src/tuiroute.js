@@ -24,7 +24,8 @@
 // variable of ours is not readable from it in either direction.
 //
 //   ~/.cache/opencode-agent-intercom/tui-route.json
-//   { "<writer pid>": { "sessionID": "ses_x" | null, "at": <epoch ms> } }
+//   { "<writer pid>": { "sessionID": "ses_x" | null, "at": <epoch ms>,
+//                       "server": "pid:4711" | "url:http://127.0.0.1:4788" } }
 //
 // One entry per TUI process, keyed by that process's pid, written by
 // tui/src/route-file.ts whenever the route CHANGES (and never on a timer that
@@ -36,6 +37,37 @@
 // TUI, while the file outlives it, so an entry whose writer is gone is not a
 // route any more and is dropped on read. Several opencode instances share the
 // one file; each owns its own key.
+//
+// `server` is what makes the file safe to ACT on. The pid says only that a
+// writer is alive, not that it is looking at this plugin's sessions: two TUIs
+// on one machine — two attached to one `opencode serve`, or two interactive
+// instances side by side — share the file, and a session id from one server
+// means nothing on the other. Without the field the escape moved ANY live
+// writer whose sample named the dying session, so a panel with nothing to do
+// with the delete was navigated too. So each side names its own server, in the
+// one form both can produce out of what they already hold (`serverIdentity`):
+//
+//   * an `opencode serve` has a listening address, and the panel attached to it
+//     holds that same address as its client's base URL. That is `url:<address>`
+//     and it is unique per server on the machine (one port, one server).
+//   * an interactive `opencode` binds nothing: the server runs IN the TUI's own
+//     process (learnings.md, "PluginInput.serverUrl is a placeholder on an
+//     interactive TUI instance"; the process table shows one `opencode` process
+//     with no child). Its address is the placeholder nothing listens on and
+//     names no server, so the process itself is the identity: `pid:<pid>`,
+//     written by both halves out of `process.pid` and equal because it is one
+//     process.
+//
+// An entry therefore belongs to this server when its `server` equals this
+// plugin's own identity, and equally when the entry's writer IS this process —
+// same process, same server, whatever either side made of its address.
+//
+// An entry that names no server at all — a panel bundle from before this field,
+// still running — is MOVED, as it was before this existed. Dropping it silently
+// would take the escape away from that panel with nothing to show for it, while
+// moving it is the behaviour it was written under; the mixed state lasts until
+// that TUI restarts, and every read that meets one says so in the log
+// (`tui route scope`).
 //
 // The in-process latch is the other half of the reading. A plugin that has
 // just moved the view itself knows something no file sample older than that
@@ -66,6 +98,32 @@ const routeLatch = { sessionID: undefined, at: 0 }
 
 let routeFilePath = ""
 
+// The address this plugin's server listens on, "" where it listens on none.
+// Set from `setServerUrl` (src/client.js), which is the one funnel the plugin's
+// address goes through and which already knows the placeholder address of an
+// in-process server for what it is.
+let serverAddress = ""
+
+// The identity of the server a route entry belongs to, in the one form both
+// halves can produce without asking anybody: the listening address where there
+// is one, and otherwise the process the server runs in. Mirrored verbatim in
+// tui/src/route-file.ts — the two must agree character for character, which
+// test/tui-route-publish.test.js pins.
+export function serverIdentity(address, pid = process.pid) {
+  const normalized = typeof address === "string" ? address.replace(/\/+$/, "") : ""
+  return normalized ? `url:${normalized}` : `pid:${pid}`
+}
+
+// Records the address of the server this plugin runs in. An empty value is an
+// in-process server, and identity falls back to this process.
+export function setTuiRouteServerAddress(address) {
+  serverAddress = typeof address === "string" ? address.replace(/\/+$/, "") : ""
+}
+
+export function ownServerIdentity() {
+  return serverIdentity(serverAddress)
+}
+
 // Where the panel publishes its route. Test seam: `setTuiRouteFilePath` points
 // reads at another file.
 export function tuiRouteFilePath() {
@@ -90,9 +148,10 @@ export function routeWriterAlive(pid) {
 }
 
 // The entries in a parsed file body that are shaped like one and whose writer
-// is still running, as `{ pid, sessionID, at }`. Pure, so the drop rules can be
-// asserted without a filesystem or a process table. `sessionID` is null for a
-// route that names no session.
+// is still running, as `{ pid, sessionID, at, server }`. Pure, so the drop
+// rules can be asserted without a filesystem or a process table. `sessionID` is
+// null for a route that names no session; `server` is null for an entry that
+// names no server — a panel bundle from before that field.
 export function parseTuiRoutes(raw, isAlive = routeWriterAlive) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return []
   const out = []
@@ -103,9 +162,41 @@ export function parseTuiRoutes(raw, isAlive = routeWriterAlive) {
     if (!isAlive(pid)) continue
     const sessionID =
       typeof value.sessionID === "string" && value.sessionID !== "" ? value.sessionID : null
-    out.push({ pid, sessionID, at: Number.isFinite(value.at) ? value.at : 0 })
+    const server = typeof value.server === "string" && value.server !== "" ? value.server : null
+    out.push({ pid, sessionID, at: Number.isFinite(value.at) ? value.at : 0, server })
   }
   return out
+}
+
+// The published entries this plugin's server may act on, split from the ones it
+// may not, as `{ mine, foreign, unscoped }` — `mine` holds the entries the
+// escape reads, `unscoped` the ones inside it that named no server, `foreign`
+// the count that was left alone. Pure over the entries, so the rule can be
+// asserted without a file.
+//
+// Three ways an entry is this server's:
+//   * its writer IS this process. An interactive `opencode` runs the server in
+//     the TUI's process, so this is the whole interactive case and it holds
+//     however either half read its own address.
+//   * it names this server's identity.
+//   * it names no server at all — the pre-field panel, moved as it was before.
+export function routesOnThisServer(entries, self = ownServerIdentity(), pid = process.pid) {
+  const mine = []
+  let foreign = 0
+  let unscoped = 0
+  for (const entry of entries ?? []) {
+    if (entry.server === null || entry.server === undefined) {
+      unscoped += 1
+      mine.push(entry)
+      continue
+    }
+    if (entry.pid === pid || entry.server === self) {
+      mine.push(entry)
+      continue
+    }
+    foreign += 1
+  }
+  return { mine, foreign, unscoped }
 }
 
 // The routes published by TUI processes that are still running. `[]` for a file
@@ -149,7 +240,11 @@ export function tuiSessionGone(sessionID) {
   return goneSessions.has(sessionID)
 }
 
-// Whether a TUI is showing `sessionID` right now.
+// Whether a TUI ON THIS SERVER is showing `sessionID` right now.
+//
+// Another server's panel is not read at all — neither as a reason to move nor
+// as a fresher sample that could outrank the latch — because its route says
+// nothing about a session it cannot even see.
 //
 // A published sample taken at or after this process's own last move is an
 // observation and outranks the latch — it is what the TUI is really on. Where
@@ -159,7 +254,19 @@ export function tuiSessionGone(sessionID) {
 // be showing this session, so nothing is moved.
 export function tuiRouteIsOnSession(sessionID) {
   if (typeof sessionID !== "string" || sessionID === "") return false
-  const fresh = readPublishedTuiRoutes().filter((entry) => entry.at >= routeLatch.at)
+  const { mine, foreign, unscoped } = routesOnThisServer(readPublishedTuiRoutes())
+  // Only when the file held something this decision had to rule on: an entry
+  // another server owns, or one from a panel that names no server.
+  if (foreign > 0 || unscoped > 0) {
+    log("tui route scope", {
+      sessionID,
+      server: ownServerIdentity(),
+      mine: mine.length,
+      foreign,
+      unscoped,
+    })
+  }
+  const fresh = mine.filter((entry) => entry.at >= routeLatch.at)
   if (fresh.length > 0) return fresh.some((entry) => entry.sessionID === sessionID)
   return routeLatch.sessionID === sessionID
 }
@@ -188,10 +295,12 @@ export function logTuiRouteEscape(fields) {
   log("tui route escape before delete", fields)
 }
 
-// Test seam: drop the in-process halves (the latch and the gone set) between
-// runs. The file is not touched — a test that seeded one owns it.
+// Test seam: drop the in-process halves (the latch, the gone set and the
+// server address) between runs. The file is not touched — a test that seeded
+// one owns it.
 export function resetTuiRouteState() {
   goneSessions.clear()
   routeLatch.sessionID = undefined
   routeLatch.at = 0
+  serverAddress = ""
 }

@@ -25,6 +25,7 @@ import {
   logTuiRouteEscape,
   noteTuiRouteSession,
   noteTuiSessionGone,
+  setTuiRouteServerAddress,
   tuiEscapeTarget,
   tuiRouteIsOnSession,
 } from "./tuiroute.js"
@@ -993,6 +994,10 @@ export function setServerUrl(url, client) {
   const next = url ? String(url).replace(/\/+$/, "") : ""
   const changed = next !== serverUrl
   serverUrl = next
+  // The route escape scopes itself to this server, and the placeholder is the
+  // address of no server at all: an instance that reports it runs its server in
+  // the TUI's own process, where the identity is that process (src/tuiroute.js).
+  setTuiRouteServerAddress(next === PLACEHOLDER_SERVER_URL ? "" : next)
   if (serverUrlLogged && !changed) return
   serverUrlLogged = true
   let clientBaseUrl

@@ -37,7 +37,11 @@ import {
   setLlmModel,
 } from "./llm-models-file.ts";
 import { debugLog } from "./debug-log.ts";
-import { publishTuiRoute, routeSessionID } from "./route-file.ts";
+import {
+  publishTuiRoute,
+  routeSessionID,
+  setTuiRouteServerFromClient,
+} from "./route-file.ts";
 import {
   type EndlessPause,
   endlessRowCell,
@@ -1525,6 +1529,13 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
       ],
       bindings: [{ key: "alt+a", cmd: FOCUS_LIST_COMMAND }],
     }) ?? (() => undefined);
+
+  // Which server this panel is attached to, published with every route so the
+  // plugin moves the view only for its OWN server — a second TUI on the machine
+  // is showing sessions this delete knows nothing about. Read off the client
+  // the panel already holds, once: it cannot change while the panel lives.
+  const routeServer = setTuiRouteServerFromClient(api.client);
+  debugLog("tui route server", { server: routeServer });
 
   // The route rides on the elapsed tick as well as on the 30 s file refresh:
   // the plugin reads the published sample at the moment it deletes a session,

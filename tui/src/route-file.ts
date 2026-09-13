@@ -14,7 +14,8 @@
 // So the panel publishes it, the mirror image of ./endless-pause-file.ts:
 //
 //   ~/.cache/opencode-agent-intercom/tui-route.json
-//   { "<this process's pid>": { "sessionID": "ses_x" | null, "at": <epoch ms> } }
+//   { "<this process's pid>": { "sessionID": "ses_x" | null, "at": <epoch ms>,
+//                               "server": "pid:4711" | "url:http://127.0.0.1:4788" } }
 //
 // `sessionID` is null for a route that names no session — the start page, the
 // plugin's own route — because "the user is in no session" has to be a
@@ -24,6 +25,17 @@
 // with the TUI that holds it, while the file outlives it. Several opencode
 // instances share the file, each owning its own key, and every write prunes the
 // keys whose writer is gone.
+//
+// `server` says which server this route belongs to, and it is what keeps a
+// second TUI on the machine out of a delete that has nothing to do with it: a
+// session id from another server names nothing here, so the plugin moves only
+// the writers that are its own. Both halves derive it the same way
+// (`serverIdentity`, mirrored in src/tuiroute.js, character for character):
+// `url:<base url>` where the TUI talks to an `opencode serve` over an address,
+// and `pid:<this process's pid>` where it does not — an interactive `opencode`
+// runs the server IN this process and reports the placeholder address nothing
+// listens on, so the process is the server. Written from `api.client`'s own
+// base URL, which the panel already holds, and never from a request.
 //
 // Written only when the route CHANGES (./tui.tsx: sampleRoute), so the steady
 // state costs nothing at all — one small write per navigation.
@@ -42,9 +54,18 @@ export interface TuiRouteEntry {
   sessionID: string | null;
   // Epoch ms the sample was taken.
   at: number;
+  // The server this route belongs to, or null for an entry that names none —
+  // a panel bundle from before this field.
+  server: string | null;
 }
 
 export type TuiRouteFileBody = Record<string, TuiRouteEntry>;
+
+// The base URL opencode hands a plugin whose server binds no socket at all:
+// an interactive `opencode` runs the server in this very process. It is the
+// address of no server, so it never becomes an identity of its own. The same
+// constant stands in src/client.js as PLACEHOLDER_SERVER_URL.
+export const PLACEHOLDER_SERVER_URL = "http://localhost:4096";
 
 let routePath = join(
   homedir(),
@@ -52,6 +73,11 @@ let routePath = join(
   "opencode-agent-intercom",
   "tui-route.json",
 );
+
+// The server identity published with every route of this process. Empty until
+// `setTuiRouteServerFromClient` has run, and then never empty; `tuiRouteServer`
+// falls back to this process while it is.
+let serverKey = "";
 
 // Test seam: point reads and writes at another file.
 export function setTuiRoutePath(p: string): void {
@@ -70,6 +96,61 @@ export function routeSessionID(route: unknown): string | null {
   if (!r || r.name !== "session") return null;
   const id = r.params?.sessionID;
   return typeof id === "string" && id !== "" ? id : null;
+}
+
+// The identity of the server a route belongs to. `url:<address>` where the TUI
+// talks to a server over one, `pid:<pid>` where it does not — the plugin half
+// derives its own the same way (src/tuiroute.js: serverIdentity), and the two
+// must agree character for character.
+export function serverIdentity(
+  address: string | null | undefined,
+  pid: number = process.pid,
+): string {
+  const normalized = typeof address === "string" ? address.replace(/\/+$/, "") : "";
+  return normalized ? `url:${normalized}` : `pid:${pid}`;
+}
+
+// The base URL an opencode SDK client is configured with, "" where it names no
+// server: no readable transport, or the placeholder of an in-process server.
+// The transport is the client's own — `_client` on a root-style client,
+// `client` on a v2 one — and reading its config asks nobody anything.
+export function clientServerAddress(client: unknown): string {
+  const candidates = [
+    (client as { _client?: { getConfig?: () => { baseUrl?: unknown } } } | undefined)?._client,
+    (client as { client?: { getConfig?: () => { baseUrl?: unknown } } } | undefined)?.client,
+  ];
+  for (const candidate of candidates) {
+    let baseUrl: unknown;
+    try {
+      baseUrl = candidate?.getConfig?.()?.baseUrl;
+    } catch {
+      // a client shape without a readable config names no server
+      continue;
+    }
+    if (typeof baseUrl !== "string" || baseUrl === "") continue;
+    const normalized = baseUrl.replace(/\/+$/, "");
+    if (normalized === PLACEHOLDER_SERVER_URL) return "";
+    return normalized;
+  }
+  return "";
+}
+
+// Records which server this panel is attached to, read off the client the panel
+// already holds. Called once at mount (./tui.tsx); until it has, a published
+// route names this process, which is the right answer for every TUI whose
+// server runs inside it.
+export function setTuiRouteServerFromClient(client: unknown): string {
+  serverKey = serverIdentity(clientServerAddress(client));
+  return serverKey;
+}
+
+// Test seam: set the published identity directly.
+export function setTuiRouteServer(identity: string): void {
+  serverKey = typeof identity === "string" ? identity : "";
+}
+
+export function tuiRouteServer(pid: number = process.pid): string {
+  return serverKey || serverIdentity("", pid);
 }
 
 // Whether the process that wrote an entry is still running. `kill(pid, 0)`
@@ -101,13 +182,18 @@ export function pruneTuiRoutes(
     if (!Number.isInteger(pid) || pid <= 0 || pid === self) continue;
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     if (!isAlive(pid)) continue;
-    const entry = value as { sessionID?: unknown; at?: unknown };
+    const entry = value as { sessionID?: unknown; at?: unknown; server?: unknown };
     out[key] = {
       sessionID:
         typeof entry.sessionID === "string" && entry.sessionID !== ""
           ? entry.sessionID
           : null,
       at: typeof entry.at === "number" && Number.isFinite(entry.at) ? entry.at : 0,
+      // Another writer's server is carried through untouched: this process
+      // rewrites the whole file and must not strip what it does not own, nor
+      // invent one for an entry that named none.
+      server:
+        typeof entry.server === "string" && entry.server !== "" ? entry.server : null,
     };
   }
   return out;
@@ -133,7 +219,7 @@ export function publishTuiRoute(
   pid: number = process.pid,
 ): boolean {
   const body = pruneTuiRoutes(readRoutes(), pid);
-  body[String(pid)] = { sessionID, at: now };
+  body[String(pid)] = { sessionID, at: now, server: tuiRouteServer(pid) };
   const tmp = `${routePath}.${pid}.tmp`;
   try {
     mkdirSync(join(routePath, ".."), { recursive: true, mode: 0o700 });

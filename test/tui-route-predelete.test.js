@@ -34,14 +34,18 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
-import { deleteSession } from "../src/client.js"
+import { PLACEHOLDER_SERVER_URL, deleteSession, setServerUrl } from "../src/client.js"
 import {
   noteTuiRouteSession,
   noteTuiSessionGone,
+  ownServerIdentity,
   parseTuiRoutes,
   readPublishedTuiRoutes,
   resetTuiRouteState,
+  routesOnThisServer,
+  serverIdentity,
   setTuiRouteFilePath,
+  setTuiRouteServerAddress,
   tuiEscapeTarget,
   tuiRouteIsOnSession,
 } from "../src/tuiroute.js"
@@ -53,6 +57,7 @@ setTuiRouteFilePath(ROUTE_FILE)
 const CHILD = "ses_child"
 const PARENT = "ses_parent"
 const ROOT = "ses_orchestrator"
+const OTHER_SESSION = "ses_other_server"
 
 // A pid that is certainly gone: a child that has already exited. Asked for
 // once — pids are not recycled inside one test run.
@@ -62,11 +67,27 @@ const deadPid = (() => {
   return run.pid
 })()
 
+// The identity a panel in this very process publishes: the interactive case,
+// where opencode runs the server inside the TUI's own process.
+const SELF = serverIdentity("", process.pid)
+
 // Publish a route as the panel would, under this live process's own pid.
-function publishRoute(sessionID, at = Date.now()) {
+function publishRoute(sessionID, at = Date.now(), server = SELF) {
   writeFileSync(
     ROUTE_FILE,
-    JSON.stringify({ [String(process.pid)]: { sessionID, at } }, null, 2) + "\n",
+    JSON.stringify({ [String(process.pid)]: { sessionID, at, server } }, null, 2) + "\n",
+  )
+}
+
+// Publish a route as a panel of ANOTHER server would: a live writer that is
+// not this process — this test's parent stands in for it, because a dead
+// writer's entry is dropped before its server is ever looked at.
+const FOREIGN_SERVER = "url:http://127.0.0.1:4788"
+
+function publishForeignRoute(sessionID, at = Date.now(), server = FOREIGN_SERVER) {
+  writeFileSync(
+    ROUTE_FILE,
+    JSON.stringify({ [String(process.ppid)]: { sessionID, at, server } }, null, 2) + "\n",
   )
 }
 
@@ -106,10 +127,19 @@ test.beforeEach(() => {
 
 test("a published route is read back, and a dead writer's is not", () => {
   const live = parseTuiRoutes({
-    [String(process.pid)]: { sessionID: CHILD, at: 5 },
-    [String(deadPid)]: { sessionID: PARENT, at: 9 },
+    [String(process.pid)]: { sessionID: CHILD, at: 5, server: SELF },
+    [String(deadPid)]: { sessionID: PARENT, at: 9, server: SELF },
   })
-  assert.deepEqual(live, [{ pid: process.pid, sessionID: CHILD, at: 5 }])
+  assert.deepEqual(live, [{ pid: process.pid, sessionID: CHILD, at: 5, server: SELF }])
+})
+
+test("an entry that names no server is read as naming none, not as this one's", () => {
+  const [entry] = parseTuiRoutes({ [String(process.pid)]: { sessionID: CHILD, at: 5 } })
+  assert.equal(entry.server, null)
+  const [empty] = parseTuiRoutes({
+    [String(process.pid)]: { sessionID: CHILD, at: 5, server: "" },
+  })
+  assert.equal(empty.server, null)
 })
 
 test("a route naming no session is published as null, not as an absence", () => {
@@ -179,6 +209,102 @@ test("a delete with no parent named still deletes, and moves nobody with no targ
   const client = fakeClient()
   assert.equal(await deleteSession(client, CHILD), true)
   assert.deepEqual(client.calls, [["delete", CHILD]])
+})
+
+// ------------------------------------- and only on this plugin's own server
+
+test("this server's own identity is its address, or its process where it has none", () => {
+  // An interactive `opencode` binds nothing and is handed the placeholder, an
+  // address no server listens on; the server then runs in this very process and
+  // that process is the identity. `opencode serve` reports its real address.
+  setTuiRouteServerAddress("")
+  assert.equal(ownServerIdentity(), SELF)
+  setTuiRouteServerAddress("http://127.0.0.1:4788/")
+  assert.equal(ownServerIdentity(), FOREIGN_SERVER, "the trailing slash is not an identity")
+  setServerUrl(PLACEHOLDER_SERVER_URL)
+  assert.equal(ownServerIdentity(), SELF, "the address of no server names no server")
+  setServerUrl("http://127.0.0.1:4788")
+  assert.equal(ownServerIdentity(), FOREIGN_SERVER, "and the real one is carried through")
+  setServerUrl("")
+})
+
+test("an entry is this server's by its writer, by its identity, or by naming none", () => {
+  const entries = [
+    { pid: process.pid, sessionID: CHILD, at: 1, server: "url:http://127.0.0.1:9999" },
+    { pid: process.ppid, sessionID: PARENT, at: 1, server: SELF },
+    { pid: process.ppid, sessionID: ROOT, at: 1, server: null },
+    { pid: process.ppid, sessionID: OTHER_SESSION, at: 1, server: FOREIGN_SERVER },
+  ]
+  const { mine, foreign, unscoped } = routesOnThisServer(entries, SELF, process.pid)
+  assert.deepEqual(
+    mine.map((entry) => entry.sessionID),
+    [CHILD, PARENT, ROOT],
+    "this process's own write, this server's identity, and the panel that names none",
+  )
+  assert.equal(foreign, 1)
+  assert.equal(unscoped, 1)
+})
+
+test("a panel on another server is not moved, however fresh its sample", async () => {
+  // The defect: the file is keyed by pid alone, so any live writer whose sample
+  // named the dying session was navigated — a second TUI on the machine, with
+  // nothing to do with this delete.
+  setServerUrl(PLACEHOLDER_SERVER_URL)
+  publishForeignRoute(CHILD, Date.now())
+  assert.equal(tuiRouteIsOnSession(CHILD), false)
+  const client = fakeClient()
+  assert.equal(await deleteSession(client, CHILD, { parentID: PARENT, fallbackID: ROOT }), true)
+  assert.deepEqual(client.calls, [["delete", CHILD]])
+  setServerUrl("")
+})
+
+test("a panel on this server is moved, over an address as over a process", async () => {
+  setServerUrl("http://127.0.0.1:4788")
+  publishForeignRoute(CHILD, Date.now())
+  const client = fakeClient()
+  await deleteSession(client, CHILD, { parentID: PARENT })
+  assert.deepEqual(client.calls, [
+    ["select", PARENT],
+    ["delete", CHILD],
+  ])
+  setServerUrl("")
+})
+
+test("another server's panel cannot outrank this process's own move either", async () => {
+  // The freshness rule reads the youngest sample; a foreign one must not even
+  // enter that comparison, or it would silence the latch a cascade stands on.
+  setServerUrl(PLACEHOLDER_SERVER_URL)
+  noteTuiRouteSession(PARENT, 1000)
+  publishForeignRoute(ROOT, 2000)
+  assert.equal(tuiRouteIsOnSession(PARENT), true, "the latch still answers")
+  assert.equal(tuiRouteIsOnSession(ROOT), false)
+  const client = fakeClient()
+  await deleteSession(client, PARENT, { parentID: ROOT })
+  assert.deepEqual(client.calls, [
+    ["select", ROOT],
+    ["delete", PARENT],
+  ])
+  setServerUrl("")
+})
+
+test("a panel that names no server is still moved, as it was before the field", async () => {
+  // A TUI bundle from before `server`, still running. Leaving it alone would
+  // take its escape away with nothing to show for it; the mixed state ends with
+  // that TUI's next restart.
+  setServerUrl(PLACEHOLDER_SERVER_URL)
+  writeFileSync(
+    ROUTE_FILE,
+    JSON.stringify({ [String(process.ppid)]: { sessionID: CHILD, at: Date.now() } }, null, 2) +
+      "\n",
+  )
+  assert.equal(tuiRouteIsOnSession(CHILD), true)
+  const client = fakeClient()
+  await deleteSession(client, CHILD, { parentID: PARENT })
+  assert.deepEqual(client.calls, [
+    ["select", PARENT],
+    ["delete", CHILD],
+  ])
+  setServerUrl("")
 })
 
 // ------------------------------------------------- where the view lands

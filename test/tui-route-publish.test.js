@@ -31,13 +31,21 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import {
+  PLACEHOLDER_SERVER_URL,
+  clientServerAddress,
   pruneTuiRoutes,
   publishTuiRoute,
   routeSessionID,
   routeWriterAlive,
+  serverIdentity,
   setTuiRoutePath,
+  setTuiRouteServer,
+  setTuiRouteServerFromClient,
   tuiRouteFilePath,
+  tuiRouteServer,
 } from "../tui/src/route-file.ts"
+import { PLACEHOLDER_SERVER_URL as PLUGIN_PLACEHOLDER } from "../src/client.js"
+import { serverIdentity as pluginServerIdentity } from "../src/tuiroute.js"
 
 const DIR = mkdtempSync(join(tmpdir(), "intercom-routefile-"))
 const ROUTE_FILE = join(DIR, "tui-route.json")
@@ -56,8 +64,11 @@ function body() {
   return JSON.parse(readFileSync(ROUTE_FILE, "utf8"))
 }
 
+const SELF = serverIdentity("", process.pid)
+
 test.beforeEach(() => {
   writeFileSync(ROUTE_FILE, "{}\n")
+  setTuiRouteServer("")
 })
 
 // ------------------------------------------------- what a route says
@@ -82,7 +93,7 @@ test("a live writer's route is kept, a dead one's is dropped, and junk with it",
     deadPid + 1000000,
   )
   assert.deepEqual(Object.keys(kept), [String(process.pid)])
-  assert.deepEqual(kept[String(process.pid)], { sessionID: CHILD, at: 5 })
+  assert.deepEqual(kept[String(process.pid)], { sessionID: CHILD, at: 5, server: null })
 })
 
 test("this process's own key is dropped before it is written again", () => {
@@ -102,28 +113,40 @@ test("a writer that is gone cannot hold a route", () => {
 
 test("the route is published under this process's pid, with the sample time", () => {
   assert.equal(publishTuiRoute(CHILD, 1234), true)
-  assert.deepEqual(body(), { [String(process.pid)]: { sessionID: CHILD, at: 1234 } })
+  assert.deepEqual(body(), {
+    [String(process.pid)]: { sessionID: CHILD, at: 1234, server: SELF },
+  })
   assert.equal(tuiRouteFilePath(), ROUTE_FILE)
 })
 
 test("a route naming no session is published as null", () => {
   publishTuiRoute(CHILD, 1)
   publishTuiRoute(null, 2)
-  assert.deepEqual(body(), { [String(process.pid)]: { sessionID: null, at: 2 } })
+  assert.deepEqual(body(), {
+    [String(process.pid)]: { sessionID: null, at: 2, server: SELF },
+  })
 })
 
 test("another live instance's entry survives this one's write", () => {
   writeFileSync(
     ROUTE_FILE,
     JSON.stringify({
-      [String(process.ppid)]: { sessionID: OTHER, at: 7 },
+      [String(process.ppid)]: {
+        sessionID: OTHER,
+        at: 7,
+        server: "url:http://127.0.0.1:4788",
+      },
       [String(deadPid)]: { sessionID: OTHER, at: 7 },
     }) + "\n",
   )
   publishTuiRoute(CHILD, 8)
   const written = body()
-  assert.deepEqual(written[String(process.ppid)], { sessionID: OTHER, at: 7 })
-  assert.deepEqual(written[String(process.pid)], { sessionID: CHILD, at: 8 })
+  assert.deepEqual(written[String(process.ppid)], {
+    sessionID: OTHER,
+    at: 7,
+    server: "url:http://127.0.0.1:4788",
+  })
+  assert.deepEqual(written[String(process.pid)], { sessionID: CHILD, at: 8, server: SELF })
   assert.equal(
     Object.prototype.hasOwnProperty.call(written, String(deadPid)),
     false,
@@ -134,7 +157,9 @@ test("another live instance's entry survives this one's write", () => {
 test("a file nobody can parse is replaced rather than propagated", () => {
   writeFileSync(ROUTE_FILE, "{ not json")
   assert.equal(publishTuiRoute(CHILD, 3), true)
-  assert.deepEqual(body(), { [String(process.pid)]: { sessionID: CHILD, at: 3 } })
+  assert.deepEqual(body(), {
+    [String(process.pid)]: { sessionID: CHILD, at: 3, server: SELF },
+  })
 })
 
 test("the write is atomic and leaves no temp file behind", () => {
@@ -144,6 +169,107 @@ test("the write is atomic and leaves no temp file behind", () => {
     [],
   )
   assert.equal(existsSync(ROUTE_FILE), true)
+})
+
+// ------------------------------------------------- which server it is
+
+// A client double shaped like the SDK's: the transport carries the base URL,
+// and reading its config asks nobody anything.
+function clientAt(baseUrl, key = "_client") {
+  return { [key]: { getConfig: () => ({ baseUrl }) } }
+}
+
+test("a TUI talking to a server over an address is that address", () => {
+  assert.equal(serverIdentity("http://127.0.0.1:4788"), "url:http://127.0.0.1:4788")
+  assert.equal(serverIdentity("http://127.0.0.1:4788/"), "url:http://127.0.0.1:4788")
+})
+
+test("a TUI whose server binds nothing is its own process", () => {
+  // The interactive case: opencode runs the server IN this process and reports
+  // the placeholder, an address nothing listens on. Both halves then name the
+  // process, and they name the same one because it is one process.
+  assert.equal(serverIdentity(""), `pid:${process.pid}`)
+  assert.equal(serverIdentity(undefined, 4711), "pid:4711")
+  assert.equal(clientServerAddress(clientAt(PLACEHOLDER_SERVER_URL)), "")
+  assert.equal(setTuiRouteServerFromClient(clientAt(PLACEHOLDER_SERVER_URL)), `pid:${process.pid}`)
+})
+
+test("the address comes off the client the panel already holds, in either shape", () => {
+  assert.equal(clientServerAddress(clientAt("http://127.0.0.1:4788")), "http://127.0.0.1:4788")
+  assert.equal(
+    clientServerAddress(clientAt("http://127.0.0.1:4788/", "client")),
+    "http://127.0.0.1:4788",
+  )
+  assert.equal(
+    setTuiRouteServerFromClient(clientAt("http://127.0.0.1:4788")),
+    "url:http://127.0.0.1:4788",
+  )
+})
+
+test("a client that names no server leaves the panel on its own process", () => {
+  for (const client of [
+    undefined,
+    {},
+    { _client: {} },
+    { _client: { getConfig: () => ({}) } },
+    {
+      _client: {
+        getConfig: () => {
+          throw new Error("no config")
+        },
+      },
+    },
+  ]) {
+    assert.equal(clientServerAddress(client), "")
+    assert.equal(setTuiRouteServerFromClient(client), `pid:${process.pid}`)
+  }
+})
+
+test("the published server is the one that was read off the client", () => {
+  setTuiRouteServerFromClient(clientAt("http://127.0.0.1:4788"))
+  publishTuiRoute(CHILD, 11)
+  assert.deepEqual(body(), {
+    [String(process.pid)]: {
+      sessionID: CHILD,
+      at: 11,
+      server: "url:http://127.0.0.1:4788",
+    },
+  })
+})
+
+test("a route published before the client was read still names this process", () => {
+  // The mount order can only be panel-first for one write at most, and an
+  // unscoped entry would be moved by every server on the machine.
+  setTuiRouteServer("")
+  assert.equal(tuiRouteServer(), `pid:${process.pid}`)
+  publishTuiRoute(CHILD, 12)
+  assert.equal(body()[String(process.pid)].server, `pid:${process.pid}`)
+})
+
+test("another writer's server survives this panel's write, and none is invented", () => {
+  const kept = pruneTuiRoutes(
+    {
+      [String(process.pid)]: { sessionID: OTHER, at: 1, server: "url:http://127.0.0.1:4788" },
+      [String(process.ppid)]: { sessionID: OTHER, at: 1 },
+    },
+    deadPid + 1000000,
+  )
+  assert.equal(kept[String(process.pid)].server, "url:http://127.0.0.1:4788")
+  assert.equal(kept[String(process.ppid)].server, null, "an entry that named none keeps none")
+})
+
+test("both halves derive the identity the same way, character for character", () => {
+  // The plugin reads what the panel writes; a divergence here is a route
+  // escape that silently never fires.
+  assert.equal(PLACEHOLDER_SERVER_URL, PLUGIN_PLACEHOLDER)
+  for (const [address, pid] of [
+    ["http://127.0.0.1:4788", 4711],
+    ["http://127.0.0.1:4788/", 4711],
+    ["", 4711],
+    [undefined, 4711],
+  ]) {
+    assert.equal(serverIdentity(address, pid), pluginServerIdentity(address, pid))
+  }
 })
 
 // ------------------------------------------------- how the panel is wired
@@ -175,7 +301,10 @@ test("the sample publishes and logs only what changed", () => {
     "an unchanged route costs neither a write nor a log line",
   )
   assert.match(source, /let lastRouteSample: string \| null \| undefined = undefined;/)
-  assert.match(source, /import \{ publishTuiRoute, routeSessionID \} from "\.\/route-file\.ts";/)
+  assert.match(
+    source,
+    /import \{\n  publishTuiRoute,\n  routeSessionID,\n  setTuiRouteServerFromClient,\n\} from "\.\/route-file\.ts";/,
+  )
 })
 
 test("the sample writes one debug line carrying the route it moved to", () => {
@@ -202,4 +331,20 @@ test("the panel publishes the route and navigates on nothing of its own account"
   const sample = bodyOf("const sampleRoute = (): void => {")
   assert.equal(sample.includes("api.route.navigate("), false)
   assert.equal(sample.includes("escapeRoute("), false)
+})
+
+test("the panel reads its server off the client once, at mount, before it publishes", () => {
+  assert.match(
+    source,
+    /const routeServer = setTuiRouteServerFromClient\(api\.client\);/,
+    "the identity comes from the client the panel holds, not from a request",
+  )
+  assert.match(source, /debugLog\("tui route server", \{ server: routeServer \}\);/)
+  const reads = source.match(/setTuiRouteServerFromClient\(/g) ?? []
+  assert.equal(reads.length, 1, "read once: the client cannot change under the panel")
+  assert.ok(
+    source.indexOf("setTuiRouteServerFromClient(api.client)") <
+      source.indexOf("\n  sampleRoute();\n  const tick = setInterval"),
+    "an unscoped route must not reach the file",
+  )
 })

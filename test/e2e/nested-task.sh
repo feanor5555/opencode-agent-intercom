@@ -56,8 +56,10 @@
 #   NESTED_CALLER      coder                  the granted role that delegates
 #   NESTED_WRONG_TARGET planner                what it asks for first and must
 #                      not get — any spawnable type that is not the researcher
-#   NESTED_DENIED_ROLE designer                a role whose permission map still
-#                      denies `spawn`; `grounder` and `gitter` are the others
+#   NESTED_DENIED_ROLE grounder                the role whose permission map
+#                      denies `spawn`. It is the only one — every other subagent
+#                      role may delegate — so this phase has no second value to
+#                      take and a different one would assert nothing
 #   NESTED_MARKER      NESTED-RESEARCH-OK      the exact line the researcher is
 #                      told to reply with. The child's answer is proven to be
 #                      the caller's tool result by finding this literal inside
@@ -109,7 +111,7 @@ MODEL_PROVIDER="$E2E_MODEL_PROVIDER"
 MODEL_ID="$E2E_MODEL_ID"
 CALLER_ROLE=${NESTED_CALLER:-coder}
 WRONG_TARGET=${NESTED_WRONG_TARGET:-planner}
-DENIED_ROLE=${NESTED_DENIED_ROLE:-designer}
+DENIED_ROLE=${NESTED_DENIED_ROLE:-grounder}
 MARKER=${NESTED_MARKER:-NESTED-RESEARCH-OK}
 TURN_TIMEOUT_S=${TURN_TIMEOUT_S:-900}
 STEP_TIMEOUT_S=${STEP_TIMEOUT_S:-420}
@@ -553,8 +555,15 @@ curl -fsS -m 15 "$BASE/agent" > "$OUT_DIR/$PREFIX.agents.json" 2>/dev/null
 GRANT_VERDICT=$(python3 - "$OUT_DIR/$PREFIX.agents.json" <<'PY' 2>/dev/null || printf 'unreadable|GET /agent could not be read'
 import json, sys
 
-DELEGATING = ["planner", "coder", "debugger", "reviewer", "documenter", "researcher"]
-NON_DELEGATING = ["grounder", "designer", "gitter"]
+# The two sides of the grant, as src/agents.js sets it: NO_SPAWN is spread into
+# `grounder` alone, so every other subagent role delegates. Together the two
+# lists are all nine subagent roles, which is what lets the evidence line below
+# call the grounder the ONE non-delegating role.
+DELEGATING = [
+    "planner", "coder", "debugger", "reviewer", "documenter", "researcher",
+    "designer", "gitter",
+]
+NON_DELEGATING = ["grounder"]
 
 try:
     data = json.load(open(sys.argv[1]))
@@ -593,9 +602,9 @@ if wrong:
     print("wrong|" + "; ".join(wrong))
 else:
     print(
-        "ok|no spawn deny rule on "
+        f"ok|no spawn deny rule on any of the {len(DELEGATING)} delegating roles ("
         + ", ".join(DELEGATING)
-        + "; a spawn deny rule on "
+        + "); a spawn deny rule on the one role that may not delegate: "
         + ", ".join(NON_DELEGATING)
     )
 PY
@@ -936,7 +945,7 @@ DENIED_SID=$(new_session "$PREFIX-denied")
 [ -n "$DENIED_SID" ] || die "the server did not return a session id for phase 2"
 echo "$DENIED_SID" > "$OUT_DIR/$PREFIX.denied.sid"
 
-DENIED_TASK="Do exactly one thing and nothing else: call spawn(\"researcher\", \"Reply with exactly this one line: $MARKER\") exactly once. If the call is refused, reply with 'REFUSED: ' followed by the refusal text word for word. If you have no spawn tool available at all, reply with exactly: NO SPAWN TOOL. Do not use any other tool, do not generate anything, do not read or write any file."
+DENIED_TASK="Do exactly one thing and nothing else: call spawn(\"researcher\", \"Reply with exactly this one line: $MARKER\") exactly once. If the call is refused, reply with 'REFUSED: ' followed by the refusal text word for word. If you have no spawn tool available at all, reply with exactly: NO SPAWN TOOL. Do not use any other tool: do not search, do not generate anything, do not read or write any file."
 TURN2="Call spawn(\"$DENIED_ROLE\", \"$DENIED_TASK\") exactly once, passing that prompt through unchanged. That is your entire task. Do not spawn anything else, do not call list(). End your turn as soon as spawn returns."
 
 # Backgrounded and then watched, for the same reason as phase 1: the denied

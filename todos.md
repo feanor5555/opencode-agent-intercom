@@ -10,5 +10,3 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 - The automatically captured session material that was removed from the repository is archived on the house share as `opencode-agent-intercom-captured-session-material-2026-08-31.md`.
 
 ## Pending
-
-- `CLAUDE.md` does not yet describe the run ceiling: the third watchdog window `maxSubagentRunMs` (default 2640000) with the per-type `agentRunMs`, the per-run stamp `entry.runStartedAt` that nothing the subagent does renews (re-seeded on `reuse` but not moved by activity, unlike `lastActivityAt`), and the wrap-up band at three quarters of the ceiling naming the two moves the subagent has (hand back with a `Blocked:` line, or `ask` the caller). `CLAUDE.md` is untracked, so this is an edit to make in place.

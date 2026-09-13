@@ -167,7 +167,11 @@
 #                      cycle by accident
 #   ENDLESS_CYCLES     2                       how many cycles are driven in
 #                      sequence; 2 is the minimum that reaches an accumulated
-#                      file. 1 drives the old single-cycle run
+#                      file. 1 drives a single cycle, whose own work turn still
+#                      carries out T105. The seeded file carries a work-off gate
+#                      for cycles 2 and 3 only, so a value above 3 is refused in
+#                      the preflight: a later cycle's work-off would meet
+#                      nothing it can finish
 #   ENDLESS_PORT       4599                    own port, kept clear of run-all's 4567
 #   ENDLESS_CONTEXT    (empty)                 the armed threshold. Empty — the
 #                      default — derives it per cycle from the primary's measured
@@ -194,12 +198,6 @@
 #                      written into the isolated settings, the only thing that
 #                      frees a subagent stuck inside one long tool call; it is
 #                      what the quiesce above has to be able to wait out
-#   SEED_TODO          1                       1 seeds the project's todo file
-#                      and the fixture directory the seeded tasks work on; 0
-#                      drives whatever file is there. The seeded file carries a
-#                      work-off gate for cycles 2 and 3 only, so SEED_TODO=1
-#                      with ENDLESS_CYCLES above 3 is refused in the preflight:
-#                      a later cycle's work-off would meet nothing it can finish
 #   SPAWN_AGENT        coder                   the in-flight subagent's role
 #   SUBAGENT_SLEEP_S   45                      how long it stays in flight; the
 #                      run is gated on the observed handle, not on this number
@@ -266,7 +264,6 @@ ENDLESS_CONTEXT_MARGIN=${ENDLESS_CONTEXT_MARGIN:-1000}
 SETTINGS_TTL_WAIT_S=${SETTINGS_TTL_WAIT_S:-3}
 ENDLESS_MAX_CYCLES=${ENDLESS_MAX_CYCLES:-$ENDLESS_CYCLES}
 ENDLESS_QUIESCE_TIMEOUT_MS=${ENDLESS_QUIESCE_TIMEOUT_MS:-600000}
-SEED_TODO=${SEED_TODO:-1}
 SPAWN_AGENT=${SPAWN_AGENT:-coder}
 SUBAGENT_SLEEP_S=${SUBAGENT_SLEEP_S:-45}
 MAX_SUBAGENT_TOOL_CALL_MS=${MAX_SUBAGENT_TOOL_CALL_MS:-300000}
@@ -322,7 +319,6 @@ TODO_BAK_NAME=""
 TODO_NAME=""
 TODO_EXISTED=0
 TODO_GUARDED=0
-TODO_SEEDED=0
 FIXTURE_CREATED=0
 FAILURES=0
 ASSERTED=0
@@ -727,7 +723,6 @@ seed_fixture() {
 # the start.
 open_workoff_gate() {
   local k="$1" flag="$PROJECT_DIR/$FIXTURE_NAME/cycle$1.flag"
-  [ "$TODO_SEEDED" = 1 ] || return 0
   [ "$k" -ge 2 ] 2>/dev/null || return 0
   if printf 'open\nopened by test/e2e/endless-task.sh for cycle %s at %s\n' "$k" "$(date -Is)" > "$flag"; then
     say "[$PREFIX] cycle $k work-off gate opened: $flag"
@@ -995,8 +990,8 @@ command -v opencode >/dev/null || die "opencode is not on PATH"
 case "$ENDLESS_CYCLES" in
   '' | *[!0-9]* | 0) die "ENDLESS_CYCLES=$ENDLESS_CYCLES is not a positive whole number" ;;
 esac
-if [ "$SEED_TODO" = 1 ] && [ "$ENDLESS_CYCLES" -gt "$GATE_CYCLES_MAX" ] 2>/dev/null; then
-  die "ENDLESS_CYCLES=$ENDLESS_CYCLES with SEED_TODO=1: the seeded file carries a task a work-off phase can finish for cycles 1..$GATE_CYCLES_MAX only — every task past those is gated on a flag nothing in this run writes, so a later cycle's (e) removal would fail on a file it cannot make progress in. Drive at most $GATE_CYCLES_MAX cycles, or seed a file of your own and run with SEED_TODO=0"
+if [ "$ENDLESS_CYCLES" -gt "$GATE_CYCLES_MAX" ] 2>/dev/null; then
+  die "ENDLESS_CYCLES=$ENDLESS_CYCLES: the seeded file carries a task a work-off phase can finish for cycles 1..$GATE_CYCLES_MAX only — every task past those is gated on a flag nothing in this run writes, so a later cycle's (e) removal would fail on a file it cannot make progress in. Drive at most $GATE_CYCLES_MAX cycles, or widen the seed itself (one more gated task plus its cycle<k>.flag in seed_todo_file and seed_fixture, and GATE_CYCLES_MAX raised to match)"
 fi
 if [ "$ENDLESS_MAX_CYCLES" -lt "$ENDLESS_CYCLES" ] 2>/dev/null; then
   die "ENDLESS_MAX_CYCLES=$ENDLESS_MAX_CYCLES is below ENDLESS_CYCLES=$ENDLESS_CYCLES — the plugin would pause the mode before the last driven cycle and that cycle's criteria would be asserted over a cycle that never started"
@@ -1145,17 +1140,12 @@ TODO_GUARDED=1
 
 # The seed goes into the file the project already uses, under its own name — a
 # second todo file would be a state the plugin refuses.
-if [ "$SEED_TODO" = 1 ]; then
-  seed_todo_file "$PROJECT_DIR/$TODO_NAME" ||
-    die "could not seed $PROJECT_DIR/$TODO_NAME"
-  seed_fixture ||
-    die "could not create the fixture directory $PROJECT_DIR/$FIXTURE_NAME the seeded tasks work on"
-  TODO_SEEDED=1
-  SEED_IDS=$(sed -nE 's/^- (T[0-9]+):.*/\1/p' "$PROJECT_DIR/$TODO_NAME" | tr '\n' ',' | sed 's/,$//')
-  TODO_BASELINE="$TODO_BASELINE — seeded with $SEED_IDS inside the markers"
-else
-  SEED_IDS="(not seeded)"
-fi
+seed_todo_file "$PROJECT_DIR/$TODO_NAME" ||
+  die "could not seed $PROJECT_DIR/$TODO_NAME"
+seed_fixture ||
+  die "could not create the fixture directory $PROJECT_DIR/$FIXTURE_NAME the seeded tasks work on"
+SEED_IDS=$(sed -nE 's/^- (T[0-9]+):.*/\1/p' "$PROJECT_DIR/$TODO_NAME" | tr '\n' ',' | sed 's/,$//')
+TODO_BASELINE="$TODO_BASELINE — seeded with $SEED_IDS inside the markers"
 
 # ---------- server ---------------------------------------------------------
 
@@ -1191,7 +1181,7 @@ settings written    endlessMode=true endlessQuiesceTimeoutMs=$ENDLESS_QUIESCE_TI
 endless ceiling     held at $ENDLESS_CONTEXT_CEILING between cycles, then ${ARMED_CONTEXT:-(armed per cycle after its spawn turn)}   (ENDLESS_CONTEXT=${ENDLESS_CONTEXT:-derive from the measured context}, margin $ENDLESS_CONTEXT_MARGIN, settings-cache wait ${SETTINGS_TTL_WAIT_S}s)
 debug log           $DEBUG_LOG   (read from byte $LOG_OFFSET)
 todo baseline       $TODO_BASELINE   (backup: $TODO_BAK)
-fixture             $PROJECT_DIR/$FIXTURE_NAME   (seeded=$TODO_SEEDED; T101 produces merged.md, which T104's title still calls outstanding; $FIRST_WORK_ID is cycle 1's own work, carried out before its trigger so that cycle has something finished to hand over; T102, T103 and T104 are gated on a flag file seeded shut, and the driver writes open into cycle<k>.flag after cycle k's rewrite is confirmed)
+fixture             $PROJECT_DIR/$FIXTURE_NAME   (seeded with $SEED_IDS; T101 produces merged.md, which T104's title still calls outstanding; $FIRST_WORK_ID is cycle 1's own work, carried out before its trigger so that cycle has something finished to hand over; T102, T103 and T104 are gated on a flag file seeded shut, and the driver writes open into cycle<k>.flag after cycle k's rewrite is confirmed)
 in-flight subagent  spawn("$SPAWN_AGENT", sleep ${SUBAGENT_SLEEP_S}s) -> handle ${SPAWN_HANDLE:-(spawned in the turn 2 of each cycle)}
 timeouts            turn=${TURN_TIMEOUT_S}s step=${STEP_TIMEOUT_S}s quiesce=${QUIESCE_WAIT_S}s work-off=${WORKOFF_TIMEOUT_S}s start=${SERVER_START_TIMEOUT_S}s poll=${POLL_S}s
 out dir             $OUT_DIR
@@ -1380,19 +1370,9 @@ run_cycle() {
     # reports it finished and names what is left open. Without it the cycle
     # winds down having done nothing, the wind-down subagent correctly changes
     # no byte, and V3 then depends on which closing line the primary picks.
-    if [ "$TODO_SEEDED" = 1 ]; then
-      drive_first_cycle_work
-      say "[$PREFIX] $tag turn 1 (work + open points) done $(date +%H:%M:%S)"
-      turn1=""
-    else
-      # SEED_TODO=0: the file is the caller's own and the driver knows no entry
-      # in it to have carried out. The cycle is driven as before and the note
-      # says what that costs.
-      say "[$PREFIX] $tag SEED_TODO=0 — no work is driven before the trigger, so this cycle's wind-down may find nothing to write"
-      printf 'work                cycle %s: none — SEED_TODO=0 leaves the driver no entry it could have carried out, so (c) rewrite depends on the wind-down finding something to change in a file this run did not seed\n' \
-        "$CYCLE" >> "$REPORT_FILE"
-      turn1="Name, one line each, what you would have a subagent do first in this project and what would be left afterwards. Call no tool at all — do not spawn, do not list — and end your turn."
-    fi
+    drive_first_cycle_work
+    say "[$PREFIX] $tag turn 1 (work + open points) done $(date +%H:%M:%S)"
+    turn1=""
   else
     # The staleness the seed arranges is a fact about the file by now; it is
     # recorded here so a failed re-title criterion can say whether the cycle was

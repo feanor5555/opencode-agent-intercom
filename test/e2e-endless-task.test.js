@@ -249,7 +249,34 @@ test("cycle 1's work turn carries out the seeded entry and spawns it untracked",
   rmSync(dir, { recursive: true, force: true })
 })
 
-function runGate({ cycle, seeded = 1 }) {
+// Cycle 1 drives that work turn on every run. The driver seeds the file it
+// drives, so no run reaches cycle 1's trigger with nothing finished: a work
+// turn behind a switch left the wind-down a file no turn of the run had
+// written and put (c) back on the model's choice of closing line.
+test("cycle 1's work turn is unconditional, and the gate ceiling is refused on every run", () => {
+  assert.equal(
+    /SEED_TODO|TODO_SEEDED/.test(DRIVER_SOURCE),
+    false,
+    "the driver still carries a seeding switch, and a run that skips the seed skips the work turn with it",
+  )
+  const start = DRIVER_SOURCE.indexOf('  if [ "$CYCLE" = 1 ]; then')
+  assert.ok(start >= 0, "run_cycle has no cycle-1 branch")
+  const branch = DRIVER_SOURCE.slice(start, DRIVER_SOURCE.indexOf("\n  else\n", start))
+  assert.match(branch, /\n {4}drive_first_cycle_work\n/)
+  assert.equal(
+    / {4}(if|else|elif) /.test(branch),
+    false,
+    "cycle 1's work turn sits behind a branch of its own",
+  )
+  // The seed carries a finishable task for GATE_CYCLES_MAX cycles and there is
+  // no unseeded run left to exempt, so the refusal turns on the count alone.
+  assert.match(
+    DRIVER_SOURCE,
+    /^if \[ "\$ENDLESS_CYCLES" -gt "\$GATE_CYCLES_MAX" \] 2>\/dev\/null; then$/m,
+  )
+})
+
+function runGate({ cycle }) {
   const dir = mkdtempSync(join(tmpdir(), "e2e-endless-gate-"))
   const report = join(dir, "report.txt")
   mkdir(join(dir, "e2e-endless-fixture"))
@@ -257,7 +284,6 @@ function runGate({ cycle, seeded = 1 }) {
 PREFIX=11-endless
 PROJECT_DIR=${shellQuote(dir)}
 FIXTURE_NAME=e2e-endless-fixture
-TODO_SEEDED=${seeded}
 REPORT_FILE=${shellQuote(report)}
 ${driverFunction("open_workoff_gate")}
 open_workoff_gate ${cycle}
@@ -281,10 +307,6 @@ test("the work-off gate opens for a cycle after the first and for no other", () 
   assert.match(opened, /opened by test\/e2e\/endless-task\.sh for cycle 2/)
   assert.match(second.result.stdout, /cycle 2 work-off gate opened/)
   rmSync(second.dir, { recursive: true, force: true })
-
-  const unseeded = runGate({ cycle: 2, seeded: 0 })
-  assert.equal(existsSync(unseeded.flag), false, "an unseeded run drives the file that is there and opens no gate of its own")
-  rmSync(unseeded.dir, { recursive: true, force: true })
 })
 
 // Every gate is a file that is ALREADY THERE and says `closed`. A gate that

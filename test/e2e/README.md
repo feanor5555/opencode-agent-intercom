@@ -300,8 +300,7 @@ byte-identically from the backup, one the driver created is removed.
 
 ```bash
 bash test/e2e/endless-task.sh                       # defaults: 2 cycles, ~15-25 min
-ENDLESS_CYCLES=1 bash test/e2e/endless-task.sh      # the old single-cycle run
-SEED_TODO=0 bash test/e2e/endless-task.sh           # drive the file that is there
+ENDLESS_CYCLES=1 bash test/e2e/endless-task.sh      # a single cycle
 SUBAGENT_SLEEP_S=30 bash test/e2e/endless-task.sh   # shorter flight window
 ENDLESS_CONTEXT=6000 bash test/e2e/endless-task.sh  # a fixed ceiling, verified
 ENDLESS_PROJECT_DIR="$HOME/testopencode" \
@@ -475,9 +474,12 @@ Parameters are env vars with cheap defaults — `ENDLESS_PROJECT_DIR`,
 `ENDLESS_PORT`, `ENDLESS_CONTEXT` (empty, i.e. derived),
 `ENDLESS_CONTEXT_CEILING` (100000000), `ENDLESS_CONTEXT_MARGIN` (1000),
 `SETTINGS_TTL_WAIT_S` (3, past the plugin's 2 000 ms settings cache),
-`ENDLESS_CYCLES` (2), `SEED_TODO` (1 — the seeded file carries a work-off gate
-for cycles 2 and 3 only, so `SEED_TODO=1` with more than 3 cycles is refused in
-the preflight: a later cycle's work-off would meet nothing it can finish),
+`ENDLESS_CYCLES` (2 — the seeded file carries a work-off gate for cycles 2 and
+3 only, so more than 3 cycles is refused in the preflight: a later cycle's
+work-off would meet nothing it can finish. There is no switch that turns the
+seed off: cycle 1's work turn carries out a seeded entry, so a run on a file
+this driver did not write would reach its trigger with nothing finished and
+assert (c) over a file no turn of the run had changed),
 `ENDLESS_MAX_CYCLES` (`$ENDLESS_CYCLES`), `ENDLESS_QUIESCE_TIMEOUT_MS` (600000 —
 a later cycle quiesces over the previous cycle's work-off subagents as well),
 `QUIESCE_WAIT_S` (that bound + 60 s, the driver's own wait for the quiesce

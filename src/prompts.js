@@ -372,6 +372,29 @@ export function replyCapBlock(agent) {
   )
 }
 
+// The same ceiling at the FIRST of the three context bands: the plan-ahead
+// notice at CTX_NEAR_BUDGET, where nothing is denied and nothing is demanded
+// yet (contextLimitNotice, src/hooks.js). Nothing is being wound up here, so
+// the ceiling is stated as the shape the ending will have to take — the detail
+// filed as the work goes on, the reply a summary that names the file — rather
+// than as a demand for a message to write now. `resultCeilingDemand` below is
+// that demand, and it comes at the two later bands.
+//
+// Empty at a ceiling of 0, like replyCapBlock: that type's reply is never cut.
+export function resultCeilingPlan(agent) {
+  const ceiling = resultCeilingFor(agent)
+  if (!(ceiling > 0)) return ""
+  const chars = replyCapChars(ceiling)
+  return (
+    `\n\nYour final reply is CAPPED at ${ceiling} tokens (~${chars} characters): everything ` +
+    `past the cap is cut out of what the orchestrator receives, so a long account reaches it ` +
+    `as an opening paragraph and no conclusion. File the detail under the project AS YOU GO, ` +
+    `while you still have your tools, and plan the reply as a SUMMARY that fits the cap — the ` +
+    `state you reached, what is done, what remains, the decisions taken — naming that file's ` +
+    `absolute path.`
+  )
+}
+
 // The same ceiling, said again at the two moments it is about to be breached:
 // the reserve band, where the subagent is told to wrap up while its tools still
 // work, and the lockdown, where they no longer do (contextLimitNotice,

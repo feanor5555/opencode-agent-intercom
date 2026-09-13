@@ -105,7 +105,7 @@ import { overrideBlock, overrideToastText } from "./overrides.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
 import { log, errMsg } from "./log.js"
-import { ABORT_NOTICE, guideBlocks, resultCeilingDemand } from "./prompts.js"
+import { ABORT_NOTICE, guideBlocks, resultCeilingDemand, resultCeilingPlan } from "./prompts.js"
 import {
   loadCustomPrompt,
   applyCustomPrompt,
@@ -310,10 +310,19 @@ const AGENTS_MD_SUBAGENTS = new Set([
   "reviewer",
 ])
 
-// CTX_TTL_MS (imported from registry.js) caps how often an entry's ctxTokens is
-// re-fetched from the live snapshot on each subagent LLM call — the main
-// hot-path tax. Bypassed once we are close to the budget so the lockdown still
-// triggers promptly.
+// The share of the budget at which the subagent is first told anything about
+// its context at all: the plan-ahead band of contextLimitNotice. It denies
+// nothing and demands no summary — it names the room left, the result ceiling
+// and what the reserve band will demand at CTX_STOP_RESERVE, so the handover is
+// planned with a fifth of the budget still to spend rather than squeezed into
+// the last tenth. Measured live against a subagent whose first word came at the
+// reserve band: it kept working through six crossings of that band and wound
+// down only when the lockdown denied it a tool.
+//
+// Second job, older: CTX_TTL_MS (imported from registry.js) caps how often an
+// entry's ctxTokens is re-fetched from the live snapshot on each subagent LLM
+// call — the main hot-path tax. The cache is bypassed from this share on, so
+// the figure the plan band, the reserve band and the lockdown act on is fresh.
 const CTX_NEAR_BUDGET = 0.7
 
 // The reserve the STOP keeps below the context budget. The tool lockdown in
@@ -950,7 +959,12 @@ function detectAgentFromSystem(output) {
 // fresh as a side effect. Empty string when the budget is disabled, still far
 // off, or the subagent is already aborted.
 //
-// Two bands, split by CTX_STOP_RESERVE:
+// Three bands, split by CTX_NEAR_BUDGET and CTX_STOP_RESERVE:
+//   plan band    — at or over CTX_NEAR_BUDGET of the budget and under
+//     CTX_STOP_RESERVE. The subagent's FIRST word about its own budget.
+//     Nothing is denied and no summary is demanded: it is told the room left,
+//     its result ceiling, that the detail belongs in a file its summary names,
+//     and what the reserve band will demand of it. It may carry on working.
 //   reserve band — at or over CTX_STOP_RESERVE of the budget but still under
 //     it. Tools still work. The subagent is told to write its `Done:` /
 //     `Blocked:` summary NOW, while it has both the tools and the room. This
@@ -970,10 +984,19 @@ function detectAgentFromSystem(output) {
 // Hot path: this runs before EVERY subagent LLM call. The snapshot HTTP fetch
 // dominates cost as the subagent's message history grows, so the result is
 // cached on the entry for CTX_TTL_MS. Once we get within CTX_NEAR_BUDGET of
-// the limit the cache is bypassed — CTX_NEAR_BUDGET sits below
-// CTX_STOP_RESERVE, so the figure is already fresh when the reserve band is
-// entered and the lockdown triggers as soon as the budget is actually
-// breached.
+// the limit the cache is bypassed — that is the same figure the plan band
+// opens on, so from the first plan notice onward every band acts on a fresh
+// count, and the lockdown triggers as soon as the budget is actually breached.
+//
+// Every band re-fires on EVERY crossing turn; none of the three is a one-shot.
+// The block rides on the per-request copy of the message array and is never
+// written back to the session (createTransformMessages), so a notice injected
+// once is gone from the model's context the moment that request ends: a
+// one-shot plan band would exist for a single LLM call, and a subagent that
+// spent that call inside a tool loop would wind up with no word about its
+// budget at all. Repeating costs nothing cumulative for the same reason —
+// each request carries at most one copy — and the figures in it move with the
+// fill, so the repeat is not the same sentence twice.
 async function contextLimitNotice(client, entry) {
   const maxContext = contextBudgetFor(entry.agent)
   if (maxContext <= 0 || aborted.has(entry.sessionID)) return ""
@@ -1005,7 +1028,49 @@ async function contextLimitNotice(client, entry) {
     if (snapshot.lastActivity) entry.lastActivity = snapshot.lastActivity
   }
 
-  if (entry.ctxTokens == null || entry.ctxTokens < maxContext * CTX_STOP_RESERVE) return ""
+  if (entry.ctxTokens == null || entry.ctxTokens < maxContext * CTX_NEAR_BUDGET) return ""
+
+  // Plan band: the subagent is told what is coming while it still has room to
+  // act on it. Nothing is denied here and nothing is demanded — a wrap-up
+  // demand at CTX_NEAR_BUDGET would throw away a fifth of a budget the
+  // orchestrator sized on purpose. It names the reserve band's threshold in
+  // tokens, so the subagent can pace itself against a figure rather than a
+  // share, and the result ceiling in the plan-ahead form (resultCeilingPlan,
+  // prompts.js): file the detail as you go, keep the reply a summary that
+  // names the file.
+  //
+  // Counted in `contextPlanNotices`, apart from both `contextWarnings` (the
+  // reserve band) and `stopInjections` (the lockdown, which drives the
+  // denial-loop notice to the parent). A subagent that has been told to plan
+  // ahead has been denied nothing and asked for nothing, so it can be ignoring
+  // neither. For the log only; nothing escalates on it.
+  if (entry.ctxTokens < maxContext * CTX_STOP_RESERVE) {
+    entry.contextPlanNotices = (entry.contextPlanNotices ?? 0) + 1
+    const left = maxContext - entry.ctxTokens
+    const reserveAt = Math.round(maxContext * CTX_STOP_RESERVE)
+    log("subagent entering context plan band", {
+      handle: entry.handle,
+      ctxTokens: entry.ctxTokens,
+      limit: maxContext,
+      remaining: left,
+      contextPlanNotices: entry.contextPlanNotices,
+    })
+    return (
+      `\n\n---\n🧭 PLAN YOUR HANDOVER. agent-intercom: your context has reached ` +
+      `${fmtTokens(entry.ctxTokens)} tokens of the ${fmtTokens(maxContext)} budget — about ` +
+      `${fmtTokens(left)} left. Nothing is denied on this turn and nothing is being wound up: ` +
+      `carry on, and finish what you are holding.\n\n` +
+      `Plan the ending now, while the room is still there. At ` +
+      `${fmtTokens(reserveAt)} tokens you will be told to WRITE YOUR SUMMARY, and you must be ` +
+      `writing it then, while your tools still work; at ${fmtTokens(maxContext)} every work ` +
+      `tool is DISABLED and plain text is all that is left to you. Do not arrive there with ` +
+      `the account unwritten.` +
+      // The ceiling, in the form that fits a subagent that is still working:
+      // file the detail as it goes, so the summary has a path to name.
+      resultCeilingPlan(entry.agent) +
+      `\n---\n`
+    )
+  }
 
   // Reserve band: room is nearly gone but the budget is not breached, so
   // guardToolExecute is still letting tool calls through. Ask for the summary

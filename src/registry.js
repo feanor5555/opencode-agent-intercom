@@ -2117,6 +2117,11 @@ function createEntry(
     // is notified once (see notifiedParentOfLoop). Resets when a tool call
     // gets through, i.e. when the subagent is no longer over budget.
     stopInjections: 0,
+    // Number of LLM turns on which the contextLimitNotice PLAN-band block was
+    // injected — the turns the subagent spent between CTX_NEAR_BUDGET of its
+    // budget and CTX_STOP_RESERVE, told what was coming while nothing was yet
+    // denied or demanded of it. For logs only; nothing escalates on it.
+    contextPlanNotices: 0,
     // Number of LLM turns on which the contextLimitNotice RESERVE-band block
     // was injected — the turns the subagent spent between CTX_STOP_RESERVE of
     // its budget and the budget itself, told to wrap up while its tools still

@@ -7,10 +7,12 @@
 //   2. notices.js `errorNotice` — a provider blow-up or a user abort now
 //      carries that recovered text up to the orchestrator alongside the
 //      failure, instead of reporting the failure alone.
-//   3. hooks.js `contextLimitNotice` — the demand for a `Done:` summary fires
-//      at CTX_STOP_RESERVE (0.9) of the context budget, while the tool
-//      lockdown in `guardToolExecute` still fires at the budget itself, so the
-//      subagent is told to write while its tools still work.
+//   3. hooks.js `contextLimitNotice` — three bands over one budget. The
+//      plan-ahead notice fires at CTX_NEAR_BUDGET (0.7) and denies and demands
+//      nothing; the demand for a `Done:` summary fires at CTX_STOP_RESERVE
+//      (0.9); the tool lockdown in `guardToolExecute` fires at the budget
+//      itself. Each band re-fires on every crossing turn, so no demand can be
+//      lost by ignoring one turn.
 //   4. watchdog.js `timeoutSubagent` — the inactivity reap reads the session
 //      one last time before its teardown deletes it, puts that text through
 //      the reply ceiling (so the overflow file exists) and hands it to the
@@ -489,11 +491,13 @@ test("a timed-out session with no assistant text reports the timeout alone", asy
   assert.doesNotMatch(notice, /the only account of the work it managed/)
 })
 
-// ---- 3. the STOP reserve below the tool lockdown ------------------------------
+// ---- 3. the three context bands below and at the tool lockdown ----------------
 
-// A budget of 10000 tokens for `coder`: the reserve band opens at 9000 and the
-// tool lockdown at 10000.
+// A budget of 10000 tokens for `coder`: the plan band opens at 7000
+// (CTX_NEAR_BUDGET), the reserve band at 9000 (CTX_STOP_RESERVE) and the tool
+// lockdown at 10000.
 const BUDGET = 10000
+const PLAN_AT = 7000
 const RESERVE_AT = 9000
 
 function budgetSettings() {
@@ -532,12 +536,82 @@ async function subagentAt(ctxTokens) {
   return { hooks, sessionID: created[created.length - 1] }
 }
 
-test("below the reserve: no block, tools admitted", async () => {
-  const { hooks, sessionID } = await subagentAt(RESERVE_AT - 1)
+test("below the plan band: no block at all, tools admitted", async () => {
+  const { hooks, sessionID } = await subagentAt(PLAN_AT - 1)
   const notice = await subagentTurnNotice(hooks, sessionID)
+  assert.doesNotMatch(notice, /PLAN YOUR HANDOVER/)
   assert.doesNotMatch(notice, /WRAP UP NOW/)
   assert.doesNotMatch(notice, /STOP\./)
   assert.equal(await toolAdmitted(hooks, sessionID), true)
+})
+
+// The plan band is the subagent's FIRST word about its budget. Measured live:
+// a subagent first told at the reserve band kept working through six crossings
+// of it and wound down only when the lockdown denied a tool.
+test("in the plan band: told what is coming, denied nothing, demanded nothing", async () => {
+  const { hooks, sessionID } = await subagentAt(PLAN_AT + 100)
+  const notice = await subagentTurnNotice(hooks, sessionID)
+  assert.match(notice, /PLAN YOUR HANDOVER/)
+  // The room left, and the reserve threshold as a figure to pace against.
+  assert.match(notice, /your context has reached 7\.1k tokens of the 10\.0k budget/)
+  assert.match(notice, /about 2\.9k left/)
+  assert.match(notice, /At 9\.0k tokens you will be told to WRITE YOUR SUMMARY/)
+  assert.match(notice, /at 10\.0k every work tool is DISABLED/)
+  // Plan-ahead, not wrap-up: it may finish what it is holding and carry on.
+  assert.match(notice, /carry on, and finish what you are holding/)
+  assert.doesNotMatch(notice, /WRAP UP NOW/)
+  assert.doesNotMatch(notice, /"Done:"/)
+  assert.doesNotMatch(notice, /Your work tools are now DISABLED/)
+  assert.equal(
+    await toolAdmitted(hooks, sessionID),
+    true,
+    "the plan band denies nothing — the lockdown is 3000 tokens away",
+  )
+})
+
+test("the plan band names the result ceiling and the file the summary must point at", async () => {
+  const { hooks, sessionID } = await subagentAt(PLAN_AT + 100)
+  const notice = await subagentTurnNotice(hooks, sessionID)
+  // `coder` carries no own `resultTokens` here: the default 2000 and the
+  // estimator's 3.5 characters per token.
+  assert.match(notice, /Your final reply is CAPPED at 2000 tokens \(~7000 characters\)/)
+  assert.match(notice, /File the detail under the project AS YOU GO/)
+  assert.match(notice, /naming that file's absolute path/)
+  // The reserve band's wording asks for the file as the LAST tool call. Here
+  // the subagent is still working, so it must not be told that yet.
+  assert.doesNotMatch(notice, /the last work tool call you should make/)
+})
+
+// The repeat rule. The block rides on the per-request copy of the message array
+// and is never written back to the session, so a one-shot notice would live for
+// exactly one LLM call and then be gone from the model's context.
+test("the plan band re-fires on every crossing turn, not once per subagent", async () => {
+  const { hooks, sessionID } = await subagentAt(PLAN_AT + 100)
+  for (const turn of [1, 2, 3]) {
+    const notice = await subagentTurnNotice(hooks, sessionID)
+    assert.match(notice, /PLAN YOUR HANDOVER/, `turn ${turn} must carry the notice again`)
+  }
+  const entry = upsertSession(sessionID, { agent: "coder", prompt: "x", parentID: PRIMARY })
+  assert.equal(entry.contextPlanNotices, 3)
+  assert.equal(entry.contextWarnings, 0, "no wrap-up has been demanded")
+  assert.equal(entry.stopInjections, 0, "nothing has been denied")
+  assert.equal(entry.notifiedParentOfLoop, false)
+})
+
+test("the reserve band keeps repeating too, and the plan band gives way to it", async () => {
+  const { hooks, sessionID } = await subagentAt(RESERVE_AT + 100)
+  for (const turn of [1, 2, 3]) {
+    const notice = await subagentTurnNotice(hooks, sessionID)
+    assert.match(notice, /WRAP UP NOW/, `turn ${turn} must carry the demand again`)
+    assert.doesNotMatch(
+      notice,
+      /PLAN YOUR HANDOVER/,
+      "one band speaks per turn, and past 9000 it is the reserve band",
+    )
+  }
+  const entry = upsertSession(sessionID, { agent: "coder", prompt: "x", parentID: PRIMARY })
+  assert.equal(entry.contextWarnings, 3)
+  assert.equal(entry.contextPlanNotices, 0, "the run opened above the plan band")
 })
 
 test("in the reserve band: told to write the summary WHILE the tools still work", async () => {
@@ -601,22 +675,31 @@ test("the lockdown names the same ceiling and asks only for a path that already 
   )
 })
 
-test("a type whose ceiling is 0 gets no cap demand in either band", async () => {
-  writeFileSync(
-    settingsFile,
-    JSON.stringify({ agentContext: { coder: BUDGET }, resultTokens: { coder: 0 } }),
-  )
-  resetSettings()
-  const { ctx, created } = makeCtx({ ctxTokens: RESERVE_AT + 100, resultParts: [textPart("w")] })
-  const hooks = await plugin(ctx)
-  await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
-  const notice = await subagentTurnNotice(hooks, created[created.length - 1])
-  assert.match(notice, /WRAP UP NOW/)
-  assert.doesNotMatch(notice, /That message is CAPPED/)
+test("a type whose ceiling is 0 gets no cap block in any of the three bands", async () => {
+  for (const [ctxTokens, head] of [
+    [PLAN_AT + 100, /PLAN YOUR HANDOVER/],
+    [RESERVE_AT + 100, /WRAP UP NOW/],
+    [BUDGET, /Your work tools are now DISABLED/],
+  ]) {
+    // One running subagent is the cap here, so each band gets its own run.
+    resetState()
+    resetTurnNotices()
+    writeFileSync(
+      settingsFile,
+      JSON.stringify({ agentContext: { coder: BUDGET }, resultTokens: { coder: 0 } }),
+    )
+    resetSettings()
+    const { ctx, created } = makeCtx({ ctxTokens, resultParts: [textPart("w")] })
+    const hooks = await plugin(ctx)
+    await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
+    const notice = await subagentTurnNotice(hooks, created[created.length - 1])
+    assert.match(notice, head)
+    assert.doesNotMatch(notice, /CAPPED at/, `ceiling 0 at ${ctxTokens} tokens`)
+  }
 })
 
-test("the reserve is a fraction of whatever budget the type has, not a fixed margin", async () => {
-  // Same relative position (95 % of the budget) on a budget ten times larger.
+test("both bands are a fraction of whatever budget the type has, not a fixed margin", async () => {
+  // The same relative positions (75 % and 95 %) on a budget ten times larger.
   writeFileSync(settingsFile, JSON.stringify({ agentContext: { coder: 100000 } }))
   resetSettings()
   const { ctx, created } = makeCtx({ ctxTokens: 95000, resultParts: [textPart("working")] })
@@ -625,6 +708,18 @@ test("the reserve is a fraction of whatever budget the type has, not a fixed mar
   const sessionID = created[created.length - 1]
   assert.match(await subagentTurnNotice(hooks, sessionID), /WRAP UP NOW/)
   assert.equal(await toolAdmitted(hooks, sessionID), true)
+
+  // One running subagent is the cap here, so the plan-band run starts clean.
+  resetState()
+  resetTurnNotices()
+  const planCtx = makeCtx({ ctxTokens: 75000, resultParts: [textPart("working")] })
+  const planHooks = await plugin(planCtx.ctx)
+  await planHooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
+  const planSession = planCtx.created[planCtx.created.length - 1]
+  const planNotice = await subagentTurnNotice(planHooks, planSession)
+  assert.match(planNotice, /PLAN YOUR HANDOVER/)
+  assert.match(planNotice, /At 90\.0k tokens you will be told to WRITE YOUR SUMMARY/)
+  assert.equal(await toolAdmitted(planHooks, planSession), true)
 })
 
 // ---- harness -----------------------------------------------------------------

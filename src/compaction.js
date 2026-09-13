@@ -264,6 +264,7 @@ async function runSubagentCompaction(client, entry, model) {
       // never be notified again, since notifiedParentOfLoop is a one-shot.
       entry.stopInjections = 0
       entry.contextWarnings = 0
+      entry.contextPlanNotices = 0
       entry.budgetDenials = 0
       entry.notifiedParentOfLoop = false
     }

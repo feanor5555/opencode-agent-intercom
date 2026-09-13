@@ -1,11 +1,11 @@
 #!/bin/bash
 # Runs all 8 single-agent end-to-end tests, the multi-agent test, the
 # route-move driver, the four mid-run-channel drivers, the context-band
-# driver, the MCP-after driver and the endless-mode cycle, writes captures
-# under ./out. The asserting drivers — the route-move one, the four mid-run
-# ones, the context-band one and the MCP-after one — decide the suite's exit
-# code: a failed criterion of theirs does not stop the suite but is collected
-# and exited on at the end.
+# driver, the run-ceiling driver, the MCP-after driver and the endless-mode
+# cycle, writes captures under ./out. The asserting drivers — the route-move
+# one, the four mid-run ones, the context-band one, the run-ceiling one and
+# the MCP-after one — decide the suite's exit code: a failed criterion of
+# theirs does not stop the suite but is collected and exited on at the end.
 #
 # It owns the server the message-tree drivers use: it builds the TUI half of the
 # plugin, starts a fresh `opencode serve` in the configured project, exports
@@ -41,21 +41,23 @@
 #                          pinned to and the only one a turn may answer on
 #   SERVER_START_TIMEOUT_S 60     readiness probe budget
 #
-# ask-expiry-task.sh, context-bands-task.sh, mcp-after-task.sh and
-# endless-task.sh run last and are the four drivers that do NOT use this
-# server: each needs settings of its own in the agent-intercom.json a server
-# was started with — the expiry driver an `answerWaitMs` /
-# `maxSubagentToolCallMs` pair per phase, the context-band driver an
-# `agentContext` budget low enough for one subagent to cross it and the
-# request log switched on, the MCP-after driver an MCP server patched into
+# ask-expiry-task.sh, context-bands-task.sh, run-ceiling-task.sh,
+# mcp-after-task.sh and endless-task.sh run last and are the five drivers
+# that do NOT use this server: each needs settings of its own in the
+# agent-intercom.json a server was started with — the expiry driver an
+# `answerWaitMs` / `maxSubagentToolCallMs` pair per phase, the context-band
+# driver an `agentContext` budget low enough for one subagent to cross it
+# and the request log switched on, the run-ceiling driver a
+# `maxSubagentRunMs` pin with the request log switched on so the wrap-up
+# band can be asserted, the MCP-after driver an MCP server patched into
 # its isolated opencode.json and the request log switched on, the endless
 # driver a threshold the primary is known to cross — so each builds its own
 # isolated configuration and starts and stops its own server, on
 # ASK_EXPIRY_PORT (default 4588), CONTEXT_BANDS_PORT (default 4606),
-# MCP_AFTER_PORT (default 4608) resp. ENDLESS_PORT (default 4599). See their
-# headers for their own parameters. This script stops its own server before
-# those four, so no session of the drivers above is still alive under the
-# settings those write.
+# RUN_CEILING_PORT (default 4612), MCP_AFTER_PORT (default 4608) resp.
+# ENDLESS_PORT (default 4599). See their headers for their own parameters.
+# This script stops its own server before those five, so no session of the
+# drivers above is still alive under the settings those write.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
@@ -204,6 +206,12 @@ e2e_server_stop
 # of this suite's is alive under the low budget it pins.
 "$HERE/context-bands-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED context-bands-task.sh(exit $?)"
 
+# The third watchdog window. Own server, own port, maxSubagentRunMs pinned in
+# the isolated agent-intercom.json, request log on so the wrap-up band can be
+# read without touching the session. Sequenced after context-bands so the two
+# request-log servers never share a process.
+"$HERE/run-ceiling-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED run-ceiling-task.sh(exit $?)"
+
 # Does opencode fire `tool.execute.after` for MCP tools? Own server, own port,
 # MCP patched into the isolated opencode.json only, request log on. Sequenced
 # after context-bands so the two request-log servers never share a process.
@@ -214,6 +222,6 @@ e2e_server_stop
 # The asserting drivers' verdict, held back above so the endless cycle still ran.
 if [ -n "$ASSERTING_FAILED" ]; then
   echo ""
-  echo "asserting driver(s) failed:$ASSERTING_FAILED — see $OUTDIR/19-tui-route.report.txt, $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt, $OUTDIR/16-between-steps.report.txt, $OUTDIR/15-ask-expiry.report.txt, $OUTDIR/17-context-bands.report.txt and $OUTDIR/18-mcp-after.report.txt" >&2
+  echo "asserting driver(s) failed:$ASSERTING_FAILED — see $OUTDIR/19-tui-route.report.txt, $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt, $OUTDIR/16-between-steps.report.txt, $OUTDIR/15-ask-expiry.report.txt, $OUTDIR/17-context-bands.report.txt, $OUTDIR/20-run-ceiling.report.txt and $OUTDIR/18-mcp-after.report.txt" >&2
   exit 1
 fi

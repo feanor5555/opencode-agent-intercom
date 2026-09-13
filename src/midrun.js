@@ -31,6 +31,7 @@ import {
   contextBudgetFor,
   retentionActive,
   soloModeActive,
+  workingWindowMs,
 } from "./settings.js"
 import { tokens as fmtTokens, estimateTokens, estimateReplyTokens } from "./format.js"
 import { askNotice, framedAgentMessage } from "./notices.js"
@@ -365,11 +366,26 @@ export function createMidRunTools({ client, unknown }) {
       }
     }
     if (outcome.status === "not-waiting") {
+      // Which of the two ways into this branch the run took, in the words the
+      // subagent is shown. `askWaitMs` (src/agentmsg.js) takes no wait either
+      // because none was asked for, or because the watchdog window the blocked
+      // call sits on leaves no room after its margin. Only the second reaches
+      // here with a positive `answerWaitMs`, and only under a window that is
+      // finite and positive — an absent or switched-off window leaves the
+      // requested wait unclamped — so that branch renders both figures
+      // unguarded.
+      const requestedWaitMs = settings.answerWaitMs
+      const cause =
+        Number.isFinite(requestedWaitMs) && requestedWaitMs > 0
+          ? `answerWaitMs is ${Math.round(requestedWaitMs / 1000)}s, and the ` +
+            `${Math.round(workingWindowMs(settings) / 1000)}s ` +
+            `watchdog window this call sits in leaves no room for it`
+          : "the wait is switched off (answerWaitMs is 0)"
       return {
         output:
-          "Your question was delivered, but this run does not wait for answers (answerWaitMs is " +
-          "0). Go on with the best reading you can defend; an answer, if one comes, arrives as " +
-          "an ordinary message at your next step.",
+          `Your question was delivered, but this run does not wait for answers — ${cause}. Go on ` +
+          `with the best reading you can defend; an answer, if one comes, arrives as an ordinary ` +
+          `message at your next step.`,
       }
     }
     if (outcome.status === "unanswered") {

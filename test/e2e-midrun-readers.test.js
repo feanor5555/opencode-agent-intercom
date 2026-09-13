@@ -197,3 +197,98 @@ test("ask-task.sh: the orchestrator is forbidden to carry the answer into the sp
   assert.match(turn, /not the word \$DECISION/)
   assert.match(turn, /message\(\\"<its handle>\\", \\"Use \$DECISION: \$ANSWER_MARKER\\"\)/)
 })
+
+// ---------------------------------------------------------------------------
+// The expiry/clamp driver. It asserts three branches of `askWaitMs`
+// (src/agentmsg.js) against a real server, and everything that decides which
+// branch a phase lands in is arithmetic over its own pinned defaults and the
+// margin the source holds. That arithmetic, the log lines it waits for and the
+// tool-result literals it recognises are pinned here, without a server: a
+// driver whose expectations have drifted away from the code would otherwise
+// only be caught by a live run that costs tokens.
+// ---------------------------------------------------------------------------
+
+const EXPIRY_DRIVER = readFileSync(resolve(import.meta.dirname, "e2e/ask-expiry-task.sh"), "utf8")
+const MIDRUN_SRC = readFileSync(resolve(import.meta.dirname, "../src/midrun.js"), "utf8")
+const AGENTMSG_SRC = readFileSync(resolve(import.meta.dirname, "../src/agentmsg.js"), "utf8")
+
+function expiryDriverString(name) {
+  const m = new RegExp(`^${name}="((?:[^"\\\\]|\\\\.)*)"$`, "m").exec(EXPIRY_DRIVER)
+  assert.ok(m, `ask-expiry-task.sh carries no ${name} assignment on one line`)
+  return m[1]
+}
+
+function expiryDriverDefault(name, env) {
+  const m = new RegExp(`^${name}=\\$\\{${env}:-(\\d+)\\}$`, "m").exec(EXPIRY_DRIVER)
+  assert.ok(m, `ask-expiry-task.sh carries no ${name} default`)
+  return Number(m[1])
+}
+
+test("ask-expiry-task.sh: the tool-result literals it recognises are the ones src/midrun.js renders", () => {
+  const names = [
+    "UNANSWERED_MARKER",
+    "NOT_WAITING_MARKER",
+    "ANSWERED_MARKER",
+    "NOROOM_CAUSE_MARKER",
+    "OFF_CAUSE_MARKER",
+  ]
+  for (const name of names) {
+    const literal = expiryDriverString(name)
+    assert.ok(
+      MIDRUN_SRC.includes(literal),
+      `${name}="${literal}" is not rendered anywhere in src/midrun.js`,
+    )
+  }
+})
+
+test("ask-expiry-task.sh: the log lines it waits for are the ones src/agentmsg.js writes", () => {
+  for (const line of ["ask registered", "ask registered without a wait", "ask expired unanswered"]) {
+    assert.ok(AGENTMSG_SRC.includes(`log("${line}"`), `src/agentmsg.js writes no "${line}" line`)
+    assert.ok(EXPIRY_DRIVER.includes(line), `the driver waits for no "${line}" line`)
+  }
+})
+
+test("ask-expiry-task.sh: its three pinned windows hit the three branches of askWaitMs", () => {
+  const margin = Number(
+    /^export const ASK_WAIT_WATCHDOG_MARGIN_MS = (\d+)$/m.exec(AGENTMSG_SRC)[1],
+  )
+  const expiryWait = expiryDriverDefault("EXPIRY_WAIT_MS", "ASK_EXPIRY_WAIT_MS")
+  const expiryWindow = expiryDriverDefault("EXPIRY_TOOL_CALL_MS", "ASK_EXPIRY_TOOL_CALL_MS")
+  const request = expiryDriverDefault("CLAMP_REQUEST_MS", "ASK_CLAMP_REQUEST_MS")
+  const clampWindow = expiryDriverDefault("CLAMP_TOOL_CALL_MS", "ASK_CLAMP_TOOL_CALL_MS")
+  const noRoomWindow = expiryDriverDefault("NOROOM_TOOL_CALL_MS", "ASK_NOROOM_TOOL_CALL_MS")
+
+  // The expiry phase: a wait that is really taken, and taken whole.
+  assert.ok(expiryWait > 0, "the expiry phase pins a wait of 0 and could never expire")
+  assert.ok(
+    expiryWindow - margin >= expiryWait,
+    `the expiry phase would be clamped: ${expiryWindow} - ${margin} < ${expiryWait}`,
+  )
+  // and short enough that a live run waits it out rather than the suite.
+  assert.ok(expiryWait <= 30000, `the expiry phase waits ${expiryWait} ms out; that is a long run`)
+
+  // The clamp phase: a wait cut down to the room, below what was requested.
+  assert.ok(clampWindow - margin > 0, "the clamp phase leaves no room and is the no-room branch")
+  assert.ok(
+    clampWindow - margin < request,
+    `the clamp phase would not clamp: ${clampWindow} - ${margin} >= ${request}`,
+  )
+
+  // The no-room phase: a window at or below the margin, and not the off switch.
+  assert.ok(noRoomWindow > 0, "the no-room phase switches the working window off instead")
+  assert.ok(
+    noRoomWindow - margin <= 0,
+    `the no-room phase still leaves ${noRoomWindow - margin} ms of room`,
+  )
+})
+
+test("ask-expiry-task.sh: the orchestrator is told to leave the question unanswered", () => {
+  const turn = /^ae_turn_prompt\(\) \{\n\s*printf '%s' "([\s\S]*?)"\n\}$/m.exec(EXPIRY_DRIVER)
+  assert.ok(turn, "ask-expiry-task.sh carries no ae_turn_prompt body")
+  assert.match(turn[1], /Do NOT answer it/)
+  assert.match(turn[1], /Do not call message\(\)/)
+  const task = /^ae_sub_task\(\) \{\n\s*printf '%s' "([\s\S]*?)"\n\}$/m.exec(EXPIRY_DRIVER)
+  assert.ok(task, "ask-expiry-task.sh carries no ae_sub_task body")
+  assert.match(task[1], /call ask\('/, "the task does not tell the subagent to call ask")
+  assert.match(task[1], /make no other tool call at all/)
+})

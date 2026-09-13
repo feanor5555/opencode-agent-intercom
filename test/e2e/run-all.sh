@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs all 8 single-agent end-to-end tests, the multi-agent test, the two
+# Runs all 8 single-agent end-to-end tests, the multi-agent test, the three
 # mid-run-channel drivers and the endless-mode cycle, writes captures under
 # ./out. The mid-run drivers assert; a failed criterion of theirs does not stop
 # the suite but decides its exit code at the end.
@@ -32,13 +32,15 @@
 #                          pinned to and the only one a turn may answer on
 #   SERVER_START_TIMEOUT_S 60     readiness probe budget
 #
-# endless-task.sh runs last and is the one driver that does NOT use this
-# server: it starts and stops its own on ENDLESS_PORT (default 4599), because a
-# cycle needs endless mode armed with a low threshold. It backs up and restores
-# ~/.config/opencode/agent-intercom.json and the todo file of the project it
-# drives. See its header for its own parameters. This script stops its own
-# server before starting that driver, so no session of the drivers above is
-# still alive under the low ceiling that driver arms globally.
+# ask-expiry-task.sh and endless-task.sh run last and are the two drivers that
+# do NOT use this server: each needs settings of its own in the
+# agent-intercom.json a server was started with — the expiry driver an
+# `answerWaitMs` / `maxSubagentToolCallMs` pair per phase, the endless driver a
+# threshold the primary is known to cross — so each builds its own isolated
+# configuration and starts and stops its own server, on ASK_EXPIRY_PORT (default
+# 4588) resp. ENDLESS_PORT (default 4599). See their headers for their own
+# parameters. This script stops its own server before the two, so no session of
+# the drivers above is still alive under the settings those two write.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 PLUGIN_ROOT=$(cd "$HERE/../.." && pwd)
@@ -132,11 +134,12 @@ unset OPENCODE_AGENT_INTERCOM_LOG_REQUESTS
 "$HERE/run-task.sh" gitter     "Show me the style of the last 5 commits in this repo. Report subject style, language, and whether bodies are used. Do NOT make any new commit." 09-gitter
 "$HERE/multi-task.sh"
 
-# The two mid-run-channel drivers. Unlike everything above they ASSERT and exit
+# The mid-run-channel drivers. Unlike everything above they ASSERT and exit
 # non-zero on a failed criterion, so their status is collected instead of
-# ending the suite here: the endless cycle below still has to run, and its own
-# server has to be started and stopped whatever these two found. The collected
-# status is what this script exits on at the very end.
+# ending the suite here: the third mid-run driver and the endless cycle below
+# still have to run, and their servers have to be started and stopped whatever
+# these two found. The collected status is what this script exits on at the very
+# end.
 MIDRUN_FAILED=""
 "$HERE/message-task.sh" || MIDRUN_FAILED="$MIDRUN_FAILED message-task.sh(exit $?)"
 "$HERE/ask-task.sh" || MIDRUN_FAILED="$MIDRUN_FAILED ask-task.sh(exit $?)"
@@ -156,11 +159,21 @@ echo ""
 echo "--- stopping the suite server before the endless driver ---"
 e2e_server_stop
 
+# The third mid-run driver, and the one that needs no server of this suite's:
+# its three phases each run under an `answerWaitMs` / `maxSubagentToolCallMs`
+# pair of their own, which only the agent-intercom.json a server was started
+# with can carry, so it builds an isolated configuration and starts a server on
+# its own port exactly as the endless driver does. It runs after the stop above
+# for the same reason that driver does: a session of this suite's left alive
+# would be a second primary under settings this one rewrites between phases. Its
+# status joins the two collected above.
+"$HERE/ask-expiry-task.sh" || MIDRUN_FAILED="$MIDRUN_FAILED ask-expiry-task.sh(exit $?)"
+
 "$HERE/endless-task.sh"
 
 # The mid-run drivers' verdict, held back above so the endless cycle still ran.
 if [ -n "$MIDRUN_FAILED" ]; then
   echo ""
-  echo "mid-run driver(s) failed:$MIDRUN_FAILED — see $OUTDIR/13-message.report.txt and $OUTDIR/14-ask.report.txt" >&2
+  echo "mid-run driver(s) failed:$MIDRUN_FAILED — see $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt and $OUTDIR/15-ask-expiry.report.txt" >&2
   exit 1
 fi

@@ -584,6 +584,7 @@ test("every driver resolves its model through the library and none carries an ow
     "multi-task.sh",
     "endless-task.sh",
     "nested-task.sh",
+    "ask-expiry-task.sh",
     "lib/midrun-common.sh",
   ]) {
     const src = readFileSync(join(e2e, name), "utf8")
@@ -601,6 +602,7 @@ test("no driver reads or writes the machine's opencode configuration", () => {
     "endless-task.sh",
     "nested-task.sh",
     "ask-task.sh",
+    "ask-expiry-task.sh",
     "message-task.sh",
     "lib/midrun-common.sh",
   ]) {
@@ -618,7 +620,7 @@ test("no driver reads or writes the machine's opencode configuration", () => {
 
 test("every driver that owns a server builds and removes an isolated configuration", () => {
   const e2e = resolve(import.meta.dirname, "e2e")
-  for (const name of ["run-all.sh", "endless-task.sh", "nested-task.sh"]) {
+  for (const name of ["run-all.sh", "endless-task.sh", "nested-task.sh", "ask-expiry-task.sh"]) {
     const src = readFileSync(join(e2e, name), "utf8")
     assert.match(src, /\be2e_iso_create\b/, `${name} starts a server on no isolated configuration`)
     assert.match(src, /\be2e_iso_remove\b/, `${name} never removes its isolated configuration`)
@@ -631,7 +633,7 @@ test("every driver audits the model it ran on", () => {
     const src = readFileSync(join(e2e, name), "utf8")
     assert.match(src, /\be2e_audit_recorded\b/, `${name} does not audit what answered`)
   }
-  for (const name of ["ask-task.sh", "message-task.sh"]) {
+  for (const name of ["ask-task.sh", "ask-expiry-task.sh", "message-task.sh"]) {
     const src = readFileSync(join(e2e, name), "utf8")
     assert.match(src, /\bmr_model_audit\b/, `${name} does not audit what answered`)
   }
@@ -651,6 +653,7 @@ test("no driver hands the audit a pattern instead of the captures it recorded", 
     "endless-task.sh",
     "nested-task.sh",
     "ask-task.sh",
+    "ask-expiry-task.sh",
     "message-task.sh",
     "lib/midrun-common.sh",
   ]) {
@@ -692,6 +695,7 @@ test("every e2e shell file parses", () => {
     "endless-task.sh",
     "nested-task.sh",
     "ask-task.sh",
+    "ask-expiry-task.sh",
     "message-task.sh",
     "lib/midrun-common.sh",
   ]) {

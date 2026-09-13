@@ -46,16 +46,28 @@ that opencode upgrades don't shift the system-prompt composition.
   not the model's taste, and forbids it to put that word into the spawn
   prompt. The driver then asserts that the answer came back as the output of
   the subagent's own `ask` call.
+- `ask-expiry-task.sh` — mid-run ASK expiry and clamp harness, and the only
+  driver that owns a server besides `endless-task.sh` and `nested-task.sh`.
+  Three phases, each with its own primary session, its own subagent and its own
+  `answerWaitMs` / `maxSubagentToolCallMs` pair written into the isolated
+  `agent-intercom.json` between phases (the plugin re-resolves both every
+  2 000 ms, so no restart is needed): a question left to expire under a pinned
+  10 000 ms wait, the same question under a 70 000 ms tool-call window whose
+  room clamps the requested 30 000 ms down to 10 000, and once more under a
+  60 000 ms window that leaves no room at all. The two clamp phases are decided
+  on the `waitMs` of the plugin's own `ask registered` line and wait for no
+  timer. See "The mid-run channel" below for its criteria table.
 - `todo-driver.mjs` — TODO.md auto-tracking harness. Drives DONE and BLOCKED
   markers through the wake hook and checks the resulting file.
-- `run-all.sh` — runs the 8 single-agent tests, the multi-agent test, the two
+- `run-all.sh` — runs the 8 single-agent tests, the multi-agent test, the three
   mid-run drivers and the endless-mode cycles. The mid-run drivers are the only
   ones in it that assert: a failed criterion of theirs does not stop the suite —
   the endless cycle still runs — but it decides the suite's exit code at the
   end. Owns the server the first ten use: builds the TUI, starts
   a fresh `opencode serve` in the configured directory (default
-  `$HOME/testopencode`), and stops it again before the endless driver, which
-  needs no server of this suite's and would be contaminated by its sessions —
+  `$HOME/testopencode`), and stops it again before `ask-expiry-task.sh` and
+  `endless-task.sh`, which need no server of this suite's and would be
+  contaminated by its sessions —
   and once more on the way out, for every path that does not reach that stop.
 - `lib/` — the Python evidence readers used by `endless-task.sh` (the kickoff
   ids, the successor's first turn, and the child session id of the driver's own
@@ -191,7 +203,9 @@ run's own: `opencode.json`, `tui.json`, `llm-models.json` and
 removed with it at the end. The machine's own `~/.config/opencode` is read
 exactly once — for the provider block, the `AGENTS.md`, the config-directory
 `node_modules` and the search credentials — and never written. `endless-task.sh`
-arms its ceiling in the isolated `agent-intercom.json`, not in the machine's.
+arms its ceiling in the isolated `agent-intercom.json`, not in the machine's,
+and `ask-expiry-task.sh` rewrites its two `ask` keys in the same isolated file
+between its phases.
 
 `HOME` and not `XDG_CONFIG_HOME` is the lever, because the plugin resolves its
 own three files through `os.homedir()` (`src/llmmodel.js`, `src/settings.js`,
@@ -590,9 +604,70 @@ What a green run establishes, from the run of 2026-09-11 against opencode
   tool calls inside that window, and the orchestrator's answer came back as that
   call's own output.
 
-What they do NOT cover: a message into a subagent that is BETWEEN steps, a
-question left to expire unanswered, and the clamp of `answerWaitMs` against
-`maxSubagentToolCallMs`. Each run names those in its report as `NOT ASSERTED`.
+What the two of them do NOT cover: a message into a subagent that is BETWEEN
+steps, a question left to expire unanswered, and the clamp of `answerWaitMs`
+against `maxSubagentToolCallMs`. Each run names those in its report as
+`NOT ASSERTED`. The last two are what `ask-expiry-task.sh` covers.
+
+### `ask-expiry-task.sh` — the unanswered path and the clamp
+
+`askWaitMs` (`src/agentmsg.js`) decides how long a blocked `ask` waits, out of
+two numbers: the requested `answerWaitMs` and the room left inside the watchdog
+window the blocked call sits on — `maxSubagentToolCallMs` (resolved through
+`workingWindowMs`, `src/settings.js`) less `ASK_WAIT_WATCHDOG_MARGIN_MS`
+(60 000). This driver drives three phases against a real server, each with its
+own primary session, its own subagent and its own pair of those two settings:
+
+| phase | `answerWaitMs` | `maxSubagentToolCallMs` | room | what must happen |
+|---|---|---|---|---|
+| `expiry` | 10 000 | 660 000 | 600 000 | the clamp is inert, the registered wait IS the pin, and the orchestrator is told to answer nothing so the timer fires |
+| `clamp` | 30 000 | 70 000 | 10 000 | the registered wait is the room, not the request |
+| `no-room` | 30 000 | 60 000 | 0 | no waiter is registered at all |
+
+Its asserted criteria:
+
+| criterion | what decides it |
+|---|---|
+| `asked (expiry)` | the subagent's own session shows the `ask` call, and the plugin logged `ask posted` for that session |
+| `wait armed (expiry)` | `"waitMs":10000` on the `ask registered` line of that session |
+| `unanswered (expiry)` | no `Answer delivered` line in the primary's transcript — the orchestrator left the question alone, as its turn told it to |
+| `expired (expiry)` | `ask expired unanswered` for that session (`src/agentmsg.js`) |
+| `tool-result (expiry)` | the `ask` call's own output carries `No answer came within` and not `The orchestrator answers:` (`src/midrun.js`) |
+| `asked (clamp)` | as above, for the clamp phase |
+| `clamp (clamp)` | `"waitMs":10000` on the `ask registered` line although 30 000 was requested |
+| `asked (no-room)` | as above, for the no-room phase |
+| `no-wait (no-room)` | `ask registered without a wait` for that session, and no `ask registered` line carrying a wait for it |
+| `tool-result (no-room)` | the `ask` call returned `this run does not wait for answers` at once |
+| `cause (no-room)` | the cause that form names is this run's own: the `ask` call's output carries `watchdog window this call sits in leaves no room for it` and not `the wait is switched off` (`src/midrun.js`) |
+| `model-pin` | every captured turn of both sessions of every phase answered on the pin |
+
+The two clamp phases wait for no timer: the figure that decides them stands in
+the registration line the plugin writes at the moment of the call. Only the
+expiry phase waits its window out, which is why that window is pinned at 10 s.
+
+The margin every expected figure is derived from is read out of
+`src/agentmsg.js` at run time, and the preflight refuses any pinning under
+which a phase would not be the branch it claims to assert — a window that
+clamps the expiry phase, a clamp phase whose room is at or above the request, a
+no-room phase that still leaves room, or `maxSubagentToolCallMs: 0`, which
+switches the working window off and leaves the request unclamped. That
+arithmetic, the log lines and the tool-result literals are pinned without a
+server by `test/e2e-midrun-readers.test.js`.
+
+A phase whose subagent never called `ask` fails its own `asked` criterion and
+records everything hanging off that call as `NOT ASSERTED`. The driver names
+three further things it deliberately leaves alone: the answered path
+(`ask-task.sh`), the `answerWaitMs: 0` route into the same no-wait branch (the
+unit suite; its preflight refuses it as a live pinning, because the two routes
+are indistinguishable in the log), and the reap of a subagent whose `ask`
+outlives its window, which the clamp exists to make unreachable.
+
+```bash
+bash test/e2e/ask-expiry-task.sh          # starts its own server on 4588
+```
+
+It writes `out/15-ask-expiry.report.txt` and exits `0` / `1` / `2` like the two
+above.
 
 ## Nested delegation
 

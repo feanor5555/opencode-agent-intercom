@@ -4,7 +4,8 @@
 // What is pinned here: the question reaches the caller as a routed parent
 // notice and the call blocks on the answer; the answer comes back as that
 // call's own result; the wait expires as a refusal to go on guessing rather
-// than as a kill; a nested subagent is refused, which is what makes the channel
+// than as a kill; each way into a not-waiting outcome is named by its own
+// cause; a nested subagent is refused, which is what makes the channel
 // deadlock-free; one question at a time; and every ending path — abort, the
 // watchdog reap, the teardown, a state reset — settles the waiter.
 //
@@ -134,6 +135,9 @@ test("answerWaitMs 0 delivers the question and returns at once", async () => {
 
   const result = await hooks.tool.ask.execute({ question: "which one?" }, subCtx)
   assert.match(result.output, /does not wait for answers/)
+  // The cause this route really has, and not the other one.
+  assert.match(result.output, /the wait is switched off \(answerWaitMs is 0\)/)
+  assert.doesNotMatch(result.output, /leaves no room for it/)
   assert.equal(posted.length, 1, "the question still reaches the caller")
   assert.equal(entry.pendingAsk, undefined)
   assert.equal(pendingAsks.size, 0)
@@ -142,6 +146,26 @@ test("answerWaitMs 0 delivers the question and returns at once", async () => {
   assert.equal(entry.asksOut, 1, "the question is still counted as asked")
   assert.equal(entry.asksUnanswered, 0, "a zero-wait question is charged to nobody")
   assert.equal(entry.asksAnswered, 0)
+})
+
+test("a wait the watchdog window leaves no room for names the clamp, not a zero setting", async () => {
+  const { ctx, posted } = makeCtx()
+  const hooks = await plugin(ctx)
+  const entry = register()
+  // A positive wait under a window at the margin: askWaitMs (src/agentmsg.js)
+  // takes no wait, and the text must say WHY rather than claim the wait is off.
+  settings({ answerWaitMs: 30000, maxSubagentToolCallMs: 60000 })
+
+  const result = await hooks.tool.ask.execute({ question: "which one?" }, subCtx)
+  assert.match(result.output, /does not wait for answers/)
+  assert.match(result.output, /answerWaitMs is 30s/)
+  assert.match(result.output, /60s watchdog window this call sits in leaves no room for it/)
+  assert.doesNotMatch(result.output, /the wait is switched off/)
+  assert.equal(posted.length, 1, "the question still reaches the caller")
+  assert.equal(entry.pendingAsk, undefined)
+  assert.equal(pendingAsks.size, 0)
+  assert.equal(entry.asksOut, 1)
+  assert.equal(entry.asksUnanswered, 0, "no wait was taken, so nobody failed to answer")
 })
 
 test("a nested subagent is refused: its caller is blocked and could never answer", async () => {

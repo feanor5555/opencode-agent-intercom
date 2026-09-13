@@ -15,7 +15,8 @@
 #              child                             → zero `🔔 agent-intercom: your subagent` in it
 #   survives   neither the orchestrator nor the blocked caller is torn down
 #              while the child runs              → both sessions answer 200 throughout the window
-#   woken      the orchestrator is woken the ordinary way once the caller ends
+#   woken      the orchestrator is woken the ordinary way once the caller ends,
+#              and the notice says its session is HELD
 #                                                → `notified primary of completion`
 #   nested-line the caller's completion notice bills the delegation
 #                                                → `⤷ nested: 1 run, …`
@@ -23,8 +24,9 @@
 #                                                → `Spawn refused: a "<caller>" may spawn "researcher" …`
 #   denied     a role that may NOT delegate gets no child at all, and the run
 #              records WHICH of the three layers refused it
-#   gone       both subagent sessions are deleted afterwards, so the child-first
-#              teardown did not leave one behind
+#   gone       the nested child's session is deleted afterwards and the caller's
+#              is HELD under the shipped retention default, so the child-first
+#              teardown left nothing behind and the caller outlived its child
 #   todo       the todo file is byte-identical afterwards — a nested run carries
 #              no task id and must tick nothing
 #
@@ -152,6 +154,7 @@ WAIT_REASON=""
 SERVER_VERSION="(unknown)"
 MAX_NESTED_SPAWNS=2
 MAX_SUBAGENT_AGE_MS=90000
+MAX_RETAINED_SUBAGENTS=2
 TODO_BAK_NAME=""
 TODO_EXISTED=0
 TODO_SUM_BEFORE=""
@@ -277,9 +280,10 @@ capture_session() {
   curl -s -m 60 "$BASE/session/$sid/message" > "$tmp" 2>/dev/null
   # A session the plugin has already torn down answers 404, and one that has
   # not spoken yet answers []. Neither may overwrite a snapshot taken while the
-  # session was alive: a subagent session is DELETED the moment it finishes, so
-  # these two files are the only surviving record of what it did, and the last
-  # non-empty snapshot is the one that counts.
+  # session was alive: a nested subagent session is DELETED the moment it
+  # finishes and a retained one is only held for a window, so these two files
+  # are the only surviving record of what it did, and the last non-empty
+  # snapshot is the one that counts.
   if ! python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d, list) and d else 1)' "$tmp" 2>/dev/null; then
     rm -f "$tmp"
     printf '%s' "$flat"
@@ -377,9 +381,10 @@ cleanup() {
   say ""
   say "--- cleanup ---"
 
-  # Sessions first: the server has to be alive to delete them. The two subagent
-  # sessions are deleted by the plugin itself — a DELETE on one that is already
-  # gone answers 404 and that is the state this driver asserts.
+  # Sessions first: the server has to be alive to delete them. The nested child
+  # is deleted by the plugin itself — a DELETE on one that is already gone
+  # answers 404 — while a retained caller is held until its window is up, so
+  # this DELETE is what actually removes it.
   for s in "$SID" "$DENIED_SID"; do
     [ -z "$s" ] && continue
     if e2e_server_alive; then
@@ -495,15 +500,23 @@ age = num("maxSubagentAgeMs", "OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS", 900
 endless = raw.get("endlessMode")
 endless = endless if isinstance(endless, bool) else flag("OPENCODE_AGENT_INTERCOM_ENDLESS_MODE", True)
 ctx = num("endlessContext", "OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT", 250000)
-print(nested, age, "true" if endless else "false", ctx)
+retained = num("maxRetainedSubagents", "OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS", 2)
+print(nested, age, "true" if endless else "false", ctx, retained)
 PY
 )
-read -r MAX_NESTED_SPAWNS MAX_SUBAGENT_AGE_MS ENDLESS_MODE ENDLESS_CONTEXT <<< "$SETTINGS_LINE"
-[ -n "${ENDLESS_CONTEXT:-}" ] ||
+read -r MAX_NESTED_SPAWNS MAX_SUBAGENT_AGE_MS ENDLESS_MODE ENDLESS_CONTEXT MAX_RETAINED_SUBAGENTS <<< "$SETTINGS_LINE"
+[ -n "${MAX_RETAINED_SUBAGENTS:-}" ] ||
   die "could not resolve the plugin settings from $SETTINGS_FILE — python3 returned: '$SETTINGS_LINE'"
 
 [ "$MAX_NESTED_SPAWNS" -gt 0 ] 2>/dev/null ||
   die "maxNestedSpawns resolves to $MAX_NESTED_SPAWNS — with 0 every nested spawn is refused before a session exists and there is no scenario to observe. Remove the key from $SETTINGS_FILE or set it above 0."
+
+# The run exercises the configuration the plugin ships, and retention is part of
+# it: with 0 the caller is destroyed instead of held and the "woken" and "gone"
+# criteria below would be asserting a state this plugin no longer produces by
+# default.
+[ "$MAX_RETAINED_SUBAGENTS" -gt 0 ] 2>/dev/null ||
+  die "maxRetainedSubagents resolves to $MAX_RETAINED_SUBAGENTS — with retention off the caller's session is destroyed rather than held, and the \"woken\" and \"gone\" criteria assert the shipped default of 2. Remove the key from $SETTINGS_FILE or set it above 0."
 
 # An endless cycle freezes every spawn from the moment it is scheduled
 # (src/tools.js, `spawn refused: endless cycle in progress`). A threshold this
@@ -624,7 +637,7 @@ opencode version    $SERVER_VERSION
 primary model       $MODEL   (every agent is pinned to it in the isolated llm-models.json; asserted per turn below)
 isolated config     $E2E_ISO_OPENCODE_DIR   (the machine's ~/.config/opencode is not written)
 settings file       $SETTINGS_FILE   (inside the isolated config)
-resolved settings   maxNestedSpawns=$MAX_NESTED_SPAWNS maxSubagentAgeMs=$MAX_SUBAGENT_AGE_MS endlessMode=$ENDLESS_MODE endlessContext=$ENDLESS_CONTEXT
+resolved settings   maxNestedSpawns=$MAX_NESTED_SPAWNS maxSubagentAgeMs=$MAX_SUBAGENT_AGE_MS endlessMode=$ENDLESS_MODE endlessContext=$ENDLESS_CONTEXT maxRetainedSubagents=$MAX_RETAINED_SUBAGENTS
 delegating caller   $CALLER_ROLE   (spawns "researcher", must block)
 refused target      $WRONG_TARGET   (asked for first, must be refused)
 denied role         $DENIED_ROLE   (permission map still denies spawn)
@@ -685,9 +698,11 @@ TURN1="Call spawn(\"$CALLER_ROLE\", \"$CALLER_TASK\") exactly once, passing that
 # The POST blocks for the orchestrator's FIRST turn only — the one that calls
 # `spawn`, which is non-blocking for a primary — so it returns at about the
 # moment the caller subagent is prompted. It runs in the background all the
-# same, because from that moment on both subagent sessions are live and both
-# are DELETED again the instant they finish: their transcripts have to be taken
-# while they exist, and the loop below is the only chance to take them.
+# same, because from that moment on both subagent sessions are live and neither
+# stays reachable for long — the nested child is DELETED the instant it
+# finishes and the caller is only HELD for its retention window: their
+# transcripts have to be taken while they exist, and the loop below is the only
+# chance to take them.
 post_prompt "$SID" "$TURN1" "$OUT_DIR/$PREFIX.turn1.json" &
 POST_PID=$!
 
@@ -709,11 +724,14 @@ fi
 # sessions: break 1 of the concept (the caller torn down the moment it stops
 # talking) and break 2 (the DELETE cascade over a live child) would both show
 # here as a session that stops answering while the child is still alive. The
-# loop ends when the caller session is gone — which is the teardown the "gone"
-# criterion below reads.
+# loop ends when the caller has finished, which under the shipped retention
+# default is NOT its session disappearing: the caller's parent is the primary,
+# so it is retained and keeps answering 200. The completion notice logged for
+# the primary is the end marker, and the session's fate after it is what the
+# "gone" criterion below reads.
 BLOCK_LINE=""; BLOCK_AGENT=""; END_LINE=""
 PROBE_ROUNDS=0; PROBE_FAILS=0; PROBE_EVIDENCE=""
-LOOP_REASON="the caller session is gone"
+LOOP_REASON="the caller loop ended without recording a reason"
 LOOP_DEADLINE=$(( $(date +%s) + STEP_TIMEOUT_S ))
 while :; do
   refresh_slice
@@ -759,6 +777,10 @@ while :; do
       fi
     fi
   elif [ "$(http_code "$BASE/session/$CALLER_SID")" != 200 ]; then
+    LOOP_REASON="the caller session is gone"
+    break
+  elif grep -qE -- "notified primary of completion .*\"parentID\":\"$SID\"" "$SLICE_FILE"; then
+    LOOP_REASON="the caller finished and its session is held"
     break
   fi
   if ! e2e_server_alive; then
@@ -886,14 +908,21 @@ else
     "the literal \"$TARGET_REFUSAL\" does not occur in $CALLER_FLAT — either the caller never attempted it, or it was refused with different words"
 fi
 
-# woken — the orchestrator got the ordinary completion notice for the caller.
-WAKE_HEAD="🔔 agent-intercom: your subagent \"$CALLER_HANDLE\" ($CALLER_ROLE) has finished and been destroyed."
+# woken — the orchestrator got the ordinary completion notice for the caller,
+# and that notice says the session is HELD. Under the shipped retention default
+# the caller is retained: its parent is the primary and not a registry entry,
+# which is what retentionDecision (src/registry.js) retains, so completionNotice
+# (src/notices.js) takes the held head and not the destroyed one. The destroyed
+# head is counted too, so a run in which the retention was refused says which
+# of the two it got instead of only "not found".
+WAKE_HEAD="🔔 agent-intercom: your subagent \"$CALLER_HANDLE\" ($CALLER_ROLE) has finished. Its session is being HELD, not destroyed."
+DESTROYED_HEAD="🔔 agent-intercom: your subagent \"$CALLER_HANDLE\" ($CALLER_ROLE) has finished and been destroyed."
 if [ -n "$CALLER_HANDLE" ] && [ "$(count_in "$PRIMARY_FLAT" "$WAKE_HEAD")" -gt 0 ]; then
-  record "woken — the orchestrator was woken the ordinary way once the caller finished" 1 \
+  record "woken — the orchestrator was woken the ordinary way once the caller finished, with the held head" 1 \
     "$(first_in "$PRIMARY_FLAT" "$WAKE_HEAD")"
 else
-  record "woken — the orchestrator was woken the ordinary way once the caller finished" 0 \
-    "no \"$WAKE_HEAD\" in $PRIMARY_FLAT (handle from the log: \"${CALLER_HANDLE:-none}\")"
+  record "woken — the orchestrator was woken the ordinary way once the caller finished, with the held head" 0 \
+    "no \"$WAKE_HEAD\" in $PRIMARY_FLAT (handle from the log: \"${CALLER_HANDLE:-none}\"); the destroyed head occurs $(count_in "$PRIMARY_FLAT" "$DESTROYED_HEAD")x — a notice carrying that one instead means the caller was not retained, though maxRetainedSubagents resolves to $MAX_RETAINED_SUBAGENTS"
 fi
 
 # nested-line — that notice bills the delegation.
@@ -908,16 +937,21 @@ else
     "\"$NESTED_LINE_HEAD\" occurs $(count_in "$PRIMARY_FLAT" "$NESTED_LINE_HEAD")x and \"$NESTED_LINE_TAIL\" $(count_in "$PRIMARY_FLAT" "$NESTED_LINE_TAIL")x in $PRIMARY_FLAT"
 fi
 
-# gone — both subagent sessions are deleted, child included. A live child left
-# behind, or a caller deleted before its child, is break 2 of the concept.
+# gone — the nested child's session is deleted and the caller's is held. The
+# child is a nested entry, which retentionDecision refuses with reason "nested"
+# (src/registry.js), so nothing may hold it; the caller hangs off the primary
+# and is retained under the shipped maxRetainedSubagents default, so it still
+# answers under the handle the wake notice offers to `reuse`. A live child left
+# behind is break 2 of the concept, and a caller torn down before its child
+# would have shown as a probe failure in "survives" above.
 CODE_CALLER_AFTER=$(http_code "$BASE/session/$CALLER_SID")
 CODE_CHILD_AFTER=$(http_code "$BASE/session/$CHILD_SID")
-if [ "$CODE_CALLER_AFTER" != 200 ] && [ "$CODE_CHILD_AFTER" != 200 ]; then
-  record "gone — both subagent sessions are deleted afterwards" 1 \
-    "GET /session/$CALLER_SID -> $CODE_CALLER_AFTER, GET /session/$CHILD_SID -> $CODE_CHILD_AFTER (neither is 200)"
+if [ "$CODE_CHILD_AFTER" != 200 ] && [ "$CODE_CALLER_AFTER" = 200 ]; then
+  record "gone — the nested child's session is deleted afterwards, the retained caller's is held" 1 \
+    "GET /session/$CHILD_SID -> $CODE_CHILD_AFTER (the child is gone), GET /session/$CALLER_SID -> $CODE_CALLER_AFTER (the caller is held for reuse)"
 else
-  record "gone — both subagent sessions are deleted afterwards" 0 \
-    "GET /session/$CALLER_SID -> $CODE_CALLER_AFTER, GET /session/$CHILD_SID -> $CODE_CHILD_AFTER (a 200 means the session survived its teardown)"
+  record "gone — the nested child's session is deleted afterwards, the retained caller's is held" 0 \
+    "GET /session/$CHILD_SID -> $CODE_CHILD_AFTER (200 means the nested child survived its teardown), GET /session/$CALLER_SID -> $CODE_CALLER_AFTER (anything but 200 means the caller was not held, though maxRetainedSubagents resolves to $MAX_RETAINED_SUBAGENTS)"
 fi
 
 # No ending path may have gone through the watchdog or an error, and no teardown
@@ -949,8 +983,9 @@ DENIED_TASK="Do exactly one thing and nothing else: call spawn(\"researcher\", \
 TURN2="Call spawn(\"$DENIED_ROLE\", \"$DENIED_TASK\") exactly once, passing that prompt through unchanged. That is your entire task. Do not spawn anything else, do not call list(). End your turn as soon as spawn returns."
 
 # Backgrounded and then watched, for the same reason as phase 1: the denied
-# role's session is deleted the instant it finishes, and its transcript is the
-# only place the refusal it saw — or the absence of a spawn tool — is recorded.
+# role's session stops being readable when it finishes — deleted outright, or
+# held only until its retention window is up — and its transcript is the only
+# place the refusal it saw, or the absence of a spawn tool, is recorded.
 post_prompt "$DENIED_SID" "$TURN2" "$OUT_DIR/$PREFIX.turn2.json" &
 DENIED_POST_PID=$!
 
@@ -967,7 +1002,12 @@ if wait_for_pattern "the denied role was spawned" "spawned .*\"agent\":\"$DENIED
     # nothing.
     ROUND_CHILDREN=$(children_of "$DENIED_CHILD_SID")
     [ -n "$ROUND_CHILDREN" ] && GRANDCHILDREN="$ROUND_CHILDREN"
+    # Ends when the denied role has finished: its session gone where nothing
+    # retained it, or — under the shipped default, where the primary is its
+    # parent and the session is held — the completion notice logged for it.
     [ "$(http_code "$BASE/session/$DENIED_CHILD_SID")" != 200 ] && break
+    refresh_slice
+    grep -qE -- "notified primary of completion .*\"parentID\":\"$DENIED_SID\"" "$SLICE_FILE" && break
     e2e_server_alive || break
     [ "$(date +%s)" -ge "$DENIED_DEADLINE" ] && break
     sleep "$PROBE_S"

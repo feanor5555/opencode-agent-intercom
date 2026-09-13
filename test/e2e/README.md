@@ -605,10 +605,10 @@ preflight/setup error. Captures and report land in `out/12-nested.*`.
 | result | the caller's own `spawn` tool result reads `<handle> (researcher) finished and is gone. Its reply:` and holds the marker line the child was told to reply with |
 | not-a-wake | zero `🔔 agent-intercom: your subagent` in the caller's transcript |
 | target | the caller's spawn of a non-researcher returns the caller-specific `Spawn refused: a "<caller>" may spawn "researcher" and nothing else — you asked for a "<target>".` |
-| woken | `🔔 agent-intercom: your subagent "<handle>" (<role>) has finished and been destroyed.` in the primary |
+| woken | `🔔 agent-intercom: your subagent "<handle>" (<role>) has finished. Its session is being HELD, not destroyed.` in the primary — the held head, since the caller hangs off the primary and is retained under the shipped `maxRetainedSubagents` default |
 | nested-line | `⤷ nested: 1 run, …(not counted in the figure above).` in that same notice |
 | denied | a role that may not delegate has no child session under it, and the run names which of the three layers refused it |
-| gone | both subagent sessions answer `404` afterwards |
+| gone | the nested child's session answers `404` afterwards (a nested entry is never retained) and the caller's still answers `200`, held for `reuse` |
 | clean | no `subagent timed out (inactivity)`, no `subagent llm error`, no `FOREIGN KEY` in the server log |
 | todo | the project's todo file is byte-identical — a nested spawn carries no task id |
 | model-pin | every assistant message of the three captured sessions names `E2E_MODEL` |
@@ -617,10 +617,17 @@ Not asserted, and reported as such: the nested quota's own refusal (it needs a
 caller that exhausts `maxNestedSpawns`; `test/nested-delegation.test.js` covers
 it), and the sidebar's grandchild row, which needs a screenshot.
 
-**Both subagent sessions are deleted the instant they finish**, so the driver
-snapshots their message trees in a loop while they are alive and keeps the last
-non-empty snapshot. A transcript taken after the run is empty — a `404` — and
-every assertion made on it would pass vacuously.
+**Neither subagent session stays readable for long** — the nested child is
+deleted the instant it finishes, and the caller is only held for its retention
+window — so the driver snapshots their message trees in a loop while they are
+alive and keeps the last non-empty snapshot. A transcript taken after a deleted
+session is empty — a `404` — and every assertion made on it would pass
+vacuously.
+
+The run exercises the shipped configuration, retention included: the driver
+prints `maxRetainedSubagents` in its resolved settings and refuses to start at
+`0`, because the caller would then be destroyed rather than held and `woken` and
+`gone` would be asserting a state the default no longer produces.
 
 ## Why the harness polls instead of streaming
 

@@ -422,9 +422,14 @@ export const AGENTS = {
       // that grant to the `grounder` alone.
       ...SUBAGENT_NO_DELEGATION,
       ...webAccessExcept("webfetch", "websearch", "web_search", "forum_search"),
-      read: "deny", edit: "deny", write: "deny", bash: "deny",
-      glob: "deny", grep: "deny",
-      outline: "deny",
+      // `read`, `glob`, `grep`, `outline` and `write` are absent, and the
+      // absence is the grant: the researcher reads the project it researches
+      // for — outline first, then the range, the discipline
+      // SUBAGENT_OUTLINE_GUIDE teaches it — and writes its own result file.
+      // `edit` stays denied — it changes no existing code — and so does
+      // `bash`, which would be a second, ungated path to both fetching and
+      // editing.
+      edit: "deny", bash: "deny",
       todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
     },
     prompt: RESEARCHER_PROMPT,

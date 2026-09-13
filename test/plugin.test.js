@@ -668,6 +668,38 @@ test("only the two web roles keep web tools, each exactly its own search path", 
   }
 })
 
+// --- the researcher's file tools -------------------------------------------
+
+test("the researcher reads and writes files but changes no existing code", () => {
+  const { permission } = AGENTS.researcher
+  // Absence, not `"allow"`: an absent key leaves the tool in the LLM schema
+  // (config.js strips only the bare-string denies) and lets the runtime guard
+  // fall through, and it is what a project override can still close.
+  // `outline` is in this list for the same reason: a role that reads source
+  // files is told to outline them first (SUBAGENT_OUTLINE_GUIDE, injected for
+  // every role outside OUTLINE_DISABLED_AGENTS), so the tool that guide names
+  // has to be there to call.
+  for (const tool of ["read", "glob", "grep", "write", "outline"]) {
+    assert.equal(
+      permission?.[tool], undefined,
+      `researcher must carry no ${tool} key — the absence is the grant`,
+    )
+  }
+  // The two that stay shut, and the reason each is shut: `edit` would change
+  // existing code, `bash` is a second path to both fetching and editing.
+  assert.equal(permission?.edit, "deny", "the researcher must not change existing code")
+  assert.equal(permission?.bash, "deny", "the researcher gets no shell")
+  // The grounder is the other web role and is unchanged: it answers from one
+  // tool and touches no file at all — `outline` included, which is why it is
+  // in OUTLINE_DISABLED_AGENTS and the researcher is not.
+  for (const tool of ["read", "glob", "grep", "write", "edit", "bash", "outline"]) {
+    assert.equal(
+      AGENTS.grounder.permission?.[tool], "deny",
+      `grounder must deny ${tool} — the file grant is the researcher's alone`,
+    )
+  }
+})
+
 test("the denied roles' prompts route a lookup to the researcher instead of searching", () => {
   // no role but the researcher may name a web tool as something IT calls.
   for (const [name, def] of Object.entries(AGENTS)) {
@@ -2478,16 +2510,20 @@ test("outline accepts an absolute path inside the session directory", skipNoCtag
   assert.match(res.output, /abs-inside\.js:1: export const A = 1/)
 })
 
-test("the config hook disables outline for designer, gitter and orchestrator", async () => {
+test("the config hook disables outline for designer, gitter, grounder and orchestrator", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   const config = {}
   await hooks.config(config)
   assert.equal(config.agent.designer.permission.outline, "deny")
   assert.equal(config.agent.gitter.permission.outline, "deny")
+  assert.equal(config.agent.grounder.permission.outline, "deny")
   assert.equal(config.agent.orchestrator.permission.outline, "deny")
   // a regular subagent leaves outline enabled (no entry in the permission map)
   assert.equal(config.agent.planner.permission?.outline, undefined)
+  // the researcher is one of those: it reads the project it researches for, so
+  // it gets the tool the reading discipline it is injected tells it to call.
+  assert.equal(config.agent.researcher.permission?.outline, undefined)
 })
 
 // rewritePendingTools — see hooks.js for the full rationale (root cause of

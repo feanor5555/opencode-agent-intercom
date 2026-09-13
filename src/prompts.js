@@ -192,8 +192,8 @@ export function delegationGuideNameFor(agent) {
 
 // Outline+read discipline. Injected only for subagents that actually have the
 // `outline` tool enabled (planner, coder, debugger, reviewer, documenter,
-// researcher). Designer and gitter don't get this — they neither read source
-// code nor have `outline`.
+// researcher). Designer, gitter and grounder don't get this — they neither
+// read source code nor have `outline`.
 export const SUBAGENT_OUTLINE_GUIDE =
   "\n\n---\n📖 agent-intercom: reading discipline.\n" +
   "Source code files: call `outline <path>` first to get the signatures (universal-ctags, " +
@@ -331,8 +331,12 @@ export function contractElementText(id) {
 
 // Subagents whose tool gating disables `outline` — they neither read source
 // code nor have the outline tool to call. Skip the outline-discipline block for
-// them so the system prompt doesn't push a tool they can't use.
-export const OUTLINE_DISABLED_AGENTS = new Set(["designer", "gitter"])
+// them so the system prompt doesn't push a tool they can't use. The grounder is
+// in here for the strongest form of that reason: it holds no file tool at all
+// (`read`, `edit`, `write`, `bash`, `glob`, `grep` and `outline` are every one
+// of them denied in its permission map), so the block would name nothing it can
+// call.
+export const OUTLINE_DISABLED_AGENTS = new Set(["designer", "gitter", "grounder"])
 
 // What the subagent is told about the reply ceiling. Not a constant: the
 // figure is the ceiling THIS type carries (settings.js `resultCeilingFor`), so

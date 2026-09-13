@@ -250,7 +250,7 @@ test("a relaxed permission key is reported with the denies the plugin re-imposes
   const finding = findingFor("researcher")
   assert.deepEqual([...finding.fields], ["permission"])
   assert.match(finding.detail, /^a project agent entry replaces permission; /)
-  assert.match(finding.detail, /this plugin's deny stays in force for .*\bwrite\b/)
+  assert.match(finding.detail, /this plugin's deny stays in force for .*\bedit\b/)
   assert.doesNotMatch(finding.detail, /\bread\b/, "what the author took away is not re-imposed")
 })
 

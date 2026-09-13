@@ -18,7 +18,7 @@ import { writeFileSync } from "node:fs"
 
 import plugin from "../src/index.js"
 import { upsertSession } from "../src/registry.js"
-import { mayDelegate } from "../src/agents.js"
+import { mayDelegate, AGENTS } from "../src/agents.js"
 import {
   PROMPT_CONTRACT,
   guideBlocks,
@@ -30,6 +30,7 @@ import {
   SUBAGENT_NO_SPAWN_GUIDE,
   delegationGuideNameFor,
   SUBAGENT_OUTLINE_GUIDE,
+  OUTLINE_DISABLED_AGENTS,
 } from "../src/prompts.js"
 import { CONTRACT_STAMP_KEY } from "../src/overrides.js"
 import {
@@ -155,6 +156,51 @@ test("the substituted guide is the role's own — delegation and outline include
   assert.ok(gitterPrompt.includes(SUBAGENT_DELEGATION_GUIDE))
   assert.ok(!gitterPrompt.includes(SUBAGENT_NO_SPAWN_GUIDE))
   assert.ok(!gitterPrompt.includes(SUBAGENT_OUTLINE_GUIDE), "gitter has no outline tool")
+})
+
+// The membership of OUTLINE_DISABLED_AGENTS against the permission maps it is
+// supposed to describe, in both directions: a role in the set must really have
+// `outline` denied, and a role out of it must really have the tool to call.
+// This is what keeps the injected reading discipline true — a role that is
+// told to `outline <path>` first and cannot is being pushed at a tool it does
+// not hold.
+test("the outline guide is skipped for exactly the roles whose permission map denies outline", () => {
+  for (const [agent, def] of Object.entries(AGENTS)) {
+    if (def.mode === "primary") continue
+    const denied = def.permission?.outline === "deny"
+    assert.equal(
+      OUTLINE_DISABLED_AGENTS.has(agent), denied,
+      denied
+        ? `${agent} denies outline, so it must be in OUTLINE_DISABLED_AGENTS`
+        : `${agent} has outline, so it must not be in OUTLINE_DISABLED_AGENTS`,
+    )
+    const guide = guideBlocks({ agent, delegates: mayDelegate(agent) })
+    assert.equal(
+      guide.includes(SUBAGENT_OUTLINE_GUIDE), !denied,
+      `${agent}: the reading discipline must be injected iff the role can outline`,
+    )
+  }
+})
+
+test("the grounder holds no file tool and is told no reading discipline", async () => {
+  const dir = newProject()
+  const hooks = await plugin(makeCtx(dir).ctx)
+  writeFileSync(getPromptFilePath(dir, "grounder"), renderDefaultsFile("grounder"))
+
+  const grounder = nextSession("ses_grounder")
+  subagent(grounder, "grounder", dir)
+  const prompt = await promptFor(hooks, grounder)
+  assert.ok(
+    !prompt.includes(SUBAGENT_OUTLINE_GUIDE),
+    "the grounder denies every file tool, outline included",
+  )
+  assert.ok(prompt.includes(SUBAGENT_GUIDE_CORE), "and still gets the core guide")
+  assert.ok(!prompt.includes("{{guide}}"))
+  // and the reference file's note stops naming the block it no longer gets
+  assert.ok(
+    !renderOpencodeDefaultFile("grounder").includes("SUBAGENT_OUTLINE_GUIDE"),
+    "the opencode-defaults reference file must not name a block the grounder is not given",
+  )
 })
 
 test("a primary's file substitutes the orchestration protocol", async () => {

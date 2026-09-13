@@ -152,8 +152,8 @@ test("the substituted guide is the role's own — delegation and outline include
   const gitter = nextSession("ses_gitter")
   subagent(gitter, "gitter", dir)
   const gitterPrompt = await promptFor(hooks, gitter)
-  assert.ok(gitterPrompt.includes(SUBAGENT_NO_SPAWN_GUIDE))
-  assert.ok(!gitterPrompt.includes(SUBAGENT_DELEGATION_GUIDE))
+  assert.ok(gitterPrompt.includes(SUBAGENT_DELEGATION_GUIDE))
+  assert.ok(!gitterPrompt.includes(SUBAGENT_NO_SPAWN_GUIDE))
   assert.ok(!gitterPrompt.includes(SUBAGENT_OUTLINE_GUIDE), "gitter has no outline tool")
 })
 

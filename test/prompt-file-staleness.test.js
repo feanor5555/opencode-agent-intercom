@@ -148,7 +148,7 @@ test("a file that lost several elements names them all, in table order", () => {
 test("a probe that does not apply to a role is not reported for it", () => {
   // `spawn-protocol` is the orchestrator's alone; `done-marker` skips the two
   // roles that own no TODO task.
-  const { missing } = classifyPromptFile("gitter", { body: "nothing at all" })
+  const { missing } = classifyPromptFile("grounder", { body: "nothing at all" })
   assert.deepEqual(missing, ["blocked-contract"])
 })
 

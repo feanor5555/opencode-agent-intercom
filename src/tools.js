@@ -180,7 +180,7 @@ function packageSizeVerdict(agent, fullPrompt) {
 
 // NESTED_SPAWN_TARGETS (agents.js) maps a spawning role to the agent types a
 // NESTED spawn of its — one whose caller is itself a subagent — may name. The
-// five non-web roles reach the `researcher`, because web access is
+// seven non-web roles reach the `researcher`, because web access is
 // concentrated there and is the one thing they cannot do for themselves; the
 // `researcher` reaches the `grounder`, the second search path its own tools do
 // not give it.

@@ -86,8 +86,8 @@ export const ORCHESTRATION_REUSE_GUIDE =
 // injection logic and delegationGuideFor below) and OUTLINE (only for
 // subagents whose tool gating actually grants them the `outline` tool).
 //
-// The spawn sentence is NOT in CORE: six roles may delegate and three may not,
-// and the six do not all name the same target — a block every subagent shares
+// The spawn sentence is NOT in CORE: eight roles may delegate and one may
+// not, and the eight do not all name the same target — a block every subagent shares
 // cannot say all of that. CORE is what is true of every subagent whatever its
 // permission map says.
 //
@@ -107,15 +107,14 @@ export const SUBAGENT_GUIDE_CORE =
   "Ask vs. Blocked: — `ask` where ONE answer lets you carry on inside this run; `Blocked:` where you cannot carry on at all, where the answer would change the task itself, or where you already asked and no answer came. Never ask twice about the same thing, and never use `ask` to deliver findings.\n" +
   "Reply to the orchestrator in English. Address the user directly only in the user's language.\n---\n"
 
-// For a subagent whose role denies `spawn` (grounder, designer, gitter). The
-// exact sentence these roles carried while no subagent could spawn at all, so
-// nothing changes for them.
+// For a subagent whose role denies `spawn` (grounder). The exact sentence
+// this role carried while no subagent could spawn at all, so nothing changes.
 export const SUBAGENT_NO_SPAWN_GUIDE =
   "\n\n---\n🚫 agent-intercom: you do not delegate.\n" +
   "You cannot spawn agents. If the task needs another agent, name it and what it should do in your final reply — the orchestrator dispatches it; you never spawn. Where the task cannot go on without that agent, this is a blocker: open the reply with `Blocked:`.\n---\n"
 
 // For a subagent whose role allows `spawn` and whose target is the researcher
-// (planner, coder, debugger, reviewer, documenter). States the one thing
+// (planner, coder, debugger, reviewer, documenter, designer, gitter). States the one thing
 // delegation is for, the one target it may name, that it is not the normal
 // working mode, and what comes back. The researcher's own block, whose target
 // is the grounder, follows below.

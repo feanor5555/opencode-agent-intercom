@@ -208,14 +208,13 @@ const SUBAGENT_NO_DELEGATION = {
 //     and searches itself, so it has nothing to delegate, and its denial is
 //     what terminates the chain structurally: the target graph in
 //     NESTED_SPAWN_TARGETS below leads to it and stops there.
-//   designer, gitter — neither does token-heavy preparatory reading; both are
-//     told in their role prompt to request web material in their final reply.
 //
-// planner, coder, debugger, reviewer, documenter and researcher do NOT carry
-// it: they may spawn, and a spawn of theirs is gated by the three checks in
-// nestedSpawnRefusal plus the per-run quota (maxNestedSpawns). The absence of
-// `spawn: "deny"` is the whole grant — the schema strip leaves the tool in
-// their schema and checkSpawnPermission resolves the same map at run time.
+// planner, coder, debugger, reviewer, documenter, researcher, designer and
+// gitter do NOT carry it: they may spawn, and a spawn of theirs is gated by
+// the three checks in nestedSpawnRefusal plus the per-run quota
+// (maxNestedSpawns). The absence of `spawn: "deny"` is the whole grant — the
+// schema strip leaves the tool in their schema and checkSpawnPermission
+// resolves the same map at run time.
 const NO_SPAWN = {
   spawn: "deny",
 }
@@ -226,8 +225,8 @@ const NO_SPAWN = {
 // things it cannot do itself. The spawn gate (tools.js) enforces it and the
 // delegating roles' limits block (hooks.js) sizes against it.
 //
-// The five non-web roles reach the `researcher`: web search and fetching is
-// the one thing they have no tool for. The `researcher` reaches the
+// The seven non-web roles reach the `researcher`: web search and fetching
+// is the one thing they have no tool for. The `researcher` reaches the
 // `grounder` and nothing else: that is the second, independent search path
 // (Google Search grounding), which its own tools do not give it.
 //
@@ -243,6 +242,8 @@ export const NESTED_SPAWN_TARGETS = Object.freeze({
   debugger: WEB_SEARCH_TARGETS,
   reviewer: WEB_SEARCH_TARGETS,
   documenter: WEB_SEARCH_TARGETS,
+  designer: WEB_SEARCH_TARGETS,
+  gitter: WEB_SEARCH_TARGETS,
   researcher: Object.freeze(["grounder"]),
 })
 
@@ -447,7 +448,7 @@ export const AGENTS = {
       "Generates images (UI mockups, screen designs, icons, illustrations, hero graphics) from a written brief. Saves files to disk; does not write source code.",
     mode: "subagent",
     hidden: true,
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS, outline: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, outline: "deny" },
     prompt: DESIGNER_PROMPT,
   },
   gitter: {
@@ -456,7 +457,7 @@ export const AGENTS = {
     mode: "subagent",
     hidden: true,
     permission: {
-      ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN,
+      ...SUBAGENT_NO_DELEGATION,
       edit: "deny", write: "deny", ...NO_WEB_ACCESS, outline: "deny",
       todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
     },

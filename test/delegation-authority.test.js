@@ -204,13 +204,13 @@ test("only the named role loses the three blocks — a sibling role keeps them",
 // ---- and the config's allow reaches it too, the other way round -----------
 
 test("a role the plugin denies but the config allows is given all three", async () => {
-  // `designer` carries `spawn: "deny"` in the plugin's own map and has no
-  // nested target; `grounder` is the same. The role that can be opened without
-  // promising a target the gate refuses is one that HAS a target, so the case
-  // is driven on a role whose own map denies and whose target table carries an
-  // entry. None ships that way, so the target table decides the shape of this
-  // test: the researcher is opened explicitly at rung 1 instead, which is the
-  // same rung a project override uses.
+  // `grounder` carries `spawn: "deny"` in the plugin's own map and has no
+  // nested target. The role that can be opened without promising a target the
+  // gate refuses is one that HAS a target, so the case is driven on a role
+  // whose own map denies and whose target table carries an entry. None ships
+  // that way, so the target table decides the shape of this test: the
+  // researcher is opened explicitly at rung 1 instead, which is the same rung
+  // a project override uses.
   const { ctx } = makeCtx({ agentConfig: allowSpawn("researcher") })
   const hooks = await plugin(ctx)
   subagentCaller("ses_researcher", "researcher")
@@ -227,16 +227,16 @@ test("a config that opens spawn on a role with no target does not promise delega
   // role's NESTED_SPAWN_TARGETS set is refused, and an empty set refuses
   // everything. Telling the role it delegates would hand it the researcher
   // block (the delegation guide's fallback) and a target it can never name.
-  assert.deepEqual(nestedSpawnTargets("designer"), [], "the designer names nothing")
-  const { ctx } = makeCtx({ agentConfig: allowSpawn("designer") })
+  assert.deepEqual(nestedSpawnTargets("grounder"), [], "the grounder names nothing")
+  const { ctx } = makeCtx({ agentConfig: allowSpawn("grounder") })
   const hooks = await plugin(ctx)
-  const callerCtx = subagentCaller("ses_designer", "designer")
+  const callerCtx = subagentCaller("ses_grounder", "grounder")
 
-  const prompt = await systemPromptFor(hooks, "ses_designer")
+  const prompt = await systemPromptFor(hooks, "ses_grounder")
   assert.ok(prompt.includes(SUBAGENT_NO_SPAWN_GUIDE))
   assert.ok(!prompt.includes(SUBAGENT_DELEGATION_GUIDE))
   assert.doesNotMatch(prompt, DELEGATION_LIMITS_HEADING)
-  assert.doesNotMatch(await turnNotice(hooks, "ses_designer"), QUOTA_LINE)
+  assert.doesNotMatch(await turnNotice(hooks, "ses_grounder"), QUOTA_LINE)
 
   // The gate lets it past the spawn check now and refuses on the target, which
   // is what the prompt above already told it.
@@ -303,8 +303,9 @@ test("an unreadable config leaves every prompt at the plugin's own map", async (
   assert.match(await turnNotice(hooks, "ses_planner"), QUOTA_LINE)
 
   const designer = await systemPromptFor(hooks, "ses_designer")
-  assert.ok(designer.includes(SUBAGENT_NO_SPAWN_GUIDE))
-  assert.doesNotMatch(designer, DELEGATION_LIMITS_HEADING)
+  assert.ok(designer.includes(SUBAGENT_DELEGATION_GUIDE))
+  assert.match(designer, DELEGATION_LIMITS_HEADING)
+  assert.match(await turnNotice(hooks, "ses_designer"), QUOTA_LINE)
 })
 
 // ---- the authority itself --------------------------------------------------

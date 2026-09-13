@@ -579,23 +579,24 @@ test("tool.execute.before hard-denies the native `task` tool from a subagent", a
 
 // --- only-the-orchestrator-delegates enforcement ---------------------------
 
-// The six roles that may delegate: they hold `spawn`, and a spawn of theirs is
-// gated at run time (the caller's own target set, no task id, a per-run quota)
-// rather than by the permission map. The researcher is one of them — its target
-// is the `grounder` alone. The three that may not: grounder, because it is the
-// end of every chain and searches itself; designer and gitter, because neither
-// does token-heavy preparatory reading.
+// The eight roles that may delegate: they hold `spawn`, and a spawn of theirs
+// is gated at run time (the caller's own target set, no task id, a per-run
+// quota) rather than by the permission map. The researcher is one of them —
+// its target is the `grounder` alone. Grounder is the only role that may not:
+// it is the end of every chain and searches itself.
 const DELEGATING_ROLES = [
   "planner",
   "coder",
   "debugger",
   "reviewer",
   "documenter",
+  "designer",
+  "gitter",
   "researcher",
 ]
-const NON_DELEGATING_ROLES = ["grounder", "designer", "gitter"]
+const NON_DELEGATING_ROLES = ["grounder"]
 
-test("spawn is granted to six subagent roles and denied to three; task never", () => {
+test("spawn is granted to eight subagent roles and denied to one; task never", () => {
   const subagents = Object.entries(AGENTS).filter(([, def]) => def.mode === "subagent")
   assert.equal(subagents.length, 9, "expected 9 subagent roles")
   assert.deepEqual(
@@ -719,15 +720,15 @@ test("spawn from a NON-DELEGATING subagent is refused as a tool result and creat
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   // the orchestrator spawns a subagent (this also proves the orchestrator path works)
-  await hooks.tool.spawn.execute({ agent: "designer", prompt: "x" }, toolCtx)
+  await hooks.tool.spawn.execute({ agent: "grounder", prompt: "x" }, toolCtx)
   const subID = created[0]
   const countBefore = created.length
   // the subagent now tries to spawn another agent -> friendly refusal, no throw,
   // no new session, and the subagent's session is NOT misregistered as primary.
-  // designer carries `spawn: "deny"`, so the caller gate refuses before any
-  // session is created; the five roles that hold `spawn` take the nested path
+  // grounder carries `spawn: "deny"`, so the caller gate refuses before any
+  // session is created; the eight roles that hold `spawn` take the nested path
   // instead (test/nested-spawn.test.js).
-  const subCtx = { sessionID: subID, agent: "designer", messageID: "m2" }
+  const subCtx = { sessionID: subID, agent: "grounder", messageID: "m2" }
   const res = await hooks.tool.spawn.execute({ agent: "researcher", prompt: "y" }, subCtx)
   assert.match(res.output, /you are a subagent/i)
   assert.equal(created.length, countBefore, "no new session may be created for a subagent spawn")
@@ -1331,11 +1332,10 @@ test("a delegating subagent under the context budget gets the quota line and not
 })
 
 test("a non-delegating subagent under the context budget gets no per-turn notice at all", async () => {
-  // A gitter: the researcher delegates now (its target is the grounder), so it
-  // is told its quota and is not the role this case is about.
+  // Grounder is the end of the chain, so it has no nested quota.
   const { ctx, created } = makeCtx({ messages: UNDER_BUDGET_MESSAGES })
   const hooks = await plugin(ctx)
-  await hooks.tool.spawn.execute({ agent: "gitter", prompt: "x" }, toolCtx)
+  await hooks.tool.spawn.execute({ agent: "grounder", prompt: "x" }, toolCtx)
 
   assert.equal(await turnNotice(hooks, created[0]), "")
 })

@@ -1432,8 +1432,8 @@ function formatLimitsNotice({
 // can spawn nothing however its `permission.spawn` reads — and the delegation
 // guide would name it a target it cannot have (delegationGuideFor falls back to
 // the researcher block for a role the target table does not key). For the roles
-// as they ship the condition is inert: the six with `spawn` all have a target
-// and the three without have neither. It bites only where a project opens
+// as they ship the condition is inert: the eight with `spawn` all have a target
+// and the one without has neither. It bites only where a project opens
 // `spawn` on a role the target table does not carry, which is exactly the case
 // reading the resolved config makes reachable here.
 async function delegatesNested(client, agent) {

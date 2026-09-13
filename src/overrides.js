@@ -312,6 +312,8 @@ const DELEGATING_AGENTS = [
   "reviewer",
   "documenter",
   "researcher",
+  "designer",
+  "gitter",
 ]
 
 // One probe per contract element: `agents: null` means every role, `re` is what
@@ -342,8 +344,8 @@ export const PROMPT_FILE_PROBES = Object.freeze([
     id: "delegation-block",
     agents: Object.freeze(DELEGATING_AGENTS),
     // The alternation is the two targets the role table admits
-    // (NESTED_SPAWN_TARGETS in agents.js): the five non-web roles are told the
-    // researcher, the researcher is told the grounder. One element either way —
+    // (NESTED_SPAWN_TARGETS in agents.js): the seven non-web roles are told
+    // the researcher, the researcher is told the grounder. One element either way —
     // what a file must carry is the sentence that names ITS target.
     re: /spawn\("(?:researcher|grounder)"/,
     why: "a role that may delegate is otherwise never told the target it may name",

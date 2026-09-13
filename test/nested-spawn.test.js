@@ -3,11 +3,11 @@
 // blocking behaviour that makes the child's ending the caller's tool result, and
 // the two pieces of session bookkeeping a nested child needs.
 //
-// `spawn` is granted to six of the nine roles (planner, coder, debugger,
-// reviewer, documenter, researcher); grounder, designer and gitter keep
-// `spawn: "deny"`. What each grantee may NAME comes from NESTED_SPAWN_TARGETS
-// (agents.js): the five non-web roles reach the researcher, the researcher
-// reaches the grounder.
+// `spawn` is granted to eight of the nine roles (planner, coder, debugger,
+// reviewer, documenter, designer, gitter, researcher); only grounder keeps
+// `spawn: "deny"`. What each grantee may NAME comes from
+// NESTED_SPAWN_TARGETS (agents.js): the seven non-web roles reach the
+// researcher, the researcher reaches the grounder.
 // The tests that drive the ADMITTED path still open it through a config
 // override on the caller's role — rung 1 of checkSpawnPermission's resolution —
 // so both rungs stay pinned and a later change to the plugin's own map cannot
@@ -54,9 +54,11 @@ const DELEGATING_ROLES = [
   "debugger",
   "reviewer",
   "documenter",
+  "designer",
+  "gitter",
   "researcher",
 ]
-const NON_DELEGATING_ROLES = ["grounder", "designer", "gitter"]
+const NON_DELEGATING_ROLES = ["grounder"]
 
 const PRIMARY = "ses_primary"
 const primaryCtx = { sessionID: PRIMARY, agent: "orchestrator", messageID: "m1" }
@@ -192,8 +194,8 @@ test("the caller gate splits the nine roles exactly as the grant does", async ()
     "a new subagent role must be placed on one side of the grant here",
   )
 
-  // The three that may not delegate: the caller gate is the first check, so
-  // they never reach the target check and no session is created for them.
+  // The one that may not delegate: the caller gate is the first check, so
+  // it never reaches the target check and no session is created for it.
   for (const role of NON_DELEGATING_ROLES) {
     const callerCtx = subagentCaller(`ses_caller_${role}`, role)
     const res = await hooks.tool.spawn.execute({ agent: "researcher", prompt: "look it up" }, callerCtx)
@@ -204,10 +206,10 @@ test("the caller gate splits the nine roles exactly as the grant does", async ()
     )
   }
 
-  // The six that may: they pass the caller gate. Probed with `coder`, a target
-  // no role's set carries, so the assertion stays on the gate and nothing
-  // blocks on a live child — reaching the target refusal is proof the caller
-  // was admitted, and the refusal names that caller's own allowed set.
+  // The eight that may: they pass the caller gate. Probed with `coder`, a
+  // target no role's set carries, so the assertion stays on the gate and
+  // nothing blocks on a live child — reaching the target refusal is proof the
+  // caller was admitted, and the refusal names that caller's own allowed set.
   for (const role of DELEGATING_ROLES) {
     const callerCtx = subagentCaller(`ses_caller_${role}`, role)
     const res = await hooks.tool.spawn.execute({ agent: "coder", prompt: "do it" }, callerCtx)
@@ -225,11 +227,11 @@ test("the caller gate splits the nine roles exactly as the grant does", async ()
 test("the refusal text for a denied role is unchanged, word for word", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  // designer keeps `spawn: "deny"`, so it gets exactly the sentence every
+  // grounder keeps `spawn: "deny"`, so it gets exactly the sentence every
   // subagent got while no role could spawn at all.
   const res = await hooks.tool.spawn.execute(
     { agent: "researcher", prompt: "x" },
-    subagentCaller("ses_designer", "designer"),
+    subagentCaller("ses_grounder", "grounder"),
   )
   assert.equal(
     res.output,
@@ -256,10 +258,11 @@ test("checkSpawnPermission: config decides, then the plugin's map, then deny", a
   // rung 1: the config's explicit deny wins over a role whose own map allows.
   assert.match(await guard.checkSpawnPermission("orchestrator"), /permission\.spawn/)
   // rung 2: a role the config does not decide for falls to the plugin's map —
-  // deny for the three that carry `spawn: "deny"`, allow for the six grants (an
-  // absent key resolves to allow).
-  assert.match(await guard.checkSpawnPermission("designer"), /permission\.spawn/)
+  // deny for the one that carries `spawn: "deny"`, allow for the eight grants
+  // (an absent key resolves to allow).
   assert.match(await guard.checkSpawnPermission("grounder"), /permission\.spawn/)
+  assert.equal(await guard.checkSpawnPermission("designer"), null)
+  assert.equal(await guard.checkSpawnPermission("gitter"), null)
   assert.equal(await guard.checkSpawnPermission("planner"), null)
   assert.equal(await guard.checkSpawnPermission("researcher"), null)
   // rung 3: a role neither side defines.
@@ -271,8 +274,8 @@ test("an ABSENT permission.spawn key allows — the shape S6 gives a delegating 
   const { ctx } = makeCtx()
   const guard = createPermissionGuard(ctx.client)
   // The orchestrator's map carries no `spawn` key at all; that absence is what
-  // planner/coder/debugger/reviewer/documenter/researcher get by dropping
-  // NO_SPAWN.
+  // planner/coder/debugger/reviewer/documenter/designer/gitter/researcher get
+  // by dropping NO_SPAWN.
   assert.equal(AGENTS.orchestrator.permission?.spawn, undefined)
   assert.equal(await guard.checkSpawnPermission("orchestrator"), null)
 })
@@ -332,15 +335,15 @@ test("a grounder may spawn nothing — the chain ends there", async () => {
 // (a project override can do this) that the target table names no set for is
 // told plainly that it may spawn nothing, instead of being pointed at a target.
 test("a caller with no target set is told it may spawn nothing", async () => {
-  const { ctx, created } = makeCtx({ agentConfig: configAllowingSpawn("gitter") })
+  const { ctx, created } = makeCtx({ agentConfig: configAllowingSpawn("grounder") })
   const hooks = await plugin(ctx)
-  assert.deepEqual([...nestedSpawnTargets("gitter")], [])
+  assert.deepEqual([...nestedSpawnTargets("grounder")], [])
 
   const res = await hooks.tool.spawn.execute(
     { agent: "researcher", prompt: "look it up" },
-    subagentCaller("ses_gitter", "gitter"),
+    subagentCaller("ses_grounder", "grounder"),
   )
-  assert.match(res.output, /a "gitter" may spawn nothing at all — you asked for a "researcher"/)
+  assert.match(res.output, /a "grounder" may spawn nothing at all — you asked for a "researcher"/)
   assert.match(res.output, /name the agent and what it should do in your final reply/i)
   assert.deepEqual(created, [])
 })

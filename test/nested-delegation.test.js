@@ -63,9 +63,11 @@ const DELEGATING_ROLES = [
   "debugger",
   "reviewer",
   "documenter",
+  "designer",
+  "gitter",
   "researcher",
 ]
-const NON_DELEGATING_ROLES = ["grounder", "designer", "gitter"]
+const NON_DELEGATING_ROLES = ["grounder"]
 
 const PRIMARY = "ses_primary"
 
@@ -197,6 +199,8 @@ test("the target table maps each spawning role to what it may name", () => {
   assert.deepEqual([...nestedSpawnTargets("debugger")], ["researcher"])
   assert.deepEqual([...nestedSpawnTargets("reviewer")], ["researcher"])
   assert.deepEqual([...nestedSpawnTargets("documenter")], ["researcher"])
+  assert.deepEqual([...nestedSpawnTargets("designer")], ["researcher"])
+  assert.deepEqual([...nestedSpawnTargets("gitter")], ["researcher"])
   // The researcher's own one target, and only that one.
   assert.deepEqual([...nestedSpawnTargets("researcher")], ["grounder"])
   // A role outside the table — denied here and unknown alike — answers with the
@@ -222,15 +226,19 @@ test("the target table maps each spawning role to what it may name", () => {
 
 // ---- the prompts: exactly one of the two blocks ----------------------------
 
-test("a delegating role gets the delegation guide and not the no-spawn one", async () => {
+test("delegating roles get the delegation guide and not the no-spawn one", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  subagentCaller("ses_planner", "planner")
 
-  const prompt = await systemPromptFor(hooks, "ses_planner")
-  assert.ok(prompt.includes(SUBAGENT_DELEGATION_GUIDE), "the delegation guide is injected")
-  assert.ok(!prompt.includes(SUBAGENT_NO_SPAWN_GUIDE), "the two blocks are mutually exclusive")
-  assert.match(prompt, /spawn\("researcher", prompt\)/)
+  for (const agent of ["planner", "designer", "gitter"]) {
+    const sessionID = `ses_${agent}`
+    subagentCaller(sessionID, agent)
+
+    const prompt = await systemPromptFor(hooks, sessionID)
+    assert.ok(prompt.includes(SUBAGENT_DELEGATION_GUIDE), `${agent}: the delegation guide is injected`)
+    assert.ok(!prompt.includes(SUBAGENT_NO_SPAWN_GUIDE), `${agent}: the two blocks are mutually exclusive`)
+    assert.match(prompt, /spawn\("researcher", prompt\)/, `${agent}: researcher is its target`)
+  }
 })
 
 test("the researcher gets the grounded delegation block, not the researcher one", async () => {
@@ -283,9 +291,9 @@ test("a researcher is told its nested quota, and it is not zero", async () => {
 test("a non-delegating role gets the no-spawn guide, word for word as before", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  subagentCaller("ses_designer", "designer")
+  subagentCaller("ses_grounder", "grounder")
 
-  const prompt = await systemPromptFor(hooks, "ses_designer")
+  const prompt = await systemPromptFor(hooks, "ses_grounder")
   assert.ok(prompt.includes(SUBAGENT_NO_SPAWN_GUIDE), "the no-spawn guide is injected")
   assert.ok(!prompt.includes(SUBAGENT_DELEGATION_GUIDE))
   assert.match(prompt, /You cannot spawn agents\./)
@@ -324,44 +332,53 @@ test("the primary gets neither block — both are subagent-only", async () => {
 
 // ---- the reduced limits block ---------------------------------------------
 
-test("a delegating role's limits block carries its three figures and nothing more", async () => {
+test("delegating roles' limits blocks carry their three figures and nothing more", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  subagentCaller("ses_planner", "planner")
 
-  const prompt = await systemPromptFor(hooks, "ses_planner")
-  assert.match(prompt, /📐 agent-intercom: limits on the work you delegate\./)
-  // 1. its own budget — the ceiling the whole run is measured against.
-  assert.match(
-    prompt,
-    new RegExp(`Your own context budget: ${fmtTokens(contextBudgetFor("planner"))} `),
-  )
-  // 2. the researcher's budget with fixed overhead and headroom, in the same
-  //    `100.0k (−12.4k fixed → 87.6k)` shape the primary's block uses.
-  const m = /researcher ([0-9.]+k?) \(−([0-9.]+k?) fixed → ([0-9.]+k?)\)/.exec(prompt)
-  assert.ok(m, "the researcher entry renders budget, fixed overhead and headroom")
-  assert.equal(m[1], fmtTokens(contextBudgetFor("researcher")))
-  // 3. the two package shares the size gate applies to a nested spawn too.
-  assert.match(prompt, new RegExp(`at or under ${percent(PACKAGE_WARN_SHARE)}`))
-  assert.match(prompt, new RegExp(`over ${percent(PACKAGE_REFUSE_SHARE)} the spawn is REFUSED`))
-  // And NOT the quota: it is the one figure that moves inside the run, so it is
-  // kept out of the element the provider caches.
-  assert.doesNotMatch(prompt, /nested spawns left this run/i)
-  // Nothing from the orchestrator's own block: a subagent can act on none of it.
-  assert.doesNotMatch(prompt, /coder \d/, "no full per-type budget table")
-  assert.doesNotMatch(prompt, /hidden from the user's screen/)
+  for (const agent of ["planner", "designer", "gitter"]) {
+    const sessionID = `ses_limits_${agent}`
+    subagentCaller(sessionID, agent)
+
+    const prompt = await systemPromptFor(hooks, sessionID)
+    assert.match(prompt, /📐 agent-intercom: limits on the work you delegate\./, `${agent}: limits`)
+    // 1. its own budget — the ceiling the whole run is measured against.
+    assert.match(
+      prompt,
+      new RegExp(`Your own context budget: ${fmtTokens(contextBudgetFor(agent))} `),
+      `${agent}: own budget`,
+    )
+    // 2. the researcher's budget with fixed overhead and headroom, in the same
+    //    `100.0k (−12.4k fixed → 87.6k)` shape the primary's block uses.
+    const m = /researcher ([0-9.]+k?) \(−([0-9.]+k?) fixed → ([0-9.]+k?)\)/.exec(prompt)
+    assert.ok(m, `${agent}: researcher entry renders budget, fixed overhead and headroom`)
+    assert.equal(m[1], fmtTokens(contextBudgetFor("researcher")))
+    // 3. the two package shares the size gate applies to a nested spawn too.
+    assert.match(prompt, new RegExp(`at or under ${percent(PACKAGE_WARN_SHARE)}`))
+    assert.match(prompt, new RegExp(`over ${percent(PACKAGE_REFUSE_SHARE)} the spawn is REFUSED`))
+    // And NOT the quota: it is the one figure that moves inside the run, so it is
+    // kept out of the element the provider caches.
+    assert.doesNotMatch(prompt, /nested spawns left this run/i)
+    // Nothing from the orchestrator's own block: a subagent can act on none of it.
+    assert.doesNotMatch(prompt, /coder \d/, "no full per-type budget table")
+    assert.doesNotMatch(prompt, /hidden from the user's screen/)
+  }
 })
 
 // ---- the quota line: on the message, not in the system prompt --------------
 
-test("the quota line reaches a delegating role on the last user message", async () => {
+test("the quota line reaches delegating roles on the last user message", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  subagentCaller("ses_planner", "planner")
 
-  const notice = await turnNotice(hooks, "ses_planner")
-  assert.match(notice, /agent-intercom: nested spawns left this run: 2 of 2\./)
-  assert.match(notice, /The quota does not reset\./)
+  for (const agent of ["planner", "designer", "gitter"]) {
+    const sessionID = `ses_quota_${agent}`
+    subagentCaller(sessionID, agent)
+
+    const notice = await turnNotice(hooks, sessionID)
+    assert.match(notice, /agent-intercom: nested spawns left this run: 2 of 2\./, `${agent}: quota`)
+    assert.match(notice, /The quota does not reset\./, `${agent}: quota is persistent`)
+  }
 })
 
 test("the quota figure counts down live within the run", async () => {
@@ -391,9 +408,9 @@ test("the quota figure counts down live within the run", async () => {
 test("a non-delegating role gets no quota line on its message", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  subagentCaller("ses_designer", "designer")
+  subagentCaller("ses_grounder", "grounder")
 
-  assert.doesNotMatch(await turnNotice(hooks, "ses_designer"), /nested spawns left this run/i)
+  assert.doesNotMatch(await turnNotice(hooks, "ses_grounder"), /nested spawns left this run/i)
 })
 
 test("the primary gets no quota line — the per-run quota is a subagent's", async () => {
@@ -417,9 +434,9 @@ test("an aborted delegating subagent is not handed a spawn allowance on the way 
 test("a non-delegating role gets no limits block at all", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  subagentCaller("ses_gitter", "gitter")
+  subagentCaller("ses_grounder", "grounder")
 
-  const prompt = await systemPromptFor(hooks, "ses_gitter")
+  const prompt = await systemPromptFor(hooks, "ses_grounder")
   assert.doesNotMatch(prompt, /limits on the work you delegate/)
 })
 

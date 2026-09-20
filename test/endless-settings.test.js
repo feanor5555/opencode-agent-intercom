@@ -34,6 +34,7 @@ const ENV_KEYS = [
   "OPENCODE_AGENT_INTERCOM_ENDLESS_MODE",
   "OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT",
   "OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS",
+  "OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_EXTENSION_MS",
   "OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES",
   "OPENCODE_AGENT_INTERCOM_MAX_PRIMARY_CONTEXT",
 ]
@@ -65,6 +66,7 @@ test("no file: endlessMode is true and endlessContext is 250000", () => {
   assert.equal(s.endlessContext, 250000)
   assert.equal(s.endlessContext, DEFAULT_ENDLESS_CONTEXT)
   assert.equal(s.endlessQuiesceTimeoutMs, 600000)
+  assert.equal(s.endlessQuiesceExtensionMs, 600000)
   assert.equal(s.endlessMaxCycles, 10)
 })
 
@@ -89,6 +91,28 @@ test("a non-integer or negative endlessContext leaves the default standing", () 
     isolate({ endlessContext: bad })
     assert.equal(getSettings().endlessContext, DEFAULT_ENDLESS_CONTEXT)
   }
+})
+
+test("endlessQuiesceExtensionMs: the env resolves, a bad value leaves the default, the file wins", () => {
+  process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_EXTENSION_MS = "90000"
+  isolate()
+  assert.equal(getSettings().endlessQuiesceExtensionMs, 90000)
+
+  // With the env silent, a bad file value leaves the DEFAULT standing.
+  delete process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_EXTENSION_MS
+  for (const bad of [1000.5, -1, "1000", null, true]) {
+    isolate({ endlessQuiesceExtensionMs: bad })
+    assert.equal(getSettings().endlessQuiesceExtensionMs, 600000, `value ${JSON.stringify(bad)} must leave the default standing`)
+  }
+
+  // 0 is a real value and switches the extension off.
+  isolate({ endlessQuiesceExtensionMs: 0 })
+  assert.equal(getSettings().endlessQuiesceExtensionMs, 0)
+
+  // File beats env.
+  process.env.OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_EXTENSION_MS = "90000"
+  isolate({ endlessQuiesceExtensionMs: 45000 })
+  assert.equal(getSettings().endlessQuiesceExtensionMs, 45000)
 })
 
 test("the env vars resolve when the file is silent and lose to the file when it is not", () => {

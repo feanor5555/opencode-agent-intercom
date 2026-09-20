@@ -29,7 +29,7 @@
 // anonymous tier. The value is a secret — it is never written to the debug log.
 //
 // Endless mode resolves the same way: `endlessMode`, `endlessContext`,
-// `endlessQuiesceTimeoutMs` and `endlessMaxCycles`.
+// `endlessQuiesceTimeoutMs`, `endlessQuiesceExtensionMs` and `endlessMaxCycles`.
 // While `endlessMode` is on and the mode has not paused itself for the session
 // in hand, `endlessContext` is the primary threshold in effect instead of
 // `maxPrimaryContext` — see `primaryContextThreshold`.
@@ -88,7 +88,7 @@
 //       "exaApiKey": "<key>", "forumBangs": ["!hn", "!lo"],
 //       "postNoticeRetries": N, "postNoticeRetryBackoffMs": N,
 //       "endlessMode": true|false, "endlessContext": N,
-//       "endlessQuiesceTimeoutMs": N, "endlessMaxCycles": N,
+//       "endlessQuiesceTimeoutMs": N, "endlessQuiesceExtensionMs": N, "endlessMaxCycles": N,
 //       "maxNestedSpawns": N,
 //       "midRunMessaging": true|false, "answerWaitMs": N,
 //       "maxMessageTokens": N,
@@ -347,6 +347,11 @@ export const DEFAULT_ENDLESS_CONTEXT = 250000
 // The inactivity watchdog (maxSubagentAgeMs) already resolves a HUNG subagent
 // in ~90 s, so this bound is for one that is genuinely working.
 const DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS = 600000
+// How long the quiesce window re-arms each time the primary's own subagents
+// are seen to advance (`lastActivityAt` moved). A subagent that stops emitting
+// freezes the signal and the cycle abandons at the next deadline; 0 switches
+// the extension off, so the first deadline abandons whatever the subagents do.
+const DEFAULT_ENDLESS_QUIESCE_EXTENSION_MS = 600000
 // How long a cycle's wind-down step gets: the primary's one shaped turn, the
 // `planner` it starts, that subagent reading files and rewriting the todo list,
 // and the settlement the cycle waits for afterwards. Minutes, not the 120 s a
@@ -467,7 +472,8 @@ function envStr(name, def) {
 // maxSubagentAgeMs, maxSubagentToolCallMs, searxngUrl, exaApiKey, forumBangs,
 // postNoticeRetries,
 // postNoticeRetryBackoffMs, endlessMode, endlessContext,
-// endlessQuiesceTimeoutMs, endlessMaxCycles, maxNestedSpawns, showAgentcom }.
+// endlessQuiesceTimeoutMs, endlessQuiesceExtensionMs, endlessMaxCycles,
+// maxNestedSpawns, showAgentcom }.
 // Cached for TTL_MS so the hot paths (spawn, every subagent transform) don't
 // stat the file constantly. searxngUrl is "" when unset (searxng disabled).
 // exaApiKey is "" when unset (web_search falls back to Exa's anonymous tier).
@@ -562,6 +568,10 @@ export function getSettings() {
     endlessQuiesceTimeoutMs: envNum(
       "OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS",
       DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS,
+    ),
+    endlessQuiesceExtensionMs: envNum(
+      "OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_EXTENSION_MS",
+      DEFAULT_ENDLESS_QUIESCE_EXTENSION_MS,
     ),
     endlessWindDownTimeoutMs: envNum(
       "OPENCODE_AGENT_INTERCOM_ENDLESS_WIND_DOWN_TIMEOUT_MS",
@@ -695,6 +705,9 @@ export function getSettings() {
     }
     if (Number.isInteger(raw?.endlessQuiesceTimeoutMs) && raw.endlessQuiesceTimeoutMs >= 0) {
       resolved.endlessQuiesceTimeoutMs = raw.endlessQuiesceTimeoutMs
+    }
+    if (Number.isInteger(raw?.endlessQuiesceExtensionMs) && raw.endlessQuiesceExtensionMs >= 0) {
+      resolved.endlessQuiesceExtensionMs = raw.endlessQuiesceExtensionMs
     }
     if (Number.isInteger(raw?.endlessWindDownTimeoutMs) && raw.endlessWindDownTimeoutMs >= 0) {
       resolved.endlessWindDownTimeoutMs = raw.endlessWindDownTimeoutMs

@@ -210,6 +210,7 @@ test("a quiesce timeout abandons and arms the cooldown", async () => {
     },
     now: () => clock,
     quiesceTimeoutMs: 1000,
+    quiesceExtensionMs: 0,
   })
   const res = await runEndlessCycle(io)
   assert.equal(res.outcome, "abandoned")
@@ -217,6 +218,49 @@ test("a quiesce timeout abandons and arms the cooldown", async () => {
   assert.equal(endlessCooldownActive(SID), true)
   assert.ok(!io._log.includes("performHandoff"))
   assert.ok(io._log.includes("disarm"))
+})
+
+test("the quiesce window re-arms while progressSignal advances and the cycle completes", async () => {
+  // isQuiesced stays false past the BASE window; the signal moves on every
+  // poll, so each poll re-arms the extension and the wait runs on until the
+  // mock declares quiesce at t=3000 — well past quiesceTimeoutMs=1000.
+  let clock = 0
+  const io = baseIo({
+    isQuiesced: async () => clock >= 3000,
+    progressSignal: () => clock,
+    sleep: async (ms) => {
+      clock += ms
+    },
+    now: () => clock,
+    quiesceTimeoutMs: 1000,
+    quiesceExtensionMs: 1000,
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "complete")
+  assert.ok(io._log.includes("performHandoff"))
+})
+
+test("a frozen progressSignal abandons at the extension deadline with `no progress`", async () => {
+  // The signal moves once (a live subagent), then stands still: the re-armed
+  // window runs out and the cycle abandons at t=1500 — past the 1000 ms base,
+  // at the extension deadline. The one hung entry under a switched-off
+  // watchdog is exactly this shape.
+  let clock = 0
+  const io = baseIo({
+    isQuiesced: async () => false,
+    progressSignal: () => (clock >= 500 ? 500 : 0),
+    sleep: async (ms) => {
+      clock += ms
+    },
+    now: () => clock,
+    quiesceTimeoutMs: 1000,
+    quiesceExtensionMs: 1000,
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "abandoned")
+  assert.equal(res.stage, "quiesce")
+  assert.match(res.reason, /still busy after \d+ms with no progress/)
+  assert.ok(!io._log.includes("performHandoff"))
 })
 
 // ---------------------------------------------------------------------------
@@ -376,14 +420,73 @@ test("V1: a resolved todo path that is not a regular file abandons", async () =>
 })
 
 test("V3: an unchanged file with no `no change` reply is restored and abandons", async () => {
+  let turns = 0
   const io = baseIo({
     reread: () => ({ name: "TODO.md", content: SNAP }),
-    windDownTurn: async () => "## WIND-DOWN DONE — 1 open",
+    windDownTurn: async () => {
+      turns += 1
+      return "## WIND-DOWN DONE — 1 open"
+    },
   })
   const res = await runEndlessCycle(io)
   assert.equal(res.outcome, "abandoned")
   assert.equal(res.stage, "confirm")
   assert.ok(io._log.includes("restore:true"), "the snapshot content was restored")
+  assert.ok(!io._log.includes("performHandoff"))
+  // The plain-count reply got its ONE re-ask: two arms, two turns, one restore.
+  assert.equal(io._log.filter((l) => l === "arm").length, 2)
+  assert.equal(turns, 2)
+  assert.equal(io._log.filter((l) => l.startsWith("restore:")).length, 1)
+})
+
+test("V3: the re-ask that writes FRESH completes without a restore", async () => {
+  let reads = 0
+  const io = baseIo({
+    reread: () => {
+      reads += 1
+      return { name: "TODO.md", content: reads === 1 ? SNAP : FRESH }
+    },
+    windDownTurn: async () => (reads === 0 ? "## WIND-DOWN DONE — 1 open" : "## WIND-DOWN DONE — 2 open"),
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "complete")
+  assert.deepEqual(res.openIds, ["T1", "T2"])
+  assert.ok(!io._log.some((l) => l.startsWith("restore:")), "the verified rewrite is not restored")
+  assert.ok(io._log.includes("performHandoff"))
+})
+
+test("V3: a re-ask that replies `no change` on the byte-equal file is accepted", async () => {
+  let turns = 0
+  const io = baseIo({
+    reread: () => ({ name: "TODO.md", content: SNAP }),
+    windDownTurn: async () => {
+      turns += 1
+      return turns === 1 ? "## WIND-DOWN DONE — 1 open" : "## WIND-DOWN DONE — no change"
+    },
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "complete")
+  assert.deepEqual(res.openIds, ["T1"])
+  assert.ok(io._log.includes("performHandoff"))
+})
+
+test("V3: a re-ask that returns `nothing open` with an empty parse stops instead of accepting", async () => {
+  let turns = 0
+  let reads = 0
+  const empty = fenced([], "T2")
+  const io = baseIo({
+    reread: () => {
+      reads += 1
+      return { name: "TODO.md", content: reads === 1 ? SNAP : empty }
+    },
+    windDownTurn: async () => {
+      turns += 1
+      return turns === 1 ? "## WIND-DOWN DONE — 1 open" : "## WIND-DOWN DONE — nothing open"
+    },
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "no-open-points")
+  assert.equal(isEndlessPaused(SID), true)
   assert.ok(!io._log.includes("performHandoff"))
 })
 

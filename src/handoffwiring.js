@@ -39,6 +39,7 @@ import {
   isQuiesced,
   recordEndlessCycle,
   countActiveSubagentsFor,
+  isActiveEntry,
   createWindDownToken,
   armEndlessWindDown,
   endlessWindDownPermit,
@@ -59,6 +60,7 @@ import {
   abortSession,
 } from "./client.js"
 import { dropRetainedSubagents, teardownSubagent, SUBAGENT_SESSION_TITLE_MARKER } from "./teardown.js"
+import { registry } from "./state.js"
 import { deliverParentNotice } from "./noticejournal.js"
 import { secureSubagentState } from "./resultfile.js"
 import {
@@ -537,7 +539,7 @@ export function dropEndlessLatch(sessionID, reason) {
 // every abandon path releases it inside runEndlessCycle and arms the cooldown.
 export async function maybeRunPendingEndless(client, sessionID) {
   if (!hasEndlessPending(sessionID)) return null
-  const { endlessMode, endlessQuiesceTimeoutMs, endlessMaxCycles, endlessWindDownTimeoutMs } =
+  const { endlessMode, endlessQuiesceTimeoutMs, endlessQuiesceExtensionMs, endlessMaxCycles, endlessWindDownTimeoutMs } =
     getSettings()
   // Stop #5, the switch: the latch is usually set during the very turn that
   // crosses the ceiling and this idle follows it immediately, so the transform
@@ -603,6 +605,21 @@ export async function maybeRunPendingEndless(client, sessionID) {
     // The figure the "quiesced after" log line reports: what this primary's
     // own wait was on when it began, scoped exactly as isQuiesced is.
     countActive: () => countActiveSubagentsFor(sessionID),
+    // Gate A's progress signal: the maximum `lastActivityAt` over this
+    // primary's active entries, read off the registry exactly as
+    // countActiveSubagentsFor reads it. It advances while any of them emits an
+    // event, so the quiesce window re-arms under a slow but living subagent and
+    // abandons once every one of them has stopped moving.
+    progressSignal: () => {
+      let max = 0
+      for (const e of registry.values()) {
+        if (e.parentID !== sessionID) continue
+        if (!isActiveEntry(e)) continue
+        const at = e.lastActivityAt ?? 0
+        if (at > max) max = at
+      }
+      return max
+    },
     // Resolve the todo file, lay the machine section down where it is missing
     // and WRITE it, then snapshot content + hash + parse + the drift count.
     // "several todo files" / "not a regular file" propagate as a throw the
@@ -676,6 +693,7 @@ export async function maybeRunPendingEndless(client, sessionID) {
     recordCycle: recordEndlessCycle,
     toast: ({ message, variant }) => showToast(client, { title: "agent-intercom", message, variant }),
     quiesceTimeoutMs: endlessQuiesceTimeoutMs,
+    quiesceExtensionMs: endlessQuiesceExtensionMs,
   })
 }
 

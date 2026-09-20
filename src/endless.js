@@ -19,7 +19,11 @@
 //      primary this cycle replaces. The ceiling above is deliberately ahead of
 //      this: it replaces nothing and lifts the freeze again.
 //   3. Wait for quiesce — no subagent running anywhere in the process —
-//      bounded by `quiesceTimeoutMs`. A timeout ABANDONS the cycle.
+//      bounded by `quiesceTimeoutMs`. While `progressSignal` (the activity
+//      figure of this primary's own subagents) advances between polls, the
+//      window re-arms at `quiesceExtensionMs`; a window that passes with the
+//      signal frozen — and `quiesceExtensionMs = 0`, which switches the
+//      extension off — ABANDONS the cycle with `no progress`.
 //   4. Prepare: resolve the todo file (creating a canonical one where the
 //      directory has none), insert the machine section where it is absent and
 //      WRITE it, then snapshot content + hash + parse + drift. Any failure
@@ -345,6 +349,9 @@ export function verifyWindDown(snapshot, fresh, { splitSections, parseTasks }) {
 // @property {() => void} release
 // @property {() => void} setCooldown
 // @property {() => Promise<boolean>} isQuiesced
+// @property {() => number} [progressSignal]
+//   monotone activity figure across polls — the maximum `lastActivityAt` of
+//   this primary's active entries; advances while any of them is emitting.
 // @property {() => Promise<unknown>} [dropRetained]
 // @property {() => number} [countActive]
 // @property {() => { fileName: string, content: string, hash: string, tasks: Array, driftCount: number }} prepare
@@ -369,6 +376,9 @@ export function verifyWindDown(snapshot, fresh, { splitSections, parseTasks }) {
 // @property {(openIdsFound: string[], openIdsLeft: string[]) => { stalledCycles: number, completed: number|null }} [recordCycle]
 // @property {(t: { message: string, variant: string }) => void} [toast]
 // @property {number} [quiesceTimeoutMs]
+// @property {number} [quiesceExtensionMs]
+//   re-arm window for each advancing progressSignal poll; 0 switches the
+//   extension off, so the first deadline abandons whatever the signal does
 // @property {number} [pollMs]
 // @property {(ms: number) => Promise<void>} [sleep]
 // @property {() => number} [now]
@@ -381,6 +391,7 @@ export async function runEndlessCycle({
   release,
   setCooldown,
   isQuiesced,
+  progressSignal = () => 0,
   dropRetained = null,
   countActive = () => 0,
   prepare,
@@ -402,6 +413,7 @@ export async function runEndlessCycle({
   recordCycle = () => ({ stalledCycles: 0, completed: null }),
   toast = () => {},
   quiesceTimeoutMs = 600_000,
+  quiesceExtensionMs = 600_000,
   pollMs = ENDLESS_QUIESCE_POLL_MS,
   sleep = defaultSleep,
   now = Date.now,
@@ -446,15 +458,32 @@ export async function runEndlessCycle({
       }
     }
 
-    // 3. Quiesce.
+    // 3. Quiesce. The base window is `quiesceTimeoutMs`; while `progressSignal`
+    // advances between polls the window re-arms at `quiesceExtensionMs`, so a
+    // primary with genuinely working subagents waits as long as they keep
+    // emitting. A window that ends with the signal frozen abandons — that is
+    // the state a hung entry under a switched-off watchdog sits in forever.
+    // `quiesceExtensionMs = 0` switches the extension off: the first deadline
+    // abandons whatever the signal does.
     const waitStartedAt = now()
     const activeAtStart = countActive()
     let quiesced = false
+    let deadline = waitStartedAt + quiesceTimeoutMs
+    let lastSignal = Number(progressSignal())
     try {
       quiesced = await isQuiesced()
       while (!quiesced) {
-        if (now() - waitStartedAt >= quiesceTimeoutMs) {
-          return abandon("quiesce", `still busy after ${quiesceTimeoutMs}ms`)
+        const at = now()
+        const signal = Number(progressSignal())
+        if (signal > lastSignal) {
+          lastSignal = signal
+          if (quiesceExtensionMs > 0) deadline = at + quiesceExtensionMs
+        }
+        if (at >= deadline) {
+          return abandon(
+            "quiesce",
+            `still busy after ${at - waitStartedAt}ms with no progress`,
+          )
         }
         await sleep(pollMs)
         quiesced = await isQuiesced()
@@ -478,96 +507,140 @@ export async function runEndlessCycle({
     const fileName = snapshot.fileName || ""
     const openIdsFound = (snapshot.tasks || []).map((t) => t.id)
 
-    // 5. Arm the single-use permit.
-    const { token } = armWindDown() || {}
-    if (!token) return abandon("prepare", "the wind-down permit could not be armed")
+    // 5–8. One wind-down attempt: arm, turn, settle, re-read (V1) and verify
+    // (V3–V5). It returns either an outcome to hand straight back — an abandon
+    // or the no-permit failure — or the attempt's own result: the reply it
+    // read off the primary, the file it re-read, and the verdict. Step 8's
+    // empty check and the restore-or-accept decision run OUTSIDE it, because
+    // the byte-equal re-ask below may hand its second attempt's result to
+    // exactly those checks.
+    const windDownAttempt = async () => {
+      // 5. Arm the single-use permit. A fresh token every call — the registry's
+      // arm overwrites any permit still standing, so the re-ask re-arms.
+      const { token } = armWindDown() || {}
+      if (!token) return { fail: abandon("prepare", "the wind-down permit could not be armed") }
 
-    // 6. The wind-down turn. The shaped reply ends the turn; the child's
-    // settlement (step 7) says the write finished.
-    let replyText = ""
-    try {
-      replyText = await windDownTurn({ token, fileName, driftCount: snapshot.driftCount || 0 })
-    } catch (err) {
-      // No shaped reply in the window. The fallback covers a model that could
-      // not place the tool call at its ceiling.
-      log(`endless: wind-down turn produced no shaped reply — ${errMsg(err)}`, {
-        sessionID: primarySessionID,
-      })
-    }
-
-    // Whichever route ran, the cycle waits on the child the permit records — or,
-    // where the permit was never consumed, on the fallback the plugin starts
-    // itself after disarming so a late permitted spawn cannot add a second
-    // writer against the same file.
-    let child
-    const permit = windDownPermit()
-    if (permit && permit.consumed && permit.settlement) {
-      child = { childSessionID: permit.childSessionID, settlement: permit.settlement }
-    } else {
-      // Disarm FIRST, synchronously, then start the fallback.
-      disarmWindDown()
-      log("endless: wind-down spawned by the plugin — the orchestrator made no permitted spawn", {
-        sessionID: primarySessionID,
-      })
+      // 6. The wind-down turn. The shaped reply ends the turn; the child's
+      // settlement (step 7) says the write finished.
+      let replyText = ""
       try {
-        child = await startWindDownSubagent()
+        replyText = await windDownTurn({ token, fileName, driftCount: snapshot.driftCount || 0 })
       } catch (err) {
-        return abandon("wind-down", `the fallback wind-down spawn failed: ${errMsg(err)}`)
+        // No shaped reply in the window. The fallback covers a model that could
+        // not place the tool call at its ceiling.
+        log(`endless: wind-down turn produced no shaped reply — ${errMsg(err)}`, {
+          sessionID: primarySessionID,
+        })
       }
-      if (!child || !child.settlement) {
-        return abandon("wind-down", "the fallback produced no wind-down child")
+
+      // Whichever route ran, the cycle waits on the child the permit records —
+      // or, where the permit was never consumed, on the fallback the plugin
+      // starts itself after disarming so a late permitted spawn cannot add a
+      // second writer against the same file.
+      let child
+      const permit = windDownPermit()
+      if (permit && permit.consumed && permit.settlement) {
+        child = { childSessionID: permit.childSessionID, settlement: permit.settlement }
+      } else {
+        // Disarm FIRST, synchronously, then start the fallback.
+        disarmWindDown()
+        log("endless: wind-down spawned by the plugin — the orchestrator made no permitted spawn", {
+          sessionID: primarySessionID,
+        })
+        try {
+          child = await startWindDownSubagent()
+        } catch (err) {
+          return {
+            fail: abandon("wind-down", `the fallback wind-down spawn failed: ${errMsg(err)}`),
+          }
+        }
+        if (!child || !child.settlement) {
+          return { fail: abandon("wind-down", "the fallback produced no wind-down child") }
+        }
       }
+
+      // 7. Settle. Await the child's own ending, bounded; where it never settles
+      // the child is ended and the cycle abandons — never confirm against a
+      // running writer.
+      let settle
+      try {
+        settle = await settleWindDown(child)
+      } catch (err) {
+        return {
+          fail: abandon("wind-down", `the wind-down child could not be settled: ${errMsg(err)}`),
+        }
+      }
+      if (!settle || !settle.ok) {
+        return {
+          fail: abandon(
+            "wind-down",
+            settle?.reason || "the wind-down child did not settle in the window",
+          ),
+        }
+      }
+
+      // 8. Confirm. V1 is the re-resolve here; the rest is verifyWindDown.
+      let fresh
+      try {
+        fresh = reread()
+      } catch (err) {
+        // multiple / not-a-file: there is no single resolved file to restore to.
+        toast({
+          message: `endless mode: the todo file no longer resolves (${snapshot.fileName || "?"}) — ${errMsg(err)}`,
+          variant: "error",
+        })
+        return { fail: abandon("confirm", `the todo file no longer resolves: ${errMsg(err)}`) }
+      }
+      if (fresh.name !== snapshot.fileName) {
+        toast({
+          message: `endless mode: the todo file was renamed from ${snapshot.fileName} to ${fresh.name}`,
+          variant: "error",
+        })
+        return {
+          fail: abandon(
+            "confirm",
+            `the todo file was renamed from ${snapshot.fileName} to ${fresh.name}`,
+          ),
+        }
+      }
+
+      const reply = interpretReply(replyText)
+      const verdict = verifyWindDown(
+        snapshot,
+        {
+          content: fresh.content,
+          replyNoChange: reply.noChange,
+          replyNothingOpen: reply.nothingOpen,
+          replyCount: reply.count,
+        },
+        { splitSections, parseTasks },
+      )
+      return { replyText, fresh, verdict, childOutcome: settle.outcome || {} }
     }
 
-    // 7. Settle. Await the child's own ending, bounded; where it never settles
-    // the child is ended and the cycle abandons — never confirm against a
-    // running writer.
-    let settle
-    try {
-      settle = await settleWindDown(child)
-    } catch (err) {
-      return abandon("wind-down", `the wind-down child could not be settled: ${errMsg(err)}`)
+    let attempt = await windDownAttempt()
+    if (attempt.fail) return attempt.fail
+
+    // The bounded re-ask: the file came back byte-equal and the reply claimed a
+    // plain open-task count — "completed" the disk does not show, which is
+    // exactly what V3 exists to refuse. A model that simply stopped editing
+    // looks identical to one that had nothing to drop, so the claim gets ONE
+    // second chance with a freshly armed token before it is either believed as
+    // a `no change` statement or rejected with the restore.
+    if (!attempt.verdict.v3 && attempt.verdict.replyCount != null) {
+      log("endless: wind-down rewrite byte-equal — re-asking the primary once", {
+        sessionID: primarySessionID,
+      })
+      const reask = await windDownAttempt()
+      if (reask.fail) return reask.fail
+      attempt = reask
     }
-    if (!settle || !settle.ok) {
-      return abandon("wind-down", settle?.reason || "the wind-down child did not settle in the window")
-    }
-    const childOutcome = settle.outcome || {}
+    let { replyText, fresh, verdict, childOutcome } = attempt
     const childCompleted = childOutcome.status === "completed"
 
-    // 8. Confirm. V1 is the re-resolve here; the rest is verifyWindDown.
-    let fresh
-    try {
-      fresh = reread()
-    } catch (err) {
-      // multiple / not-a-file: there is no single resolved file to restore to.
-      toast({
-        message: `endless mode: the todo file no longer resolves (${snapshot.fileName || "?"}) — ${errMsg(err)}`,
-        variant: "error",
-      })
-      return abandon("confirm", `the todo file no longer resolves: ${errMsg(err)}`)
-    }
-    if (fresh.name !== snapshot.fileName) {
-      toast({
-        message: `endless mode: the todo file was renamed from ${snapshot.fileName} to ${fresh.name}`,
-        variant: "error",
-      })
-      return abandon("confirm", `the todo file was renamed from ${snapshot.fileName} to ${fresh.name}`)
-    }
-
-    const reply = interpretReply(replyText)
-    const verdict = verifyWindDown(
-      snapshot,
-      {
-        content: fresh.content,
-        replyNoChange: reply.noChange,
-        replyNothingOpen: reply.nothingOpen,
-        replyCount: reply.count,
-      },
-      { splitSections, parseTasks },
-    )
-
     // 9. Nothing left to do: the subagent's explicit "nothing open" and a
-    // zero-task parse pause the mode rather than start an empty session.
+    // zero-task parse pause the mode rather than start an empty session. A
+    // re-ask that came back this way lands here too, not on the accept path.
     if (verdict.empty) {
       return stop("no-open-points", "no open points left — paused for this session", "success")
     }

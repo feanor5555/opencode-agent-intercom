@@ -255,7 +255,7 @@ test("endlessQuiesceTimeoutMs reaches the cycle: a busy process abandons at quie
 
   assert.equal(res.outcome, "abandoned")
   assert.equal(res.stage, "quiesce")
-  assert.match(res.reason, /still busy after 0ms/)
+  assert.match(res.reason, /still busy after \d+ms with no progress/)
   assert.deepEqual(created, [], "the primary is not replaced")
   assert.equal(hasEndlessPending(SID), false, "the latch is released, so the freeze lifts")
   assert.equal(endlessCooldownActive(SID), true, "an abandoned cycle arms the cooldown")

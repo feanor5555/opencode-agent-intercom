@@ -20,7 +20,10 @@ const AUDIT = resolve(import.meta.dirname, "e2e/lib/model-audit.py")
 const PLUGIN_ROOT = resolve(import.meta.dirname, "..")
 
 // A machine config directory the library may read but must never write.
-function machineConfig(dir, extra = {}) {
+// `models` is what the machine's llm-models.json holds: by default one banned
+// entry (to show the pin overwrites the machine) and a `grounder` entry on its
+// own provider, which the run must carry over untouched.
+function machineConfig(dir, extra = {}, models) {
   const cfg = join(dir, "machine", "opencode")
   mkdirSync(cfg, { recursive: true })
   writeFileSync(
@@ -35,7 +38,12 @@ function machineConfig(dir, extra = {}) {
   )
   writeFileSync(
     join(cfg, "llm-models.json"),
-    JSON.stringify({ orchestrator: { providerID: "gpuserver", modelID: "Qwen3.8 Flash Next" } }),
+    JSON.stringify(
+      models ?? {
+        orchestrator: { providerID: "gpuserver", modelID: "Qwen3.8 Flash Next" },
+        grounder: { providerID: "machinegemini", modelID: "gemini-2.5-pro", variant: "high" },
+      },
+    ),
   )
   writeFileSync(
     join(cfg, "agent-intercom.json"),
@@ -44,9 +52,9 @@ function machineConfig(dir, extra = {}) {
   return cfg
 }
 
-function runShell(script, env = {}) {
+function runShell(script, env = {}, models) {
   const dir = mkdtempSync(join(tmpdir(), "iso-test-"))
-  const machine = machineConfig(dir)
+  const machine = machineConfig(dir, {}, models)
   const path = join(dir, "script.sh")
   writeFileSync(path, script)
   const r = spawnSync("bash", [path], {
@@ -93,11 +101,17 @@ echo "ENV=\${E2E_SERVER_ENV[*]}"
   const iso = /ISO=(.*)/.exec(r.stdout)[1]
 
   const models = JSON.parse(readFileSync(join(iso, "llm-models.json"), "utf8"))
-  for (const name of ["orchestrator", "planner", "coder", "researcher", "grounder", "gitter", "title", "summary"]) {
+  for (const name of ["orchestrator", "planner", "coder", "researcher", "gitter", "title", "summary"]) {
     assert.deepEqual(models[name], { providerID: "openai", modelID: "gpt-5.6-luna" }, `${name} is not pinned`)
   }
-  // A reasoning effort is a setting of the machine's, not of the run.
-  for (const entry of Object.values(models)) assert.ok(!("variant" in entry))
+  // The exempt agent keeps the machine's entry, pin and variant included.
+  assert.deepEqual(models.grounder, { providerID: "machinegemini", modelID: "gemini-2.5-pro", variant: "high" })
+  // A reasoning effort is a setting of the machine's, not of the run — except
+  // the exempt agent's own entry, carried over verbatim.
+  for (const [name, entry] of Object.entries(models)) {
+    if (name === "grounder") continue
+    assert.ok(!("variant" in entry))
+  }
 
   const config = JSON.parse(readFileSync(join(iso, "opencode.json"), "utf8"))
   assert.deepEqual(config.plugin, [PLUGIN_ROOT], "the plugin under test has to be the wired one")
@@ -137,6 +151,74 @@ echo "ENV=\${E2E_SERVER_ENV[*]}"
 
   rmSync(home, { recursive: true, force: true })
   rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("e2e_iso_create carries the machine's grounder entry through unpinned", () => {
+  // grounder holds `grounded_search`, which answers through Google's Gemini
+  // Search grounding; pinning it at E2E_MODEL takes that provider away. The
+  // machine's entry is carried verbatim — the machine's own llm-models.json
+  // here names grounder on `machinegemini` with a variant, and the isolated
+  // file must show exactly that while every other agent shows the pin.
+  const r = runShell(`
+set -e
+. "$LIB"
+e2e_resolve_model
+e2e_iso_create "$PLUGIN_ROOT" '{}'
+echo "ISO=$E2E_ISO_OPENCODE_DIR"
+`)
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  const iso = /ISO=(.*)/.exec(r.stdout)[1]
+  const models = JSON.parse(readFileSync(join(iso, "llm-models.json"), "utf8"))
+
+  assert.deepEqual(models.grounder, { providerID: "machinegemini", modelID: "gemini-2.5-pro", variant: "high" })
+  assert.deepEqual(models.researcher, { providerID: "openai", modelID: "gpt-5.6-luna" }, "researcher keeps the pin")
+  assert.deepEqual(models.orchestrator, { providerID: "openai", modelID: "gpt-5.6-luna" })
+  // The exempt name never reaches the pin, whatever E2E_MODEL the driver chose.
+  const home = iso.replace(/\/\.config\/opencode$/, "")
+  rmSync(home, { recursive: true, force: true })
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("e2e_iso_create writes no grounder entry when the machine names none", () => {
+  // The other half of the exception: with no machine entry to keep, grounder
+  // gets no entry at all and falls back to opencode.json's top-level model
+  // like any unnamed agent — it is not silently pinned either.
+  const r = runShell(
+    `
+set -e
+. "$LIB"
+e2e_resolve_model
+e2e_iso_create "$PLUGIN_ROOT" '{}'
+echo "ISO=$E2E_ISO_OPENCODE_DIR"
+`,
+    {},
+    { orchestrator: { providerID: "gpuserver", modelID: "Qwen3.8 Flash Next" } },
+  )
+  assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+  const iso = /ISO=(.*)/.exec(r.stdout)[1]
+  const models = JSON.parse(readFileSync(join(iso, "llm-models.json"), "utf8"))
+
+  assert.ok(!("grounder" in models), "an agent the machine names nothing for gets no entry")
+  assert.deepEqual(models.orchestrator, { providerID: "openai", modelID: "gpt-5.6-luna" })
+  const config = JSON.parse(readFileSync(join(iso, "opencode.json"), "utf8"))
+  assert.equal(config.model, "openai/gpt-5.6-luna", "the fallback is still the pin, applied as instance default")
+  const home = iso.replace(/\/\.config\/opencode$/, "")
+  rmSync(home, { recursive: true, force: true })
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+// The name list itself: grounder on the exempt list, nowhere on the pinned
+// one, so a later edit that re-adds it to E2E_PINNED_AGENTS fails here.
+test("grounder is exempt from the pin and no other plugin role is", () => {
+  const src = readFileSync(LIB, "utf8")
+  const pinned = /E2E_PINNED_AGENTS="([^"]*)"/.exec(src)[1].split(/\s+/).filter(Boolean)
+  const exempt = /E2E_PIN_EXEMPT_AGENTS="([^"]*)"/.exec(src)[1].split(/\s+/).filter(Boolean)
+  assert.deepEqual(exempt, ["grounder"])
+  assert.ok(!pinned.includes("grounder"), "grounder must not be pinned")
+  for (const role of ["orchestrator", "planner", "coder", "debugger", "reviewer", "documenter", "researcher", "designer", "gitter"]) {
+    assert.ok(pinned.includes(role), `${role} is missing from the pinned list`)
+  }
+  assert.ok(!pinned.some((n) => exempt.includes(n)), "a name may be on one list only")
 })
 
 test("e2e_iso_remove takes the home and leaves the linked directories alone", () => {
@@ -273,12 +355,12 @@ function capture(dir, name, models) {
   writeFileSync(
     path,
     JSON.stringify(
-      models.map(([providerID, modelID], i) => ({
+      models.map(([providerID, modelID, agent], i) => ({
         info: {
           id: `msg_${i}`,
           role: "assistant",
           sessionID: "ses_1",
-          mode: "orchestrator",
+          mode: agent ?? "orchestrator",
           providerID,
           modelID,
         },
@@ -289,10 +371,10 @@ function capture(dir, name, models) {
   return path
 }
 
-function audit(files, expect = "openai/gpt-5.6-luna") {
+function audit(files, expect = "openai/gpt-5.6-luna", extra = []) {
   return spawnSync(
     "python3",
-    [AUDIT, "--expect", expect, "--banned", "gpuserver/Qwen3.8 Flash Next", "--label", "t", ...files],
+    [AUDIT, "--expect", expect, "--banned", "gpuserver/Qwen3.8 Flash Next", "--label", "t", ...extra, ...files],
     { encoding: "utf8" },
   )
 }
@@ -332,6 +414,65 @@ test("the model audit fails rather than passes when there is nothing to audit", 
   const r = audit([empty, join(dir, "never-written.json")])
   assert.equal(r.status, 2, r.stdout)
   assert.match(r.stdout, /nothing to audit/)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+// An off-pin turn of an exempt agent is allowed and named in the evidence line;
+// the banned model stays refused for it, and an off-pin turn of a pinned agent
+// next to it still fails.
+test("the model audit allows an exempt agent off the pin but not on the banned model", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
+  const ok = capture(dir, "ok.json", [
+    ["openai", "gpt-5.6-luna"],
+    ["machinegemini", "gemini-2.5-pro", "grounder"],
+    ["machinegemini", "gemini-2.5-pro", "grounder"],
+  ])
+  const bad = capture(dir, "bad.json", [["gpuserver", "Qwen3.8 Flash Next", "grounder"]])
+  const mixed = capture(dir, "mixed.json", [
+    ["machinegemini", "gemini-2.5-pro", "grounder"],
+    ["xai", "grok-4.6", "coder"],
+  ])
+  const exempted = ["--exempt-agent", "grounder"]
+
+  const passed = audit([ok], "openai/gpt-5.6-luna", exempted)
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr)
+  assert.match(passed.stdout, /every turn of a pinned agent answered by openai\/gpt-5\.6-luna/)
+  assert.match(passed.stdout, /2 exempt-agent turn\(s\) allowed \(grounder on machinegemini\/gemini-2\.5-pro=2\)/)
+
+  const bannedTurn = audit([bad], "openai/gpt-5.6-luna", exempted)
+  assert.equal(bannedTurn.status, 1, bannedTurn.stdout)
+  assert.match(bannedTurn.stdout, /banned gpuserver\/Qwen3\.8 Flash Next/)
+
+  const foreignPinnedTurn = audit([mixed], "openai/gpt-5.6-luna", exempted)
+  assert.equal(foreignPinnedTurn.status, 1, foreignPinnedTurn.stdout)
+  assert.match(foreignPinnedTurn.stdout, /turn on xai\/grok-4\.6 — agent coder/)
+  assert.doesNotMatch(foreignPinnedTurn.stdout, /turn on machinegemini/)
+
+  // Without --exempt-agent the audit stays what it was: off-pin is off-pin.
+  const notExempted = audit([ok])
+  assert.equal(notExempted.status, 1, notExempted.stdout)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+// The library passes the exemption through, so e2e_model_audit — and with it
+// every driver's e2e_audit_recorded — tolerates a grounder turn off the pin.
+test("e2e_model_audit reports an exempt grounder turn as PASS", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
+  const cap = capture(dir, "cap.json", [
+    ["openai", "gpt-5.6-luna"],
+    ["machinegemini", "gemini-2.5-pro", "grounder"],
+  ])
+  const script = join(dir, "run.sh")
+  writeFileSync(
+    script,
+    `. "${LIB}"
+e2e_resolve_model
+e2e_model_audit "nested" "${dir}/report.txt" "${dir}/cap.json" && echo AUDIT_OK || echo "AUDIT_FAILED=$?"
+`,
+  )
+  const r = spawnSync("bash", [script], { encoding: "utf8" })
+  assert.match(r.stdout, /PASS {2}model-pin \(nested\)/, r.stdout + r.stderr)
+  assert.match(r.stdout, /AUDIT_OK/, r.stdout + r.stderr)
   rmSync(dir, { recursive: true, force: true })
 })
 

@@ -12,8 +12,10 @@ the model from llm-models.json into `config.agent[<name>].model` at bootstrap
 and that wins over the `model` a POST names.
 
 Exit codes:
-  0  every assistant message names the pinned model
-  1  at least one names another — the banned model is called out as such
+  0  every assistant message names the pinned model (an off-pin turn of an
+     agent passed to --exempt-agent is allowed and reported separately)
+  1  at least one names another — the banned model is called out as such,
+     and an exempt agent on the banned model fails like any other
   2  the captures hold no assistant message at all; nothing was audited
 
 One evidence line on stdout either way, the offending messages listed after it.
@@ -41,9 +43,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--expect", required=True, help="the pinned providerID/modelID")
     parser.add_argument("--banned", default="", help="a model whose appearance is named as such")
+    parser.add_argument(
+        "--exempt-agent",
+        default="",
+        help="agents the pin does not reach, space-separated (grounder): an off-pin "
+        "turn of one of these is allowed and counted separately, but the banned "
+        "model is refused for them too",
+    )
     parser.add_argument("--label", default="run", help="what is being audited, for the evidence line")
     parser.add_argument("files", nargs="*")
     args = parser.parse_args()
+    exempt = set(args.exempt_agent.split())
 
     messages = []
     read, unreadable = 0, []
@@ -61,20 +71,27 @@ def main():
 
     tally = Counter()
     offenders = []
+    exempt_turns = Counter()
     for info in messages:
         ref = f"{info['providerID']}/{info['modelID']}"
         tally[ref] += 1
         if ref != args.expect:
+            agent = info.get("mode", "?")
+            if agent in exempt and ref != args.banned:
+                exempt_turns[f"{agent} on {ref}"] += 1
+                continue
             offenders.append(
                 {
                     "model": ref,
                     "session": info.get("sessionID", "?"),
                     "message": info.get("id", "?"),
-                    "agent": info.get("mode", "?"),
+                    "agent": agent,
                 }
             )
 
     seen = ", ".join(f"{ref}={count}" for ref, count in sorted(tally.items()))
+    exempt_seen = ", ".join(f"{what}={count}" for what, count in sorted(exempt_turns.items()))
+    exempt_note = f" ({exempt_seen})" if exempt_seen else ""
     head = f"{args.label}: {len(messages)} assistant message(s) over {read} capture(s)"
 
     if unreadable:
@@ -89,7 +106,7 @@ def main():
     if offenders:
         banned_hits = sum(1 for o in offenders if o["model"] == args.banned)
         extra = f", {banned_hits} of them on the banned {args.banned}" if banned_hits else ""
-        print(f"{head} — answered by: {seen}; expected {args.expect} alone{extra}")
+        print(f"{head} — answered by: {seen}; expected {args.expect} alone{extra}{exempt_note}")
         for offender in offenders[:20]:
             print(
                 f"        turn on {offender['model']} — agent {offender['agent']}, "
@@ -98,6 +115,12 @@ def main():
         if len(offenders) > 20:
             print(f"        … and {len(offenders) - 20} more")
         return 1
+    if exempt_turns:
+        print(
+            f"{head} — every turn of a pinned agent answered by {args.expect}; "
+            f"{sum(exempt_turns.values())} exempt-agent turn(s) allowed{exempt_note}"
+        )
+        return 0
     print(f"{head} — every one answered by {seen}")
     return 0
 

@@ -46,6 +46,14 @@
 #    `variant` key, and the isolated opencode.json sets `model` and
 #    `small_model` for anything not named there at all.
 #
+#    `grounder` is the one exception (E2E_PIN_EXEMPT_AGENTS): it holds
+#    `grounded_search`, which answers through Google's Gemini Search grounding,
+#    and pinning it at the test model takes its provider away and the tool
+#    cannot work. For an exempt agent the machine's own llm-models.json entry
+#    is carried over verbatim, `variant` included; where the machine names no
+#    entry for it, the isolated file names none either and that agent falls
+#    back to opencode.json's top-level `model` like anything unnamed there.
+#
 #    e2e_model_audit then reads back what answered: every assistant message the
 #    run can still see carries `providerID`/`modelID`, and a model other than
 #    the pinned one fails the run.
@@ -79,10 +87,20 @@ E2E_DEFAULT_MODEL="openai/gpt-5.6-luna"
 E2E_BANNED_MODEL="gpuserver/Qwen3.8 Flash Next"
 
 # Every agent name the pin is written for: the ten roles this plugin installs
-# (src/agents.js AGENTS) plus the opencode built-ins that can answer a turn of
-# their own. `applyModelChoices` only touches names that are already in
-# `config.agent`, so a name no build knows costs nothing.
-E2E_PINNED_AGENTS="orchestrator planner coder debugger reviewer documenter researcher grounder designer gitter build plan general title summary compaction"
+# (src/agents.js AGENTS) minus the exempt ones below, plus the opencode
+# built-ins that can answer a turn of their own. `applyModelChoices` only
+# touches names that are already in `config.agent`, so a name no build knows
+# costs nothing.
+E2E_PINNED_AGENTS="orchestrator planner coder debugger reviewer documenter researcher designer gitter build plan general title summary compaction"
+
+# The agents the pin does NOT reach, and why `grounder` is one of them: it
+# holds `grounded_search`, whose answer comes through Google's Gemini Search
+# grounding, and a pin at the test model would take that provider away from
+# the tool. An exempt agent keeps the machine's own llm-models.json entry —
+# verbatim, `variant` included — or no entry at all where the machine has
+# none, falling back to opencode.json's top-level `model` like any unnamed
+# agent.
+E2E_PIN_EXEMPT_AGENTS="grounder"
 
 # The keys carried over from the machine's agent-intercom.json into the
 # isolated one: the search endpoint and credentials a run needs to reach the
@@ -275,10 +293,10 @@ e2e_iso_create() {
   done
 
   python3 - "$machine_dir" "$iso_dir" "$plugin_root" "$E2E_MODEL_PROVIDER" "$E2E_MODEL_ID" \
-      "$E2E_PINNED_AGENTS" "$E2E_CARRIED_SETTINGS" "$settings_json" <<'PY' || {
+      "$E2E_PINNED_AGENTS" "$E2E_PIN_EXEMPT_AGENTS" "$E2E_CARRIED_SETTINGS" "$settings_json" <<'PY' || {
 import json, os, sys
 
-machine, iso, plugin_root, provider, model_id, agents, carried, settings_json = sys.argv[1:9]
+machine, iso, plugin_root, provider, model_id, agents, exempt, carried, settings_json = sys.argv[1:10]
 ref = f"{provider}/{model_id}"
 
 
@@ -325,8 +343,20 @@ write("tui.json", {"plugin": [plugin_root]})
 
 # llm-models.json: the file applyModelChoices reads. Every agent on the pin,
 # and no `variant` — a reasoning effort of the machine's is a setting of the
-# machine's, not of the run.
-write("llm-models.json", {name: {"providerID": provider, "modelID": model_id} for name in agents.split()})
+# machine's, not of the run. Except the exempt agents: `grounder` keeps the
+# machine's own entry verbatim, variant included, because the test pin would
+# take away the provider its `grounded_search` answers through; where the
+# machine names no entry for it, none is written and the agent falls back to
+# opencode.json's top-level model.
+machine_models = load(os.path.join(machine, "llm-models.json"))
+models = {}
+for name in agents.split():
+    models[name] = {"providerID": provider, "modelID": model_id}
+for name in exempt.split():
+    entry = machine_models.get(name)
+    if isinstance(entry, dict):
+        models[name] = entry
+write("llm-models.json", models)
 
 # agent-intercom.json: what the driver asked for, over the credential keys
 # carried from the machine.
@@ -371,7 +401,7 @@ PY
     E2E_SERVER_ENV+=("OPENCODE_AGENT_INTERCOM_DEBUG_LOG=$OPENCODE_AGENT_INTERCOM_DEBUG_LOG")
   fi
 
-  e2e_say "isolated config: $iso_dir (model pin $E2E_MODEL_REF, every agent; the machine's ~/.config/opencode is untouched)"
+  e2e_say "isolated config: $iso_dir (model pin $E2E_MODEL_REF, every agent except${E2E_PIN_EXEMPT_AGENTS:+ $E2E_PIN_EXEMPT_AGENTS}; the machine's ~/.config/opencode is untouched)"
   return 0
 }
 
@@ -524,6 +554,11 @@ e2e_audit_subagent_sids() {
 # assistant message at all — nothing audited is a failure, not a pass, because
 # an audit over an empty capture would pass whatever the run did.
 #
+# The agents of E2E_PIN_EXEMPT_AGENTS are passed to the audit as exempt: their
+# turns ran on the machine's entry rather than the pin by design, and an
+# off-pin turn of one of them is allowed and reported separately — the banned
+# model stays refused for them too.
+#
 # E2E_AUDIT_LINE carries the one-line evidence either way.
 E2E_AUDIT_LINE=""
 e2e_model_audit() {
@@ -531,7 +566,8 @@ e2e_model_audit() {
   shift 2
   local lib
   lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib
-  E2E_AUDIT_LINE=$(python3 "$lib/model-audit.py" --expect "$E2E_MODEL_REF" --banned "$E2E_BANNED_MODEL" --label "$label" "$@" 2>&1)
+  E2E_AUDIT_LINE=$(python3 "$lib/model-audit.py" --expect "$E2E_MODEL_REF" --banned "$E2E_BANNED_MODEL" \
+    --exempt-agent "$E2E_PIN_EXEMPT_AGENTS" --label "$label" "$@" 2>&1)
   status=$?
   if [ "$status" = 0 ]; then
     printf 'PASS  model-pin (%s)\n      %s\n' "$label" "$E2E_AUDIT_LINE" | tee -a "$report"

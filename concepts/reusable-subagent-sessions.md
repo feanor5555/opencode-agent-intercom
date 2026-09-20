@@ -487,16 +487,31 @@ that does not exist today. No running subagent's treatment changes.
 
 ### 4.1 The figure the gate is evaluated on
 
-`entry.ctxTokens` (`registry.js:1158`) is the sum of the newest assistant
-step's `input + output + cache.read + cache.write`, reasoning deliberately
-excluded, `client.js:298-307`:
+`entry.ctxTokens` is the figure `fetchSnapshot` computes
+(`ctxTokens: latestContextTokens(messages)`, `src/client.js`) through the one
+shared computation `latestContextTokens` (`src/context-figure.js`), imported by
+both the server and the TUI side: the newest assistant message with
+`tokens.output > 0` — opencode's own selection, so an in-flight step is walked
+past — summed over `input + output + reasoning + cache.read + cache.write`,
+the exact figure opencode displays; the walk stops at a compaction message
+(`info.summary === true`) and answers `undefined`, so a freshly compacted
+session has no figure until its next real turn:
 
     function latestContextTokens(messages) {
       for (let i = messages.length - 1; i >= 0; i--) {
-        const t = messages[i]?.info?.tokens
-        …
-        const sum =
-          (t.input ?? 0) + (t.output ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0)
+        const info = messages[i]?.info
+        if (info?.summary === true) return undefined
+        if (info?.role !== "assistant") continue
+        const t = info.tokens
+        if (!t) continue
+        if (!(t.output > 0)) continue
+        return (
+          (t.input ?? 0) + t.output + (t.reasoning ?? 0) +
+          (t.cache?.read ?? 0) + (t.cache?.write ?? 0)
+        )
+      }
+      return undefined
+    }
 
 There is no remaining-window field anywhere in the v1 surface
 (`work/researcher-opencode-session-lifetime.md` §3). The model's own window
@@ -932,7 +947,8 @@ expire it.
 **Yes, unconditionally, before the gate is evaluated.**
 
 Formally the stored figure stays *correct* while nothing prompts the session:
-`latestContextTokens` reads the newest assistant step (`client.js:298-310`) and
+`latestContextTokens` reads the newest assistant message with output
+(`src/context-figure.js`) and
 no new step appears while the session is idle. But correct-if-nothing-happened
 is not a property the design may assume, for one concrete reason: a retained
 session is a real opencode session the user can open in the TUI and type into.
@@ -1399,7 +1415,7 @@ Each with what would have to hold, and what would show it wrong.
    budget with no STOP injection.
 5. **The `ctxTokens` fetched at reuse time is the figure the budget guard will
    see on run 2's first transform.** Both read `latestContextTokens` off the
-   same message list (`client.js:298-310`), and the reuse writes the value onto
+   same message list (`src/context-figure.js`), and the reuse writes the value onto
    the entry. Shown wrong by: a run 2 that is STOP-injected on its first turn
    despite having passed G3.
 6. **This plugin never issues a DELETE against a primary**, so a retained child

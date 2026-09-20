@@ -1,5 +1,16 @@
 # Concept: the wind-down subagent writes the todo file
 
+Status: implemented and proven end to end (uncommitted in the working tree, 2026-09-20);
+one full cycle fired against a real TUI via `test/e2e/endless-optical-proof.sh` on
+`cliproxy/qwen3.8-flash-medium` — scheduled at ctx 12027 over a 12000 threshold, quiesced,
+wind-down confirmed 4 open tasks, `cycle 1/10 complete, open tasks 5→4`. Since this concept
+was written, two gates widened: the quiesce window re-arms while the primary's subagents
+keep advancing (`endlessQuiesceExtensionMs`, §4 step 3), and a byte-equal wind-down file with
+a counted reply gets one bounded re-ask before accept-or-restore (§4 step 8). The context
+figure every threshold rides on is the one shared computation `latestContextTokens`
+(`src/context-figure.js`), reasoning included, selected the way opencode's own surfaces
+select.
+
 Boundary: the `opencode-agent-intercom` plugin under `~/opencode-agent-intercom`.
 Nothing outside `src/`, `specs/`, `test/` is designed here. The material read for this
 concept is `specs/endless-mode.md`, `src/endless.js`, `src/handoff.js`,
@@ -504,9 +515,15 @@ change and the module's deletion belong in one step (§8, S5).
 
 ## 4. The cycle, step by step
 
-Steps 1–3 are unchanged (`src/endless.js:222-316`): claim the latch, apply the cycle
-ceiling, drop retained subagents, wait for quiesce bounded by `endlessQuiesceTimeoutMs`.
-The freeze is in force throughout, as today.
+Steps 1–3 (`src/endless.js`): claim the latch, apply the cycle ceiling, drop retained
+subagents, wait for quiesce. The quiesce wait is bounded by `endlessQuiesceTimeoutMs` as a
+BASE window, and while the primary's own subagents keep advancing — the cycle reads a
+`progressSignal` (the newest `lastActivityAt` among the primary's active entries, wired in
+`src/handoffwiring.js`) and re-arms the deadline one window forward (`endlessQuiesceExtensionMs`,
+default 600 000 ms; `0` switches the extension off and restores the base-window-only
+behaviour) on every poll where the signal moved. A window that ends with the signal frozen
+abandons — that is a hung entry under a switched-off watchdog. The freeze is in force
+throughout, as today.
 
 **4. Prepare.** In this order:
 
@@ -563,9 +580,17 @@ registration — and additionally requires the child's registry entry to be gone
 settlement arrives by `endlessWindDownTimeoutMs` counted from the spawn, the plugin ends the
 child itself and abandons (§3.2, §5).
 
-**8. Confirm.** V1–V7 of §3.3. A failure of V1, V3, V4 or V5 restores the snapshot and
-abandons; V6 logs changed titles and, like V7, does not reject an otherwise verified rewrite.
-The session is not replaced on a V1/V3/V4/V5 failure.
+**8. Confirm.** V1–V7 of §3.3. Steps 5–8 run inside one `windDownAttempt()`; the accept/restore
+decision and the `empty` stop run outside it, so the re-ask below feeds the same checks. A
+first attempt whose file came back byte-equal (V3 false) while the reply carried a counted
+open-task number gets exactly ONE bounded re-ask: the cycle logs
+`endless: wind-down rewrite byte-equal — re-asking the primary once` and runs a second
+attempt with a freshly armed token (the registry's arm overwrites the spent permit). On the
+second attempt a byte-equal file whose reply says `no change` is accepted, fresh content is
+accepted normally, and anything else takes the restore and the `confirm` abandon below, with
+the FIRST failure's rejected bytes filed. Other failures of V1, V3, V4 or V5 restore the
+snapshot and abandon; V6 logs changed titles and, like V7, does not reject an otherwise
+verified rewrite. The session is not replaced on a V1/V3/V4/V5 failure.
 
 **9. Nothing left to do.** The explicit-empty case stops and pauses, as today.
 
@@ -576,7 +601,7 @@ and its fallback block lands in the kickoff, exactly as today.
 
 **11. Record.** `recordEndlessCycle(openIdsFound, openIdsLeft)` per §3.4.8, fed by the
 before-parse of step 4 and the after-parse of step 8 — the same two snapshots the
-no-progress bound already compares (`src/endless.js:432-436`).
+no-progress bound already compares (`recordCycle`, `src/endless.js:754`, `ENDLESS_MAX_STALLED_CYCLES`).
 
 ---
 
@@ -590,7 +615,7 @@ restore of §3.3 wherever the rejected state is a rewritten file.
 | stage | trigger | outcome |
 |---|---|---|
 | `prepare` | `multiple` / `not-a-file`, `ensureTodoFile` throws, or the section write throws | abandon, no turn spent |
-| `quiesce` | timeout at `endlessQuiesceTimeoutMs` | abandon (unchanged) |
+| `quiesce` | the base/extension window passes with the progress signal frozen — `still busy after <elapsed>ms with no progress` | abandon |
 | `wind-down` | the primary produced no shaped reply in the window **and** the permit is unconsumed | `disarmEndlessWindDown(primaryID)` **first, synchronously**, then the **fallback**: the plugin calls `startWindDownSubagent` itself with whatever final text the primary last produced, then goes to `settle`. The disarm is not cosmetic — an armed permit would stay admissible, and a slow primary whose `spawn` lands after the fallback started would put a second `planner` against the same file, concurrently, through a non-atomic `writeAt`, with last-writer-wins. After the disarm that spawn takes the ordinary refusal. Logged `endless: wind-down spawned by the plugin — the orchestrator made no permitted spawn` |
 | `wind-down` | the permit was consumed but the child never started (`createChildSession` gave no id, or `promptSession` threw) | `restoreEndlessWindDown` gives the permit back once and the refusal text invites one repeat; a second such failure leaves it consumed and falls through to the row below |
 | `wind-down` | **the turn window expired with the permit consumed and the child unsettled** | keep waiting for the settlement, bounded by the waiter ceiling of §3.2; on settlement go to `confirm`; if no settlement arrives by `endlessWindDownTimeoutMs` from the spawn, end the child (abort + teardown, which settles the waiter) and abandon. Never `confirm` against a running writer, and never abandon leaving one alive |
@@ -815,7 +840,7 @@ order or in parallel; S3 needs S1 and S2; S5 needs all four.
 - **A `planner` given the whole hand-over writes a file a successor can work off.** This is
   the mode's premise and is unmeasured. Wrong when the successor's first spawns restate the
   kickoff rather than the file, and mechanically when the no-progress bound
-  (`src/endless.js:441-455`) fires two cycles running.
+  (`ENDLESS_MAX_STALLED_CYCLES`, `src/endless.js`) fires two cycles running.
 
 ## 10. Open
 

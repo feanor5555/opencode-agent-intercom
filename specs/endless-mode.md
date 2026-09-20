@@ -15,13 +15,26 @@ file off. Then the same thing happens again.
 
 ### 1.1 The primary already measures its own context and already hands itself off
 
-- Context size of any session is `latestContextTokens` (`src/client.js:283`), summing
-  `input + output + cache.read + cache.write` of the newest assistant message that has a
-  non-zero token sum. Reasoning tokens are excluded on purpose — the comment at
-  `src/client.js:268-276` states that including them "made the orchestrator handoff
-  (`maxPrimaryContext`) fire far too early, right after a reasoning-heavy turn". It is
-  reached through `fetchSnapshot` (`src/client.js:230`), one `session.messages` call capped
-  at `SNAPSHOT_TIMEOUT_MS = 5000` (`src/client.js:176`).
+- Context size of any session is `latestContextTokens` (`src/context-figure.js`), summing
+  `input + output + reasoning + cache.read + cache.write` of the newest assistant message
+  with `tokens.output > 0` — the selection rule opencode's own surfaces use, to the letter.
+  The module is the one shared computation: the server side reaches it through
+  `fetchSnapshot` (`src/client.js:759`), one `session.messages` call capped at
+  `SNAPSHOT_TIMEOUT_MS = 5000` (`src/client.js:687`), and the sidebar
+  (`tui/src/tui.tsx`) imports it directly for the `<k> ctx` line, so panel row and
+  threshold cannot disagree. The returned sum is the exact figure opencode's own TUI
+  shows for a session, so every threshold tested against it — `endlessContext` /
+  `maxPrimaryContext`, a subagent's context budget — crosses at the moment the user's
+  context display says it has; a threshold that fires early on a reasoning-heavy model is
+  raised, not the measure cut. Two exclusions stand, both on the SELECTION, not the sum: a
+  step still in flight has emitted no output yet and is walked past — a thinking model can
+  carry reasoning there with `output` still zero, and that partial describes no completed
+  turn — and the walk stops at a compaction message (`info.summary === true`) and answers
+  "no figure". The compaction stop is the one place the figure deliberately diverges from
+  opencode's display: between a compaction and the next real turn, opencode's surfaces keep
+  showing the summary turn's pre-compaction figure while this answers no-figure, because the
+  summary's own input is the history the compaction just removed and reporting it would
+  present a freshly compacted session as exactly as full as it was before.
 - On every primary turn the system-transform hook refreshes that measurement, TTL-guarded:
   `if (shouldRefreshPrimary(sessionID)) { const snap = await fetchSnapshot(...);
   recordPrimaryContext(sessionID, snap?.ctxTokens) }` (`src/hooks.js:167-169`). The store is
@@ -239,7 +252,8 @@ verifies the file on disk rather than trusting either party.
    the same reason as the plain handoff (`src/hooks.js:167-172`).
 2. **Freeze.** From the moment the latch is set, `spawn` refuses new subagents (§3.3).
 3. **Quiesce.** On the primary's `session.idle`, the endless path claims the latch and waits
-   until `countActiveSubagents() === 0`, bounded by `endlessQuiesceTimeoutMs` (§3.3).
+   until `countActiveSubagents() === 0`, over a base window of `endlessQuiesceTimeoutMs` that
+   re-arms while progress is seen (§3.3).
 4. **Save**, in five sub-steps (§3.4): **prepare** — resolve the todo file, insert the machine
    section where it is absent, write it, and snapshot its content, hash and parse; **arm** the
    single-use wind-down permit; run the **wind-down** turn — ask the orchestrator to spawn the
@@ -262,7 +276,7 @@ split avoids.
 
 ### 3.2 Settings
 
-Three new keys in `~/.config/opencode/agent-intercom.json`, resolved by `getSettings()` on
+The endless keys in `~/.config/opencode/agent-intercom.json`, resolved by `getSettings()` on
 the existing file > env > default rule (`src/settings.js:101`):
 
 | key | type | default | env var |
@@ -270,9 +284,12 @@ the existing file > env > default rule (`src/settings.js:101`):
 | `endlessMode` | boolean | `true` | `OPENCODE_AGENT_INTERCOM_ENDLESS_MODE` (`"1"`/`"0"`) |
 | `endlessContext` | integer ≥ 0 | `250000` | `OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT` |
 | `endlessQuiesceTimeoutMs` | integer ≥ 0 | `600000` | `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS` |
+| `endlessQuiesceExtensionMs` | integer ≥ 0 | `600000` | `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_EXTENSION_MS` |
 | `endlessWindDownTimeoutMs` | integer ≥ 0 | `900000` | `OPENCODE_AGENT_INTERCOM_ENDLESS_WIND_DOWN_TIMEOUT_MS` |
 
-`endlessWindDownTimeoutMs` bounds the wind-down turn and, minus one `DOC_SUMMARIES_POLL_MS`,
+`endlessQuiesceExtensionMs` re-arms the quiesce deadline on each poll whose progress signal
+advanced (§3.3); `0` switches the extension off. `endlessWindDownTimeoutMs` bounds the
+wind-down turn and, minus one `DOC_SUMMARIES_POLL_MS`,
 the child waiter that the settlement gate blocks on (§3.4). The sidebar does not show it — it
 is an env/file-only tuning key, unlike `endlessContext` which has a row (§3.7).
 
@@ -366,12 +383,21 @@ bound moves to `WIND_DOWN_PAYLOAD_MAX_CHARS`), the duplicate-task-id reservation
 carries no single id), the global spawn cap (quiesce is scoped to this primary), and retention
 (the cycle drops every retained session anyway).
 
-**The bound.** Quiesce is waited for at `DOC_SUMMARIES_POLL_MS`-scale cadence up to
-`endlessQuiesceTimeoutMs` (default 600 000 ms). It is not the only bound: the inactivity
+**The bound.** Quiesce is waited for at `DOC_SUMMARIES_POLL_MS`-scale cadence, with
+`endlessQuiesceTimeoutMs` (default 600 000 ms) as the BASE window. On every poll the cycle
+reads a progress signal — the maximum `lastActivityAt` over the primary's active registry
+entries (`progressSignal`, `src/handoffwiring.js`) — and wherever that signal has advanced
+since the previous poll, the deadline re-arms at `now + endlessQuiesceExtensionMs` (default
+600 000 ms, env `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_EXTENSION_MS`), so a primary with
+genuinely working subagents waits as long as they keep emitting. A deadline reached with the
+signal frozen abandons with `still busy after <elapsed>ms with no progress` — that is the
+state a hung entry under a switched-off watchdog sits in forever. `endlessQuiesceExtensionMs:
+0` switches the extension off and the first base-window deadline abandons whatever the signal
+does. It is not the only bound: the inactivity
 watchdog aborts any subagent silent for `maxSubagentAgeMs`, default 90 000 ms
 (`src/settings.js:45-51`), and a watchdog abort ends in the same teardown that removes the
 registry entry. So a *hung* subagent resolves itself in ~90 s; the ten-minute timeout is for
-a subagent that is genuinely working. On timeout the cycle is **abandoned, not forced**: the
+a subagent that is genuinely working. The cycle is then **abandoned, not forced**: the
 latch is released, the spawn freeze lifts, a warning toast fires, and the next over-threshold
 turn re-schedules. Aborting a working subagent to make room for a context refresh would
 destroy real work to save context.
@@ -448,7 +474,7 @@ re-reads, and **all** of these must hold or the cycle abandons without replacing
 |---|---|---|
 | V1 | `findTodoFile` resolves to exactly one regular file, same name as the snapshot | abandon (`multiple` / `not-a-file` / renamed) — no file to restore to |
 | V2 | the child's outcome is `completed` | accepted anyway when V3–V5 all hold |
-| V3 | the content hash differs from the snapshot, **or** the reply carries `## WIND-DOWN DONE — no change` | restore, abandon |
+| V3 | the content hash differs from the snapshot, **or** the reply carries `## WIND-DOWN DONE — no change` | the bounded re-ask below, or restore, abandon |
 | V4 | exactly one `begin` and one `end` marker in order, and `outsideLines(new)` equals `expectedOutside` | restore, abandon |
 | V5 | `parseTasks` yields ≥ 1 task, every id unique, every title non-empty | restore, abandon (except the explicit-empty case) |
 | V6 | a snapshot id's title differs from the new title | log the id, old title and new title; continue — the wind-down may refresh stale work |
@@ -458,6 +484,19 @@ V6 is diagnostic only. For every existing id whose normalised title changes, the
 that id together with the snapshot's old title and the new title, then continues with the V3–V5
 verified rewrite. A wind-down is expected to refresh a carried-over title when earlier work has
 made it stale.
+
+**The bounded re-ask.** A byte-equal file beside a reply claiming a plain open-task count is a
+claim the disk does not show, but a model that simply stopped editing reads identically to one
+that had nothing to drop, so the first attempt earns ONE re-ask before the verdict stands: the
+cycle logs `endless: wind-down rewrite byte-equal — re-asking the primary once` and runs a
+second wind-down attempt — arm, turn, settle, re-read, verify — on a fresh token (the
+registry's arm overwrites a spent permit). The second attempt's result feeds the same checks:
+fresh content completes normally; a byte-equal second file whose reply says
+`## WIND-DOWN DONE — no change` is accepted (V3 holds on its no-change branch); a re-ask
+answering `nothing open` with a zero-task parse goes to the explicit-empty stop of §3.6, not to
+the accept path. Anything else restores the snapshot and abandons at `confirm` with `wind-down
+rewrite rejected (V3)`, the rejected bytes filed by `writeRejectedWindDown`
+(`src/endless.js:246`) into the result directory beside the restore.
 
 **V4, as an algorithm over lines.** A removal shifts every byte after it, so "byte-identical"
 cannot be literal. `markedRange` is the inclusive line range between the single `begin` and
@@ -472,8 +511,9 @@ own snapshot, never asserted by the subagent.
 
 **A rejected rewrite is undone.** Prepare holds the exact snapshot bytes; a failure of V1, V3, V4,
 V5 means the file on disk is a rewrite the plugin refuses to stand behind, so before
-abandoning it writes the snapshot back and logs `endless: wind-down rewrite rejected — the todo
-file was restored`. Where the restore itself throws, the error toast names the path and the failed
+abandoning it files the rejected bytes (`writeRejectedWindDown`, whose path the log line names),
+writes the snapshot back and logs `endless: wind-down rewrite rejected — the todo file was
+restored`. Where the restore itself throws, the error toast names the path and the failed
 predicate. V1's renamed / `multiple` / `not-a-file` case is the exception: there is no resolved
 file to write back to. A V6 title change is logged with its id and old/new titles but is not a
 rejection.
@@ -695,9 +735,10 @@ One line per cycle transition, on the existing `log` helper (`src/log.js`):
 ```
 endless: scheduled {"sessionID":"<id>","ctx":<n>,"threshold":<n>}
 endless: quiesced after <ms>ms, activeAtStart=<n> {"sessionID":"<id>"}
+endless: wind-down rewrite byte-equal — re-asking the primary once {"sessionID":"<id>"}
 endless: wind-down confirmed <n> open task(s) [T<a>,T<b>,…] file=<name> {"sessionID":"<id>"}
 endless: cycle <k>/<max> complete, new session <id>, open tasks <before>→<after> completed=<n>
-endless: wind-down rewrite rejected — the todo file was restored {"sessionID":"<id>","failed":"V<k>"}
+endless: wind-down rewrite rejected — the todo file was restored {"sessionID":"<id>","failed":"V<k>","rejectedContentPath":"<path>"}
 endless: abandoned at <stage> — <reason> {"sessionID":"<id>"}
 ```
 
@@ -767,11 +808,13 @@ auto? }`) compacts a session in place. §2.1 says why that is not this feature.
 ## 5. Assumptions, and what would show them wrong
 
 - **`ctxTokens` tracks the primary's real context at 250 000 tokens.** The measurement is
-  validated at the 80 000 scale by the existing handoff and excludes reasoning tokens
-  deliberately (`src/client.js:271-276`). Wrong if a cycle triggers far from where the
-  session's own token display sits — read off the `endless: scheduled … ctx=` line against
-  what opencode shows. It is also model-dependent: a provider that does not report
-  `cache.read`/`cache.write` yields a smaller sum, and endless mode would fire late or never.
+  the sum opencode's own TUI displays — reasoning tokens included, over the newest
+  assistant message with `tokens.output > 0` (`src/context-figure.js`) — so the threshold
+  fires when the user's context display says it does. Wrong if a cycle
+  triggers far from where the session's own token display sits — read off the
+  `endless: scheduled … ctx=` line against what opencode shows. It is also model-dependent:
+  a provider that does not report `cache.read`/`cache.write` yields a smaller sum, and
+  endless mode would fire late or never.
 - **A session at its context ceiling can still emit ONE correct tool call.** §1.3 argues the
   opposite for prose text at that ceiling, which is why the wind-down turn asks for a single
   spawn rather than a shaped plain-text reply, and why the plugin-composed child prompt and

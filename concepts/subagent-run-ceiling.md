@@ -82,8 +82,10 @@ parent's `spawn` tool call.
 **What the unbounded entry costs while it stands:** one of `maxSubagents`
 concurrency slots (`isActiveEntry`, `LIFECYCLE_RUNNING`, `src/registry.js:2084`),
 the primary's quiesce in an endless cycle — bounded there, but only by
-abandoning the cycle (`src/endless.js:457`,
-`return abandon("quiesce", \`still busy after ${quiesceTimeoutMs}ms\`)`) — and,
+abandoning the cycle (`src/endless.js`,
+`return abandon("quiesce", \`still busy after ${at - waitStartedAt}ms with no progress\`)`; the
+base window is `endlessQuiesceTimeoutMs` and re-arms at `endlessQuiesceExtensionMs` while the
+primary's subagents keep advancing, so the abandon fires on a FROZEN signal) — and,
 in the nested case, the parent's blocked tool call.
 
 **What the sweep already has to hang a third window on.** The descriptor
@@ -208,7 +210,7 @@ make the honest bound (B) look redundant and it would not get built.
 
 The subagent's context budget locks its tools down eventually
 (`contextLimitNotice` lockdown), and the endless cycle abandons at its quiesce
-timeout (`src/endless.js:457`).
+window (`src/endless.js`, once the subagents' progress signal freezes).
 
 Costs: the lockdown arrives only when tokens accumulate, and a poll loop whose
 every result is "no such file" adds tens of tokens per turn — hours at a 100 000
@@ -292,10 +294,12 @@ The derivation, not a round guess:
   strengthened, never weakened, and `sweepOrphanedSubagentSessions` needs no
   change.
 - **What it is deliberately not anchored on.** `endlessQuiesceTimeoutMs`
-  (600 000, `src/settings.js:302`). A run ceiling short enough to protect a
+  (600 000, `src/settings.js`). A run ceiling short enough to protect a
   cycle's quiesce would have to be under 10 minutes, which is barely one maximal
   `bash` call, and the cycle is already bounded — it abandons rather than hangs
-  (`src/endless.js:457`).
+  (`src/endless.js`, the quiesce abandon; the window re-arms while the primary's
+  subagents keep advancing, so the bound that truly ends a polling subagent's
+  hold on the cycle is this run ceiling, not the quiesce timeout).
 
 The number is a judgement, and it is a wide one on purpose: it is a backstop
 against unboundedness, not a schedule. Whoever wants a schedule sets

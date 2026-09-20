@@ -394,7 +394,7 @@ What does carry the user through, and is enough:
   version rejects unknown-to-it flag combinations at the API, which would surface as a 400
   on the very first notice after an upgrade.
 - **The primary context measurement is unaffected.** `latestContextTokens`
-  (`src/client.js:283`) reads assistant token counts, and the hidden text still reaches the
+  (`src/context-figure.js`, reached through `fetchSnapshot`, `src/client.js`) reads assistant token counts, and the hidden text still reaches the
   model, so the handoff and endless thresholds see the same numbers as today. Wrong if the
   measured `ctx` drops noticeably after switching the flag on, at the same workload.
 - **`ignored` is never set by this plugin.** It is the inverse flag and would silently take

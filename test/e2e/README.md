@@ -263,7 +263,8 @@ The setup the drivers are written against:
 - `opencode serve` started in `$HOME/testopencode`
 - `E2E_MODEL` defaults to `openai/gpt-5.6-luna` — Luna, reached natively through
   the `openai` provider with ChatGPT OAuth. Every agent, the primary and the nine
-  subagent roles alike, is pinned to it; `gpuserver/Qwen3.8 Flash Next` is
+  subagent roles alike, is pinned to it, except `grounder` (see the pin
+  exception below); `gpuserver/Qwen3.8 Flash Next` is
   refused outright, whatever `E2E_MODEL` says
 - Multi-agent test: 4 subagent spawns (planner / coder / reviewer / gitter), all
   status=completed, ~6:26 min wall-clock, 92 messages, produces `bytes()` in
@@ -313,10 +314,20 @@ can: through the isolated `llm-models.json`. The model a driver names in its
 POST does **not** decide what answers — `applyModelChoices` (`src/llmmodel.js`)
 writes the file's entry into `config.agent[<name>].model` at instance bootstrap
 and that wins; a live run was answered by Qwen although the request named
-another model. The isolated file therefore pins the ten plugin roles and the
-opencode built-ins that can answer a turn, with no `variant` key, and the
-isolated `opencode.json` carries `model` and `small_model` for anything not
-named there at all.
+another model. The isolated file therefore pins the nine plugin roles that
+take the pin and the opencode built-ins that can answer a turn, with no
+`variant` key, and the isolated `opencode.json` carries `model` and
+`small_model` for anything not named there at all.
+
+`grounder` is the one agent the pin does not reach: it holds the plugin's
+`grounded_search` tool, whose answer comes through Google's Gemini Search
+grounding, and a pin at `E2E_MODEL` would take that provider away and the tool
+could not work. `e2e_iso_create` carries `grounder`'s entry from the machine's
+`~/.config/opencode/llm-models.json` into the isolated one verbatim — `variant`
+included — and where the machine names no entry for it, the isolated file
+names none either, so `grounder` falls back to the isolated `opencode.json`
+top-level `model` like any unnamed agent. The name list is
+`E2E_PIN_EXEMPT_AGENTS` in `test/e2e/config-isolation.sh`.
 
 **Every driver then checks what really answered.** opencode stamps
 `providerID`/`modelID` on every assistant message, so `e2e_model_audit` reads
@@ -410,10 +421,11 @@ ENDLESS_PORT=4599 KEEP_SERVER=1 \
 **The ceiling is derived, not guessed.** `endlessContext` is held at
 `ENDLESS_CONTEXT_CEILING` (100 000 000) for the whole preparation, so no
 preparation turn can start a cycle. The driver then reads the primary's real
-context off `GET /session/{id}/message` — the sum `input + output + cache.read +
-cache.write` of the newest assistant message with a non-zero sum, which is what
-`latestContextTokens` (`src/client.js`) compares against `endlessContext` — and
-writes the key at `ENDLESS_CONTEXT_MARGIN` (1 000) below that measurement. The
+context off `GET /session/{id}/message` — the sum `input + output + reasoning +
+cache.read + cache.write` of the newest assistant message with a non-zero output,
+which is what `latestContextTokens` (`src/context-figure.js`) compares against
+`endlessContext` — and writes the key at `ENDLESS_CONTEXT_MARGIN` (1 000) below
+that measurement. The
 next turn's transform hook re-reads the same figure and latches. Giving
 `ENDLESS_CONTEXT` a value uses it verbatim and **verifies** it against the
 measurement instead: a value the session never reaches ends the run as a setup
@@ -900,9 +912,10 @@ subagent was told, and the report land in `out/17-context-bands.*`.
 
 **A band the run did not reach is never a silent pass, and never a failure
 either.** The driver measures the subagent's own token trajectory independently
-of the plugin — the `input + output + cache.read + cache.write` sum per
-assistant message off `GET /session/<id>/message`, which is what
-`latestContextTokens` (`src/client.js`) feeds the bands from — and a band counts
+of the plugin — the `input + output + reasoning + cache.read + cache.write` sum
+per assistant message with a non-zero output off `GET /session/<id>/message`,
+which is what `latestContextTokens` (`src/context-figure.js`) feeds the bands
+from — and a band counts
 as REACHED when some step of that trajectory lands inside its range. Reached and
 no notice is a `FAIL` quoting the trajectory; never reached is `NOT ASSERTED`,
 naming the two samples that straddle the range, and everything hanging off that

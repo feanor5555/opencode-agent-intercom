@@ -77,10 +77,12 @@
 #
 # Requires: python3, curl, cp, mktemp.
 
-# The model every driver runs on unless E2E_MODEL names another. Luna, as
-# configured on this machine: provider `openai`, model `gpt-5.6-luna`
-# (OpenAI ChatGPT OAuth, reached natively by opencode).
-E2E_DEFAULT_MODEL="openai/gpt-5.6-luna"
+# The model every driver runs on unless E2E_MODEL names another. qwen3.8-flash-
+# medium on `cliproxy` (the same model the plugin runs on, src/index.js): both
+# providers this machine enables — cliproxy and gpuserver — are carried into the
+# isolated config, and gpuserver's model is the banned one, so cliproxy is the
+# provider a default can name; this pair is proven reachable and reasoning-capable.
+E2E_DEFAULT_MODEL="cliproxy/qwen3.8-flash-medium"
 
 # The model no run may use, whatever the rest of the machine is configured
 # with. Named here so the refusal reads as itself in a driver's output.

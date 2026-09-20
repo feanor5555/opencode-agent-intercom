@@ -28,7 +28,7 @@
 #                          starts a server of its own
 #   PROJECT_DIR            $HOME/testopencode
 #   OUT_DIR                ./out
-#   E2E_MODEL              openai/gpt-5.6-luna
+#   E2E_MODEL              cliproxy/qwen3.8-flash-medium
 #   TUI_ROUTE_PORT         4610   own port when this driver starts the server
 #   TUI_ROUTE_OWN_SERVER   0      1 forces a server of its own even if
 #                          OPENCODE_URL already answers

@@ -30,7 +30,10 @@ function machineConfig(dir, extra = {}, models) {
     join(cfg, "opencode.json"),
     JSON.stringify({
       plugin: ["/somewhere/else"],
-      provider: { openai: { npm: "@ai-sdk/openai-compatible", models: { "gpt-5.6-luna": {} } } },
+      provider: {
+        cliproxy: { npm: "@ai-sdk/openai-compatible", models: { "qwen3.8-flash-medium": {} } },
+        openai: { npm: "@ai-sdk/openai-compatible", models: { "gpt-5.6-luna": {} } },
+      },
       model: "gpuserver/Qwen3.8 Flash Next",
       agent: { coder: { model: "gpuserver/Qwen3.8 Flash Next", variant: "xhigh" } },
       ...extra.config,
@@ -72,7 +75,7 @@ function runShell(script, env = {}, models) {
   return { ...r, dir, machine }
 }
 
-test("e2e_resolve_model defaults to Luna and refuses the banned model", () => {
+test("e2e_resolve_model defaults to the harness default and refuses the banned model", () => {
   const r = runShell(`
 . "$LIB"
 e2e_resolve_model && echo "DEFAULT=$E2E_MODEL_REF/$E2E_MODEL_PROVIDER/$E2E_MODEL_ID"
@@ -80,7 +83,7 @@ E2E_MODEL="gpuserver/Qwen3.8 Flash Next" e2e_resolve_model && echo BANNED_ACCEPT
 E2E_MODEL="nothingusable" e2e_resolve_model && echo PAIR_ACCEPTED || echo PAIR_REFUSED
 E2E_MODEL="xai/grok-4.6" e2e_resolve_model && echo "OVERRIDE=$E2E_MODEL_REF"
 `)
-  assert.match(r.stdout, /DEFAULT=openai\/gpt-5\.6-luna\/openai\/gpt-5\.6-luna/)
+  assert.match(r.stdout, /DEFAULT=cliproxy\/qwen3\.8-flash-medium\/cliproxy\/qwen3\.8-flash-medium/)
   assert.match(r.stdout, /BANNED_REFUSED/)
   assert.match(r.stderr, /no end-to-end run may use that model/)
   assert.match(r.stdout, /PAIR_REFUSED/)
@@ -102,7 +105,7 @@ echo "ENV=\${E2E_SERVER_ENV[*]}"
 
   const models = JSON.parse(readFileSync(join(iso, "llm-models.json"), "utf8"))
   for (const name of ["orchestrator", "planner", "coder", "researcher", "gitter", "title", "summary"]) {
-    assert.deepEqual(models[name], { providerID: "openai", modelID: "gpt-5.6-luna" }, `${name} is not pinned`)
+    assert.deepEqual(models[name], { providerID: "cliproxy", modelID: "qwen3.8-flash-medium" }, `${name} is not pinned`)
   }
   // The exempt agent keeps the machine's entry, pin and variant included.
   assert.deepEqual(models.grounder, { providerID: "machinegemini", modelID: "gemini-2.5-pro", variant: "high" })
@@ -115,9 +118,9 @@ echo "ENV=\${E2E_SERVER_ENV[*]}"
 
   const config = JSON.parse(readFileSync(join(iso, "opencode.json"), "utf8"))
   assert.deepEqual(config.plugin, [PLUGIN_ROOT], "the plugin under test has to be the wired one")
-  assert.equal(config.model, "openai/gpt-5.6-luna")
-  assert.equal(config.small_model, "openai/gpt-5.6-luna")
-  assert.ok(config.provider.openai, "the machine's providers have to be carried over")
+  assert.equal(config.model, "cliproxy/qwen3.8-flash-medium")
+  assert.equal(config.small_model, "cliproxy/qwen3.8-flash-medium")
+  assert.ok(config.provider.cliproxy, "the machine's providers have to be carried over")
   assert.ok(!("model" in config.agent.coder), "a per-agent model of the machine's must not survive")
   assert.ok(!("variant" in config.agent.coder))
 
@@ -171,8 +174,8 @@ echo "ISO=$E2E_ISO_OPENCODE_DIR"
   const models = JSON.parse(readFileSync(join(iso, "llm-models.json"), "utf8"))
 
   assert.deepEqual(models.grounder, { providerID: "machinegemini", modelID: "gemini-2.5-pro", variant: "high" })
-  assert.deepEqual(models.researcher, { providerID: "openai", modelID: "gpt-5.6-luna" }, "researcher keeps the pin")
-  assert.deepEqual(models.orchestrator, { providerID: "openai", modelID: "gpt-5.6-luna" })
+  assert.deepEqual(models.researcher, { providerID: "cliproxy", modelID: "qwen3.8-flash-medium" }, "researcher keeps the pin")
+  assert.deepEqual(models.orchestrator, { providerID: "cliproxy", modelID: "qwen3.8-flash-medium" })
   // The exempt name never reaches the pin, whatever E2E_MODEL the driver chose.
   const home = iso.replace(/\/\.config\/opencode$/, "")
   rmSync(home, { recursive: true, force: true })
@@ -199,9 +202,9 @@ echo "ISO=$E2E_ISO_OPENCODE_DIR"
   const models = JSON.parse(readFileSync(join(iso, "llm-models.json"), "utf8"))
 
   assert.ok(!("grounder" in models), "an agent the machine names nothing for gets no entry")
-  assert.deepEqual(models.orchestrator, { providerID: "openai", modelID: "gpt-5.6-luna" })
+  assert.deepEqual(models.orchestrator, { providerID: "cliproxy", modelID: "qwen3.8-flash-medium" })
   const config = JSON.parse(readFileSync(join(iso, "opencode.json"), "utf8"))
-  assert.equal(config.model, "openai/gpt-5.6-luna", "the fallback is still the pin, applied as instance default")
+  assert.equal(config.model, "cliproxy/qwen3.8-flash-medium", "the fallback is still the pin, applied as instance default")
   const home = iso.replace(/\/\.config\/opencode$/, "")
   rmSync(home, { recursive: true, force: true })
   rmSync(r.dir, { recursive: true, force: true })
@@ -371,7 +374,7 @@ function capture(dir, name, models) {
   return path
 }
 
-function audit(files, expect = "openai/gpt-5.6-luna", extra = []) {
+function audit(files, expect = "cliproxy/qwen3.8-flash-medium", extra = []) {
   return spawnSync(
     "python3",
     [AUDIT, "--expect", expect, "--banned", "gpuserver/Qwen3.8 Flash Next", "--label", "t", ...extra, ...files],
@@ -382,20 +385,20 @@ function audit(files, expect = "openai/gpt-5.6-luna", extra = []) {
 test("the model audit passes only when every assistant message names the pin", () => {
   const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
   const good = capture(dir, "good.json", [
-    ["openai", "gpt-5.6-luna"],
-    ["openai", "gpt-5.6-luna"],
+    ["cliproxy", "qwen3.8-flash-medium"],
+    ["cliproxy", "qwen3.8-flash-medium"],
   ])
   const r = audit([good])
   assert.equal(r.status, 0, r.stdout + r.stderr)
   assert.match(r.stdout, /2 assistant message\(s\) over 1 capture\(s\)/)
-  assert.match(r.stdout, /every one answered by openai\/gpt-5\.6-luna=2/)
+  assert.match(r.stdout, /every one answered by cliproxy\/qwen3\.8-flash-medium=2/)
   rmSync(dir, { recursive: true, force: true })
 })
 
 test("the model audit fails on a foreign model and names the banned one as such", () => {
   const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
   const mixed = capture(dir, "mixed.json", [
-    ["openai", "gpt-5.6-luna"],
+    ["cliproxy", "qwen3.8-flash-medium"],
     ["gpuserver", "Qwen3.8 Flash Next"],
     ["xai", "grok-4.6"],
   ])
@@ -423,7 +426,7 @@ test("the model audit fails rather than passes when there is nothing to audit", 
 test("the model audit allows an exempt agent off the pin but not on the banned model", () => {
   const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
   const ok = capture(dir, "ok.json", [
-    ["openai", "gpt-5.6-luna"],
+    ["cliproxy", "qwen3.8-flash-medium"],
     ["machinegemini", "gemini-2.5-pro", "grounder"],
     ["machinegemini", "gemini-2.5-pro", "grounder"],
   ])
@@ -434,16 +437,16 @@ test("the model audit allows an exempt agent off the pin but not on the banned m
   ])
   const exempted = ["--exempt-agent", "grounder"]
 
-  const passed = audit([ok], "openai/gpt-5.6-luna", exempted)
+  const passed = audit([ok], "cliproxy/qwen3.8-flash-medium", exempted)
   assert.equal(passed.status, 0, passed.stdout + passed.stderr)
-  assert.match(passed.stdout, /every turn of a pinned agent answered by openai\/gpt-5\.6-luna/)
+  assert.match(passed.stdout, /every turn of a pinned agent answered by cliproxy\/qwen3\.8-flash-medium/)
   assert.match(passed.stdout, /2 exempt-agent turn\(s\) allowed \(grounder on machinegemini\/gemini-2\.5-pro=2\)/)
 
-  const bannedTurn = audit([bad], "openai/gpt-5.6-luna", exempted)
+  const bannedTurn = audit([bad], "cliproxy/qwen3.8-flash-medium", exempted)
   assert.equal(bannedTurn.status, 1, bannedTurn.stdout)
   assert.match(bannedTurn.stdout, /banned gpuserver\/Qwen3\.8 Flash Next/)
 
-  const foreignPinnedTurn = audit([mixed], "openai/gpt-5.6-luna", exempted)
+  const foreignPinnedTurn = audit([mixed], "cliproxy/qwen3.8-flash-medium", exempted)
   assert.equal(foreignPinnedTurn.status, 1, foreignPinnedTurn.stdout)
   assert.match(foreignPinnedTurn.stdout, /turn on xai\/grok-4\.6 — agent coder/)
   assert.doesNotMatch(foreignPinnedTurn.stdout, /turn on machinegemini/)
@@ -459,7 +462,7 @@ test("the model audit allows an exempt agent off the pin but not on the banned m
 test("e2e_model_audit reports an exempt grounder turn as PASS", () => {
   const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
   const cap = capture(dir, "cap.json", [
-    ["openai", "gpt-5.6-luna"],
+    ["cliproxy", "qwen3.8-flash-medium"],
     ["machinegemini", "gemini-2.5-pro", "grounder"],
   ])
   const script = join(dir, "run.sh")
@@ -499,8 +502,8 @@ e2e_model_audit "13-message" "${dir}/report.txt" "${dir}/cap.json" && echo AUDIT
 // it reports those turns as foreign models of the present run.
 test("the audit reads the captures this run recorded and no other file beside them", () => {
   const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
-  capture(dir, "mine.json", [["openai", "gpt-5.6-luna"]])
-  capture(dir, "subshell.json", [["openai", "gpt-5.6-luna"]])
+  capture(dir, "mine.json", [["cliproxy", "qwen3.8-flash-medium"]])
+  capture(dir, "subshell.json", [["cliproxy", "qwen3.8-flash-medium"]])
   // What an earlier run left in the same directory, on the model it pinned.
   capture(dir, "stale.json", [
     ["xai", "grok-4.6"],
@@ -524,7 +527,7 @@ e2e_audit_recorded "11-endless" "${dir}/report.txt" && echo AUDIT_OK || echo "AU
   assert.match(r.stdout, /TAKEN=taken/)
   assert.match(r.stdout, /AUDIT_OK/, r.stdout + r.stderr)
   assert.match(r.stdout, /2 assistant message\(s\) over 2 capture\(s\)/)
-  assert.match(r.stdout, /every one answered by openai\/gpt-5\.6-luna=2/)
+  assert.match(r.stdout, /every one answered by cliproxy\/qwen3\.8-flash-medium=2/)
   assert.doesNotMatch(r.stdout, /grok/)
   rmSync(dir, { recursive: true, force: true })
 })
@@ -558,7 +561,7 @@ test("each driver invocation audits its own captures and no earlier invocation's
   const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
   // What an earlier driver of the same run left behind, on the model it pinned.
   capture(dir, "first.json", [["xai", "grok-4.6"]])
-  capture(dir, "second.json", [["openai", "gpt-5.6-luna"]])
+  capture(dir, "second.json", [["cliproxy", "qwen3.8-flash-medium"]])
 
   const child = join(dir, "child.sh")
   writeFileSync(
@@ -603,8 +606,8 @@ TAG=second CAP="${dir}/second.json" bash "${child}"
 // a driver that also sources it directly sources it twice in the one process.
 test("sourcing the library again in the same process keeps the captures already recorded", () => {
   const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
-  capture(dir, "early.json", [["openai", "gpt-5.6-luna"]])
-  capture(dir, "late.json", [["openai", "gpt-5.6-luna"]])
+  capture(dir, "early.json", [["cliproxy", "qwen3.8-flash-medium"]])
+  capture(dir, "late.json", [["cliproxy", "qwen3.8-flash-medium"]])
   const script = join(dir, "run.sh")
   writeFileSync(
     script,
@@ -781,7 +784,7 @@ e2e_iso_remove > /dev/null
 test("a manifest an earlier run left in TMPDIR is not the one this invocation reads", () => {
   const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
   capture(dir, "stale.json", [["xai", "grok-4.6"]])
-  capture(dir, "mine.json", [["openai", "gpt-5.6-luna"]])
+  capture(dir, "mine.json", [["cliproxy", "qwen3.8-flash-medium"]])
   const script = join(dir, "run.sh")
   writeFileSync(
     script,

@@ -12,7 +12,7 @@
 #                   plugin debug log; default
 #                   ~/.cache/opencode-agent-intercom/debug.log. Against a
 #                   run-all.sh server, typically $OUT_DIR/00-suite.debug.log
-#   E2E_MODEL       default openai/gpt-5.6-luna (provider/model for this run)
+#   E2E_MODEL       default cliproxy/qwen3.8-flash-medium (provider/model for this run)
 #
 # It uses a server somebody else owns and writes no configuration of its own;
 # the isolation of that server's configuration belongs to whoever starts it.

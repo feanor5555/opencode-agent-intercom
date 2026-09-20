@@ -96,7 +96,7 @@
 #   OPENCODE_URL      http://localhost:4567  the running server
 #   PROJECT_DIR       $HOME/testopencode     sessions are created against it
 #   OUT_DIR           ./out                  captures and the report
-#   E2E_MODEL         openai/gpt-5.6-luna  the pin: every agent runs on it
+#   E2E_MODEL         cliproxy/qwen3.8-flash-medium  the pin: every agent runs on it
 #   BETWEEN_AGENT     debugger               the role that gets messaged; it
 #                     needs the `bash` tool for the baseline steps
 #   BETWEEN_MARKER    BETWEEN-STEPS-OK       the literal the UN-steered baseline

@@ -34,7 +34,7 @@
 # Env (all with defaults):
 #   PROJECT_DIR            $HOME/testopencode
 #   OUT_DIR                ./out
-#   E2E_MODEL              openai/gpt-5.6-luna
+#   E2E_MODEL              cliproxy/qwen3.8-flash-medium
 #   MCP_AFTER_PORT         4608   own port, clear of run-all's 4567,
 #                          ask-expiry's 4588, endless' 4599, nested's 4602,
 #                          context-bands' 4606

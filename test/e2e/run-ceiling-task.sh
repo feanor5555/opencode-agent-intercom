@@ -75,7 +75,7 @@
 #   PROJECT_DIR            $HOME/testopencode  the server's cwd, the directory
 #                          sessions are created against
 #   OUT_DIR                ./out               captures, request log, report
-#   E2E_MODEL              openai/gpt-5.6-luna the pin: every agent runs on it
+#   E2E_MODEL              cliproxy/qwen3.8-flash-medium the pin: every agent runs on it
 #   RUN_CEILING_PORT       4612                own port, clear of run-all's
 #                          4567, ask-expiry's 4588, endless' 4599, nested's
 #                          4602, context-bands' 4606, mcp-after's 4608,

@@ -122,7 +122,7 @@
 #                          sessions are created against, and where the fixture
 #                          is seeded and removed again
 #   OUT_DIR                ./out               captures, request log, report
-#   E2E_MODEL              openai/gpt-5.6-luna the pin: every agent runs on it
+#   E2E_MODEL              cliproxy/qwen3.8-flash-medium the pin: every agent runs on it
 #   CONTEXT_BANDS_PORT     4606                own port, clear of run-all's
 #                          4567, ask-expiry's 4588, endless' 4599, nested's 4602
 #   CONTEXT_AGENT          coder               the role that is driven; it needs

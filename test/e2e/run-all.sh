@@ -37,7 +37,7 @@
 #   OPENCODE_AGENT_INTERCOM_LOG_REQUESTS_FILE
 #                          $OUT_DIR/00-suite.requests.jsonl — the request log
 #                          this suite's server writes (src/reqlog.js)
-#   E2E_MODEL              openai/gpt-5.6-luna — the model every agent is
+#   E2E_MODEL              cliproxy/qwen3.8-flash-medium — the model every agent is
 #                          pinned to and the only one a turn may answer on
 #   SERVER_START_TIMEOUT_S 60     readiness probe budget
 #

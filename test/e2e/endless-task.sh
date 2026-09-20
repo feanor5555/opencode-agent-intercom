@@ -107,7 +107,7 @@
 #             a subagent session is deleted when it finishes, and no primary's
 #             message tree carries a child's turns.
 #   arming  the driver reads the primary's REAL context off the session
-#           (the sum `latestContextTokens` computes, src/client.js) and only then
+#           (the sum `latestContextTokens` computes, src/context-figure.js) and only then
 #           writes `endlessContext` below it. Until this moment the key sits at
 #           ENDLESS_CONTEXT_CEILING, high enough that no turn crosses it, so the
 #           cycle cannot start before the subagent is in flight. The key is put
@@ -1199,10 +1199,11 @@ post_prompt() {
 }
 
 # The primary's context as the PLUGIN counts it against `endlessContext`:
-# input + output + cache.read + cache.write of the newest assistant message
-# whose sum is non-zero — `latestContextTokens` (src/client.js), read off the
-# same `GET /session/{id}/message` the plugin's own snapshot reads. Prints that
-# number, or nothing when no message carries a non-zero token sum yet.
+# input + output + reasoning + cache.read + cache.write of the newest assistant
+# message with a non-zero output — `latestContextTokens`
+# (src/context-figure.js), read off the same `GET /session/{id}/message` the
+# plugin's own snapshot reads; the walk stops at a compaction message and
+# answers nothing. Prints that number, or nothing when no message qualifies yet.
 primary_ctx_tokens() {
   curl -s -m 30 "$BASE/session/$SID/message" > "$OUT_DIR/$PREFIX.cycle$CYCLE.primary-messages.json"
   e2e_audit_record "$OUT_DIR/$PREFIX.cycle$CYCLE.primary-messages.json"
@@ -1219,16 +1220,24 @@ for message in reversed(messages):
     if not isinstance(message, dict):
         continue
     info = message.get("info")
-    tokens = info.get("tokens") if isinstance(info, dict) else None
+    if not isinstance(info, dict):
+        continue
+    if info.get("summary") is True:
+        raise SystemExit
+    if info.get("role") != "assistant":
+        continue
+    tokens = info.get("tokens")
     if not isinstance(tokens, dict):
         continue
+    output = tokens.get("output") or 0
+    if output <= 0:
+        continue
     cache = tokens.get("cache")
-    total = (tokens.get("input") or 0) + (tokens.get("output") or 0)
+    total = (tokens.get("input") or 0) + output + (tokens.get("reasoning") or 0)
     if isinstance(cache, dict):
         total += (cache.get("read") or 0) + (cache.get("write") or 0)
-    if total > 0:
-        print(int(total))
-        break
+    print(int(total))
+    break
 PY
 }
 

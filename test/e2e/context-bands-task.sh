@@ -67,8 +67,9 @@
 #
 # HOW A BAND THE RUN DID NOT REACH IS TOLD FROM ONE IT REACHED AND GOT WRONG.
 # The subagent's own token trajectory is measured independently of the plugin,
-# off `GET /session/<id>/message` — the same `input + output + cache.read +
-# cache.write` sum `latestContextTokens` (src/client.js) feeds the bands from.
+# off `GET /session/<id>/message` — the same `input + output + reasoning +
+# cache.read + cache.write` sum of the newest assistant message with a non-zero
+# output that `latestContextTokens` (src/context-figure.js) feeds the bands from.
 # A band is REACHED when some step of that trajectory lands inside its range. A
 # band that was reached and produced no notice FAILS; a band no step ever landed
 # in is recorded NOT ASSERTED, naming the two samples that straddle it. What
@@ -495,12 +496,13 @@ cb_turn_prompt() {
   printf '%s' "Call spawn(\"$AGENT\", \"$(cb_sub_task)\") exactly once, passing that prompt through unchanged, then end your turn. Do not call message(), do not abort it, do not spawn anything else and do not call list(). That subagent will deliberately run its context up against its budget; when it reports back, say in one line what its final reply was, and end your turn."
 }
 
-# Every non-zero context measurement of the subagent's session, oldest first,
-# as the PLUGIN counts it: input + output + cache.read + cache.write per
-# assistant message — `latestContextTokens` (src/client.js) reads the newest of
-# exactly these. This is the run's own trajectory, measured independently of
-# anything the plugin logged, and it is what decides whether a band was reached
-# at all.
+# Every context measurement the subagent's session can yield, oldest first, as
+# the PLUGIN counts it: input + output + reasoning + cache.read + cache.write
+# per assistant message with a non-zero output — `latestContextTokens`
+# (src/context-figure.js) reads the newest of exactly these, and a compaction
+# message ends the walk there. This is the run's own trajectory, measured
+# independently of anything the plugin logged, and it is what decides whether a
+# band was reached at all.
 cb_trajectory() {
   local capture="$1"
   python3 - "$capture" "$PLAN_AT" "$RESERVE_AT" "$BUDGET" <<'PY' 2>/dev/null
@@ -518,15 +520,23 @@ if not isinstance(messages, list):
 samples = []
 for message in messages:
     info = message.get("info") if isinstance(message, dict) else None
-    tokens = info.get("tokens") if isinstance(info, dict) else None
+    if not isinstance(info, dict):
+        continue
+    if info.get("summary") is True:
+        break
+    if info.get("role") != "assistant":
+        continue
+    tokens = info.get("tokens")
     if not isinstance(tokens, dict):
         continue
+    output = tokens.get("output") or 0
+    if output <= 0:
+        continue
     cache = tokens.get("cache")
-    total = (tokens.get("input") or 0) + (tokens.get("output") or 0)
+    total = (tokens.get("input") or 0) + output + (tokens.get("reasoning") or 0)
     if isinstance(cache, dict):
         total += (cache.get("read") or 0) + (cache.get("write") or 0)
-    if total > 0:
-        samples.append(int(total))
+    samples.append(int(total))
 
 in_plan = [s for s in samples if plan_at <= s < reserve_at]
 in_reserve = [s for s in samples if reserve_at <= s < budget]

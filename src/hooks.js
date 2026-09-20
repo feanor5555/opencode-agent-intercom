@@ -464,6 +464,22 @@ export function createTransformSystem(client) {
         if (shouldRefreshPrimary(sessionID)) {
           const snap = await fetchSnapshot(client, sessionID)
           recordPrimaryContext(sessionID, snap?.ctxTokens)
+          // A read that yields no figure leaves `undefined` cached, and every
+          // later turn then fails `shouldTriggerPrimaryHandoff` while a
+          // positive threshold stands armed — the state behind "the display
+          // reached the threshold and nothing happened". Name it here, where
+          // the cause is known: `messageCount` undefined is a session the
+          // server could not be read (the fetch failure logs its own line in
+          // client.js), 0 is an empty or deleted one, and a number with no
+          // figure is a session that has no completed assistant step yet —
+          // brand-new, or just compacted (`latestContextTokens` stops at the
+          // summary message).
+          if (typeof snap?.ctxTokens !== "number") {
+            log("primary context: snapshot yielded no figure", {
+              sessionID,
+              messageCount: snap?.messageCount ?? null,
+            })
+          }
         }
         // Idle-gated handoff, schedule side. The transform hook fires WHILE
         // the triggering turn is already running — starting the handoff here
@@ -540,6 +556,19 @@ export function createTransformSystem(client) {
           // it and the plain handoff owns the threshold. A cycle already
           // executing is not touched: it has written to the todo file and must
           // not leave the primary half-replaced.
+          //
+          // A paused primary with the switch still on takes this branch and
+          // armed nothing endless: until the fix it was the one over-
+          // threshold state that produced no endless log line at all, so a
+          // session sitting paused from a self-stop showed "the display
+          // reached the threshold and nothing happened" with nothing to read
+          // off the log. Name the stop on every such turn.
+          if (endlessPaused) {
+            log("endless: cycle cannot arm — paused for this session", {
+              sessionID,
+              reason: pausedReason,
+            })
+          }
           cancelPendingEndless(sessionID)
           if (!getSettings().endlessMode) {
             // The switch is off. A pause is state of the endless mode, and the

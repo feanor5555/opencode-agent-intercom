@@ -1536,7 +1536,19 @@ export function shouldTriggerPrimaryHandoff(sessionID, maxPrimaryContext) {
     return false
   }
   const tokens = primaryContextTokens(sessionID)
-  if (typeof tokens !== "number" || !Number.isFinite(tokens)) return false
+  if (typeof tokens !== "number" || !Number.isFinite(tokens)) {
+    // A positive threshold stands armed against no figure and every later
+    // turn fails here — the silent state behind "the display reached the
+    // threshold and nothing happened". Named on each such turn, with the
+    // threshold it was tested against; the fetch site in hooks.js logs the
+    // cause, this line is the consequence read from the comparison itself.
+    log("primary threshold armed but no cached context figure", {
+      sessionID,
+      threshold: maxPrimaryContext,
+      cached: tokens === undefined ? "absent" : String(tokens),
+    })
+    return false
+  }
   return tokens >= maxPrimaryContext
 }
 
@@ -1727,7 +1739,14 @@ export const ENDLESS_COOLDOWN_MS = 300_000
 export function scheduleEndlessIfNeeded(sessionID, endlessContext) {
   if (!shouldTriggerPrimaryHandoff(sessionID, endlessContext)) return false
   if (endlessCooldownActive(sessionID)) return false
-  if (isEndlessPaused(sessionID)) return false
+  if (isEndlessPaused(sessionID)) {
+    log("endless: cycle cannot arm — paused for this session", {
+      sessionID,
+      threshold: endlessContext,
+      reason: endlessPauseReason(sessionID),
+    })
+    return false
+  }
   return markEndlessPending(sessionID)
 }
 

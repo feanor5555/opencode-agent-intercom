@@ -19,6 +19,7 @@
 // was created reads the reason off the same value, and logs why.
 
 import { log, errMsg } from "./log.js"
+import { latestContextTokens } from "./context-figure.js"
 import { getSettings } from "./settings.js"
 import { INTERCOM_MESSAGE_METADATA_KEY, intercomTextPart } from "./pluginmsg.js"
 import {
@@ -875,32 +876,6 @@ export function finalResult(messages) {
   return undefined
 }
 
-// Sums the tokens of the newest assistant message — a proxy for "how much
-// context is this session working with". Mirrors opencode's own context-limit
-// check (found in the opencode binary): `input + output + cache.read +
-// cache.write`. cache.read/cache.write are SEPARATE from input here — the
-// stored `tokens.input` is the noCache portion, so input + cache.read +
-// cache.write reconstructs the total input. reasoning is INTENTIONALLY
-// EXCLUDED: opencode's context-overflow check excludes it (reasoning tokens
-// are generated, not retained as context fill), and including it inflated the
-// measurement on thinking models — which made the orchestrator handoff
-// (`maxPrimaryContext`) fire far too early, right after a reasoning-heavy turn.
-// (opencode's `totalTokens` cost metric DOES add reasoning, but that is for
-// billing/usage accounting, not context-size gauging — do not copy it here.)
-// An in-progress assistant step carries a `tokens` object that is still
-// all-zero, so skip zero sums and keep walking back to the last completed
-// step. Undefined if none yet.
-//
-// The walk STOPS at a compaction message (`info.summary === true`) and answers
-// undefined. A compaction replaces the session's history with that one summary,
-// so nothing before it describes the session's context any more — and the
-// compaction turn's own figure is the worst reading of all: its input is the
-// whole history it was given to summarize, i.e. the fill the compaction just
-// removed. Reported, it would make a freshly compacted session look exactly as
-// full as it was before, and every reader of this figure — the primary
-// threshold, the subagent budget — would act on the fill that is gone. Answering
-// "no figure yet" is the truth here: the next real turn produces the first one
-// that describes the compacted session.
 // The `{ providerID, modelID }` pair of the newest assistant message, or
 // undefined where no assistant message carries both as non-empty strings.
 //
@@ -922,20 +897,9 @@ function latestModel(messages) {
   return undefined
 }
 
-function latestContextTokens(messages) {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.info?.summary === true) return undefined
-    const t = messages[i]?.info?.tokens
-    if (!t) continue
-    const sum =
-      (t.input ?? 0) +
-      (t.output ?? 0) +
-      (t.cache?.read ?? 0) +
-      (t.cache?.write ?? 0)
-    if (sum > 0) return sum
-  }
-  return undefined
-}
+// The session's context figure is computed by `latestContextTokens`
+// (src/context-figure.js) — the one shared computation, imported at the top of
+// this file, and the same one the sidebar (`tui/src/tui.tsx`) bundles.
 
 // The address opencode reports as its server base URL — and the one thing it
 // is NOT is a guaranteed-reachable one.

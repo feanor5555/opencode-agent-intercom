@@ -123,7 +123,7 @@ function makeCtx({ ctxTokens = 20000 } = {}) {
       messages: async () => ({
         data: [
           {
-            info: { role: "assistant", tokens: { input: ctxTokens, output: 0 } },
+            info: { role: "assistant", tokens: { input: ctxTokens - 1, output: 1 } },
             parts: [{ type: "text", text: "R" }],
           },
         ],

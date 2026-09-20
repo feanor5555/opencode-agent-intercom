@@ -205,7 +205,7 @@ test("fetchSnapshot carries the recovered text through as `result`", async () =>
             info: { role: "assistant", tokens: { input: 500, output: 10 } },
             parts: [textPart("Done: three files changed.")],
           },
-          { info: { role: "assistant", tokens: { input: 900, output: 0 } }, parts: [toolPart("read")] },
+          { info: { role: "assistant", tokens: { input: 895, output: 5 } }, parts: [toolPart("read")] },
         ],
       }),
     },
@@ -748,7 +748,7 @@ function makeCtx({ ctxTokens = 1000, resultParts = [], onPrompt } = {}) {
       messages: async () => ({
         data: [
           {
-            info: { role: "assistant", tokens: { input: ctxTokens, output: 0 } },
+            info: { role: "assistant", tokens: { input: ctxTokens - 1, output: 1 } },
             parts: resultParts,
           },
         ],

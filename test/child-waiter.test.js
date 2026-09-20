@@ -106,7 +106,7 @@ const toolCtx = { sessionID: "ses_primary", agent: "orchestrator", messageID: "m
 function assistantReply(text, tokens = 4321) {
   return [
     {
-      info: { role: "assistant", tokens: { input: tokens, output: 0 } },
+      info: { role: "assistant", tokens: { input: tokens - 1, output: 1 } },
       parts: [{ type: "text", text }],
     },
   ]

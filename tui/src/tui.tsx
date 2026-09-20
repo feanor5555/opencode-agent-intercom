@@ -55,6 +55,10 @@ import {
 } from "./endless-pause-file.ts";
 import { holdRepeat, stopHoldRepeat } from "./hold-repeat.ts";
 import {
+  latestContextTokens,
+  type ContextFigureMessage,
+} from "../../src/context-figure.js";
+import {
   composeSubagentLabel,
   subagentLabelWidth,
   truncate,
@@ -395,34 +399,10 @@ function statusColor(status: SubagentStatus, theme: TuiThemeCurrent) {
   }
 }
 
-// Context size of a subagent = prompt+output tokens of its newest message that
-// has a non-zero token count (assistant messages carry it). Mirrors the main
-// plugin's check_status. Walk newest-first; an in-progress assistant step has a
-// `tokens` object that is still all-zero, so skip zero sums and keep walking
-// back to the last completed step — otherwise the panel shows a stale "0 ctx".
-function latestContextTokens(
-  messages: Array<{ info: unknown }> | undefined,
-): number | undefined {
-  if (!messages) return undefined;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const t = (messages[i]?.info as { tokens?: unknown } | undefined)
-      ?.tokens as
-      | {
-          input?: number;
-          output?: number;
-          cache?: { read?: number; write?: number };
-        }
-      | undefined;
-    if (!t) continue;
-    const sum =
-      (t.input ?? 0) +
-      (t.output ?? 0) +
-      (t.cache?.read ?? 0) +
-      (t.cache?.write ?? 0);
-    if (sum > 0) return sum;
-  }
-  return undefined;
-}
+// The context figure a row displays is computed by the plugin's own shared
+// module (`src/context-figure.js`), imported above — the one computation both
+// halves bundle, the same one the server side measures `entry.ctxTokens` and
+// every threshold with, so panel row and wake notice cannot disagree.
 
 function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const [subagents, setSubagents] = createSignal<Map<string, SubagentEntry>>(
@@ -1335,7 +1315,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
             sessionID: entry.sessionID,
           });
           const tokens = latestContextTokens(
-            (msgRes?.data ?? []) as Array<{ info: unknown }>,
+            (msgRes?.data ?? []) as ContextFigureMessage[],
           );
           if (tokens !== undefined) entry.ctxTokens = tokens;
         } catch {

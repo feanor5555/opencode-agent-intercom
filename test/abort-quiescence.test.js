@@ -163,7 +163,7 @@ const FLUSHED = "Done: the whole final paragraph, flushed by the cleanup."
 function flushingSession(isFlushed) {
   return () => [
     {
-      info: { role: "assistant", tokens: { input: 700, output: 0 } },
+      info: { role: "assistant", tokens: { input: 699, output: 1 } },
       parts: [{ type: "text", text: isFlushed() ? FLUSHED : EARLIER }],
     },
   ]

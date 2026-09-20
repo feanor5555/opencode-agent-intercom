@@ -174,7 +174,7 @@ function makeCtx({ messages = [], agentConfig = {} } = {}) {
 function assistantReply(text, tokens = 20000) {
   return [
     {
-      info: { role: "assistant", tokens: { input: tokens, output: 0 } },
+      info: { role: "assistant", tokens: { input: tokens - 1, output: 1 } },
       parts: [{ type: "text", text }],
     },
   ]

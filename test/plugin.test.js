@@ -1118,7 +1118,7 @@ test("a subagent over the context budget gets a wrap-up instruction injected", a
   // per-type budget
   const messages = [
     {
-      info: { role: "assistant", tokens: { input: 110000, output: 0, cache: { read: 0, write: 0 } } },
+      info: { role: "assistant", tokens: { input: 109999, output: 1, cache: { read: 0, write: 0 } } },
       parts: [{ type: "text", text: "still working" }],
     },
   ]
@@ -1142,7 +1142,7 @@ test("ignored STOP injections escalate in tone and notify the primary once — n
   // per-type budget
   const messages = [
     {
-      info: { role: "assistant", tokens: { input: 110000, output: 0, cache: { read: 0, write: 0 } } },
+      info: { role: "assistant", tokens: { input: 109999, output: 1, cache: { read: 0, write: 0 } } },
       parts: [{ type: "text", text: "still working" }],
     },
   ]
@@ -1228,7 +1228,7 @@ test("the context budget bites per agent type, not globally", async () => {
   resetSettings()
   const messages = [
     {
-      info: { role: "assistant", tokens: { input: 20000, output: 0, cache: { read: 0, write: 0 } } },
+      info: { role: "assistant", tokens: { input: 19999, output: 1, cache: { read: 0, write: 0 } } },
       parts: [{ type: "text", text: "working" }],
     },
   ]
@@ -1256,7 +1256,7 @@ test("a file holding only the flat maxContext still governs every agent type", a
   resetSettings()
   const messages = [
     {
-      info: { role: "assistant", tokens: { input: 20000, output: 0, cache: { read: 0, write: 0 } } },
+      info: { role: "assistant", tokens: { input: 19999, output: 1, cache: { read: 0, write: 0 } } },
       parts: [{ type: "text", text: "working" }],
     },
   ]

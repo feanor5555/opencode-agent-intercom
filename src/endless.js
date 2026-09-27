@@ -375,6 +375,9 @@ export function verifyWindDown(snapshot, fresh, { splitSections, parseTasks }) {
 // @property {(sessionID: string, reason: string) => boolean} [pause]
 // @property {(openIdsFound: string[], openIdsLeft: string[]) => { stalledCycles: number, completed: number|null }} [recordCycle]
 // @property {(t: { message: string, variant: string }) => void} [toast]
+// @property {(step: string, detail?: { running?: number }) => void} [onStep]
+//   reports the step the cycle enters — `quiesce` (with the running count on
+//   every poll), `wind-down`, `successor` — for the sidebar's indicator only
 // @property {number} [quiesceTimeoutMs]
 // @property {number} [quiesceExtensionMs]
 //   re-arm window for each advancing progressSignal poll; 0 switches the
@@ -412,6 +415,7 @@ export async function runEndlessCycle({
   pause = () => false,
   recordCycle = () => ({ stalledCycles: 0, completed: null }),
   toast = () => {},
+  onStep = () => {},
   quiesceTimeoutMs = 600_000,
   quiesceExtensionMs = 600_000,
   pollMs = ENDLESS_QUIESCE_POLL_MS,
@@ -426,6 +430,15 @@ export async function runEndlessCycle({
     setCooldown()
     toast({ message: `endless mode: cycle abandoned at ${stage} — ${reason}`, variant: "error" })
     return { outcome: "abandoned", stage, reason }
+  }
+
+  // The indicator is best-effort: a reporter that throws never touches the cycle.
+  const reportStep = (name, detail) => {
+    try {
+      onStep(name, detail)
+    } catch (err) {
+      log(`endless: step report failed — ${errMsg(err)}`, { sessionID: primarySessionID })
+    }
   }
 
   const stop = (outcome, message, variant, pauseTarget = primarySessionID) => {
@@ -470,9 +483,11 @@ export async function runEndlessCycle({
     let quiesced = false
     let deadline = waitStartedAt + quiesceTimeoutMs
     let lastSignal = Number(progressSignal())
+    reportStep("quiesce", { running: activeAtStart })
     try {
       quiesced = await isQuiesced()
       while (!quiesced) {
+        reportStep("quiesce", { running: countActive() })
         const at = now()
         const signal = Number(progressSignal())
         if (signal > lastSignal) {
@@ -494,6 +509,7 @@ export async function runEndlessCycle({
     log(`endless: quiesced after ${now() - waitStartedAt}ms, activeAtStart=${activeAtStart}`, {
       sessionID: primarySessionID,
     })
+    reportStep("wind-down")
 
     // 4. Prepare: resolve, insert the section, write, snapshot. A throw here —
     // several todo files, a non-regular file, an ensureTodoFile or section
@@ -636,6 +652,7 @@ export async function runEndlessCycle({
       attempt = reask
     }
     let { replyText, fresh, verdict, childOutcome } = attempt
+    reportStep("successor")
     const childCompleted = childOutcome.status === "completed"
 
     // 9. Nothing left to do: the subagent's explicit "nothing open" and a

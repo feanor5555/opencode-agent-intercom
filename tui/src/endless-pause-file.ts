@@ -24,12 +24,15 @@
 // The row's states live here too, because the second thing that stops the loop
 // without touching the switch is the agent mode: in solo mode no cycle runs at
 // all, and the row says so the same way — the cell shows nothing running and
-// the line under it names the cause.
+// the line under it names the cause. And while a cycle is pending or running
+// the loop is neither simply on nor stopped: the row reads `[restarting]` and
+// the line under it names the step (./endless-cycle-file.ts).
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { ROW_NOTE_INDENT, rowNoteLine } from "./subagent-label.ts";
+import type { EndlessCycle } from "./endless-cycle-file.ts";
 
 // One published pause, as the panel uses it.
 export interface EndlessPause {
@@ -42,9 +45,13 @@ export interface EndlessPause {
   pid: number;
 }
 
-// What the `endless mode` row is in. Neither `paused` nor `solo` is a setting
-// of its own: the switch is still whatever the user left it at.
+// What the `endless mode` row is in. None of `restarting`, `paused` and `solo`
+// is a setting of its own: the switch is still whatever the user left it at.
 //
+// `restarting` — a cycle is pending or running for this session: from the
+//            latch through the quiesce wait and the wind-down to the fresh
+//            session. It ends when the successor has taken over, or the cycle
+//            abandons (back to `on`) or stops itself (`paused`).
 // `paused` — the mode stopped ITSELF for this session; switching the row off
 //            and on again is what clears it.
 // `solo`   — the plugin runs the primary in solo mode (`agentMode`), where
@@ -53,7 +60,7 @@ export interface EndlessPause {
 //            exists for a backend that serves one agent at a time. Nothing is
 //            written to the switch and the row does not move it — the mode row
 //            above is where that is decided, and it takes an opencode restart.
-export type EndlessRowState = "on" | "off" | "paused" | "solo";
+export type EndlessRowState = "on" | "off" | "paused" | "solo" | "restarting";
 
 let pausePath = join(
   homedir(),
@@ -147,16 +154,20 @@ export function pauseForSession(
 
 // What the row shows. Solo mode answers first and answers for every session:
 // no cycle runs anywhere in that process, whatever the switch and whatever any
-// session did, so neither `on` nor `paused` can be the truth there. Below it a
-// pause only reads as one while the switch is on: the user's switch-off is the
-// younger statement, and it is also what makes the plugin clear the pause on
-// the primary's next turn.
+// session did, so neither `on` nor `paused` can be the truth there. A running
+// cycle comes next and outranks the switch: turning the switch off does not
+// stop a cycle that is already executing, so `[off]` would be the state of
+// the switch and not of the loop. Below it a pause only reads as one while the
+// switch is on: the user's switch-off is the younger statement, and it is also
+// what makes the plugin clear the pause on the primary's next turn.
 export function endlessRowState(
   endlessMode: boolean,
   pause: EndlessPause | undefined,
   soloMode: boolean = false,
+  cycle?: EndlessCycle,
 ): EndlessRowState {
   if (soloMode) return "solo";
+  if (cycle) return "restarting";
   if (!endlessMode) return "off";
   return pause ? "paused" : "on";
 }
@@ -165,6 +176,7 @@ export function endlessRowState(
 // place. `solo` renders as `[off]`: nothing runs, which is what the cell says,
 // and the note line under it says why.
 export function endlessRowCell(state: EndlessRowState): string {
+  if (state === "restarting") return "[restarting]";
   if (state === "paused") return "[paused]";
   return state === "on" ? "[on] " : "[off]";
 }
@@ -200,15 +212,36 @@ export function pauseRowNote(reason: string, panelWidth?: number): string {
 // a property of the process, not of a session, and no reason travels with it.
 export const SOLO_ROW_CAUSE = "solo mode runs no cycle";
 
+// What the line under a `[restarting]` row says about the step the cycle is in.
+export function cycleStepText(cycle: EndlessCycle): string {
+  switch (cycle.step) {
+    case "turn":
+      return "waiting for the turn to end";
+    case "quiesce":
+      return cycle.running !== undefined && cycle.running > 0
+        ? `waiting for subagents (${cycle.running} running)`
+        : "waiting for subagents";
+    case "wind-down":
+      return "saving open points";
+    case "successor":
+      return "starting fresh session";
+  }
+}
+
 // The note line under the `endless mode` row, whatever put it there: the
-// published cause while the mode paused itself, the fixed sentence in solo
-// mode, and nothing in the two states that need no explanation.
+// cycle's step while it restarts, the published cause while the mode paused
+// itself, the fixed sentence in solo mode, and nothing in the two states that
+// need no explanation.
 export function endlessRowNote(
   state: EndlessRowState,
   reason: string,
   panelWidth?: number,
+  cycle?: EndlessCycle,
 ): string {
   if (state === "solo") return rowNoteLine(SOLO_ROW_CAUSE, panelWidth);
+  if (state === "restarting") {
+    return cycle ? rowNoteLine(cycleStepText(cycle), panelWidth) : "";
+  }
   if (state === "paused") return pauseRowNote(reason, panelWidth);
   return "";
 }

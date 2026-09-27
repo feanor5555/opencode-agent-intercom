@@ -61,6 +61,7 @@ import {
   endlessPauseReason,
   isEndlessPaused,
   clearEndlessPause,
+  forgetEndlessStep,
   nestedQuotaDecision,
   sessionAgentName,
   rememberPrimaryDirectory,
@@ -2264,6 +2265,9 @@ async function onSessionDeleted(props, client) {
   const sessionID = props?.sessionID ?? props?.info?.id
   if (!sessionID) return
   rememberDeletedSession(sessionID)
+  // A primary deleted while its endless cycle was pending or running: the
+  // sidebar's `[restarting]` indicator for it goes, whatever the latch does.
+  forgetEndlessStep(sessionID)
   const entry = entryForSession(sessionID)
   if (!entry || entryLifecycle(entry) !== LIFECYCLE_RETAINED) return
   // The whole descriptor, not just the handle: the entry is gone by the time

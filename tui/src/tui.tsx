@@ -53,6 +53,11 @@ import {
   pauseForSession,
   readEndlessPauses,
 } from "./endless-pause-file.ts";
+import {
+  type EndlessCycle,
+  cycleForSession,
+  readEndlessCycles,
+} from "./endless-cycle-file.ts";
 import { holdRepeat, stopHoldRepeat } from "./hold-repeat.ts";
 import {
   latestContextTokens,
@@ -456,6 +461,13 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
   const [endlessPauses, setEndlessPauses] = createSignal<
     ReadonlyMap<string, EndlessPause>
   >(readEndlessPauses());
+  // The endless cycles the main plugin publishes while one is pending or
+  // running, keyed by the primary it replaces (tui/src/endless-cycle-file.ts).
+  // Re-read on the same poll as the pauses, so the row follows the cycle's
+  // steps within one pass.
+  const [endlessCycles, setEndlessCycles] = createSignal<
+    ReadonlyMap<string, EndlessCycle>
+  >(readEndlessCycles());
   // The orchestrator/solo switch. Its own signal rather than a member of
   // `settings`: the plugin latches this key at load, so it is not one of the
   // live settings (tui/src/settings-file.ts, readAgentMode).
@@ -628,6 +640,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     setLlmParams(readLlmParams());
     setLlmModels(readLlmModels());
     setEndlessPauses(readEndlessPauses());
+    setEndlessCycles(readEndlessCycles());
   };
 
   // Opening a section that shows file-backed values re-reads them first, so what
@@ -1178,6 +1191,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
     // timer: a session whose loop has stopped itself must not go on reading
     // `[on]` for half a minute, which is the misreading this row exists to end.
     setEndlessPauses(readEndlessPauses());
+    setEndlessCycles(readEndlessCycles());
     try {
       const statusRes = await api.client.session.status({});
       const statuses = (statusRes?.data ?? {}) as Record<
@@ -1765,6 +1779,12 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
                 sessionID,
               ])
             }
+            endlessCycle={() =>
+              cycleForSession(endlessCycles(), [
+                orchestratorSessionID(),
+                sessionID,
+              ])
+            }
             endlessContext={endlessContext}
             onAdjust={alsoDisarmAgentMode(adjustSetting)}
             onToggleEndless={alsoDisarmAgentMode(toggleEndless)}
@@ -1860,6 +1880,10 @@ function SubagentPanel(props: {
   // loop is not stopped. The switch stays `endlessMode`; this only says whether
   // the mode it switches on is still running for this session.
   endlessPause: () => EndlessPause | undefined;
+  // The endless cycle published for this panel's primary while one is pending
+  // or running, undefined otherwise. Turns the row to `[restarting]` with the
+  // cycle's step on the line beneath.
+  endlessCycle: () => EndlessCycle | undefined;
   endlessContext: () => number;
   onAdjust: (key: LimitKey, delta: number) => void;
   onToggleEndless: () => void;
@@ -2035,10 +2059,16 @@ function SubagentPanel(props: {
       props.endlessMode(),
       props.endlessPause(),
       props.agentMode() === "solo",
+      props.endlessCycle(),
     ),
   );
   const endlessNote = createMemo(() =>
-    endlessRowNote(endlessState(), props.endlessPause()?.reason ?? "", panelWidth()),
+    endlessRowNote(
+      endlessState(),
+      props.endlessPause()?.reason ?? "",
+      panelWidth(),
+      props.endlessCycle(),
+    ),
   );
   // The `run (min)` row's own note: what the run ceiling cannot do at the value
   // the row shows, resolved against the two windows inside it.
@@ -2457,20 +2487,23 @@ function SubagentPanel(props: {
               <text fg={props.theme.textMuted}>{runCeilingNote()}</text>
             </box>
           </Show>
-          {/* Four states on one switch. `on` and `off` are the setting;
-              `paused` is the mode having stopped ITSELF for this session — the
+          {/* Five states on one switch. `on` and `off` are the setting;
+              `restarting` is a cycle pending or running for this session,
+              from the latch to the successor taking over; `paused` is the mode
+              having stopped ITSELF for this session — the
               switch is still on, nothing was written, and the row stays the
               switch it was: off and on again is what clears the pause. `solo`
               is the plugin running the primary by itself, where no cycle runs
               in the whole process; that row is dead, because the switch it
               would write reaches nothing until the mode row above is switched
-              back and opencode restarted. Without the two extra states a
-              session with nothing happening reads `[on]`. */}
+              back and opencode restarted. Without the three extra states a
+              session with nothing happening, or one being replaced, reads
+              `[on]`. */}
           <box flexDirection="row">
             <text fg={props.theme.textMuted}>{rowLabel("endless mode")}</text>
             <text
               fg={
-                endlessState() === "paused"
+                endlessState() === "paused" || endlessState() === "restarting"
                   ? props.theme.warning
                   : endlessState() === "on"
                     ? props.theme.success
@@ -2484,9 +2517,9 @@ function SubagentPanel(props: {
               {endlessRowCell(endlessState())}
             </text>
           </box>
-          {/* Why nothing is running, on the line under the switch: which of the
-              three stops it was, or that this process runs solo. The row itself
-              has no width left for it. */}
+          {/* The line under the switch: the step a restarting cycle is in,
+              which of the three stops it was, or that this process runs solo.
+              The row itself has no width left for it. */}
           <Show when={endlessNote() !== ""}>
             <box flexDirection="row">
               <text fg={props.theme.textMuted}>{endlessNote()}</text>
@@ -2802,7 +2835,7 @@ function SubagentPanel(props: {
               compactionRowState(
                 props.settings(),
                 props.llmAgent(),
-                endlessState() === "on",
+                endlessState() === "on" || endlessState() === "restarting",
               ),
             );
             const note = createMemo(() =>

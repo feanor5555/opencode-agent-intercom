@@ -28,6 +28,7 @@ import {
   endlessProgress,
   sessionAgent,
   primaryDirectory,
+  deletedSessions,
 } from "./state.js"
 // client.js does NOT import registry.js (verified — it only imports log /
 // settings / pluginmsg), so importing forgetSessionDirectory here creates no
@@ -37,6 +38,8 @@ import { forgetSessionDirectory } from "./client.js"
 // The pause map's published copy for the sidebar. A leaf module over log.js and
 // node:fs alone, so it adds no cycle here either.
 import { publishEndlessPause, unpublishEndlessPause } from "./endlesspause.js"
+// The running cycle's published step for the sidebar, the same kind of leaf.
+import { publishEndlessCycleStep, unpublishEndlessCycle } from "./endlesscycle.js"
 // The frozen set of ask outcomes, so clearAsk classifies against the same list
 // the `ask` tool renders from. agentmsg.js imports state / settings / log and
 // nothing from here, so this adds no cycle either.
@@ -139,6 +142,7 @@ export function forgetPrimary(sessionID) {
   // is what the no-progress bound compares across replacements.
   pendingEndless.delete(sessionID)
   endlessInProgress.delete(sessionID)
+  unpublishEndlessCycle(sessionID)
   endlessCooldowns.delete(sessionID)
   // And the compaction latch: the session is deleted at this point, so a
   // scheduled compaction has no idle left to claim it and one in progress is
@@ -1757,6 +1761,7 @@ export function markEndlessPending(sessionID) {
   if (endlessInProgress.has(sessionID)) return false
   if (pendingEndless.has(sessionID)) return false
   pendingEndless.add(sessionID)
+  publishEndlessCycleStep(sessionID, "turn")
   return true
 }
 
@@ -1774,6 +1779,7 @@ export function claimPendingEndless(sessionID) {
   if (endlessInProgress.has(sessionID)) return false
   pendingEndless.delete(sessionID)
   endlessInProgress.add(sessionID)
+  publishEndlessCycleStep(sessionID, "quiesce")
   return true
 }
 
@@ -1784,6 +1790,7 @@ export function claimPendingEndless(sessionID) {
 export function releaseEndless(sessionID) {
   if (!sessionID) return
   endlessInProgress.delete(sessionID)
+  unpublishEndlessCycle(sessionID)
 }
 
 // The switch was turned off: drop a latch that has not been claimed yet. A
@@ -1792,7 +1799,9 @@ export function releaseEndless(sessionID) {
 export function cancelPendingEndless(sessionID) {
   if (!sessionID) return false
   if (endlessInProgress.has(sessionID)) return false
-  return pendingEndless.delete(sessionID)
+  const dropped = pendingEndless.delete(sessionID)
+  if (dropped) unpublishEndlessCycle(sessionID)
+  return dropped
 }
 
 export function isEndlessInProgress(sessionID) {
@@ -1803,6 +1812,27 @@ export function isEndlessInProgress(sessionID) {
 // ends, either way it ended. Read at the top of the `spawn` handler.
 export function isEndlessFrozen(sessionID) {
   return pendingEndless.has(sessionID) || endlessInProgress.has(sessionID)
+}
+
+// The step a running cycle has reached, mirrored into the published file the
+// sidebar reads (src/endlesscycle.js) and nowhere else: no decision here reads
+// it back. The latches above are the authority, so a step reported for a
+// session that holds neither — a late report after the cycle released, or a
+// session opencode has deleted under it — publishes nothing. The file entry is
+// set in markEndlessPending and claimPendingEndless, moved here, and taken off
+// in releaseEndless, cancelPendingEndless and forgetPrimary, the places those
+// two latches are released.
+export function noteEndlessStep(sessionID, step, detail = {}) {
+  if (!sessionID || !isEndlessFrozen(sessionID)) return false
+  if (deletedSessions.has(sessionID)) return false
+  return publishEndlessCycleStep(sessionID, step, detail)
+}
+
+// Takes the published step off for a session opencode deleted. The latches
+// are left as they stand; only the indicator for a session that no longer
+// exists goes.
+export function forgetEndlessStep(sessionID) {
+  return unpublishEndlessCycle(sessionID)
 }
 
 // ----------------------------------------------------------------------------

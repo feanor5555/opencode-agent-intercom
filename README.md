@@ -665,7 +665,17 @@ exposes every runtime knob:
   state `[paused]`, set when endless mode has stopped itself for the
   current session: the stop's cause is written on the line beneath.
   The pause is per session, is not written to the settings file, and
-  is cleared by switching the row off and on again.
+  is cleared by switching the row off and on again. A fourth state
+  `[restarting]` stands while a cycle is pending or running for the
+  current session, with its step on the line beneath: `waiting for the
+  turn to end`, `waiting for subagents (N running)`, `saving open
+  points`, `starting fresh session`. It goes when the successor has
+  taken over or the cycle is abandoned (the row reads `[on]` again) or
+  the mode stops itself (`[paused]`). The plugin publishes the step to
+  `~/.cache/opencode-agent-intercom/endless-cycles.json`
+  (`src/endlesscycle.js`), next to the pauses in `endless-pauses.json`;
+  both files are indicators only, and an entry whose plugin process is
+  gone is ignored.
 - **`mode [orchestrator|solo]`** — the agent mode the plugin runs the
   primary in. `orchestrator` is the delegation pattern this plugin
   enforces — the primary delegates, the nine subagent roles do the

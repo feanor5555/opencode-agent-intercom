@@ -125,7 +125,7 @@ test("the compaction row sits last on the cycler, above [reset current agent]", 
 test("the compaction row reads the LLM section's agent selection and the endless state", () => {
   assert.ok(
     source.includes(
-      "compactionRowState(\n                props.settings(),\n                props.llmAgent(),\n                endlessState() === \"on\",\n              )",
+      "compactionRowState(\n                props.settings(),\n                props.llmAgent(),\n                endlessState() === \"on\" || endlessState() === \"restarting\",\n              )",
     ),
     "the row's state is resolved from the settings, the LLM agent and the endless row's own verdict",
   )

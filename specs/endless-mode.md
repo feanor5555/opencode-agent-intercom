@@ -657,46 +657,115 @@ is dropped on read and pruned on the next write.
    `scheduleEndlessIfNeeded` returns false. Without it, a primary already over the threshold
    re-schedules on its next turn and retries continuously — the same hot-loop
    `releaseHandoff` avoids by not restoring the pending flag (`src/registry.js:677-682`).
-5. **The switch.** Turning the sidebar row off clears the latch and the freeze at the next
-   settings read (TTL 2 000 ms, `src/settings.js:68`). The point of no return is not "past the
-   save step": prepare itself writes (the section insert) and the permit is live from arm. A
-   cycle that has **armed the permit** runs through to `confirm` or to an abandon rather than
-   stopping mid-flight, and the switch-off takes effect from the next schedule.
+5. **The switch.** Turning the sidebar row off drops a latch that has not been claimed yet,
+   and the freeze with it, on the primary's next turn after the settings read picks the change
+   up (`cancelPendingEndless`, `src/registry.js`). A cycle already claimed by the idle handler —
+   from the quiesce wait on — is not touched: prepare writes the todo file and the permit is
+   live from arm, so a claimed cycle runs through to the replacement, a self-stop or an abandon
+   rather than stopping mid-flight, and the sidebar row reads `[restarting]` until it has
+   (§3.7). The switch-off takes effect from the next schedule.
 
 None of these five stops writes the settings file, deletes a session, aborts a subagent or
 removes a task.
 
 ### 3.7 The sidebar row
 
-In the LLM params section, beneath `effort` and above `[reset current agent]`,
-sharing the section's agent cycler — that is where the two limits the
-mode interacts with already sit (`tui/src/tui.tsx:1236-1255`):
+In the Subagents block, beneath `run (min)` and its note line and above the TUI settings
+section, the `endless mode` row and the threshold row beneath it (`tui/src/tui.tsx`):
 
 ```
-  endless        [on]
+  endless mode   [on]
+  endless (k)    [-] 250 [+]
+```
+
+while a cycle is pending or running for the current session:
+
+```
+  endless mode   [restarting]
+     waiting for subagents (2 running)
   endless (k)    [-] 250 [+]
 ```
 
 or, while endless mode has paused itself for the current session:
 
 ```
-  endless        [paused]
+  endless mode   [paused]
      no open points left
   endless (k)    [-] 250 [+]
 ```
 
-The cell carries one of three labels: `"[on] "`, `"[off]"` or `"[paused]"`,
-coloured `theme.success` when on, `theme.textMuted` when off and
-`theme.warning` when paused (the colour change is the read of the pause;
-`[off]` outranks a pause left standing, because the user's switch-off is the
-younger statement and is what the plugin's mode-off branch uses to clear the
-pause on the primary's next turn — `tui/src/tui.tsx`).
-`onMouseDown` still toggles the boolean in the settings file, so switching off
-and on again clears the pause. The cause line under `[paused]` is the head of
-the published sentence at `" — "` (`pauseCause`, `tui/src/endless-pause-file.ts`);
-a sentence without that separator is shown whole. The threshold row follows
-the numeric shape with `holdRepeat` and a step of 10 000 tokens, displayed in
-thousands like `max Token(k)` (`:1251`) — from 250 to 500 in 25 taps, or a hold.
+The row state is one computation, `endlessRowState` (`tui/src/endless-pause-file.ts`), fed
+with the switch, the published pause, the agent mode from the settings file and the published
+cycle, and resolved in this order:
+
+1. `solo` — the file's `agentMode` is `"solo"`; no cycle runs in that process. The cell
+   reads `[off]`, the note line reads `solo mode runs no cycle`, and the row does not react
+   to a click (`endlessRowLive`).
+2. `restarting` — a cycle is published for this session. It outranks the switch: a switch-off
+   does not stop a cycle that has already been claimed (§3.6, item 5), so `[off]` would name
+   the setting and not the loop.
+3. `off` — the switch is off. It outranks a pause left standing, because the user's
+   switch-off is the younger statement and is what the plugin's mode-off branch uses to clear
+   the pause on the primary's next turn.
+4. `paused` — the switch is on and a pause is published for this session.
+5. `on` — otherwise.
+
+The cell text is `"[restarting]"`, `"[paused]"`, `"[on] "` or `"[off]"` (`endlessRowCell`),
+coloured `theme.warning` for `restarting` and `paused`, `theme.success` for `on` and
+`theme.textMuted` otherwise. `onMouseDown` toggles the boolean in the settings file in every
+state but `solo`, so switching off and on again clears a pause.
+
+The note line under the row comes from `endlessRowNote`, cut to the panel width beside the
+indent every note line uses; it is not rendered where it is empty (`on`, `off`, and a
+`restarting` or `paused` with nothing to name). Under `[paused]` it is the head of the
+published sentence at `" — "` (`pauseCause`); a sentence without that separator is shown
+whole. Under `[restarting]` it names the step the cycle is in (`cycleStepText`):
+
+| published step | note line | entered |
+|---|---|---|
+| `turn` | `waiting for the turn to end` | the latch is set (`markEndlessPending`), until the primary's turn ends and the idle handler claims the cycle |
+| `quiesce` | `waiting for subagents (N running)`, or `waiting for subagents` where no count above 0 is published | the claim (`claimPendingEndless`), then on every quiesce poll with the count of the primary's own subagents still running |
+| `wind-down` | `saving open points` | quiesce reached, from the prepare step through the wind-down turn, its child's settle and a re-ask |
+| `successor` | `starting fresh session` | the rewrite has passed its checks; the confirmation and the replacement run |
+
+The cycle travels out of process under `~/.cache/opencode-agent-intercom/endless-cycles.json`
+(`src/endlesscycle.js`), keyed by the primary session the cycle replaces:
+
+```
+{ "ses_x": { "step": "quiesce", "running": 2, "at": 1757280000000, "pid": 4711 } }
+```
+
+`step` is one of `turn`, `quiesce`, `wind-down`, `successor`; `running` is written for
+`quiesce` alone; `at` is when the step was entered and does not move while the step stays;
+`pid` is the writing process. The latches `pendingEndless` and `endlessInProgress`
+(`src/registry.js`) stay the authority and nothing reads the file back into a decision. The
+entry is set in `markEndlessPending` (`turn`) and `claimPendingEndless` (`quiesce`), moved by
+the cycle's `onStep` reports (`runEndlessCycle`, `src/endless.js`, wired to `noteEndlessStep`
+in `src/handoffwiring.js`), and `noteEndlessStep` publishes nothing for a session that holds
+neither latch or that opencode has deleted. A report whose step and count already stand costs
+no write, so only a changed running count reaches the disk during quiesce. Writes are atomic
+through a sibling temp file, every failure is logged and swallowed, and a reporter that throws
+never touches the cycle.
+
+The entry is taken off — and the row leaves `[restarting]` — where a latch is released:
+
+- `forgetPrimary`, when the successor has taken over and the old primary is dropped;
+- `releaseEndless`, when the cycle abandons (the row falls back to `on`) or stops itself — a
+  cycle ceiling, or nothing left to do — which also publishes the pause (`paused`);
+- `cancelPendingEndless`, when the switch is turned off before the cycle was claimed;
+- `forgetEndlessStep`, from `onSessionDeleted` (`src/hooks.js`), when opencode deletes the
+  primary while its cycle is pending or running.
+
+An entry whose writer pid is gone is ignored on read, by the plugin and by the panel alike,
+and pruned on the plugin's next write; several opencode instances share the file, each owning
+its own keys. The panel reads it in `tui/src/endless-cycle-file.ts` on every refresh pass —
+event-driven and at the latest every 5 s — and on `refreshFileState`, and looks the cycle up
+under the panel's orchestrator session first and its route session second
+(`cycleForSession`), the same lookup the pause uses. An absent, unreadable or malformed file
+reads as no cycle running. The `compaction` row counts `restarting` as endless mode being on.
+
+The threshold row follows the numeric shape with `holdRepeat` and a step of 10 000 tokens,
+displayed in thousands — from 250 to 500 in 25 taps, or a hold.
 
 Persistence goes through `settings-file.ts` on its existing read-modify-write
 (`tui/src/settings-file.ts:92-105`) with three changes:
@@ -822,8 +891,15 @@ auto? }`) compacts a session in place. §2.1 says why that is not this feature.
   when the log shows repeated `spawn refused: wind-down permit` lines followed by the window
   expiring; the wind-down turn is then failing to produce even one call, and the fallback is
   the normal path rather than the exception.
-- **The spawn freeze is short.** It holds from the latch to the end of the cycle, with the
-  single permitted wind-down spawn as its only exception. Wrong if the orchestrator's
+- **The spawn freeze is borne by an orchestrator that ends its turn.** The freeze holds from
+  the latch to the end of the cycle, with the single permitted wind-down spawn as its only
+  exception, and it is not short: it spans the rest of the primary's current turn, then the
+  quiesce wait for the primary's own running subagents — `endlessQuiesceTimeoutMs` as the base
+  window, re-armed by `endlessQuiesceExtensionMs` for as long as those subagents keep emitting,
+  so it runs as long as they work (§3.3) — then the wind-down turn and its child's settle,
+  bounded by `endlessWindDownTimeoutMs` (default 900 000 ms) per attempt and run a second time
+  on the bounded re-ask (§3.4), then the confirmation and the replacement. The sidebar row reads
+  `[restarting]` with the current step for that whole span (§3.7). Wrong if the orchestrator's
   freeze-time refusals show up as repeated retries in the log rather than as an ended turn —
   that would mean the refusal text is not steering the model.
 - **A child waiter with a primary as parent behaves.** `src/childwait.js:22-24` states it is

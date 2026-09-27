@@ -36,6 +36,7 @@ import {
   setEndlessCooldown,
   pauseEndless,
   isEndlessPaused,
+  noteEndlessStep,
   isQuiesced,
   recordEndlessCycle,
   countActiveSubagentsFor,
@@ -692,6 +693,9 @@ export async function maybeRunPendingEndless(client, sessionID) {
     pause: (pausedSessionID, reason) => pauseEndless(pausedSessionID, reason),
     recordCycle: recordEndlessCycle,
     toast: ({ message, variant }) => showToast(client, { title: "agent-intercom", message, variant }),
+    // The sidebar's `[restarting]` line: the step the cycle is in, mirrored to
+    // the published file and read by nothing in this process.
+    onStep: (step, detail) => noteEndlessStep(sessionID, step, detail),
     quiesceTimeoutMs: endlessQuiesceTimeoutMs,
     quiesceExtensionMs: endlessQuiesceExtensionMs,
   })

@@ -149,6 +149,7 @@ import {
 } from "./notices.js"
 import { capReplyForAgent, secureSubagentState } from "./resultfile.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
+import { instanceDisposing, entryInstanceDirectory } from "./instancerestart.js"
 import { maybeRunPendingCompaction, startSubagentCompaction } from "./compaction.js"
 import {
   maybeRunPendingHandoff,
@@ -2497,6 +2498,13 @@ async function onSessionError(props, client) {
     // Already being handled by another path (watchdog or a prior error event).
     return
   }
+  // The instance this run belongs to is being disposed: the error is the
+  // dispose cutting the run off, not a stop anybody asked for. It is left to
+  // the reconcile the next factory run arms (src/instancerestart.js), which
+  // settles every run the restart ended together, with the true cause, once
+  // the new instance stands — rather than reporting it here as an abort and
+  // deleting a session opencode is still writing that abort into.
+  if (leaveToInstanceRestart(entry, sessionID, props)) return
   // Latch FIRST so onSessionIdle / sweepWatchdog skip this entry even if
   // they race us between here and the postNotice below.
   entry.errored = true
@@ -2538,6 +2546,15 @@ async function onSessionError(props, client) {
       handle: entry.handle,
       sessionID,
     })
+  }
+  // The same test once more, after the wait. opencode runs the plugin's
+  // `dispose` hook and the interruption of the instance's runs side by side,
+  // with no order between them, so the abort of a run can reach this handler
+  // just before the hook has set the mark. The latch taken above is released
+  // for the reconcile, which takes only unclaimed entries.
+  if (leaveToInstanceRestart(entry, sessionID, props)) {
+    entry.errored = false
+    return
   }
   const snapshot = await fetchSnapshot(client, sessionID)
   // The mid-work securing rule (secureSubagentState, src/resultfile.js): this
@@ -2599,6 +2616,19 @@ async function onSessionError(props, client) {
     quiesced: true,
     label: "session.error",
   })
+}
+
+// Whether a subagent's `session.error` belongs to an instance dispose and is
+// left to the restart reconcile: the dispose hook's mark stands for the
+// directory the run belongs to. Logs the hand-over where it answers true.
+function leaveToInstanceRestart(entry, sessionID, props) {
+  if (!instanceDisposing(entryInstanceDirectory(entry))) return false
+  log("session.error during an instance dispose — left to the restart reconcile", {
+    handle: entry.handle,
+    sessionID,
+    error: extractErrorMessage(props?.error),
+  })
+  return true
 }
 
 // Extracts a human-readable message from the `error` payload of a

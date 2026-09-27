@@ -376,6 +376,27 @@ export const handoffDrains = new Map()
 // and a straggler can in principle arrive arbitrarily late.
 export const handoffRedirects = new Map()
 
+// Project directories whose plugin factory has already run in this process.
+// opencode builds one instance per directory and calls the factory once per
+// instance it builds, so a second factory run for a directory in this set means
+// the instance before it was disposed and a new one built inside the same
+// process — the registry of this module still holds the old instance's runs.
+// See src/instancerestart.js.
+export const loadedInstanceDirectories = new Set()
+
+// directory -> { timer, client, loadedAt }: the reconcile of one directory's
+// running subagents after an instance restart, armed by the factory run and
+// re-armed by every further run inside the settle window. See
+// src/instancerestart.js.
+export const instanceRestartReconciles = new Map()
+
+// directory -> ms: directories whose instance opencode is disposing right now,
+// marked by the plugin's `dispose` hook and cleared by the next factory run for
+// the directory. A subagent error reported inside that window is the dispose
+// cutting the run off, and is left to the reconcile. See
+// src/instancerestart.js.
+export const disposingInstanceDirectories = new Map()
+
 // Minimal async mutex (promise-chain FIFO lock) for serializing critical
 // sections over the shared state in this module. Dependency-free.
 //
@@ -453,4 +474,8 @@ export function resetState() {
   endlessProgress.lastOpenIds = null
   endlessProgress.stalledCycles = 0
   endlessWindDownPermits.clear()
+  for (const pending of instanceRestartReconciles.values()) clearTimeout(pending.timer)
+  instanceRestartReconciles.clear()
+  loadedInstanceDirectories.clear()
+  disposingInstanceDirectories.clear()
 }

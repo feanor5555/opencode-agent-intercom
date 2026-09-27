@@ -1016,7 +1016,7 @@ test("the completion notice tells the primary how many slots are now free", asyn
   assert.match(wake, /Subagent slots: 1\/2 \(global, across all sessions\) — 1 free/)
 })
 
-test("a user abort (session.error MessageAbortedError) produces exactly one abort-worded notice, not a failure", async () => {
+test("an outside abort (session.error MessageAbortedError) produces exactly one abort-worded notice, not a failure", async () => {
   const { ctx, created, notices } = makeCtx()
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent: "coder", prompt: "a" }, toolCtx)
@@ -1030,7 +1030,8 @@ test("a user abort (session.error MessageAbortedError) produces exactly one abor
   })
   const emitted = notices.slice(before)
   assert.equal(emitted.length, 1, "exactly one wake notice for the aborted subagent")
-  assert.match(emitted[0], /aborted by user/)
+  assert.match(emitted[0], /was aborted from outside this plugin — a stop in the TUI, or opencode ending the run itself\. Slot freed\./)
+  assert.doesNotMatch(emitted[0], /aborted by user/)
   assert.doesNotMatch(emitted[0], /failed/)
 
   // No second notice can fire afterwards: a stray session.idle for the same

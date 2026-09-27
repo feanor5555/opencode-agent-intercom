@@ -22,6 +22,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import plugin from "../src/index.js"
+import { INTERCOM_DELIVERY_METADATA_KEY } from "../src/pluginmsg.js"
 import { resetState } from "../src/state.js"
 import {
   entryForSession,
@@ -99,11 +100,14 @@ function configAllowingSpawn(...roles) {
   return agent
 }
 
-// `promptAsync` carries an `agent` in its body when it is a SPAWN and carries
-// none when it is a wake notice (client.js: promptSession vs postNotice). That
-// is the discriminator the carry-forward tests need — a nested child's parent
-// is itself a session this harness created, so "was it created here?" cannot
-// tell the two apart.
+// A wake notice's part carries the journal's delivery id in its metadata and a
+// SPAWN prompt's part never does (noticejournal.js deliverParentNotice vs
+// client.js promptSession); both bodies name an agent. That is the
+// discriminator the carry-forward tests need — a nested child's parent is
+// itself a session this harness created, so "was it created here?" cannot tell
+// the two apart.
+const isNoticePost = (opts) =>
+  Boolean(opts?.body?.parts?.[0]?.metadata?.[INTERCOM_DELIVERY_METADATA_KEY])
 function makeCtx({ messages = [], agentConfig = {} } = {}) {
   let counter = 0
   const created = []
@@ -120,7 +124,7 @@ function makeCtx({ messages = [], agentConfig = {} } = {}) {
       },
       promptAsync: async (opts) => {
         const id = opts?.path?.id
-        if (opts?.body?.agent) prompts.push(id)
+        if (!isNoticePost(opts)) prompts.push(id)
         else notices.push({ id, text: opts?.body?.parts?.[0]?.text ?? "" })
         return { data: undefined }
       },
@@ -671,7 +675,7 @@ test("the real inactivity sweep hands a reaped child's work to its blocked calle
 test("a child that is never prompted leaves no waiter behind", async () => {
   const { ctx, created } = makeCtx({ agentConfig: configAllowingSpawn("planner") })
   ctx.client.session.promptAsync = async (opts) => {
-    if (opts?.body?.agent) throw new Error("prompt rejected by the server")
+    if (!isNoticePost(opts)) throw new Error("prompt rejected by the server")
     return { data: undefined }
   }
   const hooks = await plugin(ctx)

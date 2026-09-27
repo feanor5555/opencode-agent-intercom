@@ -60,6 +60,8 @@ import path from "node:path"
 import { cacheDir, ensureCacheDir, log, errMsg } from "./log.js"
 import { postNotice, fetchSessionTail } from "./client.js"
 import { messageCarriesDelivery } from "./pluginmsg.js"
+import { entryForSession, sessionAgentName, primaryDirectoryOf } from "./registry.js"
+import { defaultAgentName } from "./agents.js"
 
 // How many of the target session's newest messages the confirmation reads. A
 // notice is posted as the newest message of the session, so one would do; the
@@ -390,6 +392,19 @@ function scheduleConfirmation(client, entry, options) {
   return running
 }
 
+// The agent a notice posted into `sessionID` starts its turn as: the target's
+// own. A subagent target (the detached-child late result) runs as its entry's
+// type; a primary as the agent opencode resolved for its last turn, recorded at
+// `chat.message`, and failing that as the default agent the `config` hook
+// captured for the primary's project. Resolved at every post, the replay's
+// included, so a notice never falls to whatever opencode's default agent is at
+// that moment.
+export function noticeAgentFor(sessionID) {
+  const entry = entryForSession(sessionID)
+  if (typeof entry?.agent === "string" && entry.agent !== "") return entry.agent
+  return sessionAgentName(sessionID) ?? defaultAgentName(primaryDirectoryOf(sessionID))
+}
+
 // Posts one parent notice DURABLY: journal, post, confirm.
 //
 // The post itself is `postNotice` and keeps every property it had — the retry
@@ -425,7 +440,7 @@ export async function deliverParentNotice(
   }
   const journalled = recordPendingNotice(entry)
   try {
-    await postNotice(client, sessionID, text, { deliveryID })
+    await postNotice(client, sessionID, text, { deliveryID, agent: noticeAgentFor(sessionID) })
   } catch (err) {
     if (journalled) {
       if (err?.terminal) clearPendingNotice(deliveryID)

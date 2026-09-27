@@ -8,7 +8,12 @@
 // wrapped in before it enters the SUBAGENT's session.
 
 import { getSettings, contextBudgetFor } from "./settings.js"
-import { countActiveSubagents, RETAIN_TASK_SHARE } from "./registry.js"
+import {
+  countActiveSubagents,
+  entryForSession,
+  isActiveEntry,
+  RETAIN_TASK_SHARE,
+} from "./registry.js"
 import { tokens as fmtTokens, percent } from "./format.js"
 
 // Size thresholds applied AFTER a subagent finishes, as shares of that type's
@@ -366,15 +371,23 @@ function runSizeNotice(agent, ctxTokens, packageTokens, runs = 1) {
   return `\n📏 ${label}: ${against} — ok.`
 }
 
-// Tail line for completion notices: tells the orchestrator how many subagent
-// slots are now free so it knows whether the next spawn() will succeed. Empty
-// when the cap is disabled. Called after removeEntry, so the freed slot is
-// already counted out. The cap is GLOBAL — the count includes subagents from
-// every primary in this process.
-function slotsNoticeAfterFinish(primaryID) {
+// Tail line for every ending notice: tells the orchestrator how many subagent
+// slots are free once this ending is through, so it knows whether the next
+// spawn() will succeed. Empty when the cap is disabled. The cap is GLOBAL — the
+// count includes subagents from every primary in this process.
+//
+// `finished` is the subagent the notice is about. The line says its slot is
+// freed, so it is counted out here whether or not the registry has let go of
+// it yet: the completion path builds its notice after removeEntry, but the
+// error and timeout paths build theirs before teardownSubagent runs, while the
+// entry still counts as active.
+export function slotsNoticeAfterFinish(finished) {
   const maxSubagents = getSettings().maxSubagents
   if (maxSubagents <= 0) return ""
-  const active = countActiveSubagents(primaryID)
+  const sessionID = typeof finished === "string" ? null : finished?.sessionID
+  const live = sessionID ? entryForSession(sessionID) : undefined
+  const stillCounted = live !== undefined && isActiveEntry(live) ? 1 : 0
+  const active = Math.max(0, countActiveSubagents() - stillCounted)
   const free = Math.max(0, maxSubagents - active)
   return `\nSubagent slots: ${active}/${maxSubagents} (global, across all sessions) — ${free} free.`
 }
@@ -513,6 +526,12 @@ export function lastSeenPhrase(entry, maxChars = LAST_SEEN_CHARS) {
 // zero. It is appended only when there IS text; the failure wording above it
 // is unchanged either way, so a notice for a session that produced nothing
 // reads exactly as it did before.
+//
+// An abort that reaches this notice was not requested by this plugin — its own
+// abort paths latch the session before they stop it and never get here — so
+// the wording names both sources it can have, a stop in the TUI or opencode
+// ending the run, rather than asserting that the user stopped it. An instance
+// restart is told apart before this point and gets instanceRestartNotice.
 export function errorNotice(
   entry,
   message,
@@ -523,7 +542,8 @@ export function errorNotice(
 ) {
   const head = `🔔 agent-intercom: subagent "${entry.handle}" (${entry.agent}, session ${entry.sessionID}) `
   const body = wasAborted
-    ? `aborted by user. Slot freed. `
+    ? `was aborted from outside this plugin — a stop in the TUI, or opencode ending the run ` +
+      `itself. Slot freed. `
     : `failed: ${message}. Slot freed. `
   const recovered = result
     ? `\nIts last text before it stopped — this is the only account of the work it managed, ` +
@@ -536,7 +556,51 @@ export function errorNotice(
     (ending ? `${ending} ` : "") +
     `You may re-dispatch with spawn() if the work is still needed.` +
     recovered +
-    slotsNoticeAfterFinish(entry.parentID)
+    slotsNoticeAfterFinish(entry)
+  )
+}
+
+// Wake-notice sent ONCE to a primary whose running subagents died with an
+// opencode instance restart: opencode disposed the workspace's instance and
+// built a new one inside the same process, and every run of the old instance
+// was cut off where it stood (reconcileAfterInstanceRestart,
+// src/instancerestart.js). One notice for all of them, posted after every one
+// of them is torn down, so the primary is woken once and the slots line counts
+// what is really free.
+//
+// `ended` holds one item per top-level subagent of this primary: `{ handle,
+// agent, sessionID, result, held, holdReason, nested }`, `nested` naming the
+// handles of the nested children that died under it. The cause is stated as
+// what it is — neither the user nor the orchestrator stopped these runs — so the
+// orchestrator re-dispatches instead of treating the work as cancelled.
+export function instanceRestartNotice(ended, directory) {
+  const count = ended.length
+  const where = directory ? ` for ${directory}` : ""
+  const head =
+    `🔔 agent-intercom: opencode restarted its instance${where} (the workspace was disposed ` +
+    `and rebuilt inside the running process) and ended ${count === 1 ? "your running subagent" : `${count} of your running subagents`} ` +
+    `with it. Nobody stopped ${count === 1 ? "it" : "them"} on purpose — not the user and not you: ` +
+    `the work was cut off where it stood. ${count === 1 ? "Its slot is" : "Their slots are"} freed.\n`
+  const blocks = ended.map((item) => {
+    const nested =
+      Array.isArray(item.nested) && item.nested.length > 0
+        ? ` Its nested ${item.nested.length === 1 ? "subagent" : "subagents"} ${item.nested.map((h) => `"${h}"`).join(", ")} ended with it.`
+        : ""
+    const ending = heldStateEnding(item.held, item.holdReason)
+    const recovered = item.result
+      ? `\nIts last text before it stopped — this is the only account of the work it managed, ` +
+        `read it before you re-dispatch and do not have the same ground covered twice:\n${item.result}\n`
+      : ` It left no text behind.`
+    return (
+      `\n- "${item.handle}" (${item.agent}, session ${item.sessionID}) ended by the instance ` +
+      `restart.${nested}${ending ? ` ${ending}` : ""}${recovered}`
+    )
+  })
+  return (
+    head +
+    blocks.join("") +
+    `\nRe-dispatch with spawn() whatever of this work is still needed.` +
+    slotsNoticeAfterFinish(null)
   )
 }
 

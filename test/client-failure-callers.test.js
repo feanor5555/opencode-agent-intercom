@@ -37,6 +37,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import plugin from "../src/index.js"
+import { INTERCOM_DELIVERY_METADATA_KEY } from "../src/pluginmsg.js"
 import { resetState } from "../src/state.js"
 import {
   entryForSession,
@@ -128,7 +129,7 @@ function makeCtx({ messages = [], agentConfig = {} } = {}) {
       promptAsync: async (opts) => {
         const id = opts?.path?.id
         const text = (opts?.body?.parts ?? []).map((p) => p.text ?? "").join("")
-        if (opts?.body?.agent) {
+        if (!opts?.body?.parts?.[0]?.metadata?.[INTERCOM_DELIVERY_METADATA_KEY]) {
           if (state.promptStatus) return refusal(state.promptStatus, "NotFoundError")
           prompts.push({ id, agent: opts.body.agent, text })
         } else {

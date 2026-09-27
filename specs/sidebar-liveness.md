@@ -310,6 +310,46 @@ RESULT_FILE_TTL_MS` past the age bound above (`src/teardown.js:820`); past
 that it is logged with its `unfiled:` reason and deleted anyway, because a
 hold nothing can ever release is the leak again.
 
+### 6.1 An instance restart inside the process
+
+opencode can dispose a project's instance and build a new one for the same
+directory without the process going. The plugin module stays loaded with its
+registry, the factory runs again, and every run of the old instance is cut off
+— most of them without a `session.error` or `session.idle` reaching the plugin,
+because their abort lands after the old instance's event stream is gone. The
+bootstrap sweep does not collect them: their entries are still in the
+registry (criterion 4) and the sweep does not run with a watchdog window off.
+
+`src/instancerestart.js` settles them:
+
+1. `noteInstanceLoad` (called from the factory, `src/index.js`) records every
+   directory the factory has run for. A second run for the same directory is an
+   instance restart and arms a reconcile `INSTANCE_RESTART_SETTLE_MS = 2000`
+   later; every further run inside that window re-arms it, and the plugin's
+   `dispose` hook (`noteInstanceDisposing`) cancels it, so it runs against an
+   instance that has finished building.
+2. The `dispose` hook marks the directory as disposing until the next factory
+   run. A `session.error` of a subagent of that directory inside the mark is
+   left to the reconcile (`onSessionError`, `src/hooks.js`): no notice and no
+   delete while opencode may still be writing the abort into the session.
+   opencode runs the plugin's `dispose` hook and the interruption of the
+   instance's runs side by side with no order between them, so the mark is
+   tested on arrival and again after the quiescence wait. It never sees
+   `server.instance.disposed`, which opencode publishes after the plugin's
+   event subscription is gone.
+3. `reconcileAfterInstanceRestart` takes every running, unclaimed entry of the
+   directory whose `runStartedAt` is before the factory run that armed it,
+   leaves the ones `session.status` reports `busy`/`retry` in the new instance,
+   and latches the rest before its next await. Each is read once and its state
+   filed (`secureSubagentState`) before any session is deleted; the teardowns
+   (`teardownSubagent`, `markAborted`, `quiesced`, `hold` where nothing was
+   filed) run nested children first; a blocked nested caller is settled with the
+   detail `ended by an opencode instance restart`.
+4. Each primary is woken once with `instanceRestartNotice`
+   (`src/notices.js`), naming each of its top-level subagents, the nested ones
+   that ended under them and their rescued text, and ending with the slots line
+   counted after every teardown. It does not depend on `maxSubagentAgeMs`.
+
 The "publishRetentionState is gated on retentionOffered" guard is gone from
 the sweep's precondition — that gate names a writer-side concern (whether this
 process stamps titles at all) and is unrelated to whether a leftover session
@@ -341,6 +381,7 @@ backstop for a row whose session does not go.
 | Stamp present but past window + grace | `reapRows` drops the row on the next completed pass. The plugin's reap on its own clock has already deleted the session by then; this is the backstop. |
 | Session gone from `session.children` | The row goes at once. `reapRows` runs on every completed pass, and the session's absence beats any stamp — a row must never outlive the session it names, the same rule retention already follows. |
 | Plugin process died mid-run | Subagent rows stay until the bootstrap sweep clears the leftover sessions, bounded by `ORPHAN_SWEEP_TTL_FACTOR * retainedSubagentTtlMs` and the `ORPHAN_SWEEP_MIN_AGE_MS = 600000` floor. The sweep runs at the shipped default too. |
+| opencode disposed and rebuilt the instance inside the process | The rows of the runs the restart ended go once the reconcile of §6.1 has torn them down, `INSTANCE_RESTART_SETTLE_MS` after the last factory run for the directory, whatever the watchdog windows say. |
 | Poll itself failing (network, server restart) | `refresh` swallows the error and reaps nothing, because `seen` is only the whole truth on a completed pass. Rows freeze rather than disappear. |
 
 The invariant behind the table: **a row ends because something positive said
@@ -407,6 +448,14 @@ existing `src/teardown.js` tests. The cases that matter:
    attribution; the bound is `ORPHAN_SWEEP_TTL_FACTOR * retainedSubagentTtlMs`
    floored at `ORPHAN_SWEEP_MIN_AGE_MS = 600000`; sessions this process still
    knows about are left standing.
+
+5. `test/instance-restart.test.js` — the factory run twice in one process
+   with running entries settles every one of them at `maxSubagentAgeMs: 0`,
+   reads before it deletes and deletes a nested child before its parent, leaves
+   a session reported busy and a run started after the reload alone, wakes the
+   primary once with the restart named as the cause, a true slots line and the
+   primary's own agent; a `session.error` inside the dispose mark, set before
+   it arrives or during its quiescence wait, posts nothing and deletes nothing.
 
 ### End-to-end — the nested case is the one that reproduces it
 

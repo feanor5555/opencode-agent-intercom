@@ -26,6 +26,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import plugin from "../src/index.js"
+import { INTERCOM_DELIVERY_METADATA_KEY } from "../src/pluginmsg.js"
 import { resetState, aborted } from "../src/state.js"
 import { entryForSession, upsertSession, chargeNestedRun } from "../src/registry.js"
 import { resetTurnNotices } from "../src/hooks.js"
@@ -655,7 +656,9 @@ test("the caller's own completion notice carries what its nested runs cost", asy
   const hooks = await plugin(ctx)
   const notices = []
   ctx.client.session.promptAsync = async (opts) => {
-    if (!opts?.body?.agent) notices.push(opts?.body?.parts?.[0]?.text ?? "")
+    if (opts?.body?.parts?.[0]?.metadata?.[INTERCOM_DELIVERY_METADATA_KEY]) {
+      notices.push(opts?.body?.parts?.[0]?.text ?? "")
+    }
     return { data: undefined }
   }
   const callerCtx = subagentCaller("ses_planner", "planner")

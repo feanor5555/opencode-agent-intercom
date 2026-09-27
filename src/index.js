@@ -95,10 +95,11 @@ import { startAgentcomVisibilityWatch } from "./agentcomsync.js"
 import { sweepOrphanedSubagentSessions } from "./teardown.js"
 import { pruneResultFiles } from "./resultfile.js"
 import { replayPendingNotices } from "./noticejournal.js"
+import { noteInstanceLoad, noteInstanceDisposing } from "./instancerestart.js"
 import { log } from "./log.js"
 
 // The overflow-file prune is a cache sweep, not per-session work: opencode
-// calls this factory once per session in one process, and one pass over a
+// calls this factory once per instance it builds in one process, and one pass over a
 // directory of at most a few dozen files is enough for the life of that
 // process.
 let resultFilesPruned = false
@@ -131,9 +132,19 @@ export default async (ctx) => {
   // only the ones posted from here on: the companion TUI writes the setting
   // file and this loop observes the change and rewrites the `synthetic` flag on
   // the notices this plugin posted into its primaries. Idempotent and unref'd,
-  // so the per-session factory call starts exactly one loop per process and it
+  // so a repeated factory call starts exactly one loop per process and it
   // never holds the process open. Best-effort — see agentcomsync.js.
   startAgentcomVisibilityWatch(client)
+
+  // An instance restart: opencode disposed this directory's instance and built
+  // a new one inside the same process, so this factory is running a second
+  // time over a registry that still holds the old instance's runs — and the
+  // dispose ended every one of them, most without an event this plugin saw.
+  // A second run for the same directory arms the reconcile that settles them,
+  // after a settle window that lets the new instance finish building
+  // (src/instancerestart.js). The first run for a directory is the ordinary
+  // load and arms nothing.
+  noteInstanceLoad(client, directory)
 
   // The reload leak: a subagent session this plugin left behind when it was
   // last unloaded — one being HELD for a follow-up, or one still running when
@@ -190,6 +201,18 @@ export default async (ctx) => {
   const guardToolExecute = createGuardToolExecute(client, permissionGuard)
 
   return {
+    // opencode calls this while it disposes the instance. The mark it sets is
+    // what tells a subagent error reported during the dispose apart from an
+    // ordinary abort: onSessionError leaves such a run to the reconcile the
+    // next factory run arms, instead of reporting it and deleting a session
+    // opencode is still writing the abort into.
+    dispose: async () => {
+      try {
+        noteInstanceDisposing(directory)
+      } catch (err) {
+        log("dispose hook error", err?.message ?? String(err))
+      }
+    },
     // Inject the plugin's agent roles (orchestrator + 8 subagents) into the
     // resolved config, so the orchestration pattern needs no per-project
     // `.opencode/agents/*.md`. A project can still override any role by name;

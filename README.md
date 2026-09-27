@@ -332,6 +332,36 @@ created; sessions that cannot be attributed with certainty are left standing.
 The sweep runs at the shipped default too, so a leaked session from a crashed
 plugin or opencode process does not linger.
 
+opencode can also dispose a project's instance and build a new one inside the
+running process — the plugin module stays loaded, the factory runs again, and
+every subagent that was running in the old instance is cut off, most of them
+without an event reaching the plugin. A second factory run for a directory is
+therefore read as an **instance restart**: two seconds after the last such run
+(`INSTANCE_RESTART_SETTLE_MS`, re-armed by every further run and cancelled by a
+dispose inside the window) the plugin settles every registered running
+subagent of that directory whose run started before it, unless opencode reports
+its session running in the new instance. Each one is read once and its state
+filed as on every mid-work ending, the sessions are deleted nested children
+first, and each primary is woken once with one notice that names every
+subagent of its own the restart ended, says that neither the user nor the
+orchestrator stopped them, and carries a slots line counted after all of them
+are freed. This does not depend on `maxSubagentAgeMs` or on the sweep. The
+plugin's `dispose` hook marks the directory while opencode disposes it; a
+subagent error reported inside that window — tested on arrival and again after
+the short wait for the session to go quiet, since opencode runs the hook and the
+interruption of the runs side by side — is left to this reconcile instead of
+being reported as an ordinary abort and its session deleted while opencode is
+still writing into it (`src/instancerestart.js`).
+
+Every notice the plugin posts into a session names the agent its turn runs as:
+the primary's own agent as recorded at its last `chat.message`, falling back to
+the default agent the plugin installed for the project — never whatever
+opencode's default agent happens to be while an instance is being rebuilt. An
+abort that reaches the plugin as a `session.error` and was not requested by it
+is reported as coming from outside the plugin (a stop in the TUI, or opencode
+ending the run), and every ending notice's slots line counts the ending
+subagent as freed.
+
 When a subagent hits a problem its spawn prompt did not cover — a blocker, a
 missing precondition, an ambiguity, a tool that keeps failing, a decision
 that is not its to make — it stops that step, still finishes every part of
@@ -631,7 +661,8 @@ exposes every runtime knob:
   at a step; writes `"maxSubagentAgeMs"` in ms. `0` shows as `off` and
   switches that watchdog off entirely — with it off the orphan sweep in
   `src/teardown.js`, whose window is a multiple of this one, stops running
-  too. Default 90 s.
+  too; the settling of subagents an instance restart ended does not depend on
+  it. Default 90 s.
 - **`in tool (min) [-N+]`** — the same watchdog's window for a subagent that
   is WORKING: one with a tool call in flight, from the moment the call starts
   until its result comes back. opencode publishes nothing between the part that

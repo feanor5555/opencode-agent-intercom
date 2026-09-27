@@ -253,9 +253,9 @@ test("errorNotice with recovered text keeps the failure wording AND reports the 
   assert.match(notice, /do not have the same ground covered twice/)
 })
 
-test("errorNotice on a user abort also reports the text, with the abort wording", () => {
+test("errorNotice on an outside abort also reports the text, with the abort wording", () => {
   const notice = errorNotice(failedEntry, "MessageAbortedError", true, "Done: read six files.")
-  assert.match(notice, /aborted by user\. Slot freed\. /)
+  assert.match(notice, /was aborted from outside this plugin — a stop in the TUI, or opencode ending the run itself\. Slot freed\. /)
   assert.doesNotMatch(notice, /failed:/)
   assert.match(notice, /Done: read six files\./)
 })

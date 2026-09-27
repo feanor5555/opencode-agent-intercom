@@ -247,7 +247,15 @@ export async function withRetry(op, call, {
 // exactly what it was before the journal existed. A retry re-sends the SAME id,
 // because a retry is the same delivery — two rows carrying it would both
 // confirm, and a duplicate wake was already the accepted cost of the retry.
-export async function postNotice(client, sessionID, text, { deliveryID } = {}) {
+//
+// `agent` is the agent the turn this notice starts runs as. opencode starts a
+// prompt that names no agent as its configured default agent, which is this
+// plugin's primary role only while the plugin's `config` hook has run for the
+// instance: a notice posted while opencode is disposing and rebuilding the
+// instance starts its turn as opencode's own `build`. The caller passes the
+// target's own agent (noticeAgentFor, src/noticejournal.js); where none is
+// given the body carries no `agent` field.
+export async function postNotice(client, sessionID, text, { deliveryID, agent } = {}) {
   const { postNoticeRetries, postNoticeRetryBackoffMs, showAgentcom } = getSettings()
   rememberAgentcomSession(sessionID)
   await withRetry(
@@ -260,7 +268,10 @@ export async function postNotice(client, sessionID, text, { deliveryID } = {}) {
         // handoff's lastUserGoal can skip it, and stamps `synthetic: true`
         // when the notice is hidden — see src/pluginmsg.js. The text reaches
         // the model either way; the post is the wake and is never dropped.
-        body: { parts: [intercomTextPart(text, { hidden: !showAgentcom, deliveryID })] },
+        body: {
+          ...(typeof agent === "string" && agent !== "" ? { agent } : {}),
+          parts: [intercomTextPart(text, { hidden: !showAgentcom, deliveryID })],
+        },
       }),
     {
       retries: postNoticeRetries,
@@ -649,6 +660,29 @@ export async function listSessions(client, { directory } = {}) {
     return []
   }
   return Array.isArray(outcome.data) ? outcome.data : []
+}
+
+// The ids of the sessions opencode reports running in `directory`'s instance —
+// `session.status` answers a map of session id to `{ type }`, and `busy` and
+// `retry` are the two states of a turn in flight. `null` where the read failed:
+// nothing is established then, and the caller decides what an unknown means.
+export async function fetchRunningSessionIDs(client, { directory } = {}) {
+  const op = "fetchRunningSessionIDs (session.status)"
+  const outcome = await attempt(op, () =>
+    client.session.status(directory ? { query: { directory } } : undefined),
+  )
+  if (!outcome.ok) {
+    logFailure(op, outcome.error, { directory })
+    return null
+  }
+  const running = new Set()
+  const data = outcome.data
+  if (data && typeof data === "object") {
+    for (const [sessionID, status] of Object.entries(data)) {
+      if (status?.type === "busy" || status?.type === "retry") running.add(sessionID)
+    }
+  }
+  return running
 }
 
 // ARCHIVE of a session (PATCH /session/{id} with `time.archived`), as a

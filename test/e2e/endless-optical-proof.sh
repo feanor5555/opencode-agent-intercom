@@ -37,9 +37,9 @@
 #   5. prints the debug-log stage lines verbatim and a verdict line, exits 0
 #      only when the cycle completed.
 #
-# The cycle's true end-of-cycle marker, read off src/endless.js:756 —
+# The cycle's true end-of-cycle marker, read off src/endless.js:779 —
 # `endless: cycle N/M complete, new session <id>` — is what the verdict is
-# taken from; the wind-down confirmation line (src/endless.js:732) is the
+# taken from; the wind-down confirmation line (src/endless.js:755) is the
 # confirmation band that precedes it.
 #
 # Parameters (env, each with a default; the script needs none of them):
@@ -517,10 +517,10 @@ post_prompt() {
     -H 'content-type: application/json' -d "$body" > "$outfile" 2>&1
 }
 
-# The three prompts, verbatim from endless-task.sh: the work turn (its line 820
-# with $SPAWN_AGENT=coder and the line-819 work prompt interpolated), the
-# sleep-30 spawn turn (line 1403 with SUBAGENT_SLEEP_S=30), and the crossing
-# turn (line 1466).
+# The three prompts, verbatim from endless-task.sh: the work turn (its line 821
+# with $SPAWN_AGENT=coder and the line-820 work prompt interpolated), the
+# sleep-30 spawn turn (line 1413 with SUBAGENT_SLEEP_S=30), and the crossing
+# turn (line 1473).
 WORK_MARKER="endless-optical-work-c1-$$"
 WORK_PROMPT="Read this project's $TODO_NAME. Exactly one entry between the lines <!-- intercom:begin --> and <!-- intercom:end --> asks for a line-count file under $FIXTURE_NAME/; carry out that entry and no other one. Write $FIXTURE_NAME/$FIRST_WORK_FILE with one line per file whose name begins with notes- in that directory, each line reading the file name, then a colon, then that file's number of lines. Create nothing else — no flag file, no merged.md, no count.txt, no index.md, no released.md — and change no file that is already there. Marker for the run that started you: $WORK_MARKER. Then reply with exactly two lines: the first reading 'finished: ' then the id of the entry you carried out, then ' — $FIXTURE_NAME/$FIRST_WORK_FILE written'; the second reading 'still open: ' then the ids of the other entries between those two lines, comma-separated."
 TURN1="Call spawn(\"$SPAWN_AGENT\", \"$WORK_PROMPT\") exactly once, passing that prompt through unchanged, and end your turn as soon as it returns. Do not poll, do not call list(), do not spawn a second subagent. When that subagent reports back to you, start no further work and spawn nothing: reply with at most two lines saying which todo entry it finished and which entries are still open."
@@ -623,7 +623,7 @@ fi
 ensure_sidebar_open
 grab "$RUN_DIR/02-crossed.png" || say "NOTE: 02-crossed.png failed"
 
-# trigger — `endless: scheduled` (src/hooks.js:544). The window stands where
+# trigger — `endless: scheduled` (src/hooks.js:548). The window stands where
 # the turn-3 POST set it, so no line of turns 1 and 2 can satisfy this wait.
 if ! wait_for_pattern "endless: scheduled" "endless: scheduled .*\"sessionID\":\"$SID\"" "$STEP_TIMEOUT_S"; then
   say "VERDICT: the cycle never armed — no \"endless: scheduled\" for $SID; context read $CTX3 against ceiling $ENDLESS_CONTEXT"
@@ -634,11 +634,11 @@ grab "$RUN_DIR/03-fired.png" || say "NOTE: 03-fired.png failed"
 
 # The cycle's own lines: quiesce, wind-down confirmation, then the true
 # end-of-cycle marker `endless: cycle N/M complete, new session <id>`
-# (src/endless.js:756). The briefing's "cycle … complete" is exactly this line.
+# (src/endless.js:779). The briefing's "cycle … complete" is exactly this line.
 FIRED=0
 if wait_for_pattern "endless: quiesced" "endless: quiesced" "$((SUBAGENT_SLEEP_S + STEP_TIMEOUT_S))"; then :; fi
 # The wind-down leg runs to the plugin's own bound: endlessWindDownTimeoutMs
-# defaults to 900 000 ms (src/settings.js:360), so the confirmation and the
+# defaults to 900 000 ms (src/settings.js:357), so the confirmation and the
 # replacement may each stand minutes behind the quiesce.
 wait_for_pattern "wind-down confirmed" "endless: wind-down confirmed" 600 || :
 if wait_for_pattern "endless: cycle complete" "endless: cycle [^ ]* complete, new session " "$CYCLE_WAIT_S"; then
@@ -683,9 +683,9 @@ say ""
 say "--- stage lines (verbatim from $DEBUG_LOG, this run's slice) ---"
 refresh_slice
 # The cycle's own band, in the order the concept states it: the trigger
-# (src/hooks.js:544), the quiesce (src/endless.js:494), the wind-down
-# confirmation (src/endless.js:732), the true end-of-cycle marker
-# (src/endless.js:756), and any abandonment (src/endless.js:424).
+# (src/hooks.js:548), the quiesce (src/endless.js:502), the wind-down
+# confirmation (src/endless.js:755), the true end-of-cycle marker
+# (src/endless.js:779), and any abandonment (src/endless.js:435).
 grep -E 'endless: (scheduled|quiesced|wind-down confirmed|cycle [^ ]* complete|abandoned|latch dropped)' "$SLICE_FILE" ||
   say "(no endless stage lines in the slice)"
 

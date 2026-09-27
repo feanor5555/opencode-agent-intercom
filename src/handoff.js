@@ -655,7 +655,8 @@ export function looksLikeDocSummariesReply(text) {
 //
 // The shape check is injected (`looksLikeReply`) so the endless cycle can reuse
 // this exact discipline for its own final turn — the same baseline / re-baseline
-// / timeout rules, keyed on `## OPEN POINTS` instead of `## PROJECT.md —`.
+// / timeout rules, keyed on `looksLikeWindDownReply` (`## WIND-DOWN DONE`)
+// instead of `## PROJECT.md —`.
 //
 // @param {Object} io
 // @param {() => Promise<string|undefined>} io.fetchResult  latest final result

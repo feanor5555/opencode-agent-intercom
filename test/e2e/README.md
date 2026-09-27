@@ -301,13 +301,13 @@ own three files through `os.homedir()` (`src/llmmodel.js`, `src/settings.js`,
 `src/llmparams.js`) and would otherwise keep reading the machine's
 `llm-models.json` under any `XDG_CONFIG_HOME`.
 
-Three paths stay shared on purpose:
+Three paths stay shared:
 
 | path | why |
 |---|---|
 | `~/.local/share/opencode` | symlinked in: `auth.json` and `opencode.db`. A fresh one has no provider credentials and no run could authenticate. Sessions are created and deleted there, as they always were. |
-| `~/.cache/opencode-agent-intercom` | symlinked in. The plugin's `debug.log` lives here unless `OPENCODE_AGENT_INTERCOM_DEBUG_LOG` points it elsewhere; `e2e_debug_log` reads the same env. A cache is not a setting. |
-| the driven project (`PROJECT_DIR`) | the drivers work on real files there; each puts back what it seeded (`endless-task.sh`'s todo file and fixture directory). |
+| `~/.cache/opencode-agent-intercom` | symlinked in: the isolated home's `.cache` is a link to the machine's `~/.cache`, and the plugin resolves its cache directory from `HOME`. The plugin's `debug.log` lives here unless `OPENCODE_AGENT_INTERCOM_DEBUG_LOG` points it elsewhere; `e2e_debug_log` reads the same env. Every other file the plugin keeps there — `endless-cycles.json`, `notice-journal/`, `results/`, `endless-pauses.json`, `tui-route.json`, and `requests.jsonl` where `OPENCODE_AGENT_INTERCOM_LOG_REQUESTS_FILE` is unset — is written into the machine's directory by a harness run, which contradicts the project rule that a harness run never writes productive state (open defect in `todos.md`). A run that must leave it untouched starts the driver under a `HOME` of its own whose `.cache` holds a private `opencode-agent-intercom/` beside links to the other cache entries, with `XDG_CONFIG_HOME` or `E2E_MACHINE_CONFIG_HOME` naming the machine's `~/.config`. |
+| the driven project (`PROJECT_DIR`) | the drivers work on real files there; each puts back what it seeded (`endless-task.sh`'s todo file and fixture directory). A file a model writes there on its own is not removed: the endless cycle's wind-down planner may leave `work/cycle-state.md` behind. |
 
 And one that deliberately is not: `~/.local/state/opencode/model.json`,
 opencode's per-model variant store, which `applyModelChoices` writes
@@ -1177,4 +1177,5 @@ without subscribing to the event stream.
   `e2e_build_tui` writes that bundle in place; `E2E_TUI_BUILT=1` only
   suppresses a second build in the same process tree. Captures and the debug
   log are isolated by `OUT_DIR` and `OPENCODE_AGENT_INTERCOM_DEBUG_LOG`; the
-  TUI artefact is not.
+  TUI artefact is not, and neither are the plugin's state files under
+  `~/.cache/opencode-agent-intercom` (see the shared-paths table above).

@@ -1,22 +1,31 @@
 // opencode-agent-intercom
 //
-// Gives the primary agent a non-blocking spawn channel to one-shot subagents:
+// Gives the primary agent a non-blocking spawn channel to subagents:
 //
 //   spawn  — start a subagent non-blocking (own session + promptAsync)
 //   abort  — cooperatively abort a subagent + hard-deny its further tool calls
 //            (intended for user-requested stops, not orchestrator-driven)
 //   list   — list active subagents
+//   reuse  — put a follow-up to a retained subagent (registered while
+//            retention is on)
+//   message — send a text to a RUNNING subagent mid-run (caller side of the
+//             mid-run channel)
+//   ask    — a subagent blocks its caller on a question (subagent side)
 //
-// One-shot lifecycle: a spawned subagent runs to a single reply, that reply is
-// delivered to the primary via a wake notice, and the subagent + its opencode
-// session are then destroyed. There is no mid-flight communication channel; if
-// the orchestrator wants more work in the same area, it spawns a fresh subagent.
+// Lifecycle: a spawned subagent runs to a single reply, that reply is delivered
+// to the primary via a wake notice, and the subagent is then destroyed — unless
+// it is retained, which is the shipped default (maxRetainedSubagents = 2): a
+// top-level subagent that ended cleanly keeps its entry and its opencode
+// session, so the orchestrator can put a follow-up to it through `reuse`. While
+// a subagent runs, the mid-run channel lets the caller `message` it and the
+// subagent `ask` back.
 //
 // Mechanism: the plugin owns subagent session creation, so it knows every
 // sessionID directly and hands the primary a friendly handle (e.g.
 // "researcher#1"). When a subagent goes idle the `event` hook wakes its primary
-// via `promptAsync`, pushes the subagent's full result, removes the entry from
-// our registry and deletes the underlying opencode session. There is no
+// via `promptAsync` and pushes the subagent's full result; the retention
+// decision then either keeps session and entry, or removes the entry from our
+// registry and deletes the underlying opencode session. There is no
 // status-poll tool by design.
 //
 // Enforcement (always on): primary sessions are denied the blocking native
@@ -149,10 +158,13 @@ export default async (ctx) => {
   // The reload leak: a subagent session this plugin left behind when it was
   // last unloaded — one being HELD for a follow-up, or one still running when
   // the process went — is still there, and nothing in opencode will ever delete
-  // it: no session TTL, no garbage collection, and no shutdown hook the plugin
-  // could have used. One pass at load deletes what can only be such a leftover,
-  // at every setting. The sweep starts on the next event-loop turn so its
-  // session.list request cannot hold up this factory or server bootstrap.
+  // it: no session TTL, no garbage collection, and the plugin's `dispose` hook
+  // is no cleaner — it runs while opencode disposes the instance, side by side
+  // with that instance's aborts, and deleting a session there races opencode's
+  // own writes into it, so it marks the directory as disposing instead
+  // (src/instancerestart.js). One pass at load deletes what can only be such a
+  // leftover, at every setting. The sweep starts on the next event-loop turn so
+  // its session.list request cannot hold up this factory or server bootstrap.
   setImmediate(() => {
     void sweepOrphanedSubagentSessions(client, { directory }).catch((err) => {
       log("bootstrap sweep failed", err?.message ?? String(err))

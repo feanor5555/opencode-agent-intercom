@@ -185,7 +185,7 @@ export function createPermissionGuard(client) {
 //     calls it to decide whether the spawn happens;
 //   - the prompt side (hooks.js `delegatesNested`) calls it directly to decide
 //     what the role is TOLD — whether it gets the delegation guide, the
-//     delegation limits block and the per-run quota line.
+//     delegation limits block and the per-entry quota line.
 // Asking the static role map on the prompt side instead would let a project's
 // `agent.<role>.permission.spawn = "deny"` leave the role carrying all three
 // every turn while every spawn it then makes is refused.

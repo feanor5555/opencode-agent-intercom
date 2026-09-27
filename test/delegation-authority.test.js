@@ -5,7 +5,7 @@
 // plugin's own role map (rung 2) where the config decides nothing. The system
 // prompt used to ask the static map alone, so a project-level
 // `agent.<role>.permission.spawn: "deny"` left the role carrying the delegation
-// guide, the delegation limits block and the per-run quota line on every turn
+// guide, the delegation limits block and the per-entry quota line on every turn
 // while every spawn it made was refused.
 //
 // What this file pins:
@@ -50,7 +50,7 @@ const PRIMARY = "ses_primary"
 // them: the guide in the system prompt, the reduced limits block under it, and
 // the quota line on the last user message.
 const DELEGATION_LIMITS_HEADING = /📐 agent-intercom: limits on the work you delegate\./
-const QUOTA_LINE = /nested spawns left this run/i
+const QUOTA_LINE = /nested spawns left/i
 
 const fixtureDir = mkdtempSync(join(tmpdir(), "intercom-authority-"))
 writeFileSync(

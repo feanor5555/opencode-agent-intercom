@@ -212,7 +212,7 @@ const SUBAGENT_NO_DELEGATION = {
 //
 // planner, coder, debugger, reviewer, documenter, researcher, designer and
 // gitter do NOT carry it: they may spawn, and a spawn of theirs is gated by
-// the three checks in nestedSpawnRefusal plus the per-run quota
+// the three checks in nestedSpawnRefusal plus the per-entry quota
 // (maxNestedSpawns). The absence of `spawn: "deny"` is the whole grant — the
 // schema strip leaves the tool in their schema and checkSpawnPermission
 // resolves the same map at run time.

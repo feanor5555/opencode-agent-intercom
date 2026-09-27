@@ -16,18 +16,19 @@
 // the entry means to this plugin, and is what decides whether the entry counts
 // as a running subagent (see isActiveEntry in registry.js).
 //
-// One-shot subagent lifecycle: each entry lives from `spawn` until the
-// subagent goes idle (= completed its single reply). At that point the event
-// hook delivers the result to the primary, removes the entry from this map,
-// and deletes the underlying opencode session. If more work is needed, the
-// orchestrator spawns a fresh one.
+// Subagent lifecycle: each entry lives from `spawn` until the subagent goes
+// idle (= completed its reply). At that point the event hook delivers the
+// result to the primary and removes the entry from this map, deleting the
+// underlying opencode session — unless the subagent is retained, which is the
+// default.
 //
-// The one exception is retention, and it is off unless `maxRetainedSubagents`
-// is configured above 0: a top-level subagent that ended cleanly keeps its
-// entry and its opencode session after the wake, with `lifecycle` on
-// "retained" and `retainedAt` stamped. Such an entry holds no concurrency slot
-// and is deleted when its retention window runs out, when capacity evicts it,
-// or on any other teardown.
+// Retention is on unless `maxRetainedSubagents` is configured down to 0
+// (DEFAULT_MAX_RETAINED_SUBAGENTS is 2): a top-level subagent that ended
+// cleanly keeps its entry and its opencode session after the wake, with
+// `lifecycle` on "retained" and `retainedAt` stamped, so the orchestrator can
+// put a follow-up to it through `reuse`. Such an entry holds no concurrency
+// slot and is deleted when its retention window runs out, when capacity evicts
+// it, or on any other teardown.
 export const registry = new Map()
 
 // sessionID -> handle (reverse lookup)
@@ -134,9 +135,9 @@ export const primaryDirectory = new Map()
 // sessionID -> { tokens:number|undefined, lastFetchAt:number }.
 // Cached context-token measurement for primary (non-subagent) sessions. The
 // transform hook refreshes this on each primary turn (TTL-guarded, mirroring
-// the subagent ctx path) and a future slice will read it to drive the
-// context-refresh handoff. MEASUREMENT ONLY in this slice — the threshold
-// comparison and handoff trigger are intentionally NOT here.
+// the subagent ctx path) and shouldTriggerPrimaryHandoff in registry.js reads
+// it to decide the threshold crossing that arms the relief — endless,
+// compaction or the plain handoff.
 export const primaryCtx = new Map()
 
 // sessionIDs of primary sessions whose context crossed maxPrimaryContext and

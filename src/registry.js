@@ -428,14 +428,17 @@ export function exchangeSnapshot(entry) {
 
 // Categorizes a registry entry into one displayed state:
 //   "aborted"  — user/orchestrator killed it
-//   "idle"     — opencode-idle (a brief transient between session.idle firing
-//                and the event hook removing the entry); usually not seen
+//   "idle"     — opencode reported the session idle while the entry is still
+//                "running": a brief transient between session.idle firing and
+//                the wake path taking it over (retaining it, or removing it)
 //   "busy" / "retry" — opencode's own status, work in flight
 //   "unknown"  — registered but no status seen yet
 //
-// There is no "finished" state: once a subagent goes idle the event hook
-// removes the entry from the registry entirely (one-shot lifecycle), so a
-// "done" subagent disappears rather than lingering.
+// A "done" subagent has no state of its own here: the wake path's retention
+// decision either hands the entry to `retainEntryLocked` — `lifecycle`
+// "retained", its `status` "idle", rendered by its own RETAINED section of
+// `list` and the snapshot rather than through this function — or removes it
+// outright, so it disappears from the active view.
 export function effectiveState(entry) {
   if (aborted.has(entry.sessionID)) return "aborted"
   return entry.status ?? "unknown"
@@ -493,9 +496,10 @@ export function isActiveEntry(entry) {
 // takes `maxSubagents` — the registry does not resolve settings.
 //
 // Retained only when all of:
-//   1. retention is switched on at all (`maxRetained > 0`). At 0 — the default
-//      — this is the only term that is ever reached, and every subagent is
-//      deleted at idle exactly as it always was;
+//   1. retention is switched on at all (`maxRetained > 0`). It ships on
+//      (DEFAULT_MAX_RETAINED_SUBAGENTS = 2); only a configuration down to 0
+//      stops here, and then every subagent is deleted at idle exactly as it
+//      was before retention existed;
 //   2. the entry has a parent to have been woken;
 //   3. the subagent is top level. A nested child — one whose parent is itself
 //      a tracked subagent — is never retained: its rows would be wiped
@@ -921,7 +925,7 @@ export function countActiveSubagentsFor(parentID) {
 // Gating a nested spawn would be a deadlock, not a brake: the default
 // `maxSubagents` is 1 (settings.js), the caller already occupies the only
 // slot, and the refusal it would get — wait for one to finish — names the very
-// thing it is itself. What bounds a nested run instead is the per-run quota
+// thing it is itself. What bounds a nested run instead is the per-entry quota
 // and the finite, acyclic target graph of the delegation design (agents.js
 // NESTED_SPAWN_TARGETS).
 //
@@ -937,17 +941,18 @@ export function spawnCapDecision(callerSessionID, maxSubagents) {
   }
 }
 
-// The per-run nested-spawn quota decision for one spawn call, and the charge
+// The per-entry nested-spawn quota decision for one spawn call, and the charge
 // that consumes a unit of it. Kept beside spawnCapDecision because the two are
 // the same kind of thing — a synchronous read the caller acts on with no await
 // in between — and because the quota, not the cap, is what bounds a nested
 // run: the cap deliberately does not gate one (see spawnCapDecision).
 //
-// `used` counts spawns ADMITTED by this run, not ones that went on to succeed.
+// `used` counts spawns ADMITTED against this entry across every run of its
+// session, not ones that went on to succeed.
 // The failure mode the quota exists against is a small model looping, and a
 // loop whose spawns all fail would be unbounded under a success-only count.
 //
-// A caller with no registry entry is a primary; it has no per-run quota and is
+// A caller with no registry entry is a primary; it has no per-entry quota and is
 // never refused here. `limit <= 0` refuses every nested spawn — that is the
 // escape hatch of `maxNestedSpawns: 0`, and `disabled` lets the refusal say so
 // rather than report a count the user cannot raise by waiting.
@@ -963,7 +968,7 @@ export function nestedQuotaDecision(callerSessionID, maxNestedSpawns) {
   }
 }
 
-// Charges one unit of the caller's per-run quota and returns the new total.
+// Charges one unit of the caller's per-entry quota and returns the new total.
 // Synchronous and called in the same block as nestedQuotaDecision, before any
 // await, so parallel spawn calls in one turn cannot both read the pre-charge
 // figure. A no-op returning 0 for a primary caller, which has no quota.
@@ -1113,9 +1118,15 @@ function upgradeProvisionalAgent(entry, agent) {
   bySession.set(entry.sessionID, entry.handle)
 }
 
-// Removes an entry from all shared maps. The event hook calls this immediately
-// after delivering a subagent's completion notice (one-shot lifecycle), so the
-// registry never holds a "finished" subagent.
+// Removes an entry from all shared maps. Reached from `teardownSubagent`, the
+// spawn tool's never-prompted failure, the abort tool and the reuse refusal on
+// a gone session; the completion wake removes in the same critical section
+// through `removeEntryLocked` (same body, no re-lock) when the subagent is not
+// retained. A RETAINED finished subagent keeps its entry in the registry until
+// its window runs out, capacity evicts it or it is torn down by any other
+// path, so "the registry never holds a finished subagent" holds only of the
+// active view — retained entries carry `lifecycle` "retained" and are held out
+// of it there (see isActiveEntry).
 //
 // Also reclaims the per-agent handle counter via `releaseHandle` (the
 // "decrement-when-max" policy in releaseHandle's doc-comment) so that
@@ -1188,9 +1199,11 @@ export function removeEntryLocked(sessionID) {
 //
 // "In-flight" here means: every entry still present in the registry whose
 // `parentID === fromID` AND whose wake handler has not yet snapshotted it
-// (`!dispatched`). The registry is one-shot — finished subagents are removed
-// in the wake critical section (see onSessionIdle in hooks.js), so any entry
-// still present is either actively running or already mid-dispatch. The
+// (`!dispatched`). A finished subagent either left the registry in the wake
+// critical section (see onSessionIdle in hooks.js) or stays in it as a
+// retained entry — and the handoff drops every retained entry BEFORE it
+// reparents (step 0b, dropRetainedSubagents in handoff.js), so what this walk
+// meets is an entry actively running or already mid-dispatch. The
 // `dispatched` latch is set by the wake handler BEFORE it reads parentID and
 // removes the entry (both under the same mutex, see hooks.js:494-512), so
 // observing `dispatched === true` means the handler has already captured the
@@ -1209,8 +1222,8 @@ export function removeEntryLocked(sessionID) {
 // fromID whose every matching entry is already dispatched.
 //
 // No persistent wake/results queue exists in this codebase (results are
-// delivered inline by onSessionIdle, one-shot), so there is nothing to
-// re-key outside the registry.
+// delivered inline by onSessionIdle), so there is nothing to re-key outside
+// the registry.
 export async function reparentSubagents(fromID, toID) {
   return registryMutex.runExclusive(() => {
     if (!fromID || !toID || fromID === toID) return 0
@@ -2297,12 +2310,14 @@ function createEntry(
     // Cumulative across the runs of a reused session, like `runs`: the cap is a
     // statement about the session, and a reuse is the same session again.
     compactions: 0,
-    // How many nested spawns this subagent run has been ADMITTED so far. The
-    // per-run quota (maxNestedSpawns) is checked against it in the spawn gate
+    // How many nested spawns this subagent has had ADMITTED so far, across every
+    // run of its session. The quota (maxNestedSpawns) is checked against it in
+    // the spawn gate
     // and it is charged there, in the same synchronous block, so two spawn
-    // calls in one turn cannot both pass on the same figure. Counted per RUN
-    // because the entry lives exactly as long as the one-shot run does: a fresh
-    // subagent starts at 0 and nothing ever has to reset it.
+    // calls in one turn cannot both pass on the same figure. Counted per ENTRY:
+    // the quota bounds what a reused session's runs spend in total, since an
+    // accepted reuse deliberately does NOT reset it
+    // (reviveRetainedEntryLocked) — a refill would make it unbounded.
     nestedSpawns: 0,
     // How many nested runs this subagent has taken back a result from, and the
     // context those children burned inside their own sessions. Summed by
@@ -2310,8 +2325,10 @@ function createEntry(
     // subagent's own completion notice: the parent's ctxTokens hold the
     // child's RETURNED text but nothing of what it spent getting there, so
     // without these two the true cost of a delegation is invisible to the
-    // orchestrator paying for it. Per RUN, like nestedSpawns, and reset by
-    // nothing — the entry lives exactly as long as the one-shot run.
+    // orchestrator paying for it. Per ENTRY, like nestedSpawns: an accepted
+    // reuse does not reset them (reviveRetainedEntryLocked) — they are the
+    // cumulative bill of every run of the session, which is why the completion
+    // notice labels them with the run count.
     nestedRuns: 0,
     nestedTokens: 0,
     // ---- the mid-run channel between this subagent and its caller ----------

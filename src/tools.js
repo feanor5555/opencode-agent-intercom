@@ -211,7 +211,7 @@ function wrongTargetRefusal(caller, targets, asked) {
 }
 
 // The refusal a nested spawn gets, or "" when it passes. Covers the three
-// checks that decide before anything is reserved or created; the per-run quota
+// checks that decide before anything is reserved or created; the per-entry quota
 // is checked separately, next to the charge that consumes it, so the two stay
 // in one synchronous block.
 async function nestedSpawnRefusal(permissionGuard, callerEntry, args, callerSessionID) {
@@ -638,7 +638,7 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     let entry
     let reservedSpawn = false
     try {
-      // The per-run nested quota, checked before the cap because the cap does
+      // The per-entry nested quota, checked before the cap because the cap does
       // not gate a nested spawn at all (spawnCapDecision) — this is what bounds
       // a delegating run instead. Check and charge sit in the same synchronous
       // block, with no await between them, so two spawn calls in one turn
@@ -661,7 +661,7 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
                 `with "Blocked:" where the missing material stops the task.`
               : `Spawn refused: you have already started ${quota.used} of the ${quota.limit} ` +
                 `${nestedSpawnTargets(callerEntry.agent).join("/") || "nested"} spawns one ` +
-                `subagent run gets, and the quota does not ` +
+                `subagent gets across its whole session, and the quota does not ` +
                 `reset. Do the rest of the work yourself and name in your final reply what is ` +
                 `still missing; the orchestrator decides and spawns it. Open that reply with ` +
                 `"Blocked:" where the missing material stops the task.`,

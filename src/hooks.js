@@ -462,9 +462,9 @@ export function createTransformSystem(client) {
       const delegates = isSubagent && (await delegatesNested(client, entry.agent))
       let limits = ""
       if (!isSubagent) {
-        // Primary (non-subagent) turn. Measurement only — record the current
-        // context-token count, TTL-guarded via shouldRefreshPrimary. No
-        // threshold check, no handoff trigger; that's a later slice.
+        // Primary (non-subagent) turn. Record the current context-token
+        // count, TTL-guarded via shouldRefreshPrimary; the threshold check and
+        // the relief it arms follow below in this same block.
         if (shouldRefreshPrimary(sessionID)) {
           const snap = await fetchSnapshot(client, sessionID)
           recordPrimaryContext(sessionID, snap?.ctxTokens)
@@ -899,11 +899,11 @@ export function createTransformMessages(client) {
     const entry = entryForSession(sessionID)
     // The over-budget notice is NOT memoised per turn, unlike the snapshot: it
     // counts the LLM turns on which the subagent has seen the stop sign, and a
-    // subagent is one-shot — it lives its whole life under a single user
-    // message. Keyed on that id the counter would stand still at 1 and the
-    // one-shot parent notice at BUDGET_NOTIFY_AFTER would never fire. Its
-    // escalation is the point of the block, and the session it belongs to is
-    // one to three turns from ending, so the prefix it moves is short.
+    // run spends many of them under its single user message. Keyed on that
+    // message's id the counter would stand still at 1 and the parent notice at
+    // BUDGET_NOTIFY_AFTER would never fire. Its escalation is the point of the
+    // block, and the run it belongs to is one to three turns from ending, so
+    // the prefix it moves is short.
     //
     // The quota line is not memoised either, for the plainer reason that it is
     // the figure that moves: it counts down as the run spends its quota, and a
@@ -1575,7 +1575,7 @@ async function delegatingRolesAmong(client, agents) {
 //
 // All three are settings- and file-derived, so the block holds its bytes for
 // the life of the run and belongs in the cached element. The fourth figure a
-// delegating subagent needs — how much of the per-run nested quota is left —
+// delegating subagent needs — how much of the per-entry nested quota is left —
 // counts down WITHIN the run off the caller's registry entry, so it rides on
 // the message array instead (nestedQuotaNotice, delivered by transformMessages
 // at the tail of a subagent's array).
@@ -1610,12 +1610,14 @@ function formatDelegationLimitsNotice(agent, { projectMd, agentsMd, snapshot, de
 }
 
 // The one figure of a delegating subagent's limits that moves inside its run:
-// how much of the per-run nested quota is left. `chargeNestedSpawn` increments
+// how much of the per-entry nested quota is left. `chargeNestedSpawn` increments
 // the counter this reads on every admitted nested spawn, so the first LLM call
 // after a nested child returns renders a lower number — which is why the line is
 // delivered on the last user message and not in the system prompt, where it
 // would invalidate the tool definitions and the whole stable element behind it
-// once per nested spawn.
+// once per nested spawn. The figure is the remainder of the entry's quota, so it
+// carries across a reuse — the count a second run inherits is the one the first
+// run spent.
 //
 // The line stands on its own there rather than under the limits block's
 // heading, so it names itself. It is rendered only for a caller the delegation
@@ -1626,7 +1628,7 @@ function nestedQuotaNotice(sessionID) {
   const quota = nestedQuotaDecision(sessionID, getSettings().maxNestedSpawns)
   const left = Math.max(0, quota.limit - quota.used)
   return (
-    "\n\n---\n⤷ agent-intercom: nested spawns left this run: " +
+    "\n\n---\n⤷ agent-intercom: nested spawns left: " +
     `${left} of ${quota.limit}. The quota does not reset.\n---\n`
   )
 }
@@ -1935,12 +1937,16 @@ function onSessionStatus({ sessionID, status }) {
   }
 }
 
-// A tracked subagent went idle -> its one-shot life is over. Wake the primary
-// with the result, then remove the entry from our registry AND delete the
-// underlying opencode session, so the next time the orchestrator wants
-// something it spawns a fresh one. Aborted subagents skip the wake (the user
-// already asked for it to stop). Re-entry by a duplicate idle event is a no-op
-// because the entry is already gone.
+// A tracked subagent went idle: its run is over. Wake the primary with the
+// result, then the retention decision takes over: with `maxRetainedSubagents`
+// above 0 — the shipped default, 2 — a top-level subagent that ended cleanly
+// keeps its entry and its opencode session, so the orchestrator can put a
+// follow-up to it through `reuse`; otherwise the entry leaves the registry and
+// the teardown below deletes the session, so the next time the orchestrator
+// wants something it spawns a fresh one. Aborted subagents skip the wake (the
+// user already asked for it to stop). Re-entry by a duplicate idle event is a
+// no-op because `dispatched` is latched, and a retained entry is held off a
+// stray second idle by its lifecycle.
 //
 // Double-fire guard vs the inactivity watchdog: if sweepWatchdog has already
 // aborted this subagent because it went silent, `aborted.has(sessionID)` is

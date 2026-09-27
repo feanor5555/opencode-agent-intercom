@@ -261,12 +261,14 @@ export const DEFAULT_MAX_REUSE_CONTEXT = 70000
 // Exported for the parity the retention scalars above are exported for
 // (tui/src/settings-file.ts, test/settings-defaults-parity.test.js).
 export const DEFAULT_MAX_RESULT_TOKENS = 2000
-// How many subagents ONE subagent run may start (a nested spawn). Delegation
-// exists for preparatory work whose answer the caller then uses — summarising a
-// long document, a broad lookup — not as a working mode, so the ceiling is
-// deliberately small. It is a per-RUN ceiling counted on the caller's registry
-// entry, which lives exactly as long as its one-shot run, so it resets with
-// every fresh subagent and never has to be cleared.
+// How many subagents one subagent may start (a nested spawn), summed over every
+// run of its session. Delegation exists for preparatory work whose answer the
+// caller then uses — summarising a long document, a broad lookup — not as a
+// working mode, so the ceiling is deliberately small. It is a per-ENTRY ceiling
+// counted on the caller's registry entry, so a fresh subagent starts at 0, and
+// it is cumulative: an accepted reuse deliberately leaves the figure standing
+// (reviveRetainedEntryLocked, src/registry.js), since a quota a follow-up could
+// refill would bound nothing.
 //
 // It counts ADMITTED spawns, not successful ones: the failure mode this bounds
 // is a small model looping, and a loop that fails every time would be unbounded
@@ -497,8 +499,8 @@ function envStr(name, def) {
 // bounds a cycle's quiesce wait once none of the primary's subagents runs, and
 // endlessMaxCycles the maximum
 // number of cycles one process runs; 0 disables the cycle ceiling.
-// maxNestedSpawns is how many subagents one subagent run may start; 0 disables
-// nesting.
+// maxNestedSpawns is how many subagents one subagent may start across every run
+// of its session; 0 disables nesting.
 // midRunMessaging is the off switch for the channel between a caller and a
 // RUNNING subagent; while it is off both of its tools refuse. answerWaitMs is
 // how long a subagent's blocked `ask` waits for its caller's answer before it

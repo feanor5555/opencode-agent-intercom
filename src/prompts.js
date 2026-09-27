@@ -119,9 +119,9 @@ export const SUBAGENT_NO_SPAWN_GUIDE =
 // working mode, and what comes back. The researcher's own block, whose target
 // is the grounder, follows below.
 //
-// The quota FIGURE is not in here: this block is static and the quota is a
-// runtime setting that also counts down within a run. Because it moves inside
-// the run it is not in the system prompt either — `nestedQuotaNotice` in
+// The quota FIGURE is not in here: this block is static and the quota counts
+// down within a run. Because it moves inside the run it is not in the system
+// prompt either — `nestedQuotaNotice` in
 // hooks.js delivers the number that is left on the last user message, beside
 // the over-budget notice.
 export const SUBAGENT_DELEGATION_GUIDE =
@@ -138,7 +138,7 @@ export const SUBAGENT_DELEGATION_GUIDE =
   "result of the call. There is no wake and no second chance to ask — one answer, then that " +
   "subagent is gone. Delegate a whole question at once.\n" +
   "The prompt you send carries NO `T<n>:` prefix: the researcher prepares material for your task, " +
-  "it does not take one over. You get a small quota of these per run (you are told each turn " +
+  "it does not take one over. You get a small quota of these per session (you are told each turn " +
   "what is left of it); past it, do the rest yourself and name what is still missing in your " +
   "final reply — opened with `Blocked:` where the missing material stops the task.\n---\n"
 
@@ -161,7 +161,7 @@ export const SUBAGENT_GROUNDED_DELEGATION_GUIDE =
   "subagent is gone. Fold its sources into your own answer beside what you found yourself and " +
   "carry every URL from both onto your `Sources:` line.\n" +
   "The prompt you send carries NO `T<n>:` prefix: the grounder answers a question for your task, " +
-  "it does not take one over. You get a small quota of these per run (you are told each turn " +
+  "it does not take one over. You get a small quota of these per session (you are told each turn " +
   "what is left of it); past it, answer from what you have and name what is still missing in " +
   "your final reply — opened with `Blocked:` where the missing material stops the task.\n---\n"
 

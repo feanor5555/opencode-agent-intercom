@@ -419,9 +419,9 @@ test("a nested spawn carrying a task-id prefix is refused", async () => {
   assert.deepEqual(created, [])
 })
 
-// ---- the gate: the per-run quota ------------------------------------------
+// ---- the gate: the per-entry quota ----------------------------------------
 
-test("the per-run quota is charged on admission and refuses past its limit", async () => {
+test("the per-entry quota is charged on admission and refuses past its limit", async () => {
   withSettings({ maxNestedSpawns: 2, maxSubagents: 5 })
   const { ctx, created } = makeCtx({
     messages: assistantReply("looked it up"),
@@ -457,7 +457,7 @@ test("maxNestedSpawns: 0 switches nesting off entirely", async () => {
   assert.deepEqual(created, [])
 })
 
-test("the quota is per run: a primary caller has none, and a fresh entry starts at zero", () => {
+test("the quota is per entry: a primary caller has none, and a fresh entry starts at zero", () => {
   assert.deepEqual(nestedQuotaDecision(PRIMARY, 2), {
     used: 0,
     limit: 2,

@@ -31,7 +31,13 @@
 #      .cache        → symlinked to the real one, so the plugin's debug log
 #                      stays at ~/.cache/opencode-agent-intercom/debug.log
 #                      unless OPENCODE_AGENT_INTERCOM_DEBUG_LOG points it
-#                      elsewhere. A cache is not a setting.
+#                      elsewhere. The cache is shared: every state file the
+#                      plugin keeps under cacheDir() — the endless-cycles
+#                      ledger, the notice journal, cached result files, the
+#                      pause file, the TUI route file — lands in the real
+#                      ~/.cache/opencode-agent-intercom/ too. That breaks
+#                      rule 1 as much as a written setting would; it is an
+#                      open defect (todos.md), not a harmless exception.
 #      .local/state  → NOT symlinked. `applyModelChoices` writes opencode's
 #                      per-model variant store there (src/variantstore.js), and
 #                      that is machine state a run must not rewrite.
@@ -270,8 +276,9 @@ e2e_iso_create() {
   iso_dir="$E2E_ISO_OPENCODE_DIR"
   mkdir -p "$iso_dir" "$E2E_ISO_HOME/.local/state" || { e2e_fail "e2e_iso_create: mkdir failed under $E2E_ISO_HOME"; return 1; }
 
-  # auth.json and opencode.db, and the plugin's own cache: shared with the
-  # machine on purpose — see the header.
+  # auth.json and opencode.db: shared with the machine so a run authenticates.
+  # The .cache link shares the plugin's real cache dir — the plugin's state
+  # files land in it too; open defect, see the header and todos.md.
   ln -s "${HOME}/.local/share" "$E2E_ISO_HOME/.local/share" || {
     e2e_fail "e2e_iso_create: could not link $E2E_ISO_HOME/.local/share to ${HOME}/.local/share — without auth.json no provider authenticates"
     return 1

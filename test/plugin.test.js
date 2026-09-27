@@ -580,7 +580,7 @@ test("tool.execute.before hard-denies the native `task` tool from a subagent", a
 // --- only-the-orchestrator-delegates enforcement ---------------------------
 
 // The eight roles that may delegate: they hold `spawn`, and a spawn of theirs
-// is gated at run time (the caller's own target set, no task id, a per-run
+// is gated at run time (the caller's own target set, no task id, a per-entry
 // quota) rather than by the permission map. The researcher is one of them —
 // its target is the `grounder` alone. Grounder is the only role that may not:
 // it is the end of every chain and searches itself.
@@ -1370,7 +1370,7 @@ test("a delegating subagent under the context budget gets the quota line and not
 
   assert.match(
     await turnNotice(hooks, created[0]),
-    /^\n\n---\n⤷ agent-intercom: nested spawns left this run: \d+ of \d+\. The quota does not reset\.\n---\n$/,
+    /^\n\n---\n⤷ agent-intercom: nested spawns left: \d+ of \d+\. The quota does not reset\.\n---\n$/,
   )
 })
 

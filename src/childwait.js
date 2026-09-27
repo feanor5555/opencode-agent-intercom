@@ -23,8 +23,10 @@
 // registry entry at all. Keying on the child also keeps the record and the
 // promise it guards impossible to desynchronise — one settle closes both.
 //
-// Nested spawns register a waiter in `src/tools.js:625`. Production reads and
-// cleanup are split across the paths that hold a parent's idle in `src/hooks.js`
+// Nested spawns register a waiter in `src/tools.js:758-759`, and the endless
+// wind-down spawn registers one with its parent a primary just below there.
+// Production reads and cleanup are split across the paths that hold a parent's
+// idle in `src/hooks.js`
 // (`hasLiveChildren`), end children before teardown in `src/teardown.js`
 // (`liveChildSessionIDs`), exempt blocked parents in `src/watchdog.js`
 // (`liveChildSessionIDs`), and settle endings in the spawn, hook, abort and

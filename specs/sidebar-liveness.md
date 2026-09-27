@@ -54,7 +54,7 @@ Two consequences, and they are the point:
   there is one figure and both halves render it.
 
 A held row still ends when its session does. Every way a retention ends — the
-TTL reap, the capacity eviction, the drop at a handoff or at an endless freeze,
+TTL reap, the capacity eviction, the drop at a handoff or at an endless wind-down claim,
 an abort, a reuse that fails — has the plugin delete the opencode session, so
 a held row lives exactly as long as its session is still listed among its
 parent's children. `reapRows` is where that is enforced, for held and unheld
@@ -270,7 +270,7 @@ nobody's child again and no spawn names it as a parent.
 The plugin deletes the opencode session at every ending the plugin controls
 (`teardownSubagent`, `src/teardown.js:416`): the normal one-shot, an abort, an
 error, a timeout, a retention reap, a capacity eviction, a handoff drop, an
-endless freeze. That is what makes the existence rule exact — there is no
+endless wind-down drop. That is what makes the existence rule exact — there is no
 ending the plugin knows about that does not pass through `teardownSubagent`.
 
 If the plugin process dies mid-run, its subagent rows stay until the bootstrap

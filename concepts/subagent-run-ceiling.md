@@ -81,12 +81,10 @@ parent's `spawn` tool call.
 
 **What the unbounded entry costs while it stands:** one of `maxSubagents`
 concurrency slots (`isActiveEntry`, `LIFECYCLE_RUNNING`, `src/registry.js:2084`),
-the primary's quiesce in an endless cycle — bounded there, but only by
-abandoning the cycle (`src/endless.js`,
-`return abandon("quiesce", \`still busy after ${at - waitStartedAt}ms with no progress\`)`; the
-base window is `endlessQuiesceTimeoutMs` and re-arms at `endlessQuiesceExtensionMs` while the
-primary's subagents keep advancing, so the abandon fires on a FROZEN signal) — and,
-in the nested case, the parent's blocked tool call.
+the primary's quiesce in an endless cycle — unbounded there, because the wait
+re-arms its deadline at `now + endlessQuiesceTimeoutMs` on every poll that sees
+a subagent of the primary running and abandons only once none runs
+(`src/endless.js`) — and, in the nested case, the parent's blocked tool call.
 
 **What the sweep already has to hang a third window on.** The descriptor
 discipline: `watchdogLimit` returns `{ ms, setting, kind, tool?, since? }` and
@@ -209,13 +207,13 @@ make the honest bound (B) look redundant and it would not get built.
 ### D — nothing new; lean on the existing reliefs
 
 The subagent's context budget locks its tools down eventually
-(`contextLimitNotice` lockdown), and the endless cycle abandons at its quiesce
-window (`src/endless.js`, once the subagents' progress signal freezes).
+(`contextLimitNotice` lockdown); the endless cycle's quiesce wait holds for as
+long as a subagent of the primary runs (`src/endless.js`).
 
 Costs: the lockdown arrives only when tokens accumulate, and a poll loop whose
 every result is "no such file" adds tens of tokens per turn — hours at a 100 000
-budget. The quiesce abandon protects the *cycle*, not the slot or the parent's
-blocked call, and it does so by giving up work. This is the state that was
+budget. The quiesce wait protects neither the slot nor the parent's blocked
+call, and it waits on the stuck subagent itself. This is the state that was
 observed failing. Rejected.
 
 ### Recommendation
@@ -296,10 +294,10 @@ The derivation, not a round guess:
 - **What it is deliberately not anchored on.** `endlessQuiesceTimeoutMs`
   (600 000, `src/settings.js`). A run ceiling short enough to protect a
   cycle's quiesce would have to be under 10 minutes, which is barely one maximal
-  `bash` call, and the cycle is already bounded — it abandons rather than hangs
-  (`src/endless.js`, the quiesce abandon; the window re-arms while the primary's
-  subagents keep advancing, so the bound that truly ends a polling subagent's
-  hold on the cycle is this run ceiling, not the quiesce timeout).
+  `bash` call. The quiesce timeout does not bound a running subagent at all: the
+  wait re-arms at `now + endlessQuiesceTimeoutMs` on every poll that sees one of
+  the primary's subagents running (`src/endless.js`), so the bound that ends a
+  polling subagent's hold on the cycle is this run ceiling.
 
 The number is a judgement, and it is a wide one on purpose: it is a backstop
 against unboundedness, not a schedule. Whoever wants a schedule sets

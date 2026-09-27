@@ -1,4 +1,4 @@
-// The endless cycle's wind-down permit: the one spawn the freeze admits.
+// The endless cycle's wind-down permit: the one spawn a winding-down cycle admits.
 //
 // Two halves. The permit state in src/registry.js — armed, consumed atomically,
 // restored at most once, disarmed — and the admission branch in `spawnHandler`
@@ -14,7 +14,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import plugin from "../src/index.js"
-import { resetState, endlessWindDownPermits, pendingChildResults } from "../src/state.js"
+import {
+  resetState,
+  endlessWindDownPermits,
+  pendingChildResults,
+  endlessWindingDown,
+} from "../src/state.js"
 import { resetProjectContext } from "../src/project.js"
 import { setSettingsPath, resetSettings } from "../src/settings.js"
 import { resetPermissionGuardCache } from "../src/config.js"
@@ -197,27 +202,32 @@ function makeCtx({ createFails = false, promptThrows = false } = {}) {
 
 const primaryCtx = { sessionID: PRIMARY, agent: "orchestrator", messageID: "m1" }
 
-// The cycle is executing and the permit is armed: the state the wind-down turn
-// runs in.
-function armCycle() {
+// The cycle is executing and has claimed its wind-down — set directly, the
+// claim's own reading is pinned in test/endless-latch.test.js.
+function windDownCycle() {
   markEndlessPending(PRIMARY)
   claimPendingEndless(PRIMARY)
+  endlessWindingDown.add(PRIMARY)
+}
+
+// ...and the permit is armed: the state the wind-down turn runs in.
+function armCycle() {
+  windDownCycle()
   return armEndlessWindDown(PRIMARY, { token: TOKEN, agent: "planner" })
 }
 
 const windDownPrompt = (token = TOKEN, payload = "what is open: the migration script.") =>
   `${WIND_DOWN_TOKEN_PREFIX} ${token}\n${payload}`
 
-test("the freeze without a permit refuses every spawn, as it always did", async () => {
+test("a winding-down cycle without a permit refuses every spawn", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
-  markEndlessPending(PRIMARY)
-  claimPendingEndless(PRIMARY)
+  windDownCycle()
   const res = await hooks.tool.spawn.execute(
     { agent: "planner", prompt: windDownPrompt() },
     primaryCtx,
   )
-  assert.match(res.output, /spawn failed: .*No new subagent will start/s)
+  assert.match(res.output, /spawn failed: .*no further subagent starts in this session/s)
 })
 
 test("an armed permit refuses a wrong call by naming the one that is allowed", async () => {
@@ -259,7 +269,7 @@ test("the conforming spawn is admitted once; the second one is refused", async (
   )
   assert.match(
     refused.output,
-    /spawn failed: .*No new subagent will start/s,
+    /spawn failed: .*no further subagent starts in this session/s,
     "a second call finds the permit consumed and takes the ordinary refusal",
   )
 
@@ -344,6 +354,6 @@ test("a nested caller never reaches the permit", async () => {
     { agent: "researcher", prompt: windDownPrompt() },
     { sessionID: "ses_sub_caller", agent: "planner", messageID: "m2" },
   )
-  assert.match(res.output, /Spawn refused: endless mode is replacing the primary orchestrator/)
+  assert.match(res.output, /Spawn refused: endless mode is handing the primary orchestrator.s work to a fresh session/)
   assert.equal(endlessWindDownPermit(PRIMARY).consumed, false)
 })

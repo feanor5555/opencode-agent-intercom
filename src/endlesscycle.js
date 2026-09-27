@@ -4,8 +4,8 @@
 // latches (`pendingEndless`, `endlessInProgress`, src/state.js) are the
 // authority, and nothing here is read back into a decision the plugin takes.
 // What this module adds is a READER outside the process — the sidebar panel,
-// which otherwise paints `[on]` through the whole cycle, a wait that runs to
-// minutes while the orchestrator cannot delegate.
+// which otherwise paints `[on]` through the whole cycle, a wait that runs as
+// long as the orchestrator's subagents do.
 //
 // What the file holds, keyed by the primary session the cycle replaces:
 //
@@ -30,7 +30,9 @@ import { pauseWriterAlive } from "./endlesspause.js"
 // The steps in the order a cycle passes them.
 //
 // `turn`      — latched; the primary's current turn has not ended yet
-// `quiesce`   — waiting for the primary's own subagents to finish
+// `quiesce`   — the whole wait for the wind-down claim: the primary's own
+//               subagents finishing, those it keeps spawning during the wait
+//               included, and the primary's turn ending
 // `wind-down` — the open points are being written to the todo file, from the
 //               prepare step through the wind-down turn and its child's settle
 // `successor` — the rewrite is being confirmed and the fresh session started

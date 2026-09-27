@@ -28,6 +28,11 @@ that opencode upgrades don't shift the system-prompt composition.
   order and, once over the cycles together, that a carried-over task id was
   re-titled; see "Endless mode" below. Its seed and its work-off gates are
   covered by `test/e2e-endless-task.test.js`, which runs them without a server.
+- `endless-optical-proof.sh` — endless-mode optical proof. Carries ONE endless
+  cycle end to end against its own `opencode serve` behind a real TUI (zutty on
+  an Xvfb display), captures the sidebar and footer at each stage of the cycle
+  and prints the plugin's stage lines with a verdict. Not part of `run-all.sh`;
+  see "The optical proof" under "Endless mode" below.
 - `nested-task.sh` — nested-delegation harness. Drives one nested spawn
   (orchestrator → coder → researcher) and asserts it; see "Nested delegation"
   below.
@@ -390,7 +395,7 @@ cycle on an accumulated file. The driver therefore
   `DONE: T<n>` reaches the wake hook, and the plugin leaves the task in the file.
   The driver opens exactly one gate per cycle — `cycle<k>.flag`, whose first
   line `open_workoff_gate` rewrites to `open` after cycle `k`'s rewrite is
-  confirmed, while the freeze is on, the quiesce has emptied the flight and the
+  confirmed, while the wind-down restricts spawning, the quiesce has emptied the flight and the
   successor does not exist yet — so cycle `k`'s work-off can finish that one
   task and nothing else, and `T104`, whose gate `owner.flag` nothing in the run
   writes, is still open when the last cycle winds down. This is what the first
@@ -472,7 +477,7 @@ to, so a report says which cycle a failure sits in):
 | criterion | evidence |
 |---|---|
 | trigger | `endless: scheduled` for the primary, with `ctx` and `threshold`, the threshold being the armed one |
-| (a) freeze | `spawn refused: endless cycle in progress` after a non-conforming post-trigger `spawn` |
+| (a) post-latch spawn | a `spawned {"handle":"<SPAWN_AGENT>#N"` line after the trigger for the post-trigger `spawn`, and that subagent's `notified primary of completion` before `endless: quiesced` — the orchestrator keeps delegating after the latch and the quiesce waits for what it starts |
 | (a) permit | `spawn admitted: endless wind-down permit consumed` for this primary's own session appears **exactly once** — the single-use permit admits the one conforming wind-down spawn and a second is refused |
 | (b) quiesce | `notified primary of completion` appears **before** `endless: quiesced …, activeAtStart>=1`, and after the trigger line |
 | (c) rewrite | `endless: wind-down confirmed N open task(s) [T…] file=…`, every confirmed id present as `- T<n>:` in the todo file, exactly one todo file in the directory, and the `next-id` watermark above every confirmed id (no id reused) |
@@ -481,7 +486,7 @@ to, so a report says which cycle a failure sits in):
 | kickoff | the new session carries `## Endless mode — work off the todo file`, whose body is the todo file's own text, naming exactly the ids of (c) as `- T<n>:` lines |
 | (e) work-off | the successor's first turn contains a `spawn` tool call whose `input.prompt` carries the first saved task id as the first non-empty line (`T<n>:` / `T<n>.` / `T<n>-` …) and every further spawn prompt of that turn likewise carries a saved id; the turn's per-task spawn tally rides along as evidence |
 | (e) removal | a successor subagent's `DONE: T<n>` reply removes that task: `notified primary of completion` for the successor carrying `"kind":"done","id":"T<n>"`, the id one of (c)'s, and the line `- T<n>:` gone from the todo file on disk while the file itself stays — with no foreign primary having written that file since the confirmation and no line in it the confirmed rewrite did not carry |
-| order | the five cycle lines — scheduled, refused, quiesced, confirmed, complete — appear in that order in the debug-log slice |
+| order | the five cycle lines — scheduled, admitted, quiesced, confirmed, complete — appear in that order in the debug-log slice |
 
 And once over the driven cycles together, after the last work-off phase:
 
@@ -599,11 +604,11 @@ line), `MAX_SUBAGENT_TOOL_CALL_MS` (300000 — the tool-call watchdog window
 written into the isolated settings, the only thing that frees a subagent stuck
 inside one long tool call; the shipped 660000 is wider than the driver's
 600000 quiesce, so the driver pins a narrower value into its isolated
-configuration and the preflight refuses a configuration where the quiesce
-window cannot outlast this one — `maxSubagentToolCallMs` of `0` or non-numeric,
-or `maxSubagentToolCallMs + 30000 >= ENDLESS_QUIESCE_TIMEOUT_MS` — so a subagent
-stuck in a tool call is still in flight when the quiesce gives up and the cycle
-abandons instead of winding down), `SPAWN_AGENT`,
+configuration; the quiesce wait itself re-arms while any subagent of the
+primary runs, so this window is what ends a stuck one. The preflight
+`quiesce_window_conflict` still refuses `maxSubagentToolCallMs` of `0` or
+non-numeric, and `maxSubagentToolCallMs + 30000 >= ENDLESS_QUIESCE_TIMEOUT_MS`),
+`SPAWN_AGENT`,
 `SUBAGENT_SLEEP_S` (45, and the preflight refuses a value within 10 s of
 `maxSubagentAgeMs`, where the watchdog would abort the subagent instead),
 `TURN_TIMEOUT_S`, `STEP_TIMEOUT_S`, `WORKOFF_TIMEOUT_S` (600, the removal step's
@@ -653,6 +658,45 @@ writes the settings file, `endlessMode` stays the user's own switch
 `~/.config/opencode/agent-intercom.json` and the driven project's todo file,
 deletes every session of every cycle, removes the fixture directory, stops the
 server's process group and removes its isolated home.
+
+### The optical proof — `endless-optical-proof.sh`
+
+One cycle, observed on screen. The driver builds an isolated throwaway HOME
+(`config-isolation.sh`) with endless mode on and `endlessContext` at
+`ENDLESS_CONTEXT` (12 000), copies the fixture project
+`PROOF_FIXTURE_SOURCE` (`/tmp/intercom-retention-project`) and seeds it with
+`endless-task.sh`'s todo file and note files, then starts Xvfb on
+`PROOF_DISPLAY` (151), its own server on `PROOF_PORT` (4611), the primary
+session and a zutty TUI attached to it. It drives the `T105` work turn and the
+sleeper spawn turn of `endless-task.sh`, then re-posts a short no-tool "ceiling
+check" turn until the measured context passes the ceiling (bounded at 300
+repeats, and stopped early the moment the context stops growing), plus one
+arming turn. It follows the successor with `POST /tui/select-session` and
+decides on the end-of-cycle line `endless: cycle N/M complete, new session <id>`
+in the plugin's debug log.
+
+```bash
+E2E_MODEL=cliproxy/qwen3.8-flash-medium bash test/e2e/endless-optical-proof.sh
+KEEP_SERVER=1 E2E_MODEL=cliproxy/qwen3.8-flash-medium \
+  bash test/e2e/endless-optical-proof.sh   # leave server, Xvfb and TUI up
+```
+
+**Model.** The driver's default `E2E_MODEL` is `cliproxy/gpt-5.6-luna`, which
+grows the session by about 40 tokens per crossing turn and so needs roughly 190
+repeats to reach 12 000; it has not been run end to end. The verified
+invocation is `E2E_MODEL=cliproxy/qwen3.8-flash-medium` (about 65 tokens per
+turn): its completed run took 105 crossing repeats and about 12 minutes from
+plugin load to `endless: cycle 1/10 complete, … open tasks 5→4`.
+
+**Artefacts** land in `RUN_DIR` (`work/endless-optical-proof-run/`): the four
+stage captures `01-before.png`, `02-crossed.png`, `03-fired.png` and
+`04-successor.png` (plus the first frame `00-plain.png`), the plugin's
+`debug.log` and this run's `debug-slice.log`, and the per-turn JSON replies.
+The isolated HOME and the run directory stay after the run; cleanup stops the
+server, the TUI and Xvfb and removes the fixture copy.
+
+**Exit codes:** `0` the cycle completed, `1` it did not (the printed evidence
+says where it stopped), `2` a preflight or setup error, nothing driven.
 
 ## The mid-run channel
 

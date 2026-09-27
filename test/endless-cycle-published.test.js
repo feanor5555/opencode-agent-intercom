@@ -252,9 +252,9 @@ function cycleIo(overrides = {}) {
     release: () => releaseEndless(PRIMARY),
     setCooldown: () => setEndlessCooldown(PRIMARY),
     countActive: () => Math.max(0, 2 - polls),
-    isQuiesced: async () => {
+    claimWindDown: async () => {
       const entry = readPublishedEndlessCycles()[PRIMARY]
-      seen.push(`isQuiesced:${entry?.step}:${entry?.running}`)
+      seen.push(`claimWindDown:${entry?.step}:${entry?.running}`)
       polls += 1
       return polls > 2
     },
@@ -303,9 +303,9 @@ test("a completed cycle walks the file through every step and leaves nothing beh
   const res = await runEndlessCycle(io)
   assert.equal(res.outcome, "complete")
   assert.deepEqual(io._seen, [
-    "isQuiesced:quiesce:2",
-    "isQuiesced:quiesce:1",
-    "isQuiesced:quiesce:0",
+    "claimWindDown:quiesce:2",
+    "claimWindDown:quiesce:1",
+    "claimWindDown:quiesce:0",
     "prepare:wind-down",
     "windDownTurn:wind-down",
     "settle:wind-down",
@@ -317,13 +317,13 @@ test("a completed cycle walks the file through every step and leaves nothing beh
 test("an abandoned cycle takes the entry off", async () => {
   let clock = 0
   const io = cycleIo({
-    isQuiesced: async () => false,
+    claimWindDown: async () => false,
+    countActive: () => 0,
     sleep: async (ms) => {
       clock += ms
     },
     now: () => clock,
     quiesceTimeoutMs: 1000,
-    quiesceExtensionMs: 0,
   })
   const res = await runEndlessCycle(io)
   assert.equal(res.outcome, "abandoned")

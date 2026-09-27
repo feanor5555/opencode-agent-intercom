@@ -62,6 +62,8 @@ import {
   isEndlessPaused,
   clearEndlessPause,
   forgetEndlessStep,
+  noteEndlessPrimaryBusy,
+  noteEndlessPrimaryIdle,
   nestedQuotaDecision,
   sessionAgentName,
   rememberPrimaryDirectory,
@@ -546,15 +548,19 @@ export function createTransformSystem(client) {
             showToast(client, {
               title: "agent-intercom",
               message:
-                "endless mode: context ceiling reached — open points are saved and the " +
-                "orchestrator is replaced at the end of this turn",
+                "endless mode: context ceiling reached — once no subagent is running and the " +
+                "turn has ended, open points are saved and the orchestrator is replaced",
             })
           }
+          // A turn is running while this transform runs. For a primary that
+          // holds a cycle this keeps the quiesce predicate's busy term right
+          // even where a `session.status` event was missed.
+          noteEndlessPrimaryBusy(sessionID)
         } else {
           // Reached two ways: the user switched the mode off, or the mode
           // stopped itself for this session. Either way no cycle may start, so
-          // drop a latch that has not been claimed yet — the freeze lifts with
-          // it and the plain handoff owns the threshold. A cycle already
+          // drop a latch that has not been claimed yet — the `[restarting]`
+          // indicator goes with it and the plain handoff owns the threshold. A cycle already
           // executing is not touched: it has written to the todo file and must
           // not leave the primary half-replaced.
           //
@@ -1814,6 +1820,10 @@ export function createEventHandler(client) {
           onSessionStatus(props)
           break
         case "session.idle":
+          // The primary's turn has ended: the quiesce predicate of a cycle it
+          // holds may now read it idle. Before the endless call below, which
+          // claims on this very idle where nothing else is running.
+          noteEndlessPrimaryIdle(props?.sessionID)
           await onSessionIdle(props, client)
           // Idle-gated primary handoff. Ordered AFTER the subagent wake path
           // and detached from the event stream: for a tracked subagent the
@@ -1832,9 +1842,9 @@ export function createEventHandler(client) {
           // The catch is not decoration. runEndlessCycle never throws and
           // maybeRunPendingEndless guards its own two pre-claim reads, but a
           // detached rejection from anywhere in that path would leave an
-          // unclaimed latch standing — and an endless latch is the spawn
-          // freeze, so `spawn` would refuse for the life of the process. The
-          // drop is a no-op once the cycle has claimed the latch.
+          // unclaimed latch standing, and no later crossing could arm a cycle
+          // for this primary again (markEndlessPending refuses while one
+          // stands). The drop is a no-op once the cycle has claimed the latch.
           void maybeRunPendingEndless(client, props?.sessionID).catch((err) => {
             dropEndlessLatch(props?.sessionID, `the cycle failed to start: ${errMsg(err)}`)
           })
@@ -1864,8 +1874,8 @@ export function createEventHandler(client) {
           // `session.idle`. A turn that ends in an error instead of an idle —
           // and a turn at the endless ceiling is exactly where provider errors
           // live — would leave it set with nothing left to clear it: the
-          // orchestrator stays alive, `spawn` refuses forever, and no cycle
-          // ever runs. Drop it here; the next over-threshold turn arms again.
+          // orchestrator stays alive, no cycle ever runs and none can arm
+          // again. Drop it here; the next over-threshold turn arms again.
           //
           // Dropping rather than running the cycle: the session has just
           // failed, and the cycle's first act is to ask it for a long
@@ -1916,6 +1926,12 @@ function onSessionCreated({ info }) {
 function onSessionStatus({ sessionID, status }) {
   const entry = entryForSession(sessionID)
   if (entry && status?.type && !aborted.has(sessionID)) entry.status = status.type
+  // A primary holding an endless cycle: its turn state is the quiesce
+  // predicate's busy term. The setter is a no-op for any other session.
+  if (!entry && status?.type) {
+    if (status.type === "idle") noteEndlessPrimaryIdle(sessionID)
+    else noteEndlessPrimaryBusy(sessionID)
+  }
 }
 
 // A tracked subagent went idle -> its one-shot life is over. Wake the primary

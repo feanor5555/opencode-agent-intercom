@@ -575,11 +575,12 @@ read -r MAX_NESTED_SPAWNS MAX_SUBAGENT_AGE_MS ENDLESS_MODE ENDLESS_CONTEXT MAX_R
 [ "$MAX_RETAINED_SUBAGENTS" -gt 0 ] 2>/dev/null ||
   die "maxRetainedSubagents resolves to $MAX_RETAINED_SUBAGENTS — with retention off the caller's session is destroyed rather than held, and the \"woken\" and \"gone\" criteria assert the shipped default of 2. Remove the key from $SETTINGS_FILE or set it above 0."
 
-# An endless cycle freezes every spawn from the moment it is scheduled
-# (src/tools.js, `spawn refused: endless cycle in progress`). A threshold this
-# short run could cross would silently turn the positive criteria into refusals.
+# An endless cycle replaces the primary and, from its wind-down claim on,
+# refuses every spawn (src/tools.js, `spawn refused: endless wind-down in
+# progress`). A threshold this short run could cross would turn the positive
+# criteria into refusals or strand them on a replaced session.
 if [ "$ENDLESS_MODE" = true ] && [ "$ENDLESS_CONTEXT" -gt 0 ] && [ "$ENDLESS_CONTEXT" -lt 40000 ]; then
-  die "endlessMode is on with endlessContext=$ENDLESS_CONTEXT in $SETTINGS_FILE — a cycle would fire inside this run and freeze the spawns it asserts. Raise the threshold or switch endless mode off for the run."
+  die "endlessMode is on with endlessContext=$ENDLESS_CONTEXT in $SETTINGS_FILE — a cycle would fire inside this run and replace the session whose spawns it asserts. Raise the threshold or switch endless mode off for the run."
 fi
 
 # ---------- todo-file baseline --------------------------------------------

@@ -8,8 +8,9 @@
 # §7 a-e):
 #
 #   trigger    the primary crosses `endlessContext`      → `endless: scheduled`
-#   (a) freeze a non-conforming post-trigger spawn is refused
-#                                                        → `spawn refused: endless cycle in progress`
+#   (a) post-latch a post-trigger spawn is admitted, and the quiesce waits
+#       spawn  for that subagent too                     → `spawned {"handle":"<SPAWN_AGENT>#N"` after the trigger,
+#                                                          its completion notice before `endless: quiesced`
 #   (a) permit the ONE conforming wind-down spawn is admitted exactly once
 #                                                        → `spawn admitted: endless wind-down permit consumed`
 #   (b) quiesce the in-flight subagent's completion notice is delivered BEFORE
@@ -115,9 +116,9 @@
 #           cannot start the next cycle before this driver has set it up.
 #   turn 3  one short turn whose transform hook re-reads that same context, finds
 #           it at or above the armed ceiling and latches the cycle. The turn
-#           spawns nothing — the freeze is already on from the latch.
-#   turn 4  the post-trigger spawn attempt of (a).
-#   gate    once the rewrite is confirmed — the freeze is on, nothing is in
+#           spawns nothing.
+#   turn 4  the post-trigger spawn of (a), which the orchestrator may still make.
+#   gate    once the rewrite is confirmed — the wind-down restricts spawning, nothing is in
 #           flight and the successor does not exist yet — the driver opens this
 #           cycle's work-off gate, so exactly one of the remaining tasks becomes
 #           finishable and the rest, the stale one included, cannot be drained.
@@ -715,7 +716,7 @@ seed_fixture() {
 # Opens the work-off gate of cycle $1: the one task that cycle's successor is
 # able to finish. The flag is seeded shut and this rewrites its first line to
 # `open`, which is what the gated task reads. Called once per cycle, AFTER the
-# rewrite is confirmed — at that moment the freeze is on, the quiesce has
+# rewrite is confirmed — at that moment the wind-down restricts spawning, the quiesce has
 # emptied the flight and the successor session does not exist yet, so no
 # subagent can have taken the task before the gate was open, and none of the
 # earlier cycles could drain it. Cycle 1 needs no gate: T101 is finishable from
@@ -1488,9 +1489,10 @@ run_cycle() {
   fi
 
   # The file as it stands the moment the cycle latches: what the wind-down
-  # rewrite will be compared against for the carry-over criterion. Taken here
-  # because the freeze is on from the latch, so no new subagent can change it,
-  # and the plugin's own snapshot follows a few seconds later.
+  # rewrite will be compared against for the carry-over criterion. The one
+  # subagent the driver starts after the latch replies a single line and
+  # carries no task id, so nothing changes the file before the plugin's own
+  # snapshot.
   local pre_todo="$OUT_DIR/$PREFIX.cycle$CYCLE.pre-todo.md"
   local pre_path pre_ids
   pre_path=$(todo_path)
@@ -1512,18 +1514,24 @@ run_cycle() {
 
   post_prompt "Call spawn(\"$SPAWN_AGENT\", \"Reply with the single line: second subagent.\") exactly once. If the tool refuses, report the refusal text verbatim and end your turn immediately. Do not retry, do not call any other tool." \
     "$OUT_DIR/$PREFIX.cycle$CYCLE.turn4.json"
-  say "[$PREFIX] $tag turn 4 (post-trigger spawn attempt) done $(date +%H:%M:%S)"
+  say "[$PREFIX] $tag turn 4 (post-trigger spawn) done $(date +%H:%M:%S)"
 
-  # ---------- (a) the freeze ------------------------------------------------
+  # ---------- (a) the post-latch spawn --------------------------------------
 
-  local line_refused=0
-  if wait_for_pattern "spawn refused" "spawn refused: endless cycle in progress .*\"sessionID\":\"$SID\"" "$STEP_TIMEOUT_S" \
+  # Read past the trigger line only: the in-flight subagent of this cycle was
+  # spawned before it and carries the same agent.
+  local line_admitted=0 late_handle=""
+  local outer_from=$SLICE_FROM_LINE
+  SLICE_FROM_LINE=$line_scheduled
+  if wait_for_pattern "spawned" "spawned \\{\"handle\":\"$SPAWN_AGENT#[0-9]+\"" "$STEP_TIMEOUT_S" \
        "endless: wind-down confirmed"; then
-    line_refused=$WAIT_LINENO
-    record "$tag (a) freeze — the non-conforming post-trigger spawn was refused" 1 "$WAIT_LINE"
+    line_admitted=$WAIT_LINENO
+    late_handle=$(printf '%s' "$WAIT_LINE" | sed -E 's/.*"handle":"([^"]+)".*/\1/')
+    record "$tag (a) post-latch spawn — the post-trigger spawn was admitted" 1 "$WAIT_LINE"
   else
-    record "$tag (a) freeze — the non-conforming post-trigger spawn was refused" 0 "$WAIT_REASON"
+    record "$tag (a) post-latch spawn — the post-trigger spawn was admitted" 0 "$WAIT_REASON"
   fi
+  SLICE_FROM_LINE=$outer_from
 
   # ---------- (b) the quiesce -----------------------------------------------
 
@@ -1555,6 +1563,25 @@ run_cycle() {
     fi
   else
     record "$tag (b) quiesce — waited for the in-flight subagent" 0 "$WAIT_REASON"
+  fi
+
+  # The subagent started after the latch holds the quiesce as well: its
+  # completion notice stands before the quiesce line.
+  if [ "$line_admitted" -gt 0 ] && [ -n "$late_handle" ] && [ "$line_quiesced" -gt 0 ]; then
+    local late_done late_no
+    late_done=$(slice_match_from "$line_admitted" \
+      "notified primary of completion .*\"handle\":\"$late_handle\".*\"parentID\":\"$SID\"")
+    late_no=${late_done%%:*}
+    if [ -n "$late_done" ] && [ "$late_no" -lt "$line_quiesced" ]; then
+      record "$tag (a) post-latch spawn — the quiesce waited for it" 1 \
+        "completion notice for $late_handle (slice line $late_no) precedes the quiesce (slice line $line_quiesced)"
+    else
+      record "$tag (a) post-latch spawn — the quiesce waited for it" 0 \
+        "no completion notice for $late_handle before the quiesce (slice line $line_quiesced): ${late_done:-none}"
+    fi
+  else
+    record "$tag (a) post-latch spawn — the quiesce waited for it" 0 \
+      "not reachable: admitted=$line_admitted handle=${late_handle:-none} quiesced=$line_quiesced"
   fi
 
   # ---------- (c) the rewrite -----------------------------------------------
@@ -1650,7 +1677,7 @@ run_cycle() {
 
   # ---------- this cycle's work-off gate ------------------------------------
 
-  # Opened here and nowhere else: the rewrite is confirmed, the freeze is on,
+  # Opened here and nowhere else: the rewrite is confirmed, the wind-down restricts spawning,
   # the quiesce emptied the flight and the successor does not exist yet, so the
   # task behind this gate cannot have been taken by an earlier cycle. It is the
   # one task this cycle's work-off can finish; everything else in the file,
@@ -1803,16 +1830,16 @@ PY
 
   # ---------- the order -----------------------------------------------------
 
-  if printf '%s' "$line_scheduled $line_refused $line_quiesced $line_saved $line_cycle" | grep -q '\b0\b'; then
+  if printf '%s' "$line_scheduled $line_admitted $line_quiesced $line_saved $line_cycle" | grep -q '\b0\b'; then
     record "$tag order — the five cycle lines appear in the concept's order" 0 \
-      "not all five lines were found (slice lines: scheduled=$line_scheduled refused=$line_refused quiesced=$line_quiesced saved=$line_saved cycle=$line_cycle)"
-  elif [ "$line_scheduled" -lt "$line_refused" ] && [ "$line_refused" -lt "$line_quiesced" ] &&
+      "not all five lines were found (slice lines: scheduled=$line_scheduled admitted=$line_admitted quiesced=$line_quiesced saved=$line_saved cycle=$line_cycle)"
+  elif [ "$line_scheduled" -lt "$line_admitted" ] && [ "$line_admitted" -lt "$line_quiesced" ] &&
        [ "$line_quiesced" -lt "$line_saved" ] && [ "$line_saved" -lt "$line_cycle" ]; then
     record "$tag order — the five cycle lines appear in the concept's order" 1 \
-      "slice lines: scheduled=$line_scheduled < refused=$line_refused < quiesced=$line_quiesced < saved=$line_saved < cycle=$line_cycle"
+      "slice lines: scheduled=$line_scheduled < admitted=$line_admitted < quiesced=$line_quiesced < saved=$line_saved < cycle=$line_cycle"
   else
     record "$tag order — the five cycle lines appear in the concept's order" 0 \
-      "out of order — slice lines: scheduled=$line_scheduled refused=$line_refused quiesced=$line_quiesced saved=$line_saved cycle=$line_cycle"
+      "out of order — slice lines: scheduled=$line_scheduled admitted=$line_admitted quiesced=$line_quiesced saved=$line_saved cycle=$line_cycle"
   fi
 
   CYCLE_SAVED_IDS=$saved_ids

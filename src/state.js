@@ -162,17 +162,35 @@ export const handoffInProgress = new Set()
 // of pendingHandoffs, and marked by the same transform hook for the same
 // reason: prompting, aborting or replacing the active session from inside its
 // own hook is re-entrant and can hang, so the hook only MARKS and the
-// primary's next `session.idle` executes. From the moment the latch is set,
-// `spawn` refuses new subagents — a subagent started now would be reparented
-// onto a session that has no memory of asking for it. See
-// scheduleEndlessIfNeeded / claimPendingEndless in registry.js.
+// primary's next `session.idle` executes. The latch restricts nothing: the
+// orchestrator keeps spawning, aborting and reusing until the cycle claims its
+// wind-down (endlessWindingDown below). See scheduleEndlessIfNeeded /
+// claimPendingEndless in registry.js.
 export const pendingEndless = new Set()
 
 // sessionIDs with an endless cycle currently EXECUTING (between
 // claimPendingEndless and forgetPrimary on success / releaseEndless on
-// abandon). Guards against double execution by a second idle event, and holds
-// the spawn freeze for the whole cycle.
+// abandon). Guards against double execution by a second idle event. The first
+// stretch of an executing cycle is the quiesce wait, during which the
+// orchestrator still works normally.
 export const endlessInProgress = new Set()
+
+// sessionIDs whose executing endless cycle has CLAIMED its wind-down: the
+// quiesce predicate held — no subagent of the primary running and the primary
+// idle — and the cycle took it in the same synchronous step. From here until
+// the cycle ends, `spawn` admits the wind-down permit alone and `reuse`
+// refuses. A subset of endlessInProgress, released with it.
+export const endlessWindingDown = new Set()
+
+// sessionIDs of primaries holding an endless cycle (pending or executing) that
+// are inside a turn right now. Set when the latch is marked (the transform that
+// marks it runs inside a turn), on the primary's `session.status` busy/retry
+// events and on a parent notice posted into it (the post starts or feeds a
+// turn); cleared on its `session.idle` and `session.status` idle. The quiesce
+// predicate reads it: the wind-down may only be claimed while the primary is
+// idle. Kept for cycle-holding primaries only, so the set is bounded by the
+// latches and released with them.
+export const endlessPrimaryBusy = new Set()
 
 // sessionID -> wall-clock ms until which scheduleEndlessIfNeeded refuses to
 // schedule again. Set when a cycle abandons (quiesce timeout, save failure,
@@ -243,8 +261,8 @@ export const endlessProgress = { lastOpenIds: null, stalledCycles: 0 }
 //
 //   { token, agent, consumed, restores, childSessionID, settlement }
 //
-// The one window in which the endless spawn freeze admits a spawn. Armed
-// between the quiesce wait and the wind-down turn, consumed synchronously at
+// The one spawn a winding-down cycle admits. Armed between the wind-down
+// claim and the wind-down turn, consumed synchronously at
 // admission, given back at most once when the child never started, and
 // disarmed on every exit of the cycle — see armEndlessWindDown and its five
 // siblings in registry.js. Here rather than in registry.js for the same reason
@@ -426,6 +444,8 @@ export function resetState() {
   handoffRedirects.clear()
   pendingEndless.clear()
   endlessInProgress.clear()
+  endlessWindingDown.clear()
+  endlessPrimaryBusy.clear()
   endlessCooldowns.clear()
   pendingCompactions.clear()
   compactionInProgress.clear()

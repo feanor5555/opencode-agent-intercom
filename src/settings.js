@@ -29,7 +29,7 @@
 // anonymous tier. The value is a secret — it is never written to the debug log.
 //
 // Endless mode resolves the same way: `endlessMode`, `endlessContext`,
-// `endlessQuiesceTimeoutMs`, `endlessQuiesceExtensionMs` and `endlessMaxCycles`.
+// `endlessQuiesceTimeoutMs` and `endlessMaxCycles`.
 // While `endlessMode` is on and the mode has not paused itself for the session
 // in hand, `endlessContext` is the primary threshold in effect instead of
 // `maxPrimaryContext` — see `primaryContextThreshold`.
@@ -88,7 +88,7 @@
 //       "exaApiKey": "<key>", "forumBangs": ["!hn", "!lo"],
 //       "postNoticeRetries": N, "postNoticeRetryBackoffMs": N,
 //       "endlessMode": true|false, "endlessContext": N,
-//       "endlessQuiesceTimeoutMs": N, "endlessQuiesceExtensionMs": N, "endlessMaxCycles": N,
+//       "endlessQuiesceTimeoutMs": N, "endlessMaxCycles": N,
 //       "maxNestedSpawns": N,
 //       "midRunMessaging": true|false, "answerWaitMs": N,
 //       "maxMessageTokens": N,
@@ -343,15 +343,12 @@ const DEFAULT_POST_NOTICE_RETRY_BACKOFF_MS = 500
 // its own copy of both and test/settings-defaults-parity.test.js pins them.
 export const DEFAULT_ENDLESS_MODE = true
 export const DEFAULT_ENDLESS_CONTEXT = 250000
-// How long a cycle waits for the last subagent to finish before it abandons.
-// The inactivity watchdog (maxSubagentAgeMs) already resolves a HUNG subagent
-// in ~90 s, so this bound is for one that is genuinely working.
+// How long a cycle's quiesce wait may go on with none of the primary's own
+// subagents running before it abandons — the primary stays inside a turn, or a
+// spawn or delivery window or a handoff drain stays open. While a subagent of
+// the primary runs, the wait never abandons: the subagent watchdog reaps a
+// stuck one.
 const DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS = 600000
-// How long the quiesce window re-arms each time the primary's own subagents
-// are seen to advance (`lastActivityAt` moved). A subagent that stops emitting
-// freezes the signal and the cycle abandons at the next deadline; 0 switches
-// the extension off, so the first deadline abandons whatever the subagents do.
-const DEFAULT_ENDLESS_QUIESCE_EXTENSION_MS = 600000
 // How long a cycle's wind-down step gets: the primary's one shaped turn, the
 // `planner` it starts, that subagent reading files and rewriting the todo list,
 // and the settlement the cycle waits for afterwards. Minutes, not the 120 s a
@@ -472,7 +469,7 @@ function envStr(name, def) {
 // maxSubagentAgeMs, maxSubagentToolCallMs, searxngUrl, exaApiKey, forumBangs,
 // postNoticeRetries,
 // postNoticeRetryBackoffMs, endlessMode, endlessContext,
-// endlessQuiesceTimeoutMs, endlessQuiesceExtensionMs, endlessMaxCycles,
+// endlessQuiesceTimeoutMs, endlessMaxCycles,
 // maxNestedSpawns, showAgentcom }.
 // Cached for TTL_MS so the hot paths (spawn, every subagent transform) don't
 // stat the file constantly. searxngUrl is "" when unset (searxng disabled).
@@ -497,7 +494,8 @@ function envStr(name, def) {
 // the base delay between attempts (linear, with a small jitter). endlessMode
 // arms the self-restarting orchestrator loop and, while on, makes
 // endlessContext the primary threshold in effect; endlessQuiesceTimeoutMs
-// bounds a cycle's wait for the last subagent and endlessMaxCycles the maximum
+// bounds a cycle's quiesce wait once none of the primary's subagents runs, and
+// endlessMaxCycles the maximum
 // number of cycles one process runs; 0 disables the cycle ceiling.
 // maxNestedSpawns is how many subagents one subagent run may start; 0 disables
 // nesting.
@@ -568,10 +566,6 @@ export function getSettings() {
     endlessQuiesceTimeoutMs: envNum(
       "OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS",
       DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS,
-    ),
-    endlessQuiesceExtensionMs: envNum(
-      "OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_EXTENSION_MS",
-      DEFAULT_ENDLESS_QUIESCE_EXTENSION_MS,
     ),
     endlessWindDownTimeoutMs: envNum(
       "OPENCODE_AGENT_INTERCOM_ENDLESS_WIND_DOWN_TIMEOUT_MS",
@@ -705,9 +699,6 @@ export function getSettings() {
     }
     if (Number.isInteger(raw?.endlessQuiesceTimeoutMs) && raw.endlessQuiesceTimeoutMs >= 0) {
       resolved.endlessQuiesceTimeoutMs = raw.endlessQuiesceTimeoutMs
-    }
-    if (Number.isInteger(raw?.endlessQuiesceExtensionMs) && raw.endlessQuiesceExtensionMs >= 0) {
-      resolved.endlessQuiesceExtensionMs = raw.endlessQuiesceExtensionMs
     }
     if (Number.isInteger(raw?.endlessWindDownTimeoutMs) && raw.endlessWindDownTimeoutMs >= 0) {
       resolved.endlessWindDownTimeoutMs = raw.endlessWindDownTimeoutMs

@@ -9,7 +9,7 @@
 // the same per-type budget.
 //
 // The gate half drives the real plugin factory with a mock client, the way
-// test/endless-spawn-freeze.test.js does. Sizes are built relative to the live
+// test/endless-spawn-after-latch.test.js does. Sizes are built relative to the live
 // project snapshot (`packageOf`), so the assertions sit exactly on the bars
 // rather than near them.
 //

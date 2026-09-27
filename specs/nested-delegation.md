@@ -112,23 +112,25 @@ role may not delegate; the named target is not one the caller's own set contains
 the table does not know answers the empty set, so every target is refused); the prompt
 carries a `T<n>:` prefix, which is refused because the child's `DONE: T<n>` would tick a
 TODO entry the orchestrator is still tracking against the caller — plus the per-run quota
-and the endless-mode freeze. The gates every spawn passes apply too: the agent-type gate,
+and the endless-mode wind-down gate. The gates every spawn passes apply too: the agent-type gate,
 the task-permission gate and the package gate. Refusals are returned and never thrown: a
 throw is what small models retry into a loop. Each names what IS available and tells the
 caller to do the rest itself and to open its final reply with `Blocked:` where the
 missing material stops the task.
 
-The endless freeze is worth naming separately, because its answer differs by caller. From
-the moment an endless cycle latches until it ends, no new subagent starts: a run that
-spawns as fast as its subagents finish would never let the cycle reach quiesce, and a
-subagent started now would be reparented onto a session that has no memory of asking for
-it. The question is asked of the caller's ROOT primary, because the latch holds primary
-session ids only and a nested caller asking about its own id would be told "not frozen"
-and spawn straight through. A primary gets the throw the endless-mode contract names — end
-your turn, the work belongs in your open points. A nested caller gets a returned refusal
-instead: it has no open points, will not be asked for any, and cannot end its turn in the
-sense meant, so it is told that this delegation will not start and to finish from what it
-has.
+The endless wind-down gate is worth naming separately, because its answer differs by
+caller. The latch and the quiesce wait restrict nothing; from the moment the cycle claims
+its wind-down — none of the primary's subagents running and the primary idle
+(`claimEndlessWindDown`, `src/registry.js`) — until the cycle ends, no new subagent starts
+except the cycle's own permitted wind-down spawn, because a subagent started now would be
+reparented onto a session that has no memory of asking for it. The question is asked of
+the caller's ROOT primary (`isEndlessWindingDown(rootPrimaryFor(...))`, `src/tools.js`),
+because the wind-down set holds primary session ids only and a nested caller asking about
+its own id would be told "not winding down" and spawn straight through. A primary gets the
+throw the endless-mode contract names — the hand-over has begun, put the work into the
+hand-over. A nested caller gets a returned refusal instead: it takes no part in the
+hand-over, so it is told that this delegation will not start, to do what it can itself,
+and to open its final reply with `Blocked:` where the missing material stops the task.
 
 **(ii) A rendered ending.** The child's outcome, as text the caller can act on. Every
 ending renders — `completed`, `error`, `aborted`, `timeout`, `expired`, `ended`,

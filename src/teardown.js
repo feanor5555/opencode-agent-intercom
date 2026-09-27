@@ -18,6 +18,7 @@ import {
   registryMutex,
   reservePendingDelivery,
   releasePendingDelivery,
+  noteEndlessPrimaryBusy,
 } from "./registry.js"
 import {
   showToast,
@@ -227,6 +228,13 @@ export async function postParentNotice(
   // warning, the retention-drop notice and a subagent's `ask` — so all five are
   // covered by being here. `kind` is what names them apart in the journal and
   // in the log.
+  //
+  // The notice starts a turn in the target or is drained into the one running,
+  // so the target is marked busy BEFORE the post: an endless cycle's quiesce
+  // predicate cannot read it idle between the post and the `session.status`
+  // busy event of that turn, and the turn's own idle, which necessarily follows
+  // the post, clears the mark. A no-op for a target holding no endless cycle.
+  noteEndlessPrimaryBusy(routed.target)
   await deliverParentNotice(client, routed.target, notice, {
     kind,
     requestedFor: parentID,

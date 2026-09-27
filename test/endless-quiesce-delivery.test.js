@@ -12,7 +12,7 @@
 // points. `pendingDeliveries` is what closes that window.
 //
 // Drives the real plugin factory with a mock client, the way
-// test/endless-spawn-freeze.test.js does; the notice post is held open on a
+// test/endless-spawn-after-latch.test.js does; the notice post is held open on a
 // gate so the assertion can be taken exactly inside the window.
 //
 // Run: node --test --test-timeout=5000 test/endless-quiesce-delivery.test.js

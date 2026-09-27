@@ -22,7 +22,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import plugin from "../src/index.js"
-import { resetState, primarySessions } from "../src/state.js"
+import { resetState, primarySessions, endlessWindingDown } from "../src/state.js"
 import {
   entryForSession,
   upsertSession,
@@ -32,7 +32,8 @@ import {
   rootPrimaryFor,
   spawnCapDecision,
   countActiveSubagents,
-  isEndlessFrozen,
+  isEndlessWindingDown,
+  claimPendingEndless,
   markEndlessPending,
 } from "../src/registry.js"
 import { resetTurnNotices } from "../src/hooks.js"
@@ -457,27 +458,31 @@ test("rootPrimaryFor terminates on a parentID cycle", () => {
   assert.ok(["ses_a", "ses_b"].includes(rootPrimaryFor("ses_a")), "returns rather than spinning")
 })
 
-test("the endless spawn freeze reaches a subagent through its root primary", () => {
+test("the endless wind-down restriction reaches a subagent through its root primary", () => {
   upsertSession("ses_child", { agent: "planner", prompt: "p", parentID: PRIMARY })
   upsertSession("ses_grandchild", { agent: "researcher", prompt: "r", parentID: "ses_child" })
   markEndlessPending(PRIMARY)
+  claimPendingEndless(PRIMARY)
+  endlessWindingDown.add(PRIMARY)
 
-  assert.equal(isEndlessFrozen(PRIMARY), true)
-  assert.equal(isEndlessFrozen("ses_child"), false, "the latch sets hold primary ids only")
+  assert.equal(isEndlessWindingDown(PRIMARY), true)
+  assert.equal(isEndlessWindingDown("ses_child"), false, "the sets hold primary ids only")
   assert.equal(
-    isEndlessFrozen(rootPrimaryFor("ses_child")),
+    isEndlessWindingDown(rootPrimaryFor("ses_child")),
     true,
     "which is why the gate asks about the root, not the caller",
   )
-  assert.equal(isEndlessFrozen(rootPrimaryFor("ses_grandchild")), true)
+  assert.equal(isEndlessWindingDown(rootPrimaryFor("ses_grandchild")), true)
 })
 
-test("the spawn tool throws the freeze refusal for a frozen primary, unchanged", async () => {
+test("the spawn tool throws the wind-down refusal for a winding-down primary", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   markEndlessPending(PRIMARY)
+  claimPendingEndless(PRIMARY)
+  endlessWindingDown.add(PRIMARY)
   const res = await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
-  assert.match(res.output ?? "", /No new subagent will start/)
+  assert.match(res.output ?? "", /no further subagent starts in this session/)
   assert.equal(created.length, 0)
 })
 

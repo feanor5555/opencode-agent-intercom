@@ -1,7 +1,6 @@
 // The three ways an endless latch used to stick, and the quiesce wait it held
-// open. The latch IS the spawn freeze (isEndlessFrozen, src/registry.js), so a
-// latch nobody clears is an orchestrator that stays alive and can never spawn
-// again for the life of the process.
+// open. A latch nobody clears is a cycle that never runs and blocks every later
+// one for that primary (markEndlessPending refuses while one stands).
 //
 //   1. `session.error` on the primary. Every clearing path — claim, cancel,
 //      forgetPrimary — used to run on that primary's own `session.idle` only,
@@ -11,10 +10,10 @@
 //      runEndlessCycle's abandon discipline and under a detached call.
 //   3. The quiesce wait, which counted subagents process-wide: a retired
 //      primary waited on the subagents of the successor its own earlier cycle
-//      had created, with the freeze held for the whole wait.
+//      had created.
 //
 // Driven through the real plugin factory with a mock client, the way
-// test/endless-spawn-freeze.test.js does.
+// test/endless-spawn-after-latch.test.js does.
 //
 // Run: node --test --test-timeout=5000 test/endless-latch-release.test.js
 
@@ -31,7 +30,7 @@ import {
   hasEndlessPending,
   claimPendingEndless,
   isEndlessInProgress,
-  isEndlessFrozen,
+  hasEndlessCycle,
   isQuiesced,
   countActiveSubagents,
   countActiveSubagentsFor,
@@ -110,12 +109,12 @@ test("session.error on the latched primary drops the latch and spawning works ag
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   markEndlessPending(PRIMARY)
-  assert.equal(isEndlessFrozen(PRIMARY), true)
+  assert.equal(hasEndlessCycle(PRIMARY), true)
 
   await hooks.event({ event: { type: "session.error", properties: { sessionID: PRIMARY } } })
 
   assert.equal(hasEndlessPending(PRIMARY), false, "the latch is gone")
-  assert.equal(isEndlessFrozen(PRIMARY), false, "and with it the spawn freeze")
+  assert.equal(hasEndlessCycle(PRIMARY), false, "and with it the cycle")
 
   const res = await hooks.tool.spawn.execute({ agent: "researcher", prompt: "do x" }, toolCtx)
   assert.doesNotMatch(res.output, /^spawn failed: /)
@@ -134,7 +133,7 @@ test("session.error does not cut into a cycle that has already claimed the latch
   await hooks.event({ event: { type: "session.error", properties: { sessionID: PRIMARY } } })
 
   assert.equal(isEndlessInProgress(PRIMARY), true, "the running cycle is untouched")
-  assert.equal(isEndlessFrozen(PRIMARY), true, "so the freeze it owns still holds")
+  assert.equal(hasEndlessCycle(PRIMARY), true, "so the cycle still stands")
 })
 
 test("a subagent's session.error leaves its primary's latch standing", async () => {
@@ -165,7 +164,7 @@ test("session.error with no endless latch changes nothing", async () => {
 // 2. A rejection before the claim releases the latch
 // ---------------------------------------------------------------------------
 
-test("a pre-claim rejection drops the latch instead of freezing spawn for good", async () => {
+test("a pre-claim rejection drops the latch instead of leaving it standing for good", async () => {
   const { ctx, created, state } = makeCtx()
   const hooks = await plugin(ctx)
   // Force handoffAgentName past its cheap rung: a name other than the plugin's
@@ -179,7 +178,7 @@ test("a pre-claim rejection drops the latch instead of freezing spawn for good",
 
   assert.equal(res, null, "no cycle started")
   assert.equal(hasEndlessPending(PRIMARY), false, "the latch is dropped")
-  assert.equal(isEndlessFrozen(PRIMARY), false, "the freeze lifts with it")
+  assert.equal(hasEndlessCycle(PRIMARY), false, "no cycle is left standing")
   assert.deepEqual(created, [], "the primary is not replaced")
 
   state.hostileConfig = false
@@ -201,7 +200,7 @@ test("the idle event's detached call survives the same rejection", async () => {
   // The endless call is detached from the handler; let its microtasks run.
   await new Promise((resolve) => setTimeout(resolve, 10))
 
-  assert.equal(hasEndlessPending(PRIMARY), false, "the freeze does not outlive the failed start")
+  assert.equal(hasEndlessPending(PRIMARY), false, "the latch does not outlive the failed start")
   assert.deepEqual(created, [], "nothing was created on the way")
 })
 
@@ -224,7 +223,7 @@ test("dropEndlessLatch reports what it did and refuses a claimed cycle", async (
 test("a foreign primary's subagent does not hold this primary's quiesce", async () => {
   // The observed failure: an old primary re-armed while the successor its own
   // earlier cycle created was spawning, and waited 72 s on that successor's
-  // subagent with the freeze on.
+  // subagent.
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute(

@@ -35,7 +35,12 @@ import {
   hasHandoffPending,
   isHandoffInProgress,
   isEndlessInProgress,
-  isEndlessFrozen,
+  hasEndlessCycle,
+  isEndlessWindingDown,
+  claimEndlessWindDown,
+  noteEndlessPrimaryBusy,
+  noteEndlessPrimaryIdle,
+  isEndlessPrimaryBusy,
   setEndlessCooldown,
   endlessCooldownActive,
   isQuiesced,
@@ -113,19 +118,25 @@ test("releaseEndless clears the in-progress latch without restoring the pending 
   )
 })
 
-test("forgetPrimary drops the retired primary's latch, freeze and cooldown", () => {
+test("forgetPrimary drops the retired primary's latch, wind-down claim, busy mark and cooldown", async () => {
   markEndlessPending(SID)
   claimPendingEndless(SID)
+  noteEndlessPrimaryIdle(SID)
+  assert.equal(await claimEndlessWindDown(SID), true)
+  noteEndlessPrimaryBusy(SID)
   setEndlessCooldown(SID)
   forgetPrimary(SID)
-  assert.equal(isEndlessFrozen(SID), false)
+  assert.equal(hasEndlessCycle(SID), false)
+  assert.equal(isEndlessWindingDown(SID), false)
+  assert.equal(isEndlessPrimaryBusy(SID), false)
   assert.equal(endlessCooldownActive(SID), false)
 })
 
 test("cancelPendingEndless drops an unclaimed latch but never an executing cycle", () => {
   markEndlessPending(SID)
   assert.equal(cancelPendingEndless(SID), true)
-  assert.equal(isEndlessFrozen(SID), false)
+  assert.equal(hasEndlessCycle(SID), false)
+  assert.equal(isEndlessPrimaryBusy(SID), false, "the busy mark goes with the dropped latch")
 
   markEndlessPending(SID)
   claimPendingEndless(SID)
@@ -158,17 +169,65 @@ test("the two latches cannot both stand: cancelling the plain one leaves only th
 })
 
 // ---------------------------------------------------------------------------
-// The spawn freeze predicate
+// The cycle predicates and the wind-down claim
 // ---------------------------------------------------------------------------
 
-test("isEndlessFrozen: true from the mark, through the claim, until the release", () => {
-  assert.equal(isEndlessFrozen(SID), false)
+test("hasEndlessCycle: true from the mark, through the claim, until the release", () => {
+  assert.equal(hasEndlessCycle(SID), false)
   markEndlessPending(SID)
-  assert.equal(isEndlessFrozen(SID), true, "frozen from the latch, before the cycle starts")
+  assert.equal(hasEndlessCycle(SID), true, "from the latch, before the cycle starts")
   claimPendingEndless(SID)
-  assert.equal(isEndlessFrozen(SID), true, "still frozen while the cycle runs")
+  assert.equal(hasEndlessCycle(SID), true, "while the cycle runs")
   releaseEndless(SID)
-  assert.equal(isEndlessFrozen(SID), false, "the release lifts the freeze")
+  assert.equal(hasEndlessCycle(SID), false, "the release ends it")
+})
+
+test("isEndlessWindingDown: false through the latch and the quiesce wait, true from the claim until the release", async () => {
+  markEndlessPending(SID)
+  assert.equal(isEndlessWindingDown(SID), false, "the latch restricts nothing")
+  claimPendingEndless(SID)
+  assert.equal(isEndlessWindingDown(SID), false, "the quiesce wait restricts nothing")
+  noteEndlessPrimaryIdle(SID)
+  assert.equal(await claimEndlessWindDown(SID), true)
+  assert.equal(isEndlessWindingDown(SID), true, "the claim restricts")
+  releaseEndless(SID)
+  assert.equal(isEndlessWindingDown(SID), false, "the release lifts it")
+})
+
+test("the mark leaves the primary busy: the transform that marks runs inside its turn", () => {
+  markEndlessPending(SID)
+  assert.equal(isEndlessPrimaryBusy(SID), true)
+  noteEndlessPrimaryIdle(SID)
+  assert.equal(isEndlessPrimaryBusy(SID), false)
+})
+
+test("the busy mark is kept only for a primary holding a cycle", () => {
+  assert.equal(noteEndlessPrimaryBusy(SID), false)
+  assert.equal(isEndlessPrimaryBusy(SID), false)
+})
+
+test("claimEndlessWindDown: only an executing cycle claims, and only while quiesced", async () => {
+  markEndlessPending(SID)
+  noteEndlessPrimaryIdle(SID)
+  assert.equal(await claimEndlessWindDown(SID), false, "a pending latch is not an executing cycle")
+  claimPendingEndless(SID)
+
+  upsertSession("ses_sub_running", { agent: "coder", parentID: SID })
+  assert.equal(await claimEndlessWindDown(SID), false, "a subagent of the primary runs")
+  assert.equal(isEndlessWindingDown(SID), false)
+})
+
+test("claimEndlessWindDown: a primary inside a turn is not quiesced even with no subagent", async () => {
+  markEndlessPending(SID)
+  claimPendingEndless(SID)
+  assert.equal(isEndlessPrimaryBusy(SID), true)
+  assert.equal(await isQuiesced(SID), false)
+  assert.equal(await claimEndlessWindDown(SID), false)
+  noteEndlessPrimaryIdle(SID)
+  assert.equal(await claimEndlessWindDown(SID), true, "no subagent and the primary idle: claimed")
+  assert.equal(isEndlessWindingDown(SID), true)
+  releaseEndless(SID)
+  assert.equal(isEndlessWindingDown(SID), false, "the release lifts the restriction")
 })
 
 // ---------------------------------------------------------------------------

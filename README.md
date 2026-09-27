@@ -668,8 +668,10 @@ exposes every runtime knob:
   is cleared by switching the row off and on again. A fourth state
   `[restarting]` stands while a cycle is pending or running for the
   current session, with its step on the line beneath: `waiting for the
-  turn to end`, `waiting for subagents (N running)`, `saving open
-  points`, `starting fresh session`. It goes when the successor has
+  turn to end`, `waiting for subagents (N running)` — the whole wait,
+  through which the orchestrator keeps working, until none of its
+  subagents runs and its turn has ended — `saving open points`,
+  `starting fresh session`. It goes when the successor has
   taken over or the cycle is abandoned (the row reads `[on]` again) or
   the mode stops itself (`[paused]`). The plugin publishes the step to
   `~/.cache/opencode-agent-intercom/endless-cycles.json`
@@ -918,8 +920,7 @@ is environment-variable-driven:
 | `POLLINATIONS_TOKEN` | — | If set, the `gen` Pollinations fallback uses your account |
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_MODE` | on | `"1"` arms endless mode — replaces the orchestrator when its context reaches `endlessContext`, after a permitted `planner` subagent has rewritten the project's todo file. `"0"` switches it off. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT` | `250000` | Orchestrator context threshold (tokens) while endless mode is on. Displaces the plain handoff threshold. `"0"` disables. TUI file overrides. |
-| `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS` | `600000` | How long (ms) one endless cycle waits for the last subagent to finish before abandoning. |
-| `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_EXTENSION_MS` | `600000` | How long (ms) the quiesce window re-arms each time the primary's subagents are seen to advance. `"0"` switches the extension off: the first deadline abandons. |
+| `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS` | `600000` | How long (ms) one endless cycle's quiesce wait may go on with none of the orchestrator's subagents running before it abandons — the orchestrator stays inside a turn, or a spawn or delivery window stays open. While a subagent of the orchestrator runs, the wait never abandons. |
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_WIND_DOWN_TIMEOUT_MS` | `900000` | How long (ms) the cycle waits for the permitted wind-down subagent to rewrite the todo file before abandoning. Not shown in the sidebar. |
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_MAX_CYCLES` | `10` | Cycle ceiling per opencode process. At the ceiling endless mode writes itself off. `"0"` arms no ceiling. |
 | `OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM` | on | `"0"` hides the plugin's own postings — subagent notices, handoff kickoff, doc-summary prompts — from the transcript. Their text still reaches the model unchanged. `"1"` shows them. TUI file overrides. |
@@ -943,20 +944,20 @@ sidebar context counter starts at zero for the fresh session.
 A cycle runs in this order:
 
 1. **Trigger.** The orchestrator's turn-end hook sees the context cross
-   `endlessContext` and sets a pending latch. `spawn` then refuses new
-   subagents from that orchestrator until the cycle ends, so an orchestrator
-   that spawns as fast as its subagents finish can never starve the cycle.
-2. **Quiesce.** On the orchestrator's `session.idle`, the cycle waits for every
-   running subagent in the process to finish, bounded by
+   `endlessContext` and sets a pending latch. The latch restricts nothing: the
+   orchestrator keeps spawning, aborting and reusing as usual.
+2. **Quiesce.** On the orchestrator's `session.idle`, the cycle waits until
+   none of that orchestrator's own subagents is running — those it spawned
+   after the latch included — and the orchestrator is idle between turns. The
+   wait never abandons while one of its subagents runs; a stuck one is reaped
+   by the subagent watchdog, and the orchestrator can abort it. Only a wait in
+   which none runs and the orchestrator still does not go idle abandons, after
    `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS` (default 10 minutes).
-   While the primary's subagents are seen to advance, the window re-arms at
-   `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_EXTENSION_MS` (default 10 minutes
-   per advancing poll). A window that ends with no progress abandons the cycle
-   rather than aborting a working subagent — killing real work to save context
-   is the loss the mode exists to prevent.
+   The moment both hold, the cycle claims the wind-down; from then on `spawn`
+   admits only the wind-down permit below, and `reuse` refuses.
 3. **Wind-down.** The orchestrator is asked to spawn a single `planner`
-   subagent through a one-time permit — the sole exception to the spawn
-   freeze. That subagent is handed the orchestrator's open work and rewrites
+   subagent through a one-time permit — the one spawn a winding-down cycle
+   admits. That subagent is handed the orchestrator's open work and rewrites
    the project's todo file (`TODO.md` / `todos.md`) itself with the todo
    tools, inside a machine-owned `## Intercom tasks` section the plugin fences
    off. The orchestrator has no file-writing tool of its own (`PRIMARY_TOOLS`
@@ -1012,8 +1013,8 @@ available again.
   already-over-threshold turn cannot retry on its next message; the cooldown
   lifts on its own.
 - **The switch.** Turning the toggle off in the sidebar (or
-  `OPENCODE_AGENT_INTERCOM_ENDLESS_MODE=0`) drops the latch and the freeze at
-  the next settings read; a cycle that has already armed the wind-down permit
+  `OPENCODE_AGENT_INTERCOM_ENDLESS_MODE=0`) drops a latch that has not been
+  claimed yet at the next settings read; a cycle that has already armed the wind-down permit
   still runs through to its confirm or its abandon, because the permitted
   subagent may already be rewriting the file and the cycle must not leave the
   orchestrator half-replaced. The switch-off takes effect from the next

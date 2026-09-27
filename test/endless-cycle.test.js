@@ -95,8 +95,8 @@ function baseIo(overrides = {}) {
     setCooldown: () => setEndlessCooldown(primarySessionID),
     dropRetained: async () => log.push("dropRetained"),
     countActive: () => 0,
-    isQuiesced: async () => {
-      log.push("isQuiesced")
+    claimWindDown: async () => {
+      log.push("claimWindDown")
       return true
     },
     prepare: () => {
@@ -184,10 +184,10 @@ test("a confirmed wind-down replaces the primary and records the ids", async () 
   assert.match(completion, /\"sessionID\":\"ses-endless-cycle\"/)
 })
 
-test("the drop runs before the quiesce wait", async () => {
+test("the drop runs after the wind-down claim, so a subagent retained during the wait goes too", async () => {
   const io = baseIo()
   await runEndlessCycle(io)
-  assert.deepEqual(io._log.slice(0, 2), ["dropRetained", "isQuiesced"])
+  assert.deepEqual(io._log.slice(0, 2), ["claimWindDown", "dropRetained"])
 })
 
 test("a second idle event does not claim an already-claimed cycle", async () => {
@@ -201,66 +201,90 @@ test("a second idle event does not claim an already-claimed cycle", async () => 
 // Quiesce
 // ---------------------------------------------------------------------------
 
-test("a quiesce timeout abandons and arms the cooldown", async () => {
+test("with no subagent running, a quiesce that never comes abandons and arms the cooldown", async () => {
   let clock = 0
   const io = baseIo({
-    isQuiesced: async () => false,
+    claimWindDown: async () => false,
+    countActive: () => 0,
     sleep: async (ms) => {
       clock += ms
     },
     now: () => clock,
     quiesceTimeoutMs: 1000,
-    quiesceExtensionMs: 0,
   })
   const res = await runEndlessCycle(io)
   assert.equal(res.outcome, "abandoned")
   assert.equal(res.stage, "quiesce")
+  assert.match(res.reason, /no subagent running, but not quiesced after \d+ms/)
   assert.equal(endlessCooldownActive(SID), true)
   assert.ok(!io._log.includes("performHandoff"))
   assert.ok(io._log.includes("disarm"))
 })
 
-test("the quiesce window re-arms while progressSignal advances and the cycle completes", async () => {
-  // isQuiesced stays false past the BASE window; the signal moves on every
-  // poll, so each poll re-arms the extension and the wait runs on until the
-  // mock declares quiesce at t=3000 — well past quiesceTimeoutMs=1000.
+test("the quiesce never abandons while a subagent of the primary runs, however long", async () => {
+  // One subagent runs for 20 windows of quiesceTimeoutMs with no sign of life
+  // the cycle could read; the wait holds, and the wind-down is claimed at the
+  // first poll after it is gone.
   let clock = 0
   const io = baseIo({
-    isQuiesced: async () => clock >= 3000,
-    progressSignal: () => clock,
+    countActive: () => (clock < 20_000 ? 1 : 0),
+    claimWindDown: async () => clock >= 20_000,
     sleep: async (ms) => {
       clock += ms
     },
     now: () => clock,
     quiesceTimeoutMs: 1000,
-    quiesceExtensionMs: 1000,
   })
   const res = await runEndlessCycle(io)
   assert.equal(res.outcome, "complete")
   assert.ok(io._log.includes("performHandoff"))
 })
 
-test("a frozen progressSignal abandons at the extension deadline with `no progress`", async () => {
-  // The signal moves once (a live subagent), then stands still: the re-armed
-  // window runs out and the cycle abandons at t=1500 — past the 1000 ms base,
-  // at the extension deadline. The one hung entry under a switched-off
-  // watchdog is exactly this shape.
+test("a subagent spawned during the wait holds the quiesce until it is gone too", async () => {
+  // The first subagent ends at t=2000; the orchestrator spawned a second one at
+  // t=1500, which runs until t=6000. The claim is taken only then, and the
+  // wind-down turn only after it.
   let clock = 0
+  const running = () => (clock < 2000 ? 1 : 0) + (clock >= 1500 && clock < 6000 ? 1 : 0)
+  let claimedAt = null
   const io = baseIo({
-    isQuiesced: async () => false,
-    progressSignal: () => (clock >= 500 ? 500 : 0),
+    countActive: running,
+    claimWindDown: async () => {
+      if (running() > 0) return false
+      claimedAt = clock
+      return true
+    },
+    windDownTurn: async () => {
+      io._log.push(`windDownTurn@${clock}`)
+      return "## WIND-DOWN DONE — 2 open"
+    },
     sleep: async (ms) => {
       clock += ms
     },
     now: () => clock,
     quiesceTimeoutMs: 1000,
-    quiesceExtensionMs: 1000,
   })
   const res = await runEndlessCycle(io)
-  assert.equal(res.outcome, "abandoned")
-  assert.equal(res.stage, "quiesce")
-  assert.match(res.reason, /still busy after \d+ms with no progress/)
-  assert.ok(!io._log.includes("performHandoff"))
+  assert.equal(res.outcome, "complete")
+  assert.equal(claimedAt, 6000)
+  assert.ok(io._log.includes("windDownTurn@6000"))
+})
+
+test("after the last subagent is gone, a primary still in its turn has the window to go idle", async () => {
+  // The last poll that sees a subagent is t=500; the primary's turn ends at
+  // t=1400, inside the 1000 ms window counted from that poll.
+  let clock = 0
+  const io = baseIo({
+    countActive: () => (clock < 1000 ? 1 : 0),
+    claimWindDown: async () => clock >= 1400,
+    sleep: async (ms) => {
+      clock += ms
+    },
+    now: () => clock,
+    quiesceTimeoutMs: 1000,
+  })
+  const res = await runEndlessCycle(io)
+  assert.equal(res.outcome, "complete")
 })
 
 // ---------------------------------------------------------------------------

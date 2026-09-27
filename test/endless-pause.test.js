@@ -144,7 +144,7 @@ function makeCycle({
     claim: () => claimPendingEndless(SID),
     release: () => releaseEndless(SID),
     setCooldown: () => setEndlessCooldown(SID),
-    isQuiesced: async () => true,
+    claimWindDown: async () => true,
     countActive: () => 0,
     dropRetained: async () => {},
     prepare: () => ({
@@ -318,7 +318,7 @@ test("an abandoned cycle neither writes nor pauses — it arms the cooldown", as
   const fixture = settingsFixture()
   const { io } = makeCycle({
     overrides: {
-      isQuiesced: async () => false,
+      claimWindDown: async () => false,
       quiesceTimeoutMs: 0,
     },
   })

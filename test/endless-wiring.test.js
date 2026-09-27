@@ -124,7 +124,7 @@ test("the mode switched off drops the latched cycle instead of running it", asyn
   assert.equal(
     hasEndlessPending(SID),
     false,
-    "the latch is cleared, so the freeze lifts and spawn works again",
+    "the latch is cleared",
   )
 })
 
@@ -136,7 +136,7 @@ test("solo mode drops the latched cycle: it may start no subagent of its own", a
   settings({ agentMode: "solo", endlessMode: true })
   markEndlessPending(SID)
   assert.equal(await maybeRunPendingEndless(noClient, SID), null)
-  assert.equal(hasEndlessPending(SID), false, "the latch is cleared, so the freeze lifts")
+  assert.equal(hasEndlessPending(SID), false, "the latch is cleared")
 })
 
 test("a cycle already executing is not stopped by the switch", async () => {
@@ -186,7 +186,7 @@ test("the switch turned off between two turns drops the endless latch and hands 
   settings({ endlessMode: false, endlessContext: 1, maxPrimaryContext: 1 })
   await primaryTurn(hooks, 5000)
 
-  assert.equal(hasEndlessPending(SID), false, "the freeze lifts with the latch")
+  assert.equal(hasEndlessPending(SID), false, "the latch is dropped")
   assert.equal(hasHandoffPending(SID), true, "the plain handoff owns the threshold again")
 })
 
@@ -242,10 +242,11 @@ test("a primary's session.idle event reaches maybeRunPendingEndless", async () =
   assert.deepEqual(created, [], "no replacement session was created")
 })
 
-test("endlessQuiesceTimeoutMs reaches the cycle: a busy process abandons at quiesce", async () => {
+test("endlessQuiesceTimeoutMs reaches the cycle: no subagent running and still not quiesced abandons", async () => {
   // The one settings value the cycle spends before it touches anything. At 0
   // the very first poll is already over the bound, so a reserved-but-unentered
-  // spawn slot — which counts as running — abandons the cycle immediately.
+  // spawn slot — no subagent of this primary, yet no quiesce — abandons the
+  // cycle immediately.
   settings({ endlessMode: true, endlessQuiesceTimeoutMs: 0 })
   const { ctx, created, toasts } = makeCtx()
   markEndlessPending(SID)
@@ -255,9 +256,9 @@ test("endlessQuiesceTimeoutMs reaches the cycle: a busy process abandons at quie
 
   assert.equal(res.outcome, "abandoned")
   assert.equal(res.stage, "quiesce")
-  assert.match(res.reason, /still busy after \d+ms with no progress/)
+  assert.match(res.reason, /no subagent running, but not quiesced after \d+ms/)
   assert.deepEqual(created, [], "the primary is not replaced")
-  assert.equal(hasEndlessPending(SID), false, "the latch is released, so the freeze lifts")
+  assert.equal(hasEndlessPending(SID), false, "the latch is released")
   assert.equal(endlessCooldownActive(SID), true, "an abandoned cycle arms the cooldown")
   assert.match(toasts.at(-1).body.message, /cycle abandoned at quiesce/)
 })
@@ -344,8 +345,8 @@ test("the plain handoff a paused primary arms does not lift the pause", async ()
 })
 
 test("a paused primary drops an unclaimed endless latch on its next turn", async () => {
-  // The latch can only be one set before the stop landed. It has to go, or the
-  // spawn freeze holds on a session that will never run the cycle.
+  // The latch can only be one set before the stop landed. It has to go, or it
+  // stands on a session that will never run the cycle.
   settings({ endlessMode: true, endlessContext: 250000, maxPrimaryContext: 80000 })
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
@@ -354,7 +355,7 @@ test("a paused primary drops an unclaimed endless latch on its next turn", async
 
   await primaryTurn(hooks, 100000)
 
-  assert.equal(hasEndlessPending(SID), false, "the freeze lifts with the latch")
+  assert.equal(hasEndlessPending(SID), false, "the latch is dropped")
   assert.equal(hasHandoffPending(SID), true)
 })
 
@@ -406,7 +407,7 @@ test("a paused primary that still carries a latch has it dropped on the idle sid
   pauseEndless(SID, "no open points left — paused for this session")
 
   assert.equal(await maybeRunPendingEndless(noClient, SID), null)
-  assert.equal(hasEndlessPending(SID), false, "the latch is dropped, so the freeze lifts")
+  assert.equal(hasEndlessPending(SID), false, "the latch is dropped")
 })
 
 test("the user switching the mode off clears the pause and hands the threshold back", async () => {

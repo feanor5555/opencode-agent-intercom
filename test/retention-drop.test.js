@@ -247,8 +247,8 @@ function cycleIo(overrides = {}) {
     release: () => releaseEndless(SID),
     setCooldown: () => setEndlessCooldown(SID),
     dropRetained: async () => log.push("dropRetained"),
-    isQuiesced: async () => {
-      log.push("isQuiesced")
+    claimWindDown: async () => {
+      log.push("claimWindDown")
       return true
     },
     prepare: () => {
@@ -283,18 +283,18 @@ function cycleIo(overrides = {}) {
   }
 }
 
-test("the endless cycle drops the retained subagents before the quiesce wait", async () => {
+test("the endless cycle drops the retained subagents right after the wind-down claim", async () => {
   const io = cycleIo()
   const res = await runEndlessCycle(io)
 
   assert.equal(res.outcome, "complete")
-  assert.deepEqual(io._log.slice(0, 2), ["dropRetained", "isQuiesced"])
+  assert.deepEqual(io._log.slice(0, 3), ["claimWindDown", "dropRetained", "prepare"])
 })
 
-test("an abandoned quiesce wait has already paid the drop", async () => {
+test("an abandoned quiesce wait drops nothing: the orchestrator keeps its retained subagents", async () => {
   let clock = 0
   const io = cycleIo({
-    isQuiesced: async () => false,
+    claimWindDown: async () => false,
     sleep: async (ms) => {
       clock += ms
     },
@@ -305,7 +305,7 @@ test("an abandoned quiesce wait has already paid the drop", async () => {
 
   assert.equal(res.outcome, "abandoned")
   assert.equal(res.stage, "quiesce")
-  assert.deepEqual(io._log.filter((e) => e === "dropRetained"), ["dropRetained"])
+  assert.deepEqual(io._log.filter((e) => e === "dropRetained"), [])
 })
 
 // The ceiling replaces no primary and lifts the freeze again, so the retained

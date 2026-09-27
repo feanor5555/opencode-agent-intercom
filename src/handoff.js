@@ -543,7 +543,7 @@ export function windDownPayloadOf(prompt) {
 // The prompt an endless cycle sends to the primary that is about to be
 // replaced. The orchestrator cannot write files — it holds spawn / abort /
 // list / reuse and nothing else — so the file is written by a `planner` the
-// orchestrator itself starts, through the single-use permit the freeze admits.
+// orchestrator itself starts, through the single-use permit the wind-down admits.
 // What comes back here is only the shaped closing line: the three forms below
 // are what the cycle's V3, V7 and its explicit-empty stop read.
 //

@@ -450,24 +450,25 @@ that does not exist today. No running subagent's treatment changes.
   first also means `reparentSubagents` (`registry.js:534-549`) and
   `inFlightSubagentsFor` (`registry.js:569-584`) never meet a retained entry
   and stay untouched.
-- **Endless cycle.** Same drop, inside the cycle itself: step 2b of
-  `runEndlessCycle` (`endless.js:204-216`), after the cycle-ceiling check and
-  before the quiesce wait.
+- **Endless cycle.** Same drop, inside the cycle itself: step 3b of
+  `runEndlessCycle` (`src/endless.js`), right after the quiesce wait has
+  claimed the wind-down, so a subagent retained during the wait goes too.
 
   The reason is the exclusion, not the quiesce wait. A retained session must not
-  outlive the primary it belongs to, and from step 2b on the cycle is committed
+  outlive the primary it belongs to, and from the wind-down claim on the cycle is committed
   to replacing that primary; a retention that survived would leave a handle
   addressing a warm session whose orchestrator is gone. The quiesce wait forces
   nothing here: a retained entry is not `isActiveEntry` (`registry.js:264-268`),
-  so `isQuiesced` (`registry.js:1270-1277`) already passes over it and no
-  retention can hold a cycle to its `endlessQuiesceTimeoutMs` (default 600 s,
-  `settings.js:185`).
+  so the quiesce predicate (`isQuiesced` / `claimEndlessWindDown`,
+  `src/registry.js`) already passes over it and no retention can hold a cycle
+  to its `endlessQuiesceTimeoutMs` (default 600 s).
 
   The two neighbouring positions are what fix the placement. The cycle ceiling
-  stays **ahead** of the drop: at `maxCycles` the mode switches itself off,
-  replaces nothing and lifts the spawn freeze again, so that path must leave
-  retention standing. Everything **after** the drop is a way out that has
-  already paid it — an abandoned quiesce wait, a failed save — and that is the
+  stays **ahead** of the drop: at `maxCycles` the mode switches itself off
+  and replaces nothing, so that path must leave retention standing. So does
+  an abandoned quiesce wait, which never took the claim. Everything **after**
+  the drop is a way out that has already paid it — a failed save, a failed
+  confirm — and that is the
   safe direction: a dropped retention costs a fresh spawn, a surviving one
   points a handle at a primary the next cycle replaces. The drop is
   best-effort: it is skipped where no dependency is injected, and a failure is
@@ -1330,7 +1331,7 @@ critical section (`hooks.js:1110-1171`); give `teardownSubagent` the retain
 short-circuit (`teardown.js:277-302`); rewrite `sweepWatchdog`
 (`watchdog.js:67-109`) as the `lifecycle` switch of §3.5, moving the
 `maxAge <= 0` early return into the `running` branch; add the drop-all at
-handoff start and at the endless freeze. After this step retention is real and
+handoff start and at the endless wind-down claim. After this step retention is real and
 observable with no way to use it — a session is retained, then reaped. That is
 a deliberately testable intermediate state, and the test that matters most is
 the pair: a retained entry survives past `maxSubagentAgeMs` (default 90 000) and

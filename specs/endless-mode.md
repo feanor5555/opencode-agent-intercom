@@ -231,13 +231,12 @@ happened rather than assuming it" answerable at all.
 
 | who writes the todo file | cost | what it forecloses | what it demands |
 |---|---|---|---|
-| **the orchestrator spawns one wind-down `planner` through a one-time permit; that subagent rewrites the todo file with the todo tools; the plugin verifies the file it left** (recommended) | one permitted spawn after the quiesce gate, and a full-file verification | nothing | the single-use permit of §3.3, the composed child prompt, the settlement gate and the V1–V7 confirmation of §3.4 |
+| **the orchestrator spawns one wind-down `planner` through a one-time permit; that subagent rewrites the todo file with the todo tools; the plugin verifies the file it left** (recommended) | one permitted spawn after the wind-down claim, and a full-file verification | nothing | the single-use permit of §3.3, the composed child prompt, the settlement gate and the V1–V7 confirmation of §3.4 |
 | the orchestrator states the points in one plain-text turn; the plugin parses and calls `addTask` | a parse of a shaped reply | the file's own prose, links and structure | the parse is a lossy funnel — a title and a criterion, no links, no prose — and its read-back confirms only its own appended lines, never that the file as a whole is coherent |
 | grant the orchestrator `todo_add` for the duration | a hole in `PRIMARY_TOOLS` | the invariant that a primary runs no tool but spawn/abort/list (`src/hooks.js:887`) | a time-boxed exception in the guard, and the plugin still cannot tell a successful write from a hallucinated one without re-reading the file |
 
-The spawn is *after* the quiesce gate, not before it, so §3.3's argument that a post-trigger
-spawn never quiesces is untouched — the permit admits exactly one subagent, once, after the
-wait is over. And the wind-down `planner` not holding the orchestrator's context is answered
+The spawn is *after* the wind-down claim, not before it — the permit admits exactly one
+subagent, once, after the wait is over and every other spawn is refused (§3.3). And the wind-down `planner` not holding the orchestrator's context is answered
 by the hand-over payload the plugin composes for it (§3.4): the orchestrator's saved state is
 handed to the subagent, which owns the todo tools and writes the file itself. The plugin then
 verifies the file on disk rather than trusting either party.
@@ -250,10 +249,13 @@ verifies the file on disk rather than trusting either party.
    (`src/hooks.js:162-165`). With endless mode on, `scheduleEndlessIfNeeded` compares against
    `endlessContext` and, when it is reached, sets the `pendingEndless` latch. Marking only —
    the same reason as the plain handoff (`src/hooks.js:167-172`).
-2. **Freeze.** From the moment the latch is set, `spawn` refuses new subagents (§3.3).
-3. **Quiesce.** On the primary's `session.idle`, the endless path claims the latch and waits
-   until `countActiveSubagents() === 0`, over a base window of `endlessQuiesceTimeoutMs` that
-   re-arms while progress is seen (§3.3).
+2. **Keep working.** The latch restricts nothing. The orchestrator goes on spawning,
+   aborting and reusing as usual, through the rest of its turn and through the wait below.
+3. **Quiesce and claim.** On the primary's `session.idle`, the endless path claims the latch
+   and waits until none of the primary's subagents runs — those it started after the latch
+   included — and the primary is idle. In the same synchronous step as that reading it claims
+   the wind-down; from the claim on, `spawn` admits the wind-down permit alone (§3.3). The wait
+   does not abandon while a subagent of the primary runs.
 4. **Save**, in five sub-steps (§3.4): **prepare** — resolve the todo file, insert the machine
    section where it is absent, write it, and snapshot its content, hash and parse; **arm** the
    single-use wind-down permit; run the **wind-down** turn — ask the orchestrator to spawn the
@@ -284,11 +286,10 @@ the existing file > env > default rule (`src/settings.js:101`):
 | `endlessMode` | boolean | `true` | `OPENCODE_AGENT_INTERCOM_ENDLESS_MODE` (`"1"`/`"0"`) |
 | `endlessContext` | integer ≥ 0 | `250000` | `OPENCODE_AGENT_INTERCOM_ENDLESS_CONTEXT` |
 | `endlessQuiesceTimeoutMs` | integer ≥ 0 | `600000` | `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_TIMEOUT_MS` |
-| `endlessQuiesceExtensionMs` | integer ≥ 0 | `600000` | `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_EXTENSION_MS` |
 | `endlessWindDownTimeoutMs` | integer ≥ 0 | `900000` | `OPENCODE_AGENT_INTERCOM_ENDLESS_WIND_DOWN_TIMEOUT_MS` |
 
-`endlessQuiesceExtensionMs` re-arms the quiesce deadline on each poll whose progress signal
-advanced (§3.3); `0` switches the extension off. `endlessWindDownTimeoutMs` bounds the
+`endlessQuiesceTimeoutMs` bounds only the part of the quiesce wait in which none of the
+primary's subagents runs (§3.3). `endlessWindDownTimeoutMs` bounds the
 wind-down turn and, minus one `DOC_SUMMARIES_POLL_MS`,
 the child waiter that the settlement gate blocks on (§3.4). The sidebar does not show it — it
 is an env/file-only tuning key, unlike `endlessContext` which has a row (§3.7).
@@ -309,43 +310,68 @@ plain one (`src/registry.js:616-618` returns false for a non-positive threshold)
 "endless mode on, threshold 0" is a legal state that arms nothing. It is not an error and is
 not corrected.
 
-### 3.3 Quiesce, and the subagent that starts after the trigger
+### 3.3 Quiesce, the wind-down claim, and the subagent that starts after the trigger
 
 **Definition.** The primary is quiesced when, read inside one `registryMutex.runExclusive`
-section, `countActiveSubagents() === 0` and no handoff drain is open
-(`hasHandoffDrain`, `src/registry.js:545`). The count includes `pendingSpawns.count`
-(`src/registry.js:175`), so a spawn that has reserved its slot but not yet reached
-`upsertSession` counts as running — the reservation window is exactly the window in which a
-naive registry scan would report zero.
+section (`quiescedNow`, `src/registry.js`), none of its own subagents is running
+(`countActiveSubagentsFor(sessionID) === 0`), `pendingSpawns.count === 0`,
+`pendingDeliveries.count === 0`, no handoff drain is open for it (`hasHandoffDrain`), and the
+primary itself is not inside a turn (`endlessPrimaryBusy`). `pendingSpawns.count` covers a spawn
+that has reserved its slot but not yet reached `upsertSession`; `pendingDeliveries.count` covers
+a result whose entry has left the registry but whose wake notice is not yet posted.
 
-**The active-subagent count is scoped to the endless primary.** `isQuiesced`
-(`src/registry.js:1540`) counts only the registry entries whose `parentID` is the primary
-whose cycle is running, via `countActiveSubagentsFor(sessionID)` (`src/registry.js:629`). A
+**The active-subagent count is scoped to the endless primary.** `countActiveSubagentsFor`
+counts only the registry entries whose `parentID` is the primary whose cycle is running. A
 second orchestrator's subagents do not hold up this cycle. The spawn cap's own count remains
 global — `countActiveSubagents` is untouched — so the per-cycle wait and the cap disagree on
-purpose. The two remaining terms in `isQuiesced`, `pendingSpawns.count` and
-`pendingDeliveries.count` (`src/registry.js:1543-1544`), stay process-wide because neither
-carries a parent to scope by; each covers a one-round-trip window in which the primary's own
-work is not yet visible to a registry scan.
+purpose. The two counters stay process-wide because neither carries a parent to scope by; each
+covers a one-round-trip window in which the primary's own work is not yet visible to a registry
+scan. A nested run is covered transitively: a nested spawn blocks its caller, whose own entry
+stays running for as long as its child does.
 
-**A subagent that starts after the trigger fired.** Between the latch and quiesce the
-orchestrator is still answering its turn and can call `spawn`. Left alone, an orchestrator
-that spawns as fast as its subagents finish never quiesces.
+**The primary's turn.** `endlessPrimaryBusy` (`src/state.js`) holds the primaries that hold a
+cycle and are inside a turn. It is set by `markEndlessPending` (the transform that marks runs
+inside a turn), by the primary's transform on every step, by a `session.status` event other
+than `idle`, and by `postParentNotice` **before** it posts a notice into the primary (the post
+starts or feeds a turn, so the predicate cannot read the primary idle between the post and that
+turn's busy event). It is cleared by the primary's `session.idle` — before the endless call on
+that idle runs — and by a `session.status` `idle`, and it goes with `releaseEndless`,
+`cancelPendingEndless` and `forgetPrimary`. A primary holding no cycle is not tracked.
+
+**A subagent that starts after the trigger fired.** The orchestrator keeps its tools. Between
+the latch and the claim it can call `spawn`, `abort` and `reuse` as usual, in the turn that
+crossed the ceiling, in a turn a wake notice starts, and in a turn a user message starts. Every
+subagent it starts is one more the quiesce waits for; the wait ends only when the count of the
+primary's own subagents is zero, however they came about, and the primary is idle.
 
 | how a post-trigger spawn is handled | cost | what it forecloses | what it demands |
 |---|---|---|---|
-| **`spawn` refuses while the latch is set, with a message telling the orchestrator to close out — except one permitted wind-down spawn after quiesce** (recommended) | the orchestrator loses the ability to start work in its last turn | nothing that survives the replacement anyway — a subagent spawned now would be reparented onto a session that has no memory of asking for it | one check at the top of the `spawn` handler, a refusal text, and the single-use permit below |
-| allow spawns, wait for whatever is running | none | — | an unbounded wait; the timeout of the next row becomes the normal case rather than the exception |
+| **allow spawns until the wind-down claim, wait for everything the primary runs, restrict to the one permitted wind-down spawn from the claim on** (recommended) | the restart waits as long as the orchestrator keeps delegating | nothing — the orchestrator answers its user and finishes its work normally | a primary-busy term in the quiesce predicate, and the claim taken in the same synchronous step as the quiesce reading |
+| `spawn` refuses from the latch on | the orchestrator cannot delegate for the whole wait, which runs to minutes while its subagents finish and the wind-down child writes | the user's own messages in that window are answered by refusals | — |
 | allow spawns and let them be reparented onto the new session | none | — | the new orchestrator receives results for work it never commissioned, in a session whose kickoff says "work off the todo file" |
 
-The refusal reuses the shape of the existing primary-side refusals (`src/hooks.js:894`): a
-thrown error whose text tells the model what to do instead — here, that endless mode is
-saving state, that no new subagent will start, and that it should end its turn.
+**The wind-down claim.** Each quiesce poll calls `claimEndlessWindDown(sessionID)`, which reads
+the predicate and, where it holds, adds the primary to `endlessWindingDown` inside the same mutex
+section. No spawn, delivery or primary turn can be admitted between the reading and the claim:
+a spawn from the primary happens inside a turn, which the busy term excludes, and a nested
+spawn's caller is a running subagent, which the count excludes. From the claim until the cycle
+ends (`releaseEndless`, `forgetPrimary`), `isEndlessWindingDown` holds and:
 
-**The one permitted spawn.** After quiesce the plugin arms a single-use permit for the
+- `spawn` from the root primary is refused unless it is the permitted wind-down spawn below; the
+  refusal without an armed permit says the hand-over has begun, that no further subagent starts
+  in this session, and that the work it meant to delegate belongs in the hand-over it is asked
+  for; with an armed, unconsumed permit it spells out the one allowed call;
+- a nested caller gets a returned refusal it can act on — do what it can, name what it needs,
+  open with `Blocked:`;
+- `reuse` throws — the cycle drops every retained subagent right after the claim.
+
+The gate asks about the caller's **root** primary (`rootPrimaryFor`), since the endless sets
+hold primary ids only.
+
+**The one permitted spawn.** After the wind-down claim the plugin arms a single-use permit for the
 primary, a record in `src/registry.js` keyed by session id (`token`, `agent`, `consumed`,
 `restores`, `childSessionID`, `settlement`). A spawn is admitted only when **all five** hold:
-the cycle is claimed (`endlessInProgress`, never in the pending phase); the caller is the root
+the cycle has claimed its wind-down (`endlessWindingDown`); the caller is the root
 primary, not a nested subagent; `args.agent === "planner"`; the first non-empty line of
 `args.prompt` is exactly `INTERCOM-WIND-DOWN <token>`, the token being per-cycle random and
 appearing nowhere but the wind-down prompt sent to that one primary; and the permit is
@@ -370,12 +396,13 @@ What keeps the exception from becoming a general reopening:
   text with the `INTERCOM-WIND-DOWN <token>` line stripped, capped at `WIND_DOWN_PAYLOAD_MAX_CHARS`
   (32 000), then the contract. Without this the permit would hand the orchestrator one arbitrary
   file-writing `planner` run whose task it chooses — a widening §2.3 never decided on;
-- armed at exactly one call site, between the quiesce wait and the wind-down turn — never before
-  quiesce; disarmed in a `finally` on every exit of `runEndlessCycle`, and by `forgetPrimary`;
-- the wind-down subagent is itself under the freeze, so its own nested spawns still take the
-  nested refusal (`src/tools.js:406-411`); the exception does not propagate downward;
-- `reuse` keeps its unconditional throw — its targets are retained subagents, which step 2b of
-  the cycle has already dropped.
+- armed at exactly one call site, between the wind-down claim and the wind-down turn — never
+  before the claim; disarmed in a `finally` on every exit of `runEndlessCycle`, and by
+  `forgetPrimary`;
+- the wind-down subagent is itself under the wind-down restriction, so its own nested spawns
+  still take the nested refusal; the exception does not propagate downward;
+- `reuse` throws from the claim on — its targets are retained subagents, which the cycle drops
+  right after the claim.
 
 The admitted spawn is exempted from five gates, each for a stated reason: the multi-task bundle
 guard (the briefing names every open task id by design), the package-size refusal (the payload
@@ -383,24 +410,24 @@ bound moves to `WIND_DOWN_PAYLOAD_MAX_CHARS`), the duplicate-task-id reservation
 carries no single id), the global spawn cap (quiesce is scoped to this primary), and retention
 (the cycle drops every retained session anyway).
 
-**The bound.** Quiesce is waited for at `DOC_SUMMARIES_POLL_MS`-scale cadence, with
-`endlessQuiesceTimeoutMs` (default 600 000 ms) as the BASE window. On every poll the cycle
-reads a progress signal — the maximum `lastActivityAt` over the primary's active registry
-entries (`progressSignal`, `src/handoffwiring.js`) — and wherever that signal has advanced
-since the previous poll, the deadline re-arms at `now + endlessQuiesceExtensionMs` (default
-600 000 ms, env `OPENCODE_AGENT_INTERCOM_ENDLESS_QUIESCE_EXTENSION_MS`), so a primary with
-genuinely working subagents waits as long as they keep emitting. A deadline reached with the
-signal frozen abandons with `still busy after <elapsed>ms with no progress` — that is the
-state a hung entry under a switched-off watchdog sits in forever. `endlessQuiesceExtensionMs:
-0` switches the extension off and the first base-window deadline abandons whatever the signal
-does. It is not the only bound: the inactivity
-watchdog aborts any subagent silent for `maxSubagentAgeMs`, default 90 000 ms
-(`src/settings.js:45-51`), and a watchdog abort ends in the same teardown that removes the
-registry entry. So a *hung* subagent resolves itself in ~90 s; the ten-minute timeout is for
-a subagent that is genuinely working. The cycle is then **abandoned, not forced**: the
-latch is released, the spawn freeze lifts, a warning toast fires, and the next over-threshold
-turn re-schedules. Aborting a working subagent to make room for a context refresh would
-destroy real work to save context.
+**The bound.** Quiesce is polled at `ENDLESS_QUIESCE_POLL_MS` (500 ms). While a subagent of
+the primary runs, the wait does not abandon, however long it takes: every poll that counts one
+running (`countActive`) re-arms the deadline at `now + endlessQuiesceTimeoutMs`. A stuck subagent
+is reaped by the subagent watchdog — the silence window `maxSubagentAgeMs`, the tool-call window
+`maxSubagentToolCallMs` and the run ceiling `maxSubagentRunMs` — and a watchdog abort ends in the
+same teardown that removes the registry entry; the orchestrator can also `abort` it. Where the
+user has switched those windows off, a subagent that never ends holds the wait open, and the
+orchestrator keeps working meanwhile.
+
+What remains of the abandon is the wait in which **none** of the primary's subagents runs and
+the quiesce still does not come: the primary stays inside a turn, or a process-wide spawn or
+delivery window or a handoff drain stays open. Once `endlessQuiesceTimeoutMs` (default
+600 000 ms) has passed since the last poll that saw a subagent running — or since the wait
+began — the cycle abandons with `no subagent running, but not quiesced after <elapsed>ms`. It is
+the backstop for a busy mark or a counter that no event clears. The cycle is then **abandoned,
+not forced**: the latch is released, a toast fires, the cooldown of §3.6 applies, and the next
+over-threshold turn re-schedules. Aborting a working subagent to make room for a context refresh
+would destroy real work to save context.
 
 ### 3.4 Writing the todo file, and knowing that it happened
 
@@ -537,7 +564,8 @@ verified rewrite.
 **Failure.** Any abandon — quiesce timeout, prepare throw, a fallback that could not start a child,
 a child that never settled, a rejected rewrite — leaves the session **not** replaced: replacing it
 after failing to save its state is precisely the data loss endless mode exists to prevent. Latch
-released, freeze lifted, permit disarmed, error toast, and the cooldown of §3.6 applies.
+released, wind-down restriction lifted, permit disarmed, error toast, and the cooldown of §3.6
+applies.
 
 The explicit-empty case — `parseTasks` yields zero tasks **and** the reply carries
 `## WIND-DOWN DONE — nothing open` — is not a failure and is handled in §3.6.
@@ -630,7 +658,7 @@ is dropped on read and pruned on the next write.
 
 1. **Nothing left to do.** When the confirmation's parse yields zero tasks *and* the wind-down
    reply carries `## WIND-DOWN DONE — nothing open`, the cycle stops before the replacement:
-   latch released, freeze lifted, the primary paused, success toast "endless mode: no open
+   latch released, wind-down restriction lifted, the primary paused, success toast "endless mode: no open
    points left — paused for this session". A restart into an empty todo file would produce a
    session with nothing to do, which would idle, be woken by nothing, and sit at the start of a
    fresh context forever.
@@ -657,8 +685,8 @@ is dropped on read and pruned on the next write.
    `scheduleEndlessIfNeeded` returns false. Without it, a primary already over the threshold
    re-schedules on its next turn and retries continuously — the same hot-loop
    `releaseHandoff` avoids by not restoring the pending flag (`src/registry.js:677-682`).
-5. **The switch.** Turning the sidebar row off drops a latch that has not been claimed yet,
-   and the freeze with it, on the primary's next turn after the settings read picks the change
+5. **The switch.** Turning the sidebar row off drops a latch that has not been claimed yet
+   on the primary's next turn after the settings read picks the change
    up (`cancelPendingEndless`, `src/registry.js`). A cycle already claimed by the idle handler —
    from the quiesce wait on — is not touched: prepare writes the todo file and the permit is
    live from arm, so a claimed cycle runs through to the replacement, a self-stop or an abandon
@@ -724,8 +752,8 @@ whole. Under `[restarting]` it names the step the cycle is in (`cycleStepText`):
 | published step | note line | entered |
 |---|---|---|
 | `turn` | `waiting for the turn to end` | the latch is set (`markEndlessPending`), until the primary's turn ends and the idle handler claims the cycle |
-| `quiesce` | `waiting for subagents (N running)`, or `waiting for subagents` where no count above 0 is published | the claim (`claimPendingEndless`), then on every quiesce poll with the count of the primary's own subagents still running |
-| `wind-down` | `saving open points` | quiesce reached, from the prepare step through the wind-down turn, its child's settle and a re-ask |
+| `quiesce` | `waiting for subagents (N running)`, or `waiting for subagents` where no count above 0 is published | the claim (`claimPendingEndless`), then on every quiesce poll with the count of the primary's own subagents still running — the whole wait, those spawned during it and the primary's own turn included |
+| `wind-down` | `saving open points` | the wind-down claim, from the prepare step through the wind-down turn, its child's settle and a re-ask |
 | `successor` | `starting fresh session` | the rewrite has passed its checks; the confirmation and the replacement run |
 
 The cycle travels out of process under `~/.cache/opencode-agent-intercom/endless-cycles.json`
@@ -891,17 +919,18 @@ auto? }`) compacts a session in place. §2.1 says why that is not this feature.
   when the log shows repeated `spawn refused: wind-down permit` lines followed by the window
   expiring; the wind-down turn is then failing to produce even one call, and the fallback is
   the normal path rather than the exception.
-- **The spawn freeze is borne by an orchestrator that ends its turn.** The freeze holds from
-  the latch to the end of the cycle, with the single permitted wind-down spawn as its only
-  exception, and it is not short: it spans the rest of the primary's current turn, then the
-  quiesce wait for the primary's own running subagents — `endlessQuiesceTimeoutMs` as the base
-  window, re-armed by `endlessQuiesceExtensionMs` for as long as those subagents keep emitting,
-  so it runs as long as they work (§3.3) — then the wind-down turn and its child's settle,
-  bounded by `endlessWindDownTimeoutMs` (default 900 000 ms) per attempt and run a second time
-  on the bounded re-ask (§3.4), then the confirmation and the replacement. The sidebar row reads
-  `[restarting]` with the current step for that whole span (§3.7). Wrong if the orchestrator's
-  freeze-time refusals show up as repeated retries in the log rather than as an ended turn —
-  that would mean the refusal text is not steering the model.
+- **The orchestrator eventually goes idle with nothing running.** The restart waits for a
+  moment in which none of the primary's subagents runs and the primary is between turns. An
+  orchestrator that keeps delegating — or a user who keeps writing to it — defers the restart
+  for as long as it does so, and its context grows past `endlessContext` meanwhile. The sidebar
+  row reads `[restarting]` with `waiting for subagents (N running)` for that whole span (§3.7).
+  Wrong if the log shows `endless: scheduled` for a primary with no `endless: quiesced` line
+  following while its context keeps climbing — the restart would then need a bound on the wait
+  that stops new work, which this design does not have.
+- **The primary-busy mark is cleared by an event.** Every setter of `endlessPrimaryBusy` is
+  followed by the primary's `session.idle` or `session.status` `idle`. Wrong if a cycle abandons
+  with `no subagent running, but not quiesced after <elapsed>ms` for a primary whose last turn
+  ended long before — a busy mark no event cleared.
 - **A child waiter with a primary as parent behaves.** `src/childwait.js:22-24` states it is
   supported, but no production path does it today — `src/tools.js:634` registers one only for
   nested spawns. Wrong if the settlement never resolves although the child ended, or the
@@ -972,8 +1001,14 @@ Unit, in the existing `node --test` style under `test/`:
 - Quiesce: zero entries and zero `pendingSpawns.count` → quiesced; one entry → not; zero
   entries with `pendingSpawns.count === 1` → **not** quiesced; an entry that is `dispatched`
   but still in the registry → not quiesced; an aborted entry → quiesced.
-- The spawn freeze: with the latch set and no permit armed, `spawn` throws and
-  `countActiveSubagents()` does not change; with the latch cleared, `spawn` proceeds.
+- Quiesce and the primary's turn: a primary holding a cycle is busy from the mark until its
+  idle; a `session.status` busy event and a parent notice mark it busy again; the wind-down claim
+  is refused while it is busy or while any of its subagents runs, and taken once neither holds.
+- After the latch (`test/endless-spawn-after-latch.test.js`): `spawn` and `abort` are accepted
+  with the latch set and during the quiesce wait; a subagent spawned after the latch holds the
+  wind-down claim until it is done and the wake turn it starts has ended; from the claim on, a
+  spawn without the permit is refused and takes no slot, a nested caller gets the actionable
+  refusal and `reuse` throws; the release lifts the restriction.
 - The wind-down permit (`src/registry.js`): `createWindDownToken` is 16 hex characters and
   never repeats; `armEndlessWindDown` builds the record the cycle waits on and refuses to arm
   without a token; `consumeEndlessWindDown` is single-use — the second call is refused, and a
@@ -981,8 +1016,8 @@ Unit, in the existing `node --test` style under `test/`:
   `restoreEndlessWindDown` gives the permit back exactly once; `noteEndlessWindDownChild`
   records the child and the settlement the cycle gates on; disarm and `forgetPrimary` each drop
   the permit; the wind-down child is never retained.
-- The permitted spawn through the freeze (`src/tools.js`): the freeze without a permit refuses
-  every spawn as it always did; an armed permit refuses a wrong call by naming the one that is
+- The permitted spawn (`src/tools.js`): a winding-down cycle without a permit refuses every
+  spawn; an armed permit refuses a wrong call by naming the one that is
   allowed; the conforming spawn is admitted once and the second one is refused; the plugin
   composes the child's prompt around the hand-over rather than passing `args.prompt`; a create
   failure gives the permit back and invites one repeat; a prompt failure gives the permit back,
@@ -1024,9 +1059,13 @@ Unit, in the existing `node --test` style under `test/`:
   of the previous cycle's ids cleared) → the new primary paused; the cycle counter at
   `endlessMaxCycles` → paused; a failed cycle → the cooldown suppresses the next schedule and
   lifts after it.
-- Quiesce timeout: with a permanently busy fake registry, the cycle abandons after
-  `endlessQuiesceTimeoutMs` of virtual time, the latch is released, the freeze is lifted and no
-  session was created.
+- Quiesce bound (`test/endless-cycle.test.js`): with a subagent of the primary running for
+  twenty windows the cycle does not abandon and completes once it is gone; a subagent spawned
+  during the wait holds the claim until it is gone too, and the wind-down turn runs only after
+  the claim; after the last subagent the primary gets `endlessQuiesceTimeoutMs` to go idle; with
+  none running and no quiesce, the cycle abandons after that window of virtual time, the latch is
+  released, the cooldown is armed and no session was created. A stale `endlessQuiesceExtensionMs`
+  key or env var resolves to nothing and raises no error.
 - Sidebar store: `toggleEndlessMode()` writes only `endlessMode` and leaves `maxSubagents`,
   `maxContext`, `searxngUrl` and unknown keys byte-identical; a following
   `stepSetting("maxContext", 5000)` does **not** delete `endlessMode` (the per-key validators
@@ -1039,9 +1078,10 @@ Live, once — no series, no averaging. One endless cycle against a real
 `opencode serve` with `endlessContext` lowered to a reachable value (5 000–10 000) and one
 subagent deliberately in flight when the threshold is crossed:
 
-- **(a) the freeze and the permit.** A non-conforming spawn after the trigger is refused, the
-  conforming wind-down spawn is admitted once, and a second one is refused — read off the
-  `spawn refused: wind-down permit` and the admit lines in the log with the latch set.
+- **(a) the post-latch spawn and the permit.** A spawn after the trigger is admitted and its
+  completion notice precedes `endless: quiesced`; the conforming wind-down spawn is admitted
+  once, and a second one is refused — read off the `spawned`, the completion and the admit lines
+  in the log.
 - **(b) the quiesce.** The wind-down spawn happens only after the in-flight subagent's
   completion notice was delivered — read off the ordering of `endless: quiesced` against the
   wake line.

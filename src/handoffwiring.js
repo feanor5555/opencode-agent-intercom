@@ -37,10 +37,9 @@ import {
   pauseEndless,
   isEndlessPaused,
   noteEndlessStep,
-  isQuiesced,
+  claimEndlessWindDown,
   recordEndlessCycle,
   countActiveSubagentsFor,
-  isActiveEntry,
   createWindDownToken,
   armEndlessWindDown,
   endlessWindDownPermit,
@@ -61,7 +60,6 @@ import {
   abortSession,
 } from "./client.js"
 import { dropRetainedSubagents, teardownSubagent, SUBAGENT_SESSION_TITLE_MARKER } from "./teardown.js"
-import { registry } from "./state.js"
 import { deliverParentNotice } from "./noticejournal.js"
 import { secureSubagentState } from "./resultfile.js"
 import {
@@ -506,9 +504,9 @@ async function settleWindDownChild(client, primarySessionID, child) {
 }
 
 // Drops an endless latch that has been set but not yet claimed, and says why.
-// The spawn freeze lifts with it, so this is the only thing standing between a
-// primary whose cycle will never start and a `spawn` that refuses for the life
-// of the process.
+// A latch no idle will ever claim would hold the `[restarting]` indicator and
+// block every later cycle for this primary (markEndlessPending refuses while
+// one stands), so this is what clears a cycle that will never start.
 //
 // A cycle already claimed is untouched: cancelPendingEndless refuses one, and
 // an executing cycle owns its own abandon discipline (releaseEndless + the
@@ -529,8 +527,9 @@ export function dropEndlessLatch(sessionID, reason) {
 // HTTP round trip for every subagent that finishes.
 //
 // Runs detached from the event handler like the plain handoff, and for a
-// stronger reason: a cycle waits for quiesce (up to endlessQuiesceTimeoutMs),
-// then takes a final turn out of the old primary, then runs the whole handoff.
+// stronger reason: a cycle waits for quiesce (as long as the primary's own
+// subagents run, then up to endlessQuiesceTimeoutMs for the primary to go
+// idle), then takes a final turn out of the old primary, then runs the whole handoff.
 // runEndlessCycle itself never throws, but the two session reads THIS function
 // makes before the claim can: a rejection there is outside the cycle's abandon
 // discipline, so it is caught here and drops the latch. The `void` call site
@@ -540,8 +539,7 @@ export function dropEndlessLatch(sessionID, reason) {
 // every abandon path releases it inside runEndlessCycle and arms the cooldown.
 export async function maybeRunPendingEndless(client, sessionID) {
   if (!hasEndlessPending(sessionID)) return null
-  const { endlessMode, endlessQuiesceTimeoutMs, endlessQuiesceExtensionMs, endlessMaxCycles, endlessWindDownTimeoutMs } =
-    getSettings()
+  const { endlessMode, endlessQuiesceTimeoutMs, endlessMaxCycles, endlessWindDownTimeoutMs } = getSettings()
   // Stop #5, the switch: the latch is usually set during the very turn that
   // crosses the ceiling and this idle follows it immediately, so the transform
   // hook's off-branch — which needs ANOTHER turn from the primary — is not a
@@ -596,31 +594,20 @@ export async function maybeRunPendingEndless(client, sessionID) {
     claim: () => claimPendingEndless(sessionID),
     release: () => releaseEndless(sessionID),
     setCooldown: () => setEndlessCooldown(sessionID),
-    isQuiesced: () => isQuiesced(sessionID),
-    // Cycle step 2b: a retained subagent must not outlive the primary this
-    // cycle replaces. Runs before the quiesce wait, so nothing is held alive
-    // across a wait that may last `endlessQuiesceTimeoutMs`. The handoff this
-    // cycle then performs drops them too — by that point there is nothing left
-    // to drop, and both entry points stay correct on their own.
+    // Cycle step 3: the quiesce reading and the wind-down claim in one mutex
+    // section (claimEndlessWindDown), so no spawn, delivery or primary turn is
+    // admitted between the two.
+    claimWindDown: () => claimEndlessWindDown(sessionID),
+    // Cycle step 3b: a retained subagent must not outlive the primary this
+    // cycle replaces. Runs right after the claim, so a subagent retained while
+    // the orchestrator kept working through the wait goes too. The handoff
+    // this cycle then performs drops them as well — by that point there is
+    // nothing left to drop, and both entry points stay correct on their own.
     dropRetained: () => dropRetainedSubagents(client, { label: "endless" }),
-    // The figure the "quiesced after" log line reports: what this primary's
-    // own wait was on when it began, scoped exactly as isQuiesced is.
+    // This primary's own running subagents, scoped exactly as the quiesce
+    // predicate is: the figure the sidebar shows, the "quiesced after" log
+    // line reports, and the wait reads to know it must not abandon.
     countActive: () => countActiveSubagentsFor(sessionID),
-    // Gate A's progress signal: the maximum `lastActivityAt` over this
-    // primary's active entries, read off the registry exactly as
-    // countActiveSubagentsFor reads it. It advances while any of them emits an
-    // event, so the quiesce window re-arms under a slow but living subagent and
-    // abandons once every one of them has stopped moving.
-    progressSignal: () => {
-      let max = 0
-      for (const e of registry.values()) {
-        if (e.parentID !== sessionID) continue
-        if (!isActiveEntry(e)) continue
-        const at = e.lastActivityAt ?? 0
-        if (at > max) max = at
-      }
-      return max
-    },
     // Resolve the todo file, lay the machine section down where it is missing
     // and WRITE it, then snapshot content + hash + parse + the drift count.
     // "several todo files" / "not a regular file" propagate as a throw the
@@ -637,7 +624,7 @@ export async function maybeRunPendingEndless(client, sessionID) {
       return { fileName: name, content, hash, tasks, driftCount }
     },
     // Mint a per-cycle token and arm the single-use permit for the `planner`
-    // spawn the freeze will admit. Returns the token the wind-down prompt
+    // spawn the wind-down claim will admit. Returns the token the wind-down prompt
     // carries, or an empty object when the arm failed.
     armWindDown: () => {
       const token = createWindDownToken()
@@ -697,7 +684,6 @@ export async function maybeRunPendingEndless(client, sessionID) {
     // the published file and read by nothing in this process.
     onStep: (step, detail) => noteEndlessStep(sessionID, step, detail),
     quiesceTimeoutMs: endlessQuiesceTimeoutMs,
-    quiesceExtensionMs: endlessQuiesceExtensionMs,
   })
 }
 

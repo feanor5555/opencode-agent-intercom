@@ -20,6 +20,8 @@ import {
   lastPrimaryTool,
   pendingEndless,
   endlessInProgress,
+  endlessWindingDown,
+  endlessPrimaryBusy,
   endlessCooldowns,
   pendingCompactions,
   compactionInProgress,
@@ -76,10 +78,9 @@ export function trackPrimary(sessionID) {
 // unconditionally.
 //
 // This is what makes a primary-keyed decision reach a nested caller. The
-// endless-mode spawn freeze is the case in hand: its latch sets are keyed on
-// primary session ids only, so `isEndlessFrozen(subagentSessionID)` is always
-// false and a subagent would spawn straight through a freeze whose purpose is
-// to let the cycle reach quiesce.
+// endless-mode wind-down restriction is the case in hand: its sets are keyed on
+// primary session ids only, so `isEndlessWindingDown(subagentSessionID)` is
+// always false and a subagent would spawn straight through the restriction.
 //
 // The walk is bounded twice: by a `seen` set, so a parentID cycle (which the
 // spawn path cannot produce, but a reparent race could) returns instead of
@@ -136,12 +137,15 @@ export function forgetPrimary(sessionID) {
   // could never be claimed again (no further idle events) but would leak.
   pendingHandoffs.delete(sessionID)
   handoffInProgress.delete(sessionID)
-  // Same for the endless latch, freeze and cooldown: the cycle that just
-  // replaced this primary is over and its id is never scheduled again. The
-  // cross-cycle progress record (endlessProgress) deliberately survives — it
-  // is what the no-progress bound compares across replacements.
+  // Same for the endless latch, the wind-down claim, the busy mark and the
+  // cooldown: the cycle that just replaced this primary is over and its id is
+  // never scheduled again. The cross-cycle progress record (endlessProgress)
+  // deliberately survives — it is what the no-progress bound compares across
+  // replacements.
   pendingEndless.delete(sessionID)
   endlessInProgress.delete(sessionID)
+  endlessWindingDown.delete(sessionID)
+  endlessPrimaryBusy.delete(sessionID)
   unpublishEndlessCycle(sessionID)
   endlessCooldowns.delete(sessionID)
   // And the compaction latch: the session is deleted at this point, so a
@@ -1715,16 +1719,17 @@ export function isCompactionInProgress(sessionID) {
 }
 
 // ----------------------------------------------------------------------------
-// Endless mode: the latch, the spawn freeze, the quiesce predicate and the
+// Endless mode: the latch, the wind-down claim, the quiesce predicate and the
 // state the bounds need (cooldown after an abandoned cycle, open-task progress
 // across cycles, and the per-session pause a self-stop leaves behind).
 //
 // The latch is the endless twin of pendingHandoffs and works the same way: the
 // transform hook MARKS while the triggering turn runs, the `session.idle`
-// event CLAIMS and executes. What it adds over the plain handoff is the
-// freeze — from the mark until the end of the cycle, `spawn` refuses, so an
-// orchestrator that spawns as fast as its subagents finish cannot keep the
-// cycle from ever reaching quiesce.
+// event CLAIMS and executes. Neither restricts the orchestrator: it keeps
+// spawning, aborting and reusing through the latch and the quiesce wait, and
+// the cycle waits until none of its subagents runs and it is idle. Only the
+// wind-down claim, taken in the same synchronous step as that quiesce reading,
+// restricts `spawn` to the wind-down permit.
 // ----------------------------------------------------------------------------
 
 // How long after an abandoned cycle (quiesce timeout, save failure, handoff
@@ -1761,6 +1766,9 @@ export function markEndlessPending(sessionID) {
   if (endlessInProgress.has(sessionID)) return false
   if (pendingEndless.has(sessionID)) return false
   pendingEndless.add(sessionID)
+  // The mark is taken by the transform of a turn that is running, so the
+  // primary is busy by construction; its `session.idle` clears this.
+  endlessPrimaryBusy.add(sessionID)
   publishEndlessCycleStep(sessionID, "turn")
   return true
 }
@@ -1783,13 +1791,16 @@ export function claimPendingEndless(sessionID) {
   return true
 }
 
-// Abandon-path release: clears the in-progress latch, which also lifts the
-// spawn freeze. The consumed pending flag is NOT restored — a retry has to go
-// through a fresh schedule, and the cooldown holds that back for five minutes.
-// The success path releases via forgetPrimary instead.
+// Abandon-path release: clears the in-progress latch and the wind-down claim,
+// which lifts the wind-down restriction on `spawn`. The consumed pending flag
+// is NOT restored — a retry has to go through a fresh schedule, and the
+// cooldown holds that back for five minutes. The success path releases via
+// forgetPrimary instead.
 export function releaseEndless(sessionID) {
   if (!sessionID) return
   endlessInProgress.delete(sessionID)
+  endlessWindingDown.delete(sessionID)
+  endlessPrimaryBusy.delete(sessionID)
   unpublishEndlessCycle(sessionID)
 }
 
@@ -1800,7 +1811,10 @@ export function cancelPendingEndless(sessionID) {
   if (!sessionID) return false
   if (endlessInProgress.has(sessionID)) return false
   const dropped = pendingEndless.delete(sessionID)
-  if (dropped) unpublishEndlessCycle(sessionID)
+  if (dropped) {
+    endlessPrimaryBusy.delete(sessionID)
+    unpublishEndlessCycle(sessionID)
+  }
   return dropped
 }
 
@@ -1808,10 +1822,48 @@ export function isEndlessInProgress(sessionID) {
   return endlessInProgress.has(sessionID)
 }
 
-// The spawn freeze: true from the moment the latch is set until the cycle
-// ends, either way it ended. Read at the top of the `spawn` handler.
-export function isEndlessFrozen(sessionID) {
+// True while the primary holds an endless cycle in either phase, pending or
+// executing — from the mark until the cycle ends, either way it ended.
+export function hasEndlessCycle(sessionID) {
   return pendingEndless.has(sessionID) || endlessInProgress.has(sessionID)
+}
+
+// The wind-down restriction: true from the wind-down claim until the cycle
+// ends. Read at the top of the `spawn` and `reuse` handlers; while it holds,
+// `spawn` admits the wind-down permit alone.
+export function isEndlessWindingDown(sessionID) {
+  return endlessWindingDown.has(sessionID)
+}
+
+// The primary's turn state as far as a held endless cycle needs it. A primary
+// that holds no cycle is not tracked, so the set stays bounded by the latches.
+export function noteEndlessPrimaryBusy(sessionID) {
+  if (!sessionID || !hasEndlessCycle(sessionID)) return false
+  endlessPrimaryBusy.add(sessionID)
+  return true
+}
+
+export function noteEndlessPrimaryIdle(sessionID) {
+  if (!sessionID) return false
+  return endlessPrimaryBusy.delete(sessionID)
+}
+
+export function isEndlessPrimaryBusy(sessionID) {
+  return endlessPrimaryBusy.has(sessionID)
+}
+
+// The wind-down claim: reads the quiesce predicate and, where it holds, takes
+// the claim inside the SAME registryMutex section, so no spawn, delivery or
+// primary turn can be admitted between the reading and the claim. Only an
+// executing cycle can claim; answers whether the claim stands.
+export function claimEndlessWindDown(sessionID) {
+  return registryMutex.runExclusive(() => {
+    if (!sessionID || !endlessInProgress.has(sessionID)) return false
+    if (endlessWindingDown.has(sessionID)) return true
+    if (!quiescedNow(sessionID)) return false
+    endlessWindingDown.add(sessionID)
+    return true
+  })
 }
 
 // The step a running cycle has reached, mirrored into the published file the
@@ -1823,7 +1875,7 @@ export function isEndlessFrozen(sessionID) {
 // in releaseEndless, cancelPendingEndless and forgetPrimary, the places those
 // two latches are released.
 export function noteEndlessStep(sessionID, step, detail = {}) {
-  if (!sessionID || !isEndlessFrozen(sessionID)) return false
+  if (!sessionID || !hasEndlessCycle(sessionID)) return false
   if (deletedSessions.has(sessionID)) return false
   return publishEndlessCycleStep(sessionID, step, detail)
 }
@@ -1836,15 +1888,16 @@ export function forgetEndlessStep(sessionID) {
 }
 
 // ----------------------------------------------------------------------------
-// The wind-down permit: the ONE spawn the endless freeze admits.
+// The wind-down permit: the ONE spawn a winding-down cycle admits.
 //
-// The freeze above refuses every spawn from the moment the latch is set. The
-// cycle's wind-down step needs exactly one exception — the orchestrator starts
-// a `planner` that rewrites the todo file — and the permit is what makes that
-// exception single-use, typed and unforgeable rather than a hole in the freeze.
+// The wind-down claim above refuses every spawn from the moment it is taken.
+// The cycle's wind-down step needs exactly one exception — the orchestrator
+// starts a `planner` that rewrites the todo file — and the permit is what makes
+// that exception single-use, typed and unforgeable rather than a hole in the
+// restriction.
 //
-// Armed at exactly one call site (between the quiesce wait and the wind-down
-// turn, never in the `pendingEndless` phase), consumed SYNCHRONOUSLY at
+// Armed at exactly one call site (between the wind-down claim and the
+// wind-down turn, never before the claim), consumed SYNCHRONOUSLY at
 // admission in `spawnHandler`, given back at most once when the child never
 // started, and disarmed in the cycle's `finally` and by `forgetPrimary`.
 // ----------------------------------------------------------------------------
@@ -2008,18 +2061,23 @@ export function clearEndlessPause(sessionID) {
 }
 
 // The quiesce predicate: none of THIS primary's subagents is running, no
-// result is still being delivered, no spawn slot is reserved, and no handoff
-// drain is open for this primary. Read inside ONE registryMutex section so a
-// concurrent removeEntry / upsertSession cannot splice the count.
+// result is still being delivered, no spawn slot is reserved, no handoff drain
+// is open for this primary, and the primary itself is not inside a turn. Read
+// inside ONE registryMutex section so a concurrent removeEntry / upsertSession
+// cannot splice the count.
 //
 // The registry term is countActiveSubagentsFor(sessionID) — the subagents this
 // primary owns, not the process. The cap the rest of the plugin is built on
 // stays global; quiesce is a different question from the cap, and answering it
 // process-wide makes a primary wait on subagents that can never deliver into
 // it: a chained cycle leaves the retired primary waiting on the successor its
-// own earlier cycle created, with the spawn freeze held for that whole wait.
-// What quiesce protects is the primary's own final turn, so the primary's own
-// subagents are what it has to wait for.
+// own earlier cycle created. What quiesce protects is the primary's own final
+// turn, so the primary's own subagents are what it has to wait for — however
+// they came about, a subagent spawned after the latch included.
+//
+// The busy term is the primary's own turn (endlessPrimaryBusy): the
+// orchestrator keeps working through the wait, and a turn in flight can spawn
+// at any step, so the wind-down is claimed only between turns.
 //
 // The two counters stay process-wide, and deliberately so — neither carries a
 // parent to be scoped by, and each one covers a window in which THIS primary's
@@ -2034,16 +2092,19 @@ export function clearEndlessPause(sessionID) {
 //     Without it the cycle would see quiesce while the last result is still on
 //     its way into the very session it is about to replace — and that result
 //     would never reach the saved open points. The window is one notice post.
-// Both are seconds; a running subagent is bounded by maxSubagentAgeMs (90 s by
-// default), which is the wait this scoping removes.
-export function isQuiesced(sessionID) {
-  return registryMutex.runExclusive(
-    () =>
-      countActiveSubagentsFor(sessionID) === 0 &&
-      pendingSpawns.count === 0 &&
-      pendingDeliveries.count === 0 &&
-      !hasHandoffDrain(sessionID),
+// Both are seconds.
+function quiescedNow(sessionID) {
+  return (
+    countActiveSubagentsFor(sessionID) === 0 &&
+    pendingSpawns.count === 0 &&
+    pendingDeliveries.count === 0 &&
+    !hasHandoffDrain(sessionID) &&
+    !endlessPrimaryBusy.has(sessionID)
   )
+}
+
+export function isQuiesced(sessionID) {
+  return registryMutex.runExclusive(() => quiescedNow(sessionID))
 }
 
 // The cross-cycle progress record, as a set difference over open task IDS.

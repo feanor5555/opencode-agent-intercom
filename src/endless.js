@@ -5,7 +5,8 @@
 //
 // Dependency-injected in the same discipline as handoff.js: this module imports
 // no client, no registry and no todo-file I/O, so the whole sequence — quiesce
-// wait, prepare, arm, wind-down turn, settle, confirm, replacement, bounds — is
+// wait and wind-down claim, prepare, arm, wind-down turn, settle, confirm,
+// replacement, bounds — is
 // unit-testable against fakes with virtual time. The live wiring lives in
 // handoffwiring.js. The two pure parse helpers `splitSections`/`parseTasks` are
 // injected too, so the verification (verifyWindDown) can be exercised without
@@ -15,15 +16,22 @@
 //   1. Claim the latch. False → another idle event already took this cycle.
 //   2. The cycle ceiling: at `maxCycles` the mode pauses itself for this
 //      primary before anything is written or replaced.
-//   2b. Drop every retained subagent. A retained session must not outlive the
-//      primary this cycle replaces. The ceiling above is deliberately ahead of
-//      this: it replaces nothing and lifts the freeze again.
-//   3. Wait for quiesce — no subagent running anywhere in the process —
-//      bounded by `quiesceTimeoutMs`. While `progressSignal` (the activity
-//      figure of this primary's own subagents) advances between polls, the
-//      window re-arms at `quiesceExtensionMs`; a window that passes with the
-//      signal frozen — and `quiesceExtensionMs = 0`, which switches the
-//      extension off — ABANDONS the cycle with `no progress`.
+//   3. Wait for quiesce and claim the wind-down — no subagent of this primary
+//      running, however it came about, and the primary idle. The orchestrator
+//      keeps working through the wait: it spawns, aborts and reuses as usual,
+//      and every subagent it starts is one more the wait covers. The claim is
+//      taken in the same synchronous step as the quiesce reading
+//      (`claimWindDown`); from it on `spawn` admits the wind-down permit alone.
+//      While a subagent of this primary runs the wait never abandons — a stuck
+//      one is reaped by the subagent watchdog. Only a wait in which none runs
+//      and the quiesce still does not come — the primary stays inside a turn,
+//      or a process-wide spawn or delivery window or a handoff drain stays
+//      open — ABANDONS, once `quiesceTimeoutMs` has passed since the last poll
+//      that saw one running (or since the wait began).
+//   3b. Drop every retained subagent. A retained session must not outlive the
+//      primary this cycle replaces; taken after the claim, so one retained
+//      during the wait is dropped too. The ceiling above is deliberately ahead
+//      of this: it replaces nothing.
 //   4. Prepare: resolve the todo file (creating a canonical one where the
 //      directory has none), insert the machine section where it is absent and
 //      WRITE it, then snapshot content + hash + parse + drift. Any failure
@@ -51,7 +59,7 @@
 // user's own switch (on by default); a self-stop persisting `false` would
 // disable that default for good. A stop pauses ONE primary session instead.
 //
-// Every abandon path releases the latch (lifting the spawn freeze), arms the
+// Every abandon path releases the latch and the wind-down claim, arms the
 // cooldown, logs the stage, and NEVER replaces the primary. The permit is
 // disarmed in a `finally` on every exit, so no permit outlives its cycle. Like
 // runScheduledHandoff, this function NEVER throws — its caller is an event
@@ -348,12 +356,14 @@ export function verifyWindDown(snapshot, fresh, { splitSections, parseTasks }) {
 // @property {() => boolean} claim
 // @property {() => void} release
 // @property {() => void} setCooldown
-// @property {() => Promise<boolean>} isQuiesced
-// @property {() => number} [progressSignal]
-//   monotone activity figure across polls — the maximum `lastActivityAt` of
-//   this primary's active entries; advances while any of them is emitting.
+// @property {() => Promise<boolean>} claimWindDown
+//   reads the quiesce predicate (no subagent of this primary running, no spawn
+//   or delivery window open, no handoff drain, the primary idle) and, where it
+//   holds, claims the wind-down in the same step; true once claimed
 // @property {() => Promise<unknown>} [dropRetained]
 // @property {() => number} [countActive]
+//   this primary's running subagents; while it is above zero the quiesce wait
+//   does not abandon
 // @property {() => { fileName: string, content: string, hash: string, tasks: Array, driftCount: number }} prepare
 //   resolve + section-insert + write + snapshot; throws to abandon at prepare
 // @property {() => { token: string }} armWindDown
@@ -379,9 +389,8 @@ export function verifyWindDown(snapshot, fresh, { splitSections, parseTasks }) {
 //   reports the step the cycle enters — `quiesce` (with the running count on
 //   every poll), `wind-down`, `successor` — for the sidebar's indicator only
 // @property {number} [quiesceTimeoutMs]
-// @property {number} [quiesceExtensionMs]
-//   re-arm window for each advancing progressSignal poll; 0 switches the
-//   extension off, so the first deadline abandons whatever the signal does
+//   how long the wait may go on with none of this primary's subagents running
+//   before it abandons; counted from the last poll that saw one running
 // @property {number} [pollMs]
 // @property {(ms: number) => Promise<void>} [sleep]
 // @property {() => number} [now]
@@ -393,8 +402,7 @@ export async function runEndlessCycle({
   claim,
   release,
   setCooldown,
-  isQuiesced,
-  progressSignal = () => 0,
+  claimWindDown,
   dropRetained = null,
   countActive = () => 0,
   prepare,
@@ -417,7 +425,6 @@ export async function runEndlessCycle({
   toast = () => {},
   onStep = () => {},
   quiesceTimeoutMs = 600_000,
-  quiesceExtensionMs = 600_000,
   pollMs = ENDLESS_QUIESCE_POLL_MS,
   sleep = defaultSleep,
   now = Date.now,
@@ -460,7 +467,45 @@ export async function runEndlessCycle({
       )
     }
 
-    // 2b. Drop the retained subagents of the primary this cycle will replace.
+    // 3. Quiesce and the wind-down claim. The deadline stands at
+    // `quiesceTimeoutMs` past the last poll that saw a subagent of this primary
+    // running, so the wait never abandons while one runs — however long, and
+    // whether it was spawned before the latch or during this wait. A wait with
+    // none running that still does not quiesce — the primary stays inside a
+    // turn, or a process-wide window or a handoff drain stays open — abandons
+    // once that window has passed.
+    const waitStartedAt = now()
+    const activeAtStart = countActive()
+    let claimed = false
+    let deadline = waitStartedAt + quiesceTimeoutMs
+    reportStep("quiesce", { running: activeAtStart })
+    try {
+      claimed = await claimWindDown()
+      while (!claimed) {
+        const running = countActive()
+        reportStep("quiesce", { running })
+        const at = now()
+        if (running > 0) {
+          deadline = at + quiesceTimeoutMs
+        } else if (at >= deadline) {
+          return abandon(
+            "quiesce",
+            `no subagent running, but not quiesced after ${at - waitStartedAt}ms`,
+          )
+        }
+        await sleep(pollMs)
+        claimed = await claimWindDown()
+      }
+    } catch (err) {
+      return abandon("quiesce", errMsg(err))
+    }
+    log(`endless: quiesced after ${now() - waitStartedAt}ms, activeAtStart=${activeAtStart}`, {
+      sessionID: primarySessionID,
+    })
+    reportStep("wind-down")
+
+    // 3b. Drop the retained subagents of the primary this cycle will replace.
+    // After the claim, so a subagent retained during the wait goes too.
     if (dropRetained) {
       try {
         await dropRetained()
@@ -470,46 +515,6 @@ export async function runEndlessCycle({
         })
       }
     }
-
-    // 3. Quiesce. The base window is `quiesceTimeoutMs`; while `progressSignal`
-    // advances between polls the window re-arms at `quiesceExtensionMs`, so a
-    // primary with genuinely working subagents waits as long as they keep
-    // emitting. A window that ends with the signal frozen abandons — that is
-    // the state a hung entry under a switched-off watchdog sits in forever.
-    // `quiesceExtensionMs = 0` switches the extension off: the first deadline
-    // abandons whatever the signal does.
-    const waitStartedAt = now()
-    const activeAtStart = countActive()
-    let quiesced = false
-    let deadline = waitStartedAt + quiesceTimeoutMs
-    let lastSignal = Number(progressSignal())
-    reportStep("quiesce", { running: activeAtStart })
-    try {
-      quiesced = await isQuiesced()
-      while (!quiesced) {
-        reportStep("quiesce", { running: countActive() })
-        const at = now()
-        const signal = Number(progressSignal())
-        if (signal > lastSignal) {
-          lastSignal = signal
-          if (quiesceExtensionMs > 0) deadline = at + quiesceExtensionMs
-        }
-        if (at >= deadline) {
-          return abandon(
-            "quiesce",
-            `still busy after ${at - waitStartedAt}ms with no progress`,
-          )
-        }
-        await sleep(pollMs)
-        quiesced = await isQuiesced()
-      }
-    } catch (err) {
-      return abandon("quiesce", errMsg(err))
-    }
-    log(`endless: quiesced after ${now() - waitStartedAt}ms, activeAtStart=${activeAtStart}`, {
-      sessionID: primarySessionID,
-    })
-    reportStep("wind-down")
 
     // 4. Prepare: resolve, insert the section, write, snapshot. A throw here —
     // several todo files, a non-regular file, an ensureTodoFile or section

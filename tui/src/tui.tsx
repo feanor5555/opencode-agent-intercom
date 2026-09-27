@@ -510,8 +510,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void): void {
 
   // Flip endless mode and save. Same read-modify-write: the value flipped is
   // the one on disk, not the panel's copy, which may be stale — the plugin
-  // writes this key back to false itself when one of the mode's bounds ends the
-  // loop.
+  // never writes this key itself; a mode bound that ends the loop pauses the
+  // mode for that one session and leaves the file alone.
   const toggleEndless = (): void => {
     showSettings(toggleEndlessMode());
   };

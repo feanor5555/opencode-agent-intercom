@@ -795,8 +795,8 @@ export function setEndlessMode(value: boolean): Settings {
 
 // Flips endless mode. The counterpart of stepSetting for a two-valued setting:
 // the flip starts from what the file holds at this moment, so a switch thrown
-// outside the panel — by hand, or by the plugin's own bounds writing
-// endlessMode back to false — is toggled from rather than overwritten.
+// outside the panel — by hand — is toggled from rather than overwritten. The
+// plugin itself never writes this key.
 export function toggleEndlessMode(): Settings {
   return applySetting("endlessMode", (current) => !current.endlessMode);
 }

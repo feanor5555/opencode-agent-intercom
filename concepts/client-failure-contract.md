@@ -9,38 +9,39 @@ opencode builds the plugin's SDK client **without `throwOnError`**. A failed req
 reject: it resolves with an envelope `{ error, request, response }` carrying the HTTP status —
 `response.status: 404`, `error.name: "NotFoundError"` for a session that is gone.
 
-One function in the module reads that today, `src/client.js:38`:
+One function in the module reads that, `src/client.js:78`:
 
 ```js
-export function noticePostFailure(result) {
+export function requestFailure(result, op = "request") {
 ```
 
-and one caller uses it, `src/client.js:106`: `failure = noticePostFailure(result)`.
+and every wrapper reaches it through `attempt` (`src/client.js:117-132`):
+`const failure = requestFailure(result, op)`.
 
-Every other write in the module awaits the promise and reports success unconditionally:
+Every write in the module goes through `attempt` and reports what the server answered:
 
 | Site | Line | What it reports on a resolved failure |
 | --- | --- | --- |
-| `promptSession` | `src/client.js:169` `await client.session.promptAsync({` | returns normally — "sent" |
-| `abortSession` | `src/client.js:177` `return Boolean(unwrap(await client.session.abort({ path: { id: sessionID } })))` | `false` — correct by accident (see §4.4) |
-| `deleteSession` | `src/client.js:253-254` `await client.session.delete(...)` / `return true` | `true` — "deleted" |
-| `updateSessionTitle` | `src/client.js:269-270` `await client.session.update(...)` / `return true` | `true` — "written" |
-| `archiveSession` | `src/client.js:308-312` `await client.session.update({ ... time: { archived: Date.now() } })` / `return true` | `true` — "archived" |
-| `createChildSession` | `src/client.js:282-296` returns `{ sessionID }` or `{ error }`, throws on `kind: "indeterminate"` | `{ error }` — refused with status; throws — no response seen |
+| `promptSession` | `src/client.js:367-406` `withRetry(… client.session.promptAsync({ … }) …)` | throws after the retry policy |
+| `abortSession` | `src/client.js:416-424` `attempt(op, () => client.session.abort({ path: { id: sessionID } }))` | `false`, logged |
+| `deleteSession` | `src/client.js:564-583` `attempt(op, () => client.session.delete(...))` | `false`, logged |
+| `updateSessionTitle` | `src/client.js:637-647` `attempt(op, () => client.session.update(...))` | `false`, logged |
+| `archiveSession` | `src/client.js:704-716` `attempt(op, () => client.session.update({ ... time: { archived: Date.now() } }))` | `false`, logged |
+| `createChildSession` | `src/client.js:308-321` returns `{ sessionID }` or `{ error }`, throws on `kind: "indeterminate"` | `{ error }` — refused with status; throws — no response seen |
 
-The reads have a second, subtler form of the same defect. `fetchSnapshot` unwraps to `undefined`
-on an envelope, so `messages = []` and it returns `src/client.js:367`
-`messageCount: messages.length` = `0`. `snapshotOutcome` then reads that as `src/client.js:397`
-`return snapshot.messageCount > 0 ? "ok" : "gone"`. A 500 from `session.messages` is therefore
-classified as **"the session was deleted underneath the plugin"**, and `reuse` acts on it —
-`src/tools.js:936-937`:
+The reads go through `attempt` as well. `fetchSnapshot` returns `{ messageCount: 0 }` for a 404 and
+`{}` for every other failure (`src/client.js:803-806`), and `snapshotOutcome` reads that as
+`src/client.js:843-844`: `{}` is `"unavailable"`, `messageCount > 0` is `"ok"`, anything else
+`"gone"`. Only a session that is really gone takes `reuse`'s destroying branch —
+`src/tools.js:1175-1176`:
 
 ```js
       await removeEntry(entry.sessionID)
       forgetSessionDirectory(entry.sessionID)
 ```
 
-A transient server error permanently destroys a retained handle.
+A transient server error takes the `"unavailable"` branch (`src/tools.js:1184`) and leaves the
+retained handle standing.
 
 The direct-fetch paths in the module no longer read failures themselves: `applyAgentcomVisibility`
 and `patchPartSynthetic` go through the client's own transport (`lowLevelClient`, verb parameter,
@@ -54,8 +55,8 @@ Three primitives in `src/client.js`, above every wrapper, and exactly three cont
 
 ### 2.1 `requestFailure(result, op)`
 
-`noticePostFailure` generalised: same envelope reading, an operation label instead of the
-hard-coded `"session.promptAsync failed"` in `src/client.js:50`, and one new field.
+The envelope reading (`src/client.js:78-102`), labelled with the operation
+(`` `${op} failed` ``, `src/client.js:89-92`), and one field for the retry policy.
 
 Returns `undefined` for a delivered request, or an `Error` carrying:
 
@@ -69,7 +70,7 @@ Returns `undefined` for a delivered request, or an `Error` carrying:
   - `"indeterminate"` — a thrown transport error. No response was seen; the write may or may not
     have taken effect.
 
-Success keeps the shapes the current reader accepts (`src/client.js:24-28`): `undefined`, a bare
+Success keeps the shapes the reader accepts (`src/client.js:48-51`): `undefined`, a bare
 payload, `{ data }`, and `{ data, request, response }` with a 2xx/3xx status.
 
 ### 2.2 `attempt(op, call)`
@@ -81,13 +82,13 @@ nothing else — no wrapper awaits an SDK call bare again.
 
 ### 2.3 `withRetry(op, call, { retries, backoffMs, retryKinds })`
 
-The loop that stands in `postNotice` today (`src/client.js:94-131`), lifted out unchanged in its
+The loop `postNotice` runs on (`withRetry`, `src/client.js:165-217`), with these
 mechanics: linear backoff `attempt * backoffMs` plus 0–25 % jitter, `terminal` breaks out at once,
 the last error is thrown after the budget is spent. One addition: `retryKinds` names which failure
 kinds are worth another attempt.
 
 Settings stay as they are — `postNoticeRetries` / `postNoticeRetryBackoffMs`
-(`src/settings.js:329-330`) become the client's single retry policy, read per call. No new
+(`src/settings.js:334-335`) become the client's single retry policy, read per call. No new
 configuration surface: a second budget is only justified once a measurement shows the spawn path
 needs a different one.
 
@@ -118,7 +119,7 @@ the fresh orchestrator its instructions twice.
   outside this narrower status predicate. An `"indeterminate"` throw is ambiguous — there the
   duplicate-prompt risk outweighs the retry, so it throws on the first failure.
 - **Reported writes — no retry.** `deleteSession` has a reconciliation path already:
-  `sweepOrphanedSubagentSessions` (`src/teardown.js:588`) collects, at the next plugin load,
+  `sweepOrphanedSubagentSessions` (`src/teardown.js:904`) collects, at the next plugin load,
   exactly the sessions a failed delete leaves behind, and its criteria (marker in the title, a
   parentID, no children, unknown to this process, old enough) admit them. A retry loop on the
   teardown hot path buys nothing the sweep does not already give, and it delays a wake that has
@@ -128,7 +129,7 @@ the fresh orchestrator its instructions twice.
 
 ## 4. Call sites, one by one
 
-### 4.1 `spawn` — `src/tools.js:627`
+### 4.1 `spawn` — `src/tools.js:785`
 
 ```js
         await promptSession(client, { sessionID, agent: args.agent, prompt: fullPrompt })
@@ -136,8 +137,8 @@ the fresh orchestrator its instructions twice.
 
 **Should throw.** The catch that receives it already exists and is already correct: it settles the
 child waiter with `detail: "the child session was never prompted"`, calls `removeEntry`,
-`deleteSession` (`src/tools.js:642`) and `forgetSessionDirectory`, then re-throws so `guard`
-(`src/tools.js:307-315`) renders `spawn failed: <message>` to the orchestrator.
+`deleteSession` (`src/tools.js:801`) and `forgetSessionDirectory`, then re-throws so `guard`
+(`src/tools.js:325-333`) renders `spawn failed: <message>` to the orchestrator.
 
 Contract change: that catch **currently never fires for an HTTP failure**. Today the spawn
 reports a running subagent, registers an entry, holds a concurrency slot, and the child never
@@ -148,7 +149,7 @@ No new catch is added: `guard`'s output is the right channel — the orchestrato
 spawn and is waiting on the tool result. A notice would arrive at the same session by a second
 route for no gain.
 
-### 4.2 `reuse` — `src/tools.js:1032`
+### 4.2 `reuse` — `src/tools.js:1270`
 
 ```js
         await promptSession(client, { sessionID, agent, prompt })
@@ -159,32 +160,32 @@ original window (`restoreRetainedEntryLocked`), re-publishes the original retent
 re-throws to `guard`. Same shape as spawn: today a refused follow-up leaves a *running* entry
 whose run never started, and the orchestrator is told to wait for a wake that is not coming.
 
-### 4.3 Handoff kickoff — `src/handoffwiring.js:183` → `src/handoff.js:283`
+### 4.3 Handoff kickoff — `src/handoffwiring.js:213-214` → `src/handoff.js:358`
 
 ```js
     await deps.promptAsync(newID, kickoffMessage)
 ```
 
-**Should throw.** This is the largest silent failure in the plugin. `src/handoff.js:283` is the
+**Should throw.** `src/handoff.js:358` is the
 last statement before the documented point of no return; its catch un-reparents the subagents back
-to the old primary, deletes the orphaned new session (`src/handoff.js:302`) and aborts the drain so
+to the old primary, deletes the orphaned new session (`src/handoff.js:377`) and aborts the drain so
 buffered notices go back to the surviving old primary. Past that line the sequence archives the old
-primary (`src/handoff.js:352`) and forgets it.
+primary (`src/handoff.js:427`) and forgets it.
 
 Today a refused kickoff walks straight through: the old primary is archived, every in-flight
 subagent is reparented to a session that was never prompted and will never wake, and the drain is
 flushed into it. The orchestrator is lost with no error anywhere. After the change the handoff
 fails cleanly and the old primary keeps working; a later over-budget turn re-schedules it.
 
-`deps.promptAsync` is typed `Promise<void>` (`src/handoff.js:120`) and the failure-path test
+`deps.promptAsync` is typed `Promise<void>` (`src/handoff.js:126`) and the failure-path test
 `test/handoff.test.js:678` already drives it with a throwing double. The test was never wrong —
 the production wiring was unfaithful to it. §6 adds the wiring-level test that pins the two
 together.
 
-### 4.4 DOC_SUMMARY / open-points prompt — `src/handoffwiring.js:318`
+### 4.4 DOC_SUMMARY / open-points prompt — `src/handoffwiring.js:385`
 
 **Should throw**, and the two callers keep their existing, deliberately asymmetric answers
-(`src/handoffwiring.js:333-342`): the plain handoff catches and substitutes
+(`src/handoffwiring.js:367-371`): the plain handoff catches and substitutes
 `FALLBACK_DOC_SUMMARIES`; the endless cycle abandons, because replacing a primary after failing to
 save its open points is the data loss the mode exists to prevent.
 
@@ -192,7 +193,7 @@ Contract change is timing only, and in the right direction: a refused prompt fai
 of polling `fetchSnapshot` for the full `DOC_SUMMARIES_TIMEOUT_MS` (120 s) to reach the same
 conclusion.
 
-### 4.5 `abortSession` — `src/tools.js:323`, `src/teardown.js:232`, `src/watchdog.js:273`
+### 4.5 `abortSession` — `src/tools.js:339-346`, `src/teardown.js:295`, `src/watchdog.js:460`
 
 **Reported write, no behaviour change for the callers.** `Boolean(unwrap(...))` already yields
 `false` on an envelope, so the abort tool already renders
@@ -201,40 +202,45 @@ changes is only that the reason is logged. Its result stays `ok && Boolean(data)
 answer means "not confirmed", not "the request failed", and the two must keep rendering the same
 way to the orchestrator.
 
-### 4.6 `deleteSession` — `src/teardown.js:406`, `src/teardown.js:606`, `src/tools.js:642`, `src/tools.js:1136`
+### 4.6 `deleteSession` — `src/teardown.js:567`, `src/teardown.js:986`, `src/tools.js:801`, `src/tools.js:1439`
 
-**Reported write.** `src/teardown.js:406-407` is already written for a truthful boolean:
+**Reported write.** `src/teardown.js:566-574` is written for a truthful boolean:
 
 ```js
-      const ok = await deleteSession(client, sessionID)
-      if (ok) log(`${tag}deleted opencode session`, { handle, sessionID })
+    if (
+      await deleteSession(client, sessionID, {
+        parentID,
+        fallbackID: rootPrimaryFor(parentID),
+        cause: label || "teardown",
+      })
+    ) {
+      log(`${tag}deleted opencode session`, { handle, sessionID })
+    }
 ```
 
 Two consequences the callers must absorb:
 
 - the `try`/`catch` wrapped around that call becomes dead — `deleteSession` does not throw — and is
   removed, so the failure is logged once, inside the wrapper, with its status;
-- `src/teardown.js:606` `if (await deleteSession(client, sessionID)) {` gates
+- `src/teardown.js:986` `if (await deleteSession(client, sessionID, { parentID: s.parentID, cause: "sweep" })) {` gates
   `forgetSessionDirectory` and the sweep's return array. A session whose delete was refused is no
   longer counted as deleted and no longer dropped from the directory cache. That is the correct
   reading — it still exists — and the next sweep will find it again.
 
-**Deliberately swallowed** at `src/tools.js:642`: it runs inside the spawn's cleanup path, whose
+**Deliberately swallowed** at `src/tools.js:801`: it runs inside the spawn's cleanup path, whose
 job is to surface the *original* prompt failure. A cleanup failure must never mask it.
 
-### 4.7 `archiveSession` — `src/handoffwiring.js:210` → `src/handoff.js:352`
+### 4.7 `archiveSession` — `src/handoffwiring.js:245` → `src/handoff.js:427`
 
-**Reported write, and its failure stays swallowed at the caller.** `src/handoff.js:352` sits after
+**Reported write, and its failure stays swallowed at the caller.** `src/handoff.js:427` sits after
 the point of no return and is already wrapped: "post-kickoff failures do NOT revert" — a zombie old
 session is strictly better than deleting a live successor. Pinned by
 `test/handoff.test.js:731`. Only the log gains the status.
 
-Note the type mismatch that is now visible: `deps.archiveSession` is declared
-`Promise<void>` (`src/handoff.js:123`) while the wrapper returns a boolean. Widen the JSDoc to
-`Promise<boolean>` for `archiveSession` and `deleteSession`; `handoff.js` ignores both values and
-needs no code change.
+`deps.archiveSession` and `deps.deleteSession` are declared `Promise<boolean>`
+(`src/handoff.js:128-129`), matching the wrappers; `handoff.js` ignores both values.
 
-### 4.8 `updateSessionTitle` — `src/teardown.js:522`
+### 4.8 `updateSessionTitle` — `src/teardown.js:753`
 
 ```js
   return updateSessionTitle(client, sessionID, title)
@@ -252,25 +258,25 @@ the boolean. Keep it that way.
 
 One deliberate refinement in `fetchSnapshot`, which is the only read whose caller branches on
 *why* it is empty: a failure with `status === 404` returns `{ messageCount: 0 }` (the session is
-genuinely gone), every other failure returns `{}`. `snapshotOutcome` (`src/client.js:395`) then
+genuinely gone), every other failure returns `{}`. `snapshotOutcome` (`src/client.js:842-845`) then
 answers "gone" only where the session really is gone and "unavailable" for a 500 or a timeout, and
 `reuse` stops destroying a retained handle on a transient error — it takes the branch at
-`src/tools.js:946` instead, which leaves the subagent held and tells the orchestrator to call again.
+`src/tools.js:1184` instead, which leaves the subagent held and tells the orchestrator to call again.
 
 `listSessions` returning `[]` on a refused call is what keeps the orphan sweep from deleting
 anything on a bad read — it does nothing rather than something wrong. Unchanged, now for a reason
 rather than by luck.
 
-### 4.10 `createChildSession` — `src/tools.js:600`, `src/handoffwiring.js:178-185`
+### 4.10 `createChildSession` — `src/tools.js:718`, `src/handoffwiring.js:197-205`
 
 Answers `{ sessionID }` on success, `{ error }` on a refused create (carrying `status`,
 `errorName`, `terminal`, `terminal` reason), and **throws** the error on a transport failure
-(`kind: "indeterminate"`). `src/tools.js:600` destructures `{ sessionID, error: createFailure }`
+(`kind: "indeterminate"`). `src/tools.js:718` destructures `{ sessionID, error: createFailure }`
 and renders the status in its output; the spawn's existing catch path is unchanged because the
 indeterminate throw propagates into it the same way a refused `promptSession` throw would.
 
-`src/handoffwiring.js:178-185` takes `.sessionID` so a refused create resolves to `undefined`
-into `src/handoff.js:197`, which already throws on `!newID` and lands in the pre-kickoff revert
+`src/handoffwiring.js:197-205` takes `.sessionID` so a refused create resolves to `undefined`
+into `src/handoff.js:216`, which already throws on `!newID` and lands in the pre-kickoff revert
 catch — the existing test pin `test/handoff.test.js:713` ("createSession throws — drain aborted,
 nothing reparented, nothing deleted") covers it.
 
@@ -313,10 +319,10 @@ changes. *Depends on: step 1.*
 
 **Step 3 — the reported writes.** Rewrite `deleteSession`, `archiveSession`, `updateSessionTitle`
 and `abortSession` on `attempt`, each logging once with `op` + `status`. Remove the now-dead
-`try`/`catch` around `deleteSession` in `teardownSubagent` (`src/teardown.js:405-410`). Widen the
-`deleteSession` / `archiveSession` JSDoc in `src/handoff.js:122-123` to `Promise<boolean>`. New
+`try`/`catch` around `deleteSession` in `teardownSubagent` (`src/teardown.js:566-574`). Widen the
+`deleteSession` / `archiveSession` JSDoc in `src/handoff.js:128-129` to `Promise<boolean>`. New
 tests: each returns `false` on an envelope; the orphan sweep does not count a refused delete
-(`src/teardown.js:606`). *Depends on: step 1. Independent of step 2.*
+(`src/teardown.js:986`). *Depends on: step 1. Independent of step 2.*
 
 **Step 4 — `promptSession`.** The breaking one, and last, so it lands on a green tree. Wrap it in
 `withRetry` with `retryKinds: ["refused"]` and a 5xx-only predicate, throwing otherwise. New tests
@@ -326,7 +332,7 @@ waiter, and reaches `guard`); the reuse path (the entry returns to retained on i
 *Depends on: step 1.*
 
 **Step 5 — the two guards.** Add the status to `createChildSession`'s log and to the spawn's
-"Failed to create subagent session." output; add the `if (!newID) throw` at `src/handoff.js:197`.
+"Failed to create subagent session." output; add the `if (!newID) throw` at `src/handoff.js:216`.
 Test: a `createSession` that answers `undefined` takes the pre-kickoff revert path.
 *Depends on: step 4 (shares the handoff failure-path tests).*
 
@@ -352,14 +358,14 @@ kickoffs, after a retried spawn or handoff.
 *Repair if so:* set the retry budget for `promptSession` to zero — one predicate, no structural change.
 
 **A3 — `session.abort` answering `{ data: false }` means "not confirmed", not "failed".** This is how
-`src/client.js:177` reads it today and how the abort tool's output wording is built.
+`src/client.js:423` reads it and how the abort tool's output wording is built.
 *Falsified by:* an abort that is confirmed by the server yet answers falsy — observable as the
 "(abort call did not confirm)" suffix on aborts that visibly worked.
 
 **A4 — the orphan sweep is the reconciliation path for a refused delete.** A subagent session whose
 `DELETE` failed is collected at the next plugin load by `sweepOrphanedSubagentSessions`.
 *Falsified by:* a leaked subagent session that survives a restart — it would mean one of the sweep's
-five criteria (`src/teardown.js:593-604`) excludes it, most likely the age bound.
+five criteria (`src/teardown.js:858-882`) excludes it, most likely the age bound.
 *Consequence if so:* `deleteSession` needs the retry policy after all, which is one argument at one
 call site.
 

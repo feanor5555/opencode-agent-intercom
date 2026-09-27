@@ -16,95 +16,99 @@ Read out of the source, each claim with its line:
 
 - The context budget is **per agent type**. The file key `agentContext` maps an
   agent name to its ceiling in whole tokens and is resolved by
-  `contextBudgetFor(agent)` (`src/settings.js:725`); the legacy flat key
+  `contextBudgetFor(agent)` (`src/settings.js:801`); the legacy flat key
   `maxContext` and the env var `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` are the
   value for every type without an own entry (`src/settings.js:6-21`,
-  `src/settings.js:478`); the built-in per-type default table is
+  `src/settings.js:804`); the built-in per-type default table is
   `DEFAULT_AGENT_CONTEXT` (`src/settings.js:123-133`) and an unknown name
   falls back to `DEFAULT_MAX_CONTEXT = 100000` (`src/settings.js:116`). Whole
-  tokens, settings cached for `TTL_MS = 2000` (`src/settings.js:486-488`).
+  tokens, settings cached for `TTL_MS = 2000` (`src/settings.js:400`, `:530`).
   `0` is a real value at every level and disables the budget for that type.
-- The legacy flat key is parsed (`src/settings.js:540-555`) and recorded with
+- The legacy flat key is parsed (`src/settings.js:592-595`) and recorded with
   the level that produced it as `maxContextSource`
-  (`src/settings.js:494-508`), because "the user set 100000" and "nobody set
+  (`src/settings.js:533-534`, `:594`), because "the user set 100000" and "nobody set
   anything" pick different budgets for a type that has a built-in default.
-- **Three enforcement points**, confirmed by a tree-wide grep for
-  `contextBudgetFor` across `src/`:
-  1. `const maxContext = contextBudgetFor(entry.agent)` (`src/hooks.js:1061`)
-     at the head of `contextLimitNotice(client, entry)` (`src/hooks.js:1060`).
-     `0` disables (`src/hooks.js:1062`). The `ctxTokens == null` or
+- **Three enforcement points on the running subagent and its orchestrator.** A
+  tree-wide grep for `contextBudgetFor` across `src/` finds further readers: the
+  spawn package gate (`src/tools.js:144`), the reuse and retention gates
+  (`src/tools.js:1205`, `src/hooks.js:2125`), the `message` refusal
+  (`src/midrun.js:164`), a delegating subagent's limits block
+  (`src/hooks.js:1583`, `:1590`) and the wake notices (`src/notices.js:103`, `:350`).
+  1. `const maxContext = contextBudgetFor(entry.agent)` (`src/hooks.js:1111`)
+     at the head of `contextLimitNotice(client, entry)` (`src/hooks.js:1110`).
+     `0` disables (`src/hooks.js:1112`). The `ctxTokens == null` or
      pre-band guard is `entry.ctxTokens < maxContext * CTX_NEAR_BUDGET`
-     (`src/hooks.js:1091`). The reserve-band open is
-     `entry.ctxTokens < maxContext * CTX_STOP_RESERVE` (`src/hooks.js:1107`).
-     The lockdown open is `entry.ctxTokens < maxContext` (`src/hooks.js:1143`).
+     (`src/hooks.js:1141`). The reserve-band open is
+     `entry.ctxTokens < maxContext * CTX_STOP_RESERVE` (`src/hooks.js:1157`).
+     The lockdown open is `entry.ctxTokens < maxContext` (`src/hooks.js:1193`).
      The constants are `CTX_NEAR_BUDGET = 0.7` and `CTX_STOP_RESERVE = 0.9`
-     (`src/hooks.js:326,337`).
-  2. `const maxContext = contextBudgetFor(entry.agent)` (`src/hooks.js:2701`)
+     (`src/hooks.js:338,349`).
+  2. `const maxContext = contextBudgetFor(entry.agent)` (`src/hooks.js:2838`)
      at the head of the tool-call guard. The hard-deny condition is
      `maxContext > 0 && entry.ctxTokens != null && entry.ctxTokens >= maxContext`
-     (`src/hooks.js:2702-2705`). `MID_RUN_MESSAGING_TOOLS` is exempted
-     (`src/hooks.js:2706-2712`).
+     (`src/hooks.js:2839`). `MID_RUN_MESSAGING_TOOLS` is exempted
+     (`src/hooks.js:2859-2868`).
   3. The orchestrator-only `{{limits}}` block. The per-type row in
      `formatLimitsNotice` is built by iterating the spawnable roles and
-     resolving each through `contextBudgetFor` (`src/hooks.js:1488,1495`); the
+     resolving each through `contextBudgetFor` (`src/hooks.js:1453,1455`); the
      block feeds the orchestrator prompt only
-     (`src/promptsfile.js:21,174,214`).
+     (`src/promptsfile.js:21,362,409`).
 - `contextLimitNotice` is **three bands, not two**: plan, reserve, lockdown.
-  Split by `CTX_NEAR_BUDGET` and `CTX_STOP_RESERVE` (`src/hooks.js:1022-1034`).
+  Split by `CTX_NEAR_BUDGET` and `CTX_STOP_RESERVE` (`src/hooks.js:1072-1084`).
   Plan band (`>= CTX_NEAR_BUDGET`, `< CTX_STOP_RESERVE`): denies nothing,
   demands nothing, names the room left and the reserve threshold in tokens,
-  adds `resultCeilingPlan` (`src/prompts.js:384`). Counted in
-  `entry.contextPlanNotices` (`src/hooks.js:1108`). Reserve band
+  adds `resultCeilingPlan` (`src/prompts.js:387`). Counted in
+  `entry.contextPlanNotices` (`src/hooks.js:1158`). Reserve band
   (`>= CTX_STOP_RESERVE`, `< budget`): tools still work, demands the `Done:`
   / `Blocked:` summary NOW while both the tools and the room remain, adds
-  `resultCeilingDemand` (`src/prompts.js:414`). Counted in
-  `entry.contextWarnings` (`src/hooks.js:1144`). Lockdown (`>= budget`):
+  `resultCeilingDemand` (`src/prompts.js:417`). Counted in
+  `entry.contextWarnings` (`src/hooks.js:1194`). Lockdown (`>= budget`):
   `guardToolExecute` is denying every work tool, the block escalates over
   successive LLM turns and notifies the parent at `BUDGET_NOTIFY_AFTER = 3`
-  (`src/hooks.js:350`); counted in `entry.stopInjections` (`src/hooks.js:1199`).
+  (`src/hooks.js:362`); counted in `entry.stopInjections` (`src/hooks.js:1249`).
   Every band re-fires on each crossing turn — the block rides on the
   per-request copy of the message array and is never written back to the
-  session (`src/hooks.js:1051-1059`).
+  session (`src/hooks.js:1101-1109`).
 - **Compaction instead of lockdown, when switched on for the type.** The
   crossing buys a `client.session.summarize` instead of the lockdown, up to
-  `MAX_SUBAGENT_COMPACTIONS`; `startSubagentCompaction` (`src/hooks.js:1182`)
-  takes the decision and owns the latch. False means the crossing is the
+  `MAX_SUBAGENT_COMPACTIONS`; `startSubagentCompaction` (`src/compaction.js:210`,
+  called at `src/hooks.js:1232`) takes the decision and owns the latch. False means the crossing is the
   lockdown's after all — switch off, cap spent, or a question open. The
   reserve band is untouched either way.
 - The subagent's notice rides in a **carrier message appended at the END of
   the per-request array** (`isNoticeCarrier` / `tailNoticeCarrier`,
-  `src/hooks.js:776,797`), not on the last user message — which in a subagent
+  `src/hooks.js:821,842`), not on the last user message — which in a subagent
   session is message 0. The primary's placement is unchanged: its notice
-  hangs off its own last user message (`src/hooks.js:891-894`).
+  hangs off its own last user message (`src/hooks.js:938-943`).
 - Both enforcement points already hold the registry `entry`:
-  `contextLimitNotice(client, entry)` (`src/hooks.js:1060`), and the guard
-  runs after `permissionGuard.checkToolPermission` (`src/hooks.js:2715-2718`).
+  `contextLimitNotice(client, entry)` (`src/hooks.js:1110`), and the guard
+  runs after `permissionGuard.checkToolPermission` (`src/hooks.js:2826-2836`).
   `entry.agent` is in hand at both, for free.
 - The type is on the entry: `upsertSession(sessionID, { agent: args.agent, ... })`
-  (`src/tools.js:276-282`), stored by `createEntry(sessionID, agent || "subagent", ...)`
-  (`src/registry.js:261`), re-keyed by `upgradeProvisionalAgent`
-  (`src/registry.js:281-288`), whose first guard is
+  (`src/tools.js:835-853`), stored by `createEntry(sessionID, agent || "subagent", ...)`
+  (`src/registry.js:1076-1078`), re-keyed by `upgradeProvisionalAgent`
+  (`src/registry.js:1107-1114`), whose first guard is
   `if (!agent || agent === "subagent" || entry.agent !== "subagent") return`
-  (`src/registry.js:282`).
+  (`src/registry.js:1108`).
 - Per-agent config already exists in its own files and is the pattern this
   design follows: `export type LlmParams = Record<string, Record<string, number>>`
   (`tui/src/llm-params-file.ts:26`) with `export function resolveForAgent(agent)`
-  (`src/llmparams.js:63`), `export type LlmModels = Record<string, ModelRef>`
-  (`tui/src/llm-models-file.ts:30`), and the same shape for `agentContext`
+  (`src/llmparams.js:73`), `export type LlmModels = Record<string, ModelEntry>`
+  (`tui/src/llm-models-file.ts:86`), and the same shape for `agentContext`
   itself through `tui/src/settings-file.ts`. All three are edited in the TUI
   through **one agent cycler plus one row per value**
-  (`tui/src/tui.tsx:1354-1364`), with `★` marking an own value against an
-  inherited one (`tui/src/tui.tsx:1394-1396`) and `[reset current agent]`
-  (`tui/src/tui.tsx:1400-1405`).
+  (`tui/src/tui.tsx:2603-2612`), with `★` marking an own value against an
+  inherited one (`tui/src/tui.tsx:2734-2736`) and `[reset current agent]`
+  (`tui/src/tui.tsx:2866-2871`).
 - The TUI already fetches the live agent list: `const res = await api.client.app.agents({})`
-  (`tui/src/tui.tsx:387`), whose records are typed
+  (`tui/src/tui.tsx:670`), whose records are typed
   `mode: "subagent" | "primary" | "all"` (`@opencode-ai/sdk` `types.gen.d.ts:1399-1402`).
-  Its own hardcoded list is `const LLM_AGENTS = [...]`, nine names
-  (`tui/src/tui.tsx:78-88`).
+  Its own hardcoded list is `export const AGENT_NAMES = [...]`, ten names
+  (`tui/src/agent-roles.ts:19-30`).
 - Roles the plugin itself installs: `export const AGENTS = { orchestrator, planner,
-  coder, debugger, reviewer, documenter, researcher, designer, gitter }`
-  (`src/agents.js:138-217`), merged non-destructively by `installAgents`
-  (`src/agents.js:229-244`).
+  coder, debugger, reviewer, documenter, researcher, grounder, designer, gitter }`
+  (`src/agents.js:355-472`), merged non-destructively by `installAgents`
+  (`src/agents.js:735-824`).
 
 ## 2. Target state
 
@@ -118,12 +122,12 @@ New file key in `~/.config/opencode/agent-intercom.json`, next to `maxSubagents`
 
 `Record<agentName, wholeTokens>`. A key is kept only when
 `Number.isInteger(v) && v >= 0`; anything else is dropped silently, the
-discipline `forumBangs` already uses (`src/settings.js:207-215`). A value that
+discipline `forumBangs` already uses (`src/settings.js:676-684`). A value that
 is not a plain object (array, string, `null`) leaves the key unset entirely. An
 agent absent from the map is absent — nothing is materialised on read
-(`tui/src/llm-params-file.ts:53-67` is the precedent).
+(`tui/src/llm-params-file.ts:55-67` is the precedent).
 
-`maxContext` becomes **legacy-only**: still parsed (`src/settings.js:192-194`
+`maxContext` becomes **legacy-only**: still parsed (`src/settings.js:592-595`
 stays), no longer the ceiling, no longer editable in the TUI. It is the
 migration seed — see 2.3. A separate key rather than a `number | object` union
 on `maxContext`, because migration then reduces to a presence test
@@ -131,14 +135,14 @@ on `maxContext`, because migration then reduces to a presence test
 validator and writer.
 
 Rejected alternative: a third JSON file `agent-context.json` via
-`createJsonObjectFile` (`tui/src/json-object-file.ts:34`). It would inherit the
+`createJsonObjectFile` (`tui/src/json-object-file.ts:33`). It would inherit the
 per-agent read-modify-write machinery unchanged, which is the pull. Against it:
 a third store, a third cache, a third test seam and a third parity surface for
 one integer per agent, while the value is an intercom governance limit that
 belongs beside `maxSubagents` and `endless*`. It cannot go into
 `llm-params.json` at all: that hook forwards every key it does not recognise
 into `output.options`, i.e. into the provider request body
-(`src/llmparams.js:87-92`), so a `maxContext` key there would be sent to the
+(`src/llmparams.js:114-116`), so a `maxContext` key there would be sent to the
 model.
 
 **Env var: `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` stays and its meaning narrows.**
@@ -151,24 +155,26 @@ an environment string; per-type values live in the file.
 
 ### 2.2 Built-in per-type defaults
 
-In `src/settings.js`, exported (the TUI mirrors it and the parity test pins
-both, as it already does for the two scalars — `src/settings.js:44-49`,
-`test/settings-defaults-parity.test.js:81`):
+In `src/settings.js`, exported (`src/settings.js:116`, `:123-133`); the TUI
+mirrors both (`tui/src/settings-file.ts:175`, `tui/src/agent-roles.ts:80-90`)
+and `test/settings-defaults-parity.test.js` pins the two halves against each
+other and the table's keys against `SPAWNABLE_ROLES`:
 
 ```js
+export const DEFAULT_MAX_CONTEXT = 100000   // unknown agent name, legacy flat key fallback
 export const DEFAULT_AGENT_CONTEXT = {
-  planner: 40000, coder: 60000, debugger: 60000, reviewer: 40000,
-  documenter: 40000, researcher: 60000, designer: 30000, gitter: 30000,
+  planner: 100000, coder: 100000, debugger: 100000, reviewer: 100000,
+  documenter: 100000, researcher: 100000, grounder: 100000, designer: 100000,
+  gitter: 100000,
 }
-export const DEFAULT_MAX_CONTEXT = 40000   // unknown agent name
 ```
 
-`DEFAULT_MAX_CONTEXT` keeps its value and its name and becomes the fallback for
-a name not in the table — so an agent the plugin does not define behaves exactly
-as it does today. `orchestrator` gets no entry: the budget is subagent-only
-(`src/hooks.js:163-164` calls `contextLimitNotice` in the `isSubagent` branch
+Every spawnable type defaults to 100000 tokens. `DEFAULT_MAX_CONTEXT` is the
+fallback for a name not in the table and for the legacy flat `maxContext`
+key. `orchestrator` gets no entry: the budget is subagent-only
+(`src/hooks.js:923` calls `contextLimitNotice` in the subagent branch
 alone); the primary is governed by `primaryContextThreshold()`
-(`src/settings.js:283-286`).
+(`src/settings.js:1094-1097`).
 
 ### 2.3 Migration of an existing file
 
@@ -184,7 +190,7 @@ Read-time, no write by the server half:
   step to the selected one, and deletes the flat `maxContext` key. The frozen
   map reproduces what was in effect, so nothing loosens or tightens; and the
   write happens in the half that already owns writing this file
-  (`tui/src/settings-file.ts:110-135`).
+  (`stepPerAgentCeiling`, `tui/src/settings-file.ts:699-730`).
 
 Alternative, cheaper and duller: never write, keep the flat key as a permanent
 seed. It costs nothing to build but leaves a file in which the effective ceiling
@@ -203,7 +209,7 @@ in `src/settings.js`, over the same 2 s-cached `getSettings()` object. Order:
 2. flat `maxContext` from the **file** (legacy seed), if present.
 3. env `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT`, if set.
 4. `DEFAULT_AGENT_CONTEXT[agent]`.
-5. `DEFAULT_MAX_CONTEXT` (40000).
+5. `DEFAULT_MAX_CONTEXT` (100000).
 
 Rules:
 
@@ -212,18 +218,18 @@ Rules:
 - **`0`** at any level means *disabled for that type* and is a real value, not
   "unset": a `0` at level 1 beats a non-zero default, a `0` at level 2/3
   disables every unconfigured type. Both enforcement points already treat
-  `<= 0` as off (`src/hooks.js:349,911`), so the semantics carry over unchanged.
+  `<= 0` as off (`src/hooks.js:1112,2839`), so the semantics carry over unchanged.
 - **Type not yet known.** The entry is provisional `"subagent"`
-  (`src/registry.js:261,282`) until `spawn` upgrades it, and the upgrade runs
-  *after* `await promptSession(...)` (`src/tools.js:264` then `:276-282`), which
-  is `client.session.promptAsync` (`src/client.js:85-90`) — it returns once the
+  (`src/registry.js:1077,1108`) until `spawn` upgrades it, and the upgrade runs
+  *after* `await promptSession(...)` (`src/tools.js:785` then `:835-853`), which
+  is `client.session.promptAsync` (`src/client.js:367-407`) — it returns once the
   run is queued, so a first LLM turn can reach the hook with `entry.agent ===
   "subagent"`. In that window `"subagent"` is simply a name not in the table and
   resolves to `DEFAULT_MAX_CONTEXT` (level 5) — unless the user has put an
   explicit `"subagent"` entry in `agentContext`, which is then honoured and is
   the documented way to steer the window. It is harmless in practice: the budget
   only bites at `ctxTokens >= budget`, and a session that has not had its first
-  assistant step has `ctxTokens == null` (`src/hooks.js:370`).
+  assistant step has `ctxTokens == null` (`src/hooks.js:1141`).
 - Therefore: **the budget is resolved per call from `entry.agent`, never cached
   on the entry.** The value corrects itself on the first call after the upgrade.
 
@@ -231,29 +237,30 @@ Rules:
 
 Both change, identically and minimally:
 
-- `src/hooks.js:348` → `const maxContext = contextBudgetFor(entry.agent)`.
-  Everything below it (`:349`, `:354`, `:370`, `:383`, `:418`) already reads the
+- `src/hooks.js:1111` → `const maxContext = contextBudgetFor(entry.agent)`.
+  Everything below it (`:1112`, `:1117`, `:1141`, `:1157`, `:1193`) already reads the
   local and is untouched; the injected text keeps printing the number that
   actually applied.
-- `src/hooks.js:910` → the same substitution. `entry` is in scope.
+- `src/hooks.js:2838` → the same substitution. `entry` is in scope.
 
-No other server change: `denialLoopNotice` (`src/notices.js:123-133`) carries no
-budget, and `recordPrimaryContext` (`src/hooks.js:170`) is a different setting.
+No other server change: `denialLoopNotice` (`src/notices.js:607-616`) carries no
+budget, and `recordPrimaryContext` (`src/hooks.js:470`) is a different setting.
 
 ### 2.6 The `{{limits}}` block
 
-A single `maxContext = X` (`src/hooks.js:466`) is no longer the ceiling.
-`formatLimitsNotice()` (`src/hooks.js:647-677`) lists the budget per spawnable
+`formatLimitsNotice()` (`src/hooks.js:1436-1488`) lists the budget per spawnable
 type, with each entry carrying the fixed overhead that type's spawns pay
 before the orchestrator's own words and the headroom left over; `0` is shown
-as `off`. The full block:
+as `off`. The full block, with the built-in defaults, one `gitter: 0` entry in
+`agentContext`, and illustrative fixed-overhead figures (they depend on the
+project's `PROJECT.md`, `AGENTS.md` and snapshot):
 
 ```
-📐 agent-intercom: current limits — maxSubagents = 3.
-Context budget per agent: planner 40k (−10k fixed → 30k) · coder 60k (−12k
-fixed → 48k) · debugger 60k (−12k fixed → 48k) · reviewer 40k (−10k fixed →
-30k) · documenter 40k (−10k fixed → 30k) · researcher 60k (−12k fixed → 48k)
-· designer 30k (−8k fixed → 22k) · gitter off.
+📐 agent-intercom: current limits — maxSubagents = 1.
+Context budget per agent: planner 100k (−10k fixed → 90k) · coder 100k (−12k
+fixed → 88k) · debugger 100k (−12k fixed → 88k) · reviewer 100k (−10k fixed →
+90k) · documenter 100k (−10k fixed → 90k) · researcher 100k (−12k fixed → 88k)
+· grounder 100k (−8k fixed → 92k) · designer 100k (−8k fixed → 92k) · gitter off.
 Per entry: the budget, the fixed overhead every spawn of that type carries
 before your own words (subagent guides, PROJECT.md, the project snapshot the
 plugin prepends, AGENTS.md where that type keeps it), and the headroom left of
@@ -262,20 +269,20 @@ Use the budget — the first number of the agent you are spawning — in the
 right-sized-chunks rule of the orchestration protocol above.
 ```
 
-(The `hideChatter` tail — "Subagent results and handoff messages are hidden
-from the user's screen…" — is appended only while that setting is on.)
+(The `showAgentcom` tail — "Subagent results and handoff messages are hidden
+from the user's screen…" — is appended only while that setting is off.)
 
-The list is built from `Object.keys(AGENTS)` minus `orchestrator`
-(`src/agents.js:138-217`) mapped through `contextBudgetFor` — the plugin's own
-roles, which are the ones the orchestrator prompt tells it to spawn
-(`src/agents.js:27`). Cost: the block grows from one line to three, ~40 tokens
+The list is built from `SPAWNABLE_ROLES` (`src/hooks.js:1453`; the `mode: "subagent"`
+roles of `AGENTS`, `src/agents.js:499-503`) mapped through `contextBudgetFor` — the
+plugin's own roles, which are the ones the orchestrator prompt tells it to spawn
+(`src/agents.js:49`). Cost: the block grows from one line to three, ~40 tokens
 per orchestrator turn.
 
 Rejected: printing a min–max range. Cheaper, but useless — the orchestrator
 sizes a chunk for a *named* role, and a range tells it nothing about that role.
 
-`src/promptsfile.js:21,174` document the placeholder as "current maxSubagents /
-maxContext" and are updated to match.
+`src/promptsfile.js:21,362` document the placeholder as "current maxSubagents +
+per-agent context budgets".
 
 ### 2.7 TUI
 
@@ -283,7 +290,7 @@ maxContext" and are updated to match.
 role list (`AGENT_NAMES`, orchestrator included), in the LLM params
 section, directly after the `effort` row and before `[reset current
 agent]`, with the Subagents section carrying no agent cycler**
-(`tui/src/tui.tsx:1770-1830`):
+(`tui/src/tui.tsx:2603-2612`, `:2705-2739`):
 
 ```
   agent          [<]  coder        [>]
@@ -291,30 +298,28 @@ agent]`, with the Subagents section carrying no agent cycler**
 ```
 
 Reasoning: it is the pattern the panel already runs twice, for LLM params and
-for the per-agent model (`tui/src/tui.tsx:1354-1396`) — same cycler, same
+for the per-agent model (`tui/src/tui.tsx:2603-2673`) — same cycler, same
 `holdRepeat` steppers, same `★` for "this agent's own value, not the inherited
 one", same read-modify-write store. It costs one extra row regardless of how
 many agent types exist, and it stands exactly where the old global row stood, so
 the user who reaches for the ceiling finds it without being told. `[-]` at the
 type's own value stepping below zero **drops the entry** so the inherited
 default shows again, the behaviour `stepLlmParam` already implements
-(`tui/src/llm-params-file.ts:140-142`).
+(`tui/src/llm-params-file.ts:148-149`).
 
-The cycler list comes from the live fetch already in the file —
-`api.client.app.agents({})` (`tui/src/tui.tsx:387`) filtered to
-`mode !== "primary"` — falling back to `LLM_AGENTS` minus `orchestrator`
-(`tui/src/tui.tsx:78-88`) until the first fetch lands. That way a project's own
-agents are editable too, which a hardcoded list cannot do.
+The cycler walks `AGENT_NAMES` (`tui/src/agent-roles.ts:19-30`, `cycleLlmAgent` at
+`tui/src/tui.tsx:776-780`), the plugin's own roles with `orchestrator` included; a
+project's own agents get no row.
 
 The displayed value is the **effective** ceiling (own > flat/env > built-in
 default), so a type with no entry reads `60`, never `0`; `0` renders as `off`,
-as `maxSubagents` renders `unlimited` (`tui/src/tui.tsx:1266`).
+as `maxSubagents` renders `unlimited` (`tui/src/tui.tsx:2313`).
 
 Cost of this recommendation: a second cycler index signal, a nested-map member
-on the `Settings` interface (`tui/src/settings-file.ts:24-29`) so the
+on the `Settings` interface (`tui/src/settings-file.ts:117-142`) so the
 `SETTING_VALIDATORS` mapped type still forces a validator
-(`tui/src/settings-file.ts:57-62`), an `agentContext`-aware writer beside
-`stepSetting` (which is scalar-only, `tui/src/settings-file.ts:149-155`), the
+(`tui/src/settings-file.ts:341-365`), an `agentContext`-aware writer beside
+`stepSetting` (which is scalar-only, `tui/src/settings-file.ts:674-680`), the
 migration freeze, and a mirror of `DEFAULT_AGENT_CONTEXT`.
 
 Weighed and rejected:
@@ -325,26 +330,26 @@ Weighed and rejected:
   read the README to change a limit they can see biting on screen.
 - **One row per agent type.** Nine rows today, unbounded with project agents;
   it buries the three sibling limits and breaks the fixed sidebar layout the
-  column widths assume (`tui/src/tui.tsx:104-111`).
+  column widths assume (`tui/src/tui.tsx:176-186`).
 - **Effective ceiling on the running subagent's row instead of the settings
   block.** Not instead — **in addition**, and cheap: the row already renders
-  `· ${formatTokens(entry.ctxTokens)} ctx` (`tui/src/tui.tsx:1195-1198`), so it
+  `· ${formatTokens(entry.ctxTokens)} ctx` (`tui/src/tui.tsx:2176-2179`), so it
   becomes `· 12k/60k ctx`. That is where the user notices the ceiling biting.
   It cannot replace the editor: a row exists only while that subagent runs, and
   it is read-only. Last step, droppable.
 
 ### 2.8 Agent types known at runtime
 
-- Server: `AGENTS` (`src/agents.js:196-285`) — nine roles — merged into
-  opencode's resolved config by `installAgents` (`src/agents.js:313-328`), where
+- Server: `AGENTS` (`src/agents.js:355-472`) — ten roles — merged into
+  opencode's resolved config by `installAgents` (`src/agents.js:735-824`), where
   a project may add its own or override one. The `spawn` tool's gate reads
-  `SPAWNABLE_ROLES` (`src/agents.js:299`), the eight `mode: "subagent"` roles
+  `SPAWNABLE_ROLES` (`src/agents.js:499-503`), the nine `mode: "subagent"` roles
   minus `orchestrator` — the closed spawnable set is this plugin's own
   roles, nothing else. `contextBudgetFor` keeps its unknown-name fallback of
   2.2 for any read path that is not the spawn gate (e.g. a per-type editor
   iterating types the project added), and nothing is materialised on read.
 - TUI: the live merged list from `api.client.app.agents({})`
-  (`tui/src/tui.tsx:387`), each record carrying `name` and `mode`
+  (`tui/src/tui.tsx:670`), each record carrying `name` and `mode`
   (SDK `types.gen.d.ts:1399-1402`). So yes — a per-type editor can list them,
   including project-defined agents, without a hardcoded table.
 
@@ -356,7 +361,7 @@ Each step leaves the tree building and `npm run check` / `npm test` green.
 
 1. **`src/settings.js`** — `DEFAULT_AGENT_CONTEXT`, the `agentContext` file key
    with its validator, `contextBudgetFor(agent)`. Header comment
-   (`src/settings.js:28-36`) updated. Tests in `test/settings.test.js`: own
+   (`src/settings.js:6-21`) updated. Tests in `test/settings.test.js`: own
    value wins; flat seed; env; per-type default; unknown name; `0` per type;
    `0` as seed; malformed map ignored. Depends on nothing. Nothing calls the new
    function yet, so behaviour is unchanged.
@@ -383,20 +388,20 @@ Steps 2 and 3 are independent of each other; 4 may run in parallel with 2/3.
 ## 4. Assumptions
 
 - **A1 — the provisional window is reachable.** Taken as given because
-  `promptAsync` (`src/client.js:86`) returns before the run finishes while
-  `upsertSession` with the agent name runs after it (`src/tools.js:264,276`).
+  `promptAsync` (`src/client.js:381`) returns before the run finishes while
+  `upsertSession` with the agent name runs after it (`src/tools.js:785,835`).
   Holds if opencode queues the prompt asynchronously. Wrong if the hook never
   observes `entry.agent === "subagent"` — a one-line log at the head of
   `contextLimitNotice` would show it. Costs nothing either way: the fallback of
   2.4 is correct in both cases.
 - **A2 — `app.agents()` returns project-defined agents, not only built-ins.**
   Taken from its use as the source of resolved per-agent defaults
-  (`tui/src/tui.tsx:387-400`). Wrong if a project agent is missing from the
+  (`tui/src/tui.tsx:668-710`). Wrong if a project agent is missing from the
   cycler; the hardcoded `LLM_AGENTS` fallback keeps the panel usable then.
 - **A3 — the default table's numbers.** They encode a judgement about how much
   context each role needs, not a measurement. Wrong if a role routinely trips
   its ceiling before finishing — visible as `denialLoopNotice`
-  (`src/notices.js:123`) firing for one role repeatedly. They are user-editable
+  (`src/notices.js:607`) firing for one role repeatedly. They are user-editable
   per type, so being wrong is cheap.
 
 ## 5. Open

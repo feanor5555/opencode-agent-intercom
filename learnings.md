@@ -322,17 +322,17 @@ stored for an opencode built-in that the project does not list in its
 The plugin's `experimental.chat.system.transform` rewrites the array opencode passes in, then `provider/transform.ts:359-360` and `session/llm/request.ts:100-112` shape how that array reaches the provider.
 
 - opencode joins everything it assembled — `agent.prompt`, `input.system` (env / instructions / MCP / skills), `user.system` — into a single string in `system[0]` before the hook fires (`request.ts:56-78`). The hook is handed a one-element array.
-- `request.ts:56-78` collapses the array only when the plugin APPENDED to an untouched header (`length > 2 && system[0] === header`). The plugin clears the array and pushes two elements (`src/hooks.js:328-333`), so neither condition holds and order and element count survive verbatim.
+- `request.ts:56-78` collapses the array only when the plugin APPENDED to an untouched header (`length > 2 && system[0] === header`). The plugin clears the array and pushes two elements (`src/hooks.js:774-779`), so neither condition holds and order and element count survive verbatim.
 - `request.ts:100-112` maps each array element to its own `role: "system"` message. The plugin's `[0]` and `[1]` are two distinct system messages, not one joined blob.
 - `provider/transform.ts:359-360` (`applyCaching`) marks the first two system messages and the last two non-system messages. With two elements in the system array, both carry a breakpoint. Each element is its own cache scope: a hit on `[0]` reuses everything in front of it; a miss on `[1]` does not invalidate `[0]`.
-- `output.system[0]` (stable mass): agent prompt (`slices.role`), AGENTS.md content (`slices.agentsMd`, kept for orchestrator / coder / debugger / reviewer), the role-specific guide strings from `src/prompts.js`, `projectMd`, and — because `parseOpencodeSystem` (`src/hooks.js:441-465`) takes everything from `Instructions from:` to the end of the joined blob — MCP instructions, skills, and `user.system`. The mass is stable across the turns of a session, given no edit to AGENTS.md / PROJECT.md / the role prompt / `~/.config/opencode/agent-intercom.json`.
-- `output.system[1]` (`<env>` block from `src/hooks.js:441-465`, extracted verbatim from opencode's blob). Holds cwd, worktree, platform, git-repo flag, and the only `new Date().toDateString()` in the whole prompt path (`session/system.ts:81`). Element-level breakpoint means a calendar-day rollover or a `cd` costs the ~80 tokens of `<env>`, not the stable mass.
-- Per-turn blocks — abort notice, active-subagent snapshot, over-budget STOP — ride on a synthetic text part appended to the last user message (`src/hooks.js:423`, factory at `src/hooks.js:390`), not in the system prompt. They live past the cached prefix and never invalidate it.
+- `output.system[0]` (stable mass): agent prompt (`slices.role`), AGENTS.md content (`slices.agentsMd`, kept for orchestrator / coder / debugger / reviewer), the role-specific guide strings from `src/prompts.js`, `projectMd`, and — because `parseOpencodeSystem` (`src/hooks.js:972-997`) takes everything from `Instructions from:` to the end of the joined blob — MCP instructions, skills, and `user.system`. The mass is stable across the turns of a session, given no edit to AGENTS.md / PROJECT.md / the role prompt / `~/.config/opencode/agent-intercom.json`.
+- `output.system[1]` (`<env>` block from `src/hooks.js:972-997`, extracted verbatim from opencode's blob). Holds cwd, worktree, platform, git-repo flag, and the only `new Date().toDateString()` in the whole prompt path (`session/system.ts:81`). Element-level breakpoint means a calendar-day rollover or a `cd` costs the ~80 tokens of `<env>`, not the stable mass.
+- Per-turn blocks — abort notice, active-subagent snapshot, context-limit and run-ceiling bands — ride on a synthetic text part (`createTransformMessages`, `src/hooks.js:886`, part built at `src/hooks.js:945-954`), not in the system prompt: the primary's hangs off its last user message, a subagent's off a carrier message appended at the end of the array (`tailNoticeCarrier`, `src/hooks.js:842`). They live past the cached prefix and never invalidate it.
 
 Latent caveats:
 
 - A caller that sets `user.system` on a user message would land that text inside element `[0]` (it is captured into the `Instructions from:`…end span). Nothing in this project sets it; opencode never sets it itself. If a future caller does, element `[0]` invalidates per call.
-- If opencode's marker strings change, `parseOpencodeSystem` returns `{ role: joined, env: "", agentsMd: "" }` (`src/hooks.js:442`): the rewrite degrades to one element with `<env>` embedded at its front. Per-day invalidation, not a corrupted prompt.
+- If opencode's marker strings change, `parseOpencodeSystem` returns `{ role: joined, env: "", agentsMd: "" }` (`src/hooks.js:975`): the rewrite degrades to one element with `<env>` embedded at its front. Per-day invalidation, not a corrupted prompt.
 
 Anthropic-style `ttl: 1h` cache marker: not worth pursuing at the providers in use. DeepSeek (`deepseek-v4-flash`), MiniMax M3 native, and xAI Grok 4.6 cache prefixes automatically with no caller breakpoints or TTL. OpenAI GPT-5.6 Luna only supports `ttl: "30m"`. opencode merges plugin-supplied `providerOptions` rather than overwriting them (`provider/transform.ts:401`), so the setting would reach the provider — it simply has no documented effect at these four. The current two-element split with system breakpoints and a trailing-message synthetic part is what gives the cache its hit surface.
 
@@ -567,17 +567,17 @@ process-global state on this machine:
 
 - the captures directory under `OUT_DIR` — every driver resolves
   `OUT_DIR=${OUT_DIR:-$(dirname "$0")/out}` and `mkdir -p`s it, and `run-all.sh`
-  pins all its children to one `OUT_DIR` via `test/e2e/run-all.sh:76`. Two suites
+  pins all its children to one `OUT_DIR` via `test/e2e/run-all.sh:84`. Two suites
   sharing the checkout also share `test/e2e/out` and the `E2E_AUDIT_MANIFEST`
-  files (`test/e2e/config-isolation.sh:404-471`) the audit reads back over.
+  files (`test/e2e/config-isolation.sh:444-480`) the audit reads back over.
 - the plugin's debug log at `~/.cache/opencode-agent-intercom/debug.log` —
-  hard-coded in `src/log.js:13` as `cacheDir()` and written by `appendFileSync`
-  (`src/log.js:46`). Each driver takes a byte offset and tails from there; two
+  under `cacheDir()` (`src/log.js:12-14`) and written by `appendFileSync`
+  (`src/log.js:54`). Each driver takes a byte offset and tails from there; two
   suites started at the same wall-clock moment both tail from the SAME file
   and so each other's earlier lines. The byte-offset slice is a per-run window
   over a process-global file.
 - the project directory `?directory=` is handed to `opencode serve` — the
-  default `$HOME/testopencode` (`test/e2e/run-all.sh:69`). Two suites running
+  default `$HOME/testopencode` (`test/e2e/run-all.sh:71`). Two suites running
   the default share sessions, the endless driver's seeded todo file, and
   `e2e-endless-fixture/`.
 - the TUI build artefact `tui/dist/tui.js` — `e2e_build_tui`
@@ -591,65 +591,166 @@ Four knobs, all already in the harness, isolate them:
   script that sets `OUT_DIR=<fresh path>` before each `run-all.sh` lands both
   suites' captures in different roots; the per-driver audit follows.
 - **`OPENCODE_AGENT_INTERCOM_DEBUG_LOG`** — read at module load in
-  `src/log.js:30-31` as `LOG_PATH`; unset, it is `cacheDir()/debug.log`. `run-all.sh:86`
+  `src/log.js:30-31` as `LOG_PATH`; unset, it is `cacheDir()/debug.log`. `run-all.sh:89`
   exports it as `$OUTDIR/00-suite.debug.log` unless the caller already set it.
-  `e2e_debug_log` (`test/e2e/config-isolation.sh:178-184`) reads the same env,
+  `e2e_debug_log` (`test/e2e/config-isolation.sh:198-204`) reads the same env,
   so drivers and server agree on the file path with no further plumbing.
 - **`OPENCODE_AGENT_INTERCOM_LOG_REQUESTS_FILE`** — `src/reqlog.js:14-16`,
-  redirecting the per-server request log; `run-all.sh:87` exports it as
+  redirecting the per-server request log; `run-all.sh:90` exports it as
   `$OUTDIR/00-suite.requests.jsonl` the same way.
 - **Per-driver project dir / port envs** — `PROJECT_DIR` (and
   `NESTED_PROJECT_DIR`, `ENDLESS_PROJECT_DIR`, `ASK_EXPIRY_PROJECT_DIR`,
   `CONTEXT_BANDS_PROJECT_DIR`, `MCP_AFTER_PROJECT_DIR`) plus
   `RUN_ALL_PORT` / `NESTED_PORT` / `ENDLESS_PORT` / `ASK_EXPIRY_PORT` /
-  `CONTEXT_BANDS_PORT` / `MCP_AFTER_PORT`. `run-all.sh:93-96` refuses a busy
+  `CONTEXT_BANDS_PORT` / `MCP_AFTER_PORT`. `run-all.sh:96-99` refuses a busy
   `RUN_ALL_PORT`; each suite picks a free one.
 
 The isolated `HOME` is already per-suite: `e2e_iso_create`
-(`test/e2e/config-isolation.sh:223`) builds `${TMPDIR:-/tmp}/e2e-opencode-home.XXXXXXXX`
+(`test/e2e/config-isolation.sh:263`) builds `${TMPDIR:-/tmp}/e2e-opencode-home.XXXXXXXX`
 per process. The symlink into `~/.cache` is what makes the debug log shared
 in the first place; with `OPENCODE_AGENT_INTERCOM_DEBUG_LOG` set, the symlink
-stays and the file inside it becomes per-suite. The machine's
+stays and the debug log moves to the path that variable names. The machine's
 `~/.local/share/opencode` symlink likewise stays — `auth.json` and
 `opencode.db` are shared, sessions are created and deleted there.
 
-What does NOT isolate today: the TUI build artefact. Two `run-all.sh` on one
-checkout still race `tui/dist/tui.js`. The in-place `npm run build` is the
-contract — there is no lock around it in the harness — so an outer lock or a
-separate checkout per suite is what serialises it.
+What does NOT isolate today:
 
-## Distinguishing the three abort callers in `~/.cache/opencode-agent-intercom/debug.log`
+- the TUI build artefact. Two `run-all.sh` on one checkout still race
+  `tui/dist/tui.js`. The in-place `npm run build` is the contract — there is no
+  lock around it in the harness — so an outer lock or a separate checkout per
+  suite is what serialises it.
+- the plugin's state files. `cacheDir()` is `os.homedir()/.cache/opencode-agent-intercom`
+  (`src/log.js:12-14`), the server runs with `HOME` set to the throwaway home
+  (`E2E_SERVER_ENV`, `test/e2e/config-isolation.sh:395-401`), and that home's
+  `.cache` is a symlink to the machine's `~/.cache`
+  (`test/e2e/config-isolation.sh:279`). Every file the plugin keeps under
+  `cacheDir()` therefore lands in the machine's
+  `~/.cache/opencode-agent-intercom/`, shared with every running opencode on
+  the machine and with every other suite: `endless-cycles.json`
+  (`src/endlesscycle.js:42`), `notice-journal/` (`src/noticejournal.js:110`),
+  `results/` (`src/resultfile.js:56`), `endless-pauses.json`
+  (`src/endlesspause.js:43`), `tui-route.json` (`src/tuiroute.js:142`) and,
+  where `OPENCODE_AGENT_INTERCOM_LOG_REQUESTS_FILE` is unset,
+  `requests.jsonl`. `OPENCODE_AGENT_INTERCOM_DEBUG_LOG` moves the debug log
+  alone. A run that must leave that directory untouched starts the driver
+  under a `HOME` of its own whose `.cache` holds a private
+  `opencode-agent-intercom/` beside symlinks to the other cache entries, with
+  `XDG_CONFIG_HOME` (or `E2E_MACHINE_CONFIG_HOME`) naming the machine's
+  `~/.config` for the harness to read its config from and
+  `OPENCODE_AGENT_INTERCOM_DEBUG_LOG` pointing into its out directory.
 
-When a subagent session ends with `subagent llm error … MessageAbortedError:
-Aborted` followed by `session.error: removed subagent` and
-`session.error: deleted opencode session`, three callers in the live build can
-have produced that pair. The diagnostic line one of them now writes settles
-which fired.
+## Distinguishing the abort callers in `~/.cache/opencode-agent-intercom/debug.log`
 
-- **Panel abort** — `abortSubagent` in `tui/src/tui.tsx:1428-1474` is the
-  single convergence point for the three panel gestures (row cross at
-  `tui/src/tui.tsx:2159`, the `x`/`d` keys handled by the focus-aware panel,
-  and the `agent-intercom.abort-selected` command palette entry at
-  `tui/src/tui.tsx:137`). It writes
+The sequence `subagent llm error … MessageAbortedError: Aborted … "aborted":true`,
+`session.error: removed subagent`, `session.error: deleted opencode session` is
+written only for an abort the plugin did not request itself: a panel abort, a
+stop in opencode's own TUI, or opencode ending the run. The plugin's own abort
+paths latch the entry first — the abort tool adds the session to `aborted`, the
+watchdog sets `timedOut` — and `onSessionError` returns on either latch before
+it logs anything (`src/hooks.js:2497-2500`). Each caller leaves its own line:
+
+- **Panel abort** — the three panel gestures (row cross at
+  `tui/src/tui.tsx:2142`, the `x`/`d` keys at `tui/src/tui.tsx:2001`, the
+  `agent-intercom.abort-selected` command palette entry, `ABORT_COMMAND` at
+  `tui/src/tui.tsx:146`, handled at `tui/src/tui.tsx:1513`) converge on
+  `requestAbort` (`tui/src/tui.tsx:1485`). The first gesture on a row only arms
+  it; a second one on the same row within `ABORT_CONFIRM_MS` (4000 ms,
+  `tui/src/abort-arming.ts:18`, decided by `decideAbort`,
+  `tui/src/abort-arming.ts:64`) calls `abortSubagent`
+  (`tui/src/tui.tsx:1422-1468`). That writes
   `debugLog("tui abort issued", { sessionID, handle, agent, status, trigger })`
-  at `tui/src/tui.tsx:1445-1451` BEFORE the `api.client.session.abort` call
-  at `tui/src/tui.tsx:1453` goes out, then on a failed request emits
-  `tui abort request failed` with the same `trigger` field. The `trigger`
-  value names the gesture: `"row"`, `"key"`, or `"command"`. The line lands
-  immediately above the `subagent llm error` entry.
-- **Orchestrator abort tool** — `abortHandler` in `src/tools.js:1317-1360`
-  (registered at `src/tools.js:1702`) calls `signalAbort` →
-  `abortSession` (`src/tools.js:340-347`), then logs `log("aborted", {
-  handle, confirmed })` at `src/tools.js:1360` BEFORE the tool returns to
-  the model. The orchestrator wrote `"aborted"` iff it issued the abort.
-- **Watchdog** — `src/watchdog.js:458-463` calls
-  `abortSession(watchdogClient, sessionID)` and writes `watchdog:` lines
-  (`watchdog: removed subagent`, `watchdog: session quiescence timed out;
-  deleting`, `watchdog: deleted opencode session`) at the same points as the
-  event-hook teardown. The two inactivity windows (`maxSubagentAgeMs`,
-  `maxSubagentToolCallMs`) step to `0` in the sidebar — at `0` the row
-  renders `off` and that watchdog is disarmed; any abort attributed to the
-  watchdog while both are `0` is excluded. The third window
-  (`maxSubagentRunMs`) is the wall-clock ceiling on ONE RUN and uses the same
-  `0`/`off` rendering; `0` there means NO run ceiling, not that the watchdog
-  is disarmed.
+  (`tui/src/tui.tsx:1439-1445`) BEFORE the `api.client.session.abort` call
+  (`tui/src/tui.tsx:1447`) goes out, and on a failed request
+  `tui abort request failed` with the same `trigger` field
+  (`tui/src/tui.tsx:1464`). The `trigger` value names the gesture: `"row"`,
+  `"key"`, or `"command"`. The line lands immediately above the
+  `subagent llm error` entry.
+- **Orchestrator abort tool** — `abortHandler` (`src/tools.js:1314`, registered
+  as `abort` at `src/tools.js:1693`) adds the session to `aborted`, calls
+  `signalAbort` → `abortSession` (`src/tools.js:339-346`) and logs
+  `log("aborted", { handle, confirmed })` (`src/tools.js:1357`) BEFORE the tool
+  returns to the model. The orchestrator wrote `"aborted"` iff it issued the
+  abort; no `subagent llm error` line follows it.
+- **Watchdog** — sets `timedOut` (`src/watchdog.js:200`), logs
+  `subagent timed out`, calls `abortSession(watchdogClient, sessionID)`
+  (`src/watchdog.js:460`) and tears down with `watchdog:` lines
+  (`watchdog: removed subagent`, `watchdog: deleted opencode session`). The
+  sweep skips every running entry while `maxSubagentAgeMs` is `0`
+  (`src/watchdog.js:137`), so at that setting no window of it fires — silence,
+  tool call and run ceiling alike — and no abort is the watchdog's. With
+  `maxSubagentAgeMs` above `0`, `maxSubagentToolCallMs: 0` removes only the
+  tool-call window, and a type's run ceiling of `0` (`maxSubagentRunMs` /
+  `agentRunMs`) means NO run ceiling for that type.
+- **Instance dispose** — opencode disposing the project's instance aborts every
+  run in it. The plugin's `dispose` hook logs `instance disposing`; a
+  `session.error` inside that mark logs
+  `session.error during an instance dispose — left to the restart reconcile`
+  and nothing else; the next factory run logs
+  `instance restart: reconcile armed`, and the reconcile
+  `instance restart: settling subagents the restart ended` followed by
+  `instance-restart:` teardown lines. A run whose abort lands after the old
+  instance's event subscription is gone produces no plugin line of its own
+  until that reconcile.
+
+## opencode rebuilds a project's instance inside the running process
+
+opencode 1.18.32 can dispose a project directory's instance and create a new one
+for the same directory without the process ending. Evidence: one interactive
+process (`run=a1a5bee6`, cwd `~/vidl`) logged `disposing instance` /
+`creating instance` for that directory at 14:00:39Z/14:00:41Z, 14:00:46Z/14:00:46Z
+and 14:02:16Z/14:02:16Z — three pairs within 97 s — under the one `run=` id, with
+no cause logged. What that means for a plugin:
+
+- **The factory runs again, the module does not reload.** The plugin logged
+  `agent-intercom initialized` once at process start and again after each
+  re-creation, but the once-per-module lines (`server url resolved`,
+  `watchdog started`) did not repeat. The ESM cache keeps the module, so
+  module state — this plugin's registry in `src/state.js` — survives into the
+  new instance, and changed plugin code on disk is NOT picked up: only a new
+  process loads it. The factory is called per instance, not per session: over
+  3 h 18 min of many sessions it ran exactly once until the first dispose.
+- **The dispose aborts every run of the instance.** All four running
+  subagents ended with `error=Aborted` between 14:00:39.439Z and 14:00:41.420Z.
+- **The `dispose` hook runs side by side with those aborts.** opencode runs its
+  disposers under one `Promise.allSettled`, the plugin's `Hooks.dispose` among
+  them, alongside the interruption of the session runners, and before it drops
+  the plugin's event subscription; there is no order between the hook and any
+  one abort (opencode source at 545f51d, `plugin/index.ts`,
+  `instance-store.ts` `disposeContext` → `runDisposers`).
+- **A late abort never reaches the plugin.** An abort that finishes after the
+  old instance's event subscription is gone produces no `session.error` or
+  `session.idle` for the plugin: of the four aborts above the plugin saw one;
+  the three that landed about two seconds later left no plugin line at all.
+- **`server.instance.disposed` never reaches a plugin `event` hook.** opencode
+  publishes it on `GlobalBus` only, after all disposers ran.
+- **Deleting a session right after its abort races opencode's own writes.**
+  `Session.remove` does not cancel the prompt runner, and the interrupted
+  loop's finish block writes after the abort. The plugin deleted the aborted
+  `ses_f1cd5cde…` at 14:00:39.486Z; opencode logged `prompt_async failed` with
+  `EffectDrizzleQueryError: Failed query: insert into "part"` for that session
+  at 14:00:41.332Z.
+- **A post between dispose and re-creation lands under opencode's default
+  agent.** A notice posted without `agent` in that gap ran as `build`, because
+  the plugin's config hook had not yet set `default_agent` for the new
+  instance.
+
+The plugin's handling of all of this is `src/instancerestart.js` (see
+`README.md`, the instance-restart paragraph after the bootstrap sweep).
+
+## The file key `exaApiKey` wins over `EXA_API_KEY`
+
+`web_search` and `forum_search` send `getExaApiKey()` as `x-api-key`
+(`src/searchcore.js:33-35`). The key resolves file first: a non-empty
+`exaApiKey` in `~/.config/opencode/agent-intercom.json`
+(`src/settings.js:673-675`) overrides the environment variable `EXA_API_KEY`
+(`src/settings.js:560`). A key rotated in the environment alone therefore never
+reaches the plugin while the file carries a key: the plugin keeps sending the
+file's key, Exa answers `401`, and `web_search` degrades to searxng alone —
+logged as `websearch exa failed … (401): Invalid API key` (`forumsearch exa
+failed …` for `forum_search`) and `websearch merge exa=0`. A rotation updates
+both places — `EXA_API_KEY` where the environment sets it and `exaApiKey` in the
+settings file — or removes `exaApiKey` from the file, which works only where
+the opencode process inherits `EXA_API_KEY`. The settings log line masks the
+value (`exaApiKey: "<set>"`, `src/settings.js:758-759`), so a stale key shows
+up in `~/.cache/opencode-agent-intercom/debug.log` as those 401 lines, not as
+the key.

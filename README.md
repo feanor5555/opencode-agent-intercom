@@ -385,12 +385,13 @@ second, independent search path (Google Search grounding) the researcher's own
 tools do not give it. A refusal names the caller's own allowed set, e.g.
 `a "researcher" may spawn "grounder" and nothing else — you asked for a "coder"`,
 or `a "gitter" may spawn nothing at all`. The spawn prompt sent on either path
-carries no `T<n>:` prefix and no `DONE:` marker is expected. A per-run quota
+carries no `T<n>:` prefix and no `DONE:` marker is expected. A per-entry quota
 (`maxNestedSpawns`, default `2`, env `OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS`,
-`0` disables) bounds how many such nested runs one subagent may start; the
-messages hook appends a per-turn notice to the last user message naming what
-is left. `grounder`, `designer` and `gitter` are denied `spawn` outright.
-`abort`, `list` and `task` are denied for every subagent.
+`0` disables) bounds how many such nested runs one subagent may start across
+every run of its session; the messages hook appends a per-turn notice to the
+last user message naming what is left. `grounder`, `designer` and `gitter` are
+denied `spawn` outright. `abort`, `list` and `task` are denied for every
+subagent.
 
 Grounded search is not automatic: the `researcher` spawns a `grounder` only
 where the briefing the orchestrator writes asks for a grounded search, and
@@ -758,8 +759,13 @@ exposes every runtime knob:
   The task prompt sent to a subagent stays visible whatever the switch says —
   it is the subagent's entire instruction, not chatter — and tool results stay
   under opencode's own `tool_details_visibility`. Writes
-  `~/.config/opencode/agent-intercom.json` as `"showAgentcom": true|false`,
-  picked up within ~2 s; env var `OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM`
+  `~/.config/opencode/agent-intercom.json` as `"showAgentcom": true|false`.
+  A watch on the settings directory drops the plugin's settings cache on the
+  write and rewrites the already-posted notices 120 ms after it; every new
+  notice reads the switch at its send through that cache, whose entries live
+  2 s, so where the watch does not report the write a new notice follows the
+  switch within 2 s and the retroactive rewrite waits for the 5-minute
+  fallback tick. Env var `OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM`
   resolves with `1`/`0`. Default `true`. With the switch off, the transcript
   no longer shows why the orchestrator continues — the orchestrator is told
   to relay the substance itself. The part route the switch relies on is
@@ -929,7 +935,7 @@ is environment-variable-driven:
 | `OPENCODE_AGENT_INTERCOM_DEBUG` | on | `"0"` disables logging to `~/.cache/opencode-agent-intercom/debug.log` |
 | `OPENCODE_AGENT_INTERCOM_LOG_REQUESTS` | off | `"1"` writes per-LLM-call JSONL to `~/.cache/opencode-agent-intercom/requests.jsonl` (path override: `_LOG_REQUESTS_FILE`) |
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS` | `1` | Concurrent subagents per primary. `"0"` disables. TUI file overrides. |
-| `OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS` | `2` | Nested `spawn` calls a single subagent run may start (the caller's one allowed target — `researcher` for the five non-web roles, `grounder` for `researcher`). `"0"` disables — the subagent must do the work itself. TUI file overrides via `"maxNestedSpawns"`. |
+| `OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS` | `2` | Nested `spawn` calls one subagent may start, across every run of its session (the caller's one allowed target — `researcher` for the five non-web roles, `grounder` for `researcher`). `"0"` disables — the subagent must do the work itself. TUI file overrides via `"maxNestedSpawns"`. |
 | `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` | `100000` | Subagent context budget (tokens). `"0"` disables. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS` | `90000` | Watchdog window (ms) for a subagent with nothing in flight. `"0"` switches the inactivity watchdog off, and with it the orphan sweep whose window is a multiple of this one. TUI file overrides via `"maxSubagentAgeMs"`; the TUI's `silence (s)` row steps it in whole seconds. |
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS` | `660000` | The same watchdog's window (ms) for a subagent with a tool call in flight, counted from the start of that call. `"0"` means no ceiling while it works; the silence window still applies to every subagent that is not working. TUI file overrides via `"maxSubagentToolCallMs"`; the TUI's `in tool (min)` row steps it in whole minutes. |
@@ -946,7 +952,7 @@ is environment-variable-driven:
 | `OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH` / `_DISABLE_OUTLINE` / `_DISABLE_FORUM_SEARCH` / `_DISABLE_GROUNDED_SEARCH` | off | `"1"` skips that tool |
 | `OPENCODE_AGENT_INTERCOM_SKIP_CTAGS` / `_SKIP_CHROMIUM` | off | Installer-only: skip ctags build / Chromium download |
 | `OPENCODE_AGENT_INTERCOM_GROUNDING_TIMEOUT_MS` | `90000` | Per-request ceiling (ms) for `grounded_search`. |
-| `EXA_API_KEY` | — | If set, `web_search` uses Exa's paid tier. File key `exaApiKey` overrides. |
+| `EXA_API_KEY` | — | If set, `web_search` uses Exa's paid tier. A non-empty file key `exaApiKey` overrides it, so a key rotated in the environment alone never reaches the plugin while the file carries one: a rotation updates both, or removes `exaApiKey` from the file. |
 | `OPENCODE_AGENT_INTERCOM_GOOGLE_API_KEY` / `GEMINI_API_KEY` / `GOOGLE_API_KEY` | — | API key for `grounded_search` (consulted in that order). Falls back to the `google.key` field of `${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json`, where `opencode auth login` writes a Gemini key. |
 | `POLLINATIONS_TOKEN` | — | If set, the `gen` Pollinations fallback uses your account |
 | `OPENCODE_AGENT_INTERCOM_ENDLESS_MODE` | on | `"1"` arms endless mode — replaces the orchestrator when its context reaches `endlessContext`, after a permitted `planner` subagent has rewritten the project's todo file. `"0"` switches it off. TUI file overrides. |

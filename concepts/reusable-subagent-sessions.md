@@ -39,93 +39,117 @@ Three things are fixed by the user and are not derived here.
    the secondary case only: handing a retained subagent a further *related
    task* rather than a question. That case is a bonus, not the driver.
 
-Two figures this design is written against are decided changes to the current
-source rather than what the source says today, and are named as such wherever
-they carry an argument:
+Two figures this design is written against, as the source holds them:
 
-- **The per-agent context budget default becomes 100 000 tokens for every agent
-  type.** Today the source says `DEFAULT_MAX_CONTEXT = 40000` (`settings.js:78`)
-  and a per-type table of 30 000–60 000 (`settings.js:85-94`). Every threshold
-  argument below uses 100 000.
-- **The endless-mode restart threshold default becomes 250 000 tokens.** That
-  governs the primary session's own handoff (`primaryContextThreshold`,
-  `settings.js:438-441`), not subagents, and enters this design only through
-  §3.6: a longer retention window is more often cut short by a handoff than by
-  its own ceiling.
+- **The per-agent context budget default is 100 000 tokens for every agent
+  type.** `DEFAULT_MAX_CONTEXT = 100000` (`settings.js:116`) and the per-type
+  table `DEFAULT_AGENT_CONTEXT` (`settings.js:123-133`) holds 100 000 for every
+  role. Every threshold argument below uses 100 000.
+- **The endless-mode restart threshold default is 250 000 tokens**
+  (`DEFAULT_ENDLESS_CONTEXT`, `settings.js:345`). That governs the primary
+  session's own handoff (`primaryContextThreshold`, `settings.js:1094-1097`),
+  not subagents, and enters this design only through §3.6: a longer retention
+  window is more often cut short by a handoff than by its own ceiling.
 
 ---
 
-## 1. What the code says today
+## 1. What the code says
 
-The invariant is written down as an invariant, `src/state.js:15-20`:
+The invariant is written down as an invariant, with retention as its one
+exception, `src/state.js:19-29`:
 
     // One-shot subagent lifecycle: each entry lives from `spawn` until the
     // subagent goes idle (= completed its single reply). At that point the event
     // hook delivers the result to the primary, removes the entry from this map,
-    // and deletes the underlying opencode session. There is no follow-up channel
-    // to a finished subagent; if more work is needed, the orchestrator spawns a
-    // fresh one.
+    // and deletes the underlying opencode session. If more work is needed, the
+    // orchestrator spawns a fresh one.
+    //
+    // The one exception is retention, and it is off unless `maxRetainedSubagents`
+    // is configured above 0: a top-level subagent that ended cleanly keeps its
+    // entry and its opencode session after the wake, with `lifecycle` on
+    // "retained" and `retainedAt` stamped. …
 
-It is enforced in one place. `onSessionIdle` latches and removes inside the
-wake mutex, `src/hooks.js:1140-1150`:
+It is enforced in one place. `onSessionIdle` latches, then retains or removes
+inside the wake mutex, `src/hooks.js:2020-2056`:
 
     e.dispatched = true
     …
-    const removed = removeEntryLocked(sessionID)
+    const retention = retentionDecision(e, retentionCapacity())
+    if (retention.retain) {
+      retainEntryLocked(sessionID)
+    } else {
+      const removed = removeEntryLocked(sessionID)
 
-and the shared teardown deletes the underlying session,
-`src/teardown.js:296-302`:
+and the shared teardown deletes the underlying session unless it is retained
+or held, `src/teardown.js:566-575`:
 
-    try {
-      const ok = await deleteSession(client, sessionID)
-      if (ok) log(`${tag}deleted opencode session`, { handle, sessionID })
-    …
+    if (
+      await deleteSession(client, sessionID, {
+        parentID,
+        fallbackID: rootPrimaryFor(parentID),
+        cause: label || "teardown",
+      })
+    ) {
+      log(`${tag}deleted opencode session`, { handle, sessionID })
+    }
     forgetSessionDirectory(sessionID)
 
-`deleteSession` is the real thing, `src/client.js:155-158`:
+`deleteSession` is the real thing, `src/client.js:564-570`:
 
-    export async function deleteSession(client, sessionID) {
-      try {
-        await client.session.delete({ path: { id: sessionID } })
+    export async function deleteSession(client, sessionID, { parentID, fallbackID, cause = "delete" } = {}) {
+      …
+      const outcome = await attempt(op, () => client.session.delete({ path: { id: sessionID } }))
 
-Two consequences the rest of the plugin is built on. First, there is no
-finished state — `src/registry.js:219-221`:
+Two consequences the rest of the plugin is built on. First, `status` has no
+finished value — `src/registry.js:436-438` still says so:
 
     // There is no "finished" state: once a subagent goes idle the event hook
     // removes the entry from the registry entirely (one-shot lifecycle), so a
     // "done" subagent disappears rather than lingering.
 
-Second, **registry membership *is* the definition of "running"**,
-`src/registry.js:237-243`:
+— and a finished subagent that is kept is told apart by `lifecycle` instead
+(§3.1).
+
+Second, **what counts as "running" is `isActiveEntry`, not registry
+membership**, `src/registry.js:879-886`:
 
     export function countActiveSubagents(primaryID) {
       let n = pendingSpawns.count
       for (const e of registry.values()) {
-        if (effectiveState(e) === "aborted") continue
+        if (!isActiveEntry(e)) continue
         n += 1
       }
       return n
     }
 
-That one function is the basis of the concurrency cap
-(`src/registry.js:263-270`), the quiesce predicate
-(`src/registry.js:1076-1082`), and both slot lines the orchestrator is shown
-(`src/notices.js:174-179`, `src/tools.js:663-679`). The default cap is one,
-`src/settings.js:74`:
+That predicate is the basis of the concurrency cap
+(`src/registry.js:930-938`), the quiesce predicate
+(`src/registry.js:2096-2108`, through `countActiveSubagentsFor`,
+`src/registry.js:901-910`), and both slot lines the orchestrator is shown
+(`src/notices.js:384-393`, `src/tools.js:979-996`). The default cap is one,
+`src/settings.js:112`:
 
     export const DEFAULT_MAX_SUBAGENTS = 1
 
-The capability retention would use is available. Re-prompting a session by id
+The capability retention uses is available. Re-prompting a session by id
 is a supported operation that keeps history
 (`work/researcher-opencode-session-lifetime.md` §2), and the plugin's own
-wrapper already takes a session id and an agent name,
-`src/client.js:96-101`:
+wrapper takes a session id and an agent name,
+`src/client.js:367-387`:
 
-    export async function promptSession(client, { sessionID, agent, prompt, hideable = false }) {
-      const hidden = hideable && getSettings().hideChatter
-      await client.session.promptAsync({
-        path: { id: sessionID },
-        body: { agent, parts: [intercomTextPart(prompt, { hidden })] },
+    export async function promptSession(
+      client,
+      { sessionID, agent, prompt, hideable = false, noReply = false },
+    ) {
+      const { showAgentcom, postNoticeRetries, postNoticeRetryBackoffMs } = getSettings()
+      const hidden = hideable && !showAgentcom
+      …
+          client.session.promptAsync({
+            path: { id: sessionID },
+            …
+            body: {
+              agent,
+              parts: [intercomTextPart(prompt, { hidden })],
 
 There is no session TTL and no garbage collection on the opencode side
 (`work/researcher-opencode-session-lifetime.md` §1: the maintainer's answer in
@@ -165,11 +189,15 @@ either way.
   The cost is one `session.update` per retention that becomes final and one per
   accepted reuse; the title change is best-effort and a failed write costs the
   reader the row it would have shown, never a wrong one.
-- **Whether the feature ships on.** The default proposed below is off
-  (`maxRetainedSubagents = 0`), which keeps a project that never opts in
-  byte-identical to today and keeps `test/system-prompt-stability.test.js`
-  meaningful. Turning it on by default is a one-line change and is the only
-  setting in this design whose default is a judgement rather than a derivation.
+- **Whether the feature ships on.** It does: `DEFAULT_MAX_RETAINED_SUBAGENTS`
+  is `2` (`settings.js:229`), so `reuse` is registered and
+  `ORCHESTRATION_REUSE_GUIDE` injected on a shipped install.
+  `maxRetainedSubagents = 0` is the rollback: nothing is retained, the
+  orchestrator guide stays byte-identical to its one-shot form, which keeps
+  `test/system-prompt-stability.test.js` meaningful, and switching retention
+  back on needs an opencode restart because the tool surface is latched at
+  load (`retentionOffered`, `settings.js:973-976`). It is the only setting in
+  this design whose default is a judgement rather than a derivation.
 
 ---
 
@@ -177,9 +205,9 @@ either way.
 
 ### 3.1 States
 
-Today an entry has `status` (`src/registry.js:1147`), which mirrors opencode's
+An entry has `status` (`src/registry.js:2201`), which mirrors opencode's
 own session status — `busy` / `retry` / `idle` — plus `aborted` derived from a
-set, `src/registry.js:222-225`:
+set, `src/registry.js:439-442`:
 
     export function effectiveState(entry) {
       if (aborted.has(entry.sessionID)) return "aborted"
@@ -192,54 +220,60 @@ field, `entry.lifecycle`, with exactly three values:
 
 | `lifecycle` | meaning | set where |
 |---|---|---|
-| `running` | a turn is in flight or about to be; the entry occupies a concurrency slot | `createEntry` (`registry.js:1121`), and again on every accepted reuse |
-| `retained` | the wake was delivered, the opencode session is alive and re-promptable | the idle critical section, when the retention decision says keep |
-| `closing` | teardown has begun; no reuse admitted, delete in flight | `teardownSubagent` entry, before its first await |
+| `running` | a turn is in flight or about to be; the entry occupies a concurrency slot | `createEntry` (`registry.js:2209`), and again on every accepted reuse (`reviveRetainedEntryLocked`, `registry.js:738`) |
+| `retained` | the wake was delivered, the opencode session is alive and re-promptable | the idle critical section, when the retention decision says keep (`retainEntryLocked`, `registry.js:649-658`) |
+| `closing` | teardown has begun; no reuse admitted, delete in flight | `markEntryClosing` in `teardownSubagent` before its delete-path I/O (`teardown.js:515`), the eviction claim under the registry mutex, and the watchdog's reap before its first await |
 
-`effectiveState` gains `retained` ahead of the `status` fallback, so every
-renderer that already calls it (`tools.js:267`, `hooks.js:936`,
-`registry.js:240`, `registry.js:418`) sees the new state rather than a stale
-`idle`.
+`effectiveState` (`registry.js:439-442`) is left as it is. The renderers that
+call it (`tools.js:363`, `hooks.js:1698`) are handed running entries only —
+`isActiveEntry` (`registry.js:481-485`), which `countActiveSubagents`
+(`registry.js:882`) and `activeTaskIdsFor` (`registry.js:1098`) call, filters
+the others out — and a retained entry is rendered in its own section, with
+its lifecycle read through `entryLifecycle` (`registry.js:465-467`).
 
 ### 3.2 What replaces the unconditional delete
 
 The idle path stays exactly as it is up to and including the wake delivery —
 the `dispatched` latch, the delivery reservation, the snapshot fetch, the
 child-waiter settle, the TODO auto-tick and the parent notice
-(`hooks.js:1140-1216`) all keep running unchanged, because the orchestrator
-still gets its result at the same moment. Only the two lines that dispose of
+(`hooks.js:1965-2228`) all keep running unchanged, because the orchestrator
+still gets its result at the same moment. Only the two steps that dispose of
 the session change:
 
-- `removeEntryLocked(sessionID)` (`hooks.js:1149`) becomes
-  `retainOrRemoveLocked(sessionID, decision)`. On `remove` its body is
-  today's. On `retain` it leaves the entry in `registry` and `bySession`,
-  sets `lifecycle = "retained"`, stamps `retainedAt = Date.now()`, and — this
-  matters, see §7.6 — clears `dispatched` back to `false`, because the latch
-  means "a wake for *this run* is in flight" and that run is over.
-- `teardownSubagent(…, { entryRemoved: true })` (`hooks.js:1224-1228`) is
-  called only on the `remove` branch. On the `retain` branch nothing after the
-  notice runs: no `endLiveChildrenOf`, no quiescence wait, no `deleteSession`,
+- `removeEntryLocked(sessionID)` (`hooks.js:2054`) is taken on a refusal
+  only. On a grant the section calls `retainEntryLocked(sessionID)`
+  (`hooks.js:2052`, `registry.js:649-658`), which leaves the entry in
+  `registry` and `bySession`, sets `lifecycle = "retained"`, stamps
+  `retainedAt = Date.now()`, and — this matters, see §7.6 — clears
+  `dispatched` back to `false`, because the latch means "a wake for *this
+  run* is in flight" and that run is over.
+- `teardownSubagent(…, { entryRemoved: !wake.retained, retain, hold })`
+  (`hooks.js:2238-2246`) runs on both branches. With `retain` it publishes the
+  retention state and returns (`teardown.js:495-512`) before anything that
+  disposes: no `endLiveChildrenOf`, no quiescence wait, no `deleteSession`,
   no `forgetSessionDirectory` (the directory cache is what a reuse needs).
 
 The retention decision is taken in **two phases**, because the conditions do
 not all become knowable at the same moment: the mutex section holds the entry
 but not the reply, and the result snapshot is fetched only after the lock is
-released (`hooks.js:1175`). Splitting it is what lets the delivery half of the
+released (`hooks.js:2112`). Splitting it is what lets the delivery half of the
 idle path stay exactly as it is.
 
 **Phase 1, inside the critical section.** A pure function in `registry.js`,
-`retentionDecision(entry, maxRetained)`, computed on the values the section
+`retentionDecision(entry, maxRetained)` (`registry.js:521-531`), computed on the values the section
 already holds and doing no I/O. It grants a retention only when all of:
 
 1. `maxRetainedSubagents > 0`;
 2. the ending is a clean idle — never `session.error`
-   (`hooks.js:1254-1304`), never a watchdog timeout (`watchdog.js:126-163`),
-   never the abort tool (`tools.js:682-764`). A run that failed or hung is not
+   (`hooks.js:2468-2619`), never a watchdog timeout (`watchdog.js:424-561`),
+   never the abort tool (`tools.js:1314-1467`). A run that failed or hung is not
    a session to hand more work to, and those three paths keep deleting exactly
    as today. This is not a term of the function but of its caller: those three
    paths go straight to `teardownSubagent` and never take the decision at all;
 3. the entry is a top-level subagent, i.e. its parent is a primary and it has
-   no waiter — nested children are excluded outright (§7.4).
+   no waiter — nested children are excluded outright (§7.4) — and it is not
+   the endless cycle's wind-down child, which the cycle drops with every other
+   retention as it replaces the primary.
 
 On a grant the section calls `retainEntryLocked` instead of
 `removeEntryLocked`; on a refusal it removes the entry exactly as it always
@@ -252,9 +286,9 @@ back to false, and `teardownSubagent` then disposes of the session on the very
 same path it always used. Two conditions live here:
 
 4. the reply is not a `Blocked:` report — `isBlockedResult`
-   (`notices.js:29-33`) already classifies it, and the established decision is
+   (`notices.js:39-43`) already classifies it, and the established decision is
    that a blocked task continues through a fresh spawn carrying the
-   orchestrator's decision (`notices.js:89-92`);
+   orchestrator's decision (`notices.js:287-290`);
 5. **the question-mode admission gate of §4 passes on the freshly fetched
    `snapshot.ctxTokens`** — i.e. `0 < ctx ≤ 70 000` and, where a budget is
    configured, `ctx < budget`. A session that could never be admitted for even
@@ -272,10 +306,10 @@ Capacity is not a term of either phase. A retention that overshoots
 `maxRetainedSubagents` is resolved afterwards, by evicting the OLDEST retained
 entries (§3.4) rather than by refusing the newest — the entry the orchestrator
 was just told about is the one most likely to be asked a follow-up question.
-The eviction runs through `evictRetainedOverCapacity` (`hooks.js:1627-1642`),
+The eviction runs through `evictRetainedOverCapacity` (`hooks.js:2442-2444`),
 which calls `dropRetainedSubagents(client, { keep: retentionCapacity() })`
-(`teardown.js:366-379`): `keep` is the live value of
-`maxRetainedSubagents` from `retentionCapacity()` (`settings.js:600-602`), the
+(`teardown.js:601-611`): `keep` is the live value of
+`maxRetainedSubagents` from `retentionCapacity()` (`settings.js:990-992`), the
 victims are claimed under the registry mutex and moved to `LIFECYCLE_CLOSING`
 before any I/O, and each is then handed to `teardownSubagent` with
 `notice: null` and `markAborted: false` — the same teardown every ending path
@@ -290,7 +324,7 @@ would otherwise hold entries the orchestrator can no longer use: `list`
 stops offering them and `reuse` refuses them on the very capacity that
 stranded them, while the opencode session stands for the whole retention
 window. That gap is closed on the same 5 s watchdog tick, by
-`trimRetainedToCapacity` (`watchdog.js:204-214`): it reads `retentionCapacity`
+`trimRetainedToCapacity` (`watchdog.js:255-263`): it reads `retentionCapacity`
 live, so a settings edit takes effect at the next tick, and drops the
 over-capacity tail — oldest `retainedAt` first — through the same
 `dropRetainedSubagents(..., { keep, label: "capacity" })` the idle eviction
@@ -300,35 +334,36 @@ the per-entry loop of `sweepWatchdog` takes its snapshot, so the reap and the
 trim never race on the same entry. A failed trim is logged and retried on the
 next tick — it must not cost the tick its timeout and TTL work.
 
-Anything else deletes, and the whole feature reduces to today's behaviour when
-`maxRetainedSubagents` is 0 — which is its default: phase 1's first condition
-is then the only one ever reached.
+Anything else deletes, and the whole feature reduces to the one-shot
+behaviour when `maxRetainedSubagents` is 0 — the rollback; the shipped default
+is 2 (`settings.js:229`). At 0 phase 1's first condition is the only one ever
+reached.
 
 ### 3.3 Settings and defaults
 
-Added to `getSettings` (`src/settings.js:266-287`), to the file-parse block
-below it, and to the TUI's copy `tui/src/settings-file.ts` with the parity
+Added to `getSettings` (`src/settings.js:531-586`), to the file-parse block
+below it (`src/settings.js:634-654`), and to the TUI's copy `tui/src/settings-file.ts` with the parity
 test extended (`test/settings-defaults-parity.test.js`):
 
 | key | env var | default | meaning |
 |---|---|---|---|
-| `maxRetainedSubagents` | `OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS` | **0** | how many finished subagents may be held per process. 0 switches the whole feature off — today's behaviour, byte for byte. Recommended non-zero value: **3** |
-| `retainedSubagentTtlMs` | `OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS` | **3600000** (60 min) | the retention ceiling, measured from `retainedAt`. Clamped to a minimum of 1: "no ceiling" is deliberately not offered, because nothing else in the system will ever delete the session |
+| `maxRetainedSubagents` | `OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS` | **2** | how many finished subagents may be held per process. 0 switches the whole feature off — the one-shot behaviour, byte for byte |
+| `retainedSubagentTtlMs` | `OPENCODE_AGENT_INTERCOM_RETAINED_SUBAGENT_TTL_MS` | **3600000** (60 min) | the retention ceiling, measured from `retainedAt`. Clamped to a minimum of 1 (`settings.js:755`): "no ceiling" is deliberately not offered, because nothing else in the system will ever delete the session |
 | `reuseContext` | — (map, file only) | `{}` | the reuse ceiling **per agent type**, in whole tokens, exactly as the file holds it. Read through `reuseCeilingFor`, never directly (§4.6) |
 | `maxReuseContext` | `OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT` | **70000** | the reuse ceiling for every type `reuseContext` does not name |
 
-Plus one module constant, not a setting, in `registry.js` beside the existing
-share constants (`notices.js:17-18` is the precedent):
+Plus one module constant, not a setting, in `registry.js` (`registry.js:571`;
+the share constants at `notices.js:27-28` are the precedent):
 
     RETAIN_TASK_SHARE = 0.5   // requirement 3, secondary case only
 
-and one exported default in `settings.js` beside `DEFAULT_MAX_CONTEXT`:
+and one exported default in `settings.js` (`settings.js:248`):
 
     DEFAULT_MAX_REUSE_CONTEXT = 70000
 
 **Why 60 minutes and not 30.** The requirement is "30 minutes or more". A TTL
 of exactly 30 minutes fails its own stated case at the boundary: the reap runs
-on the 5 s watchdog tick (`WATCHDOG_INTERVAL_MS = 5000`, `watchdog.js:35`), so
+on the 5 s watchdog tick (`WATCHDOG_INTERVAL_MS = 5000`, `watchdog.js:61`), so
 a question asked at 30:01 finds nothing, and a question asked at 29:58 races
 the sweep. 60 minutes is the smallest round wall-clock unit that clears "or
 more" with room, and an hour is the unit a user actually reasons in. 45 minutes
@@ -336,24 +371,24 @@ more" with room, and an hour is the unit a user actually reasons in. 45 minutes
 too high and the bootstrap sweep is cut; it buys a 25 % smaller exposure and
 gives up the round number.
 
-**Why capacity 3 and not 1.** The driver is "something strikes the orchestrator
+**Why capacity 2 and not 1.** The driver is "something strikes the orchestrator
 later", and what strikes it later is usually about an *earlier* subagent — the
 most recent one is still in the wake notice it just read. With capacity 1 and
 oldest-first eviction, the second subagent to finish evicts exactly the one the
-orchestrator is most likely to want. Three covers a normal working stretch — a
-review, a fix, a check — without becoming a pool. Eviction when capacity is
-full stays **oldest `retainedAt` first**.
+orchestrator is most likely to want. Two keep that earlier one beside the
+newest without becoming a pool. Eviction when capacity is full stays
+**oldest `retainedAt` first**.
 
 ### 3.4 When a retained session is finally torn down
 
-Four ways out, in the order they are likely:
+Five ways out, in the order they are likely:
 
 - **Reuse ends it.** A reused run goes back to `lifecycle = "running"` and, on
   its own idle, faces the same retention decision again. `retainedAt` is
   re-stamped, so the TTL is per retention, not per session.
 - **The ceiling fires.** A new branch inside the existing watchdog tick — not a
   second timer; `sweepWatchdog` already runs every 5 s and its handle is
-  `unref`'d (`watchdog.js:35`, `:51-60`). Entries with
+  `unref`'d (`watchdog.js:61`, `:77-85`). Entries with
   `lifecycle === "retained"` and `retainedAt + retainedSubagentTtlMs < now` go
   through `teardownSubagent` with `notice: null` and `markAborted: false`.
   **No wake notice on expiry**: the parent was already woken when the run
@@ -361,13 +396,22 @@ Four ways out, in the order they are likely:
   something it may never think about again has gone. The expiry is surfaced
   instead in the next turn's snapshot block (§7.8), which costs nothing.
 - **Capacity evicts it**, same teardown, same silence.
+- **A delete from outside ends it.** opencode publishes `session.deleted` for
+  every session it removes, and `onSessionDeleted` (`hooks.js`) acts on exactly
+  one lifecycle: a retained entry whose session the user deleted from outside —
+  the sidebar's `x` on a held row, since a held subagent is idle and there is
+  no run to abort. The entry leaves the registry, and this is the ONE retention
+  end that wakes the parent: it was told the handle stays reachable, so
+  `noticeRetentionLost` says it no longer is (the window expiry and the
+  capacity evictions above stay silent — the parent's own settings decided
+  those).
 - **The parent's world ends** — handoff, endless cycle, plugin reload (§3.5,
   §6).
 
 **Sizing the reaping pass.** It does not need any. It rides the tick that
 already exists, iterates the same `[...registry.values()]` snapshot the sweep
-already takes (`watchdog.js:73`), and adds at most `maxRetainedSubagents`
-integer comparisons per tick — 3 comparisons every 5 s, 2 160 over a full
+already takes (`watchdog.js:127`), and adds at most `maxRetainedSubagents`
+integer comparisons per tick — 2 comparisons every 5 s, 1 440 over a full
 retained hour. The only quantity the longer window changes here is granularity:
 a 5 s tick against a 3 600 000 ms TTL is a 0.14 % overshoot. Neither
 `WATCHDOG_INTERVAL_MS` nor the sweep's shape needs to move.
@@ -377,57 +421,62 @@ a 5 s tick against a 3 600 000 ms TTL is a 0.14 % overshoot. Neither
 This is the part of the design where the longer window is won or lost, so it is
 stated as an edit rather than as an intent.
 
-**What would happen without an exemption.** `lastActivityAt` is bumped only by
-the event handler, on an observed event (`registry.js:1148-1156` documents it;
-`hooks.js:1007` does it). A retained session emits no events — it is idle and
-nobody is prompting it — so its `lastActivityAt` freezes at the last event of
-run 1. The sweep compares exactly that value against `maxSubagentAgeMs`
-(`DEFAULT_MAX_SUBAGENT_AGE_MS = 90000`, `settings.js:110`):
+**What would happen without an exemption.** `lastActivityAt` is bumped by
+the event handler on an observed event (`registry.js:2225-2232` documents it;
+`hooks.js:1814` does it), by the tool guard on every tool call
+(`hooks.js:2772`) and when a tool call returns (`hooks.js:3052`). A retained
+session emits no events and makes no tool calls — it is idle and nobody is
+prompting it — so its `lastActivityAt` freezes at the last event of run 1. The
+running branch compares exactly that value against the silence window
+`maxSubagentAgeMs` for an entry with nothing in flight
+(`DEFAULT_MAX_SUBAGENT_AGE_MS = 90000`, `settings.js:152`;
+`watchdog.js:195-197`):
 
-    const last = entry.lastActivityAt ?? entry.spawnedAt
-    if (now - last <= maxAge) continue
+    const last = limit.since ?? entry.lastActivityAt ?? entry.spawnedAt
+    const silentMs = now - last
+    if (silentMs <= limit.ms) continue
 
 so a retained entry crosses the threshold about 90 s after its run ended, 18
 ticks in. The 60-minute window would in practice be a 90-second window, and
 every retained subagent would be torn down by `timeoutSubagent`
-(`watchdog.js:126-163`) with a `timeoutNotice` posted to the parent — a false
+(`watchdog.js:424-561`) with a `timeoutNotice` posted to the parent — a false
 hang report about a subagent that finished cleanly and was already reported as
 finished.
 
-**What would hide the bug.** Today the sweep would in fact skip such an entry
-by accident, `watchdog.js:78-80`:
+**What would hide the bug.** Without the lifecycle switch the running branch
+would skip such an entry by accident, `watchdog.js:141-143`:
 
     // session.idle fires just before the entry is removed; if a stray idle
     // sneaks through the gap, `entry.status === "idle"` covers it.
     if (entry.status === "idle") continue
 
-and `hooks.js:1134` sets `e.status = "idle"` on the idle path. That line is
+and `hooks.js:2014` sets `e.status = "idle"` on the idle path. That line is
 documented as a race guard for the removal gap, not as a retention rule.
 Leaning on it would leave the retention ceiling with no owner and would break
 silently the day someone narrows the guard to what its comment describes.
 
-**The edit.** `sweepWatchdog` becomes one loop with a switch on
-`entry.lifecycle`, and nothing about a running subagent changes:
+**The switch.** `sweepWatchdog` (`watchdog.js:117-216`) is one loop with a
+switch on the entry's lifecycle, and the running branch keeps its own rules:
 
-1. `case "running"` — today's body, byte for byte: the four skips
+1. running (`watchdog.js:137-200`) — the `maxAge <= 0` switch, the four skips
    (`timedOut`, `errored`, `aborted.has(sessionID)`, `status === "idle"`), the
    `isWaitingOnWatchdoggedChild` exemption with its `lastActivityAt` bump
-   (`watchdog.js:96-100`), the `maxSubagentAgeMs` comparison, the `timedOut`
+   (`watchdog.js:161-164`), the window `watchdogLimit` picks, the `timedOut`
    latch before any I/O, `timeoutSubagent`. The `status === "idle"` guard stays
    with its comment intact; it keeps being a race guard.
-2. `case "retained"` — the retention branch of §3.4. `maxSubagentAgeMs` is
-   never read here and `lastActivityAt` is never compared; the only clock that
-   applies is `retainedAt + retainedSubagentTtlMs`.
-3. `case "closing"` — `continue`. A teardown is already in flight.
+2. retained (`watchdog.js:132-136`) — the retention branch of §3.4.
+   `maxSubagentAgeMs` is never read here and `lastActivityAt` is never
+   compared; the only clock that applies is `retainedAt + retainedSubagentTtlMs`.
+3. closing (`watchdog.js:131`) — `continue`. A teardown is already in flight.
 
-4. **The one non-obvious move.** `sweepWatchdog` opens with
-   `if (maxAge <= 0) return` (`watchdog.js:69`, "watchdog disabled"). That
-   early return currently short-circuits the whole sweep, so leaving it in
-   place would mean `maxSubagentAgeMs = 0` also switches off the retention
-   reap — and the leak of §6 becomes unbounded, silently, in the one
-   configuration a user picks precisely because they do not want subagents
-   killed on a timer. The check moves *into* the `running` branch. This is the
-   edit I expect to be got wrong, and it deserves its own test: with
+4. **The one non-obvious placement.** The `maxAge <= 0` check ("watchdog
+   disabled", `watchdog.js:137`) sits inside the running branch, not at the top
+   of the sweep. At the top it would short-circuit the whole sweep, so
+   `maxSubagentAgeMs = 0` would also switch off the retention reap — and the
+   leak of §6 would become unbounded, silently, in the one configuration a user
+   picks precisely because they do not want subagents killed on a timer. This
+   placement is the one most likely to be got wrong, and it deserves its own
+   test: with
    `maxSubagentAgeMs = 0` and `maxRetainedSubagents = 3`, a retained entry past
    its TTL must still be reaped.
 
@@ -437,8 +486,8 @@ synchronous block, before `promptSession` is awaited, so run 2 is measured from
 the reuse and cannot be reaped on the first tick after admission. From that
 moment the inactivity watchdog owns run 2 exactly as it owned run 1.
 
-Net effect: the inactivity threshold stops applying only to entries in a state
-that does not exist today. No running subagent's treatment changes.
+Net effect: the inactivity threshold stops applying only to entries in the
+retained or closing state. No running subagent's treatment changes.
 
 ### 3.6 Parent ends, plugin reloads
 
@@ -447,9 +496,9 @@ that does not exist today. No running subagent's treatment changes.
   only value is its context, and its context is the *old* primary's task; the
   new orchestrator receives a summary and has never seen that history, so a
   fresh spawn is a better offer than a warm session it cannot read. Dropping
-  first also means `reparentSubagents` (`registry.js:534-549`) and
-  `inFlightSubagentsFor` (`registry.js:569-584`) never meet a retained entry
-  and stay untouched.
+  first (step 0b, `handoff.js:29-35`, `:177-179`) also means
+  `reparentSubagents` (`registry.js:1214-1229`) and `inFlightSubagentsFor`
+  (`registry.js:1249-1264`) never meet a retained entry and stay untouched.
 - **Endless cycle.** Same drop, inside the cycle itself: step 3b of
   `runEndlessCycle` (`src/endless.js`), right after the quiesce wait has
   claimed the wind-down, so a subagent retained during the wait goes too.
@@ -458,14 +507,14 @@ that does not exist today. No running subagent's treatment changes.
   outlive the primary it belongs to, and from the wind-down claim on the cycle is committed
   to replacing that primary; a retention that survived would leave a handle
   addressing a warm session whose orchestrator is gone. The quiesce wait forces
-  nothing here: a retained entry is not `isActiveEntry` (`registry.js:264-268`),
+  nothing here: a retained entry is not `isActiveEntry` (`registry.js:481-485`),
   so the quiesce predicate (`isQuiesced` / `claimEndlessWindDown`,
   `src/registry.js`) already passes over it and no retention can hold a cycle
   to its `endlessQuiesceTimeoutMs` (default 600 s).
 
   The two neighbouring positions are what fix the placement. The cycle ceiling
-  stays **ahead** of the drop: at `maxCycles` the mode switches itself off
-  and replaces nothing, so that path must leave retention standing. So does
+  stays **ahead** of the drop: at `maxCycles` the mode pauses itself for that
+  primary and replaces nothing, so that path must leave retention standing. So does
   an abandoned quiesce wait, which never took the claim. Everything **after**
   the drop is a way out that has already paid it — a failed save, a failed
   confirm — and that is the
@@ -526,7 +575,7 @@ There is no remaining-window field anywhere in the v1 surface
 
 served by `GET /config/providers` and exposed as `client.config.providers()`
 (`sdk.gen.d.ts:76`), with the agent's model resolvable in-process
-(`src/llmmodel.js:72-82`). **The design does not fetch it.** The gate's job is
+(`src/llmmodel.js:91-98`). **The design does not fetch it.** The gate's job is
 not "how much window is left" but "may this session be handed another prompt",
 and that question is now answered by a number the user fixed. The window route
 is named here so the choice is on the record, and §10 states the single
@@ -536,14 +585,14 @@ observation that would force it.
 
 At reuse time, three inputs:
 
-- `budget = contextBudgetFor(entry.agent)` (`settings.js:403-409`); `0` means
+- `budget = contextBudgetFor(entry.agent)` (`settings.js:801-807`); `0` means
   the budget is disabled for that type, and is a real value at every resolution
   level, never "unset"
 - `ceiling = reuseCeilingFor(entry.agent)` — the per-type reuse ceiling of
   §4.6, default 70 000; `0` means this type is never reused
 - `ctx` = `ctxTokens` from a **fresh** `fetchSnapshot` (§5.2)
 - `pkg` = `estimateTokens(prompt)`, the same estimator `packageSizeVerdict`
-  uses (`tools.js:100-135`)
+  uses (`tools.js:143-178`)
 
 <!-- -->
 
@@ -553,8 +602,9 @@ At reuse time, three inputs:
               ∧  (mode !== "task"  ∨  budget === 0
                                    ∨  ctx ≤ budget × RETAIN_TASK_SHARE)   (G4)
 
-**G1 — a figure, not a guess.** `fetchSnapshot` returns `{}` on any failure
-(`client.js:262-263`), so `ctxTokens` may be `undefined`. The ceiling the user
+**G1 — a figure, not a guess.** `fetchSnapshot` returns `{}` on a failed read
+and `{ messageCount: 0 }` on a 404 (`client.js:801-804`), so `ctxTokens` may be
+`undefined`. The ceiling the user
 set must never be evaluated against a missing number; an unreadable snapshot
 refuses.
 
@@ -563,10 +613,10 @@ and evaluated per agent type (§4.6). It is the term that exists to be
 configured; the others exist to protect contracts the plugin already holds.
 
 **G3 — the existing budget contract, kept intact.** A session must not be
-re-prompted into an immediate STOP. `contextLimitNotice` (`hooks.js:652-732`)
+re-prompted into an immediate STOP. `contextLimitNotice` (`hooks.js:1110-1316`)
 injects the STOP block on run 2's first transform whenever
-`ctxTokens >= maxContext`, and `guardToolExecute` denies every tool call from
-that moment, `hooks.js:1467-1468`:
+`ctxTokens >= maxContext`, and `guardToolExecute` denies every work tool call
+from that moment, `hooks.js:2838-2839`:
 
     const maxContext = contextBudgetFor(entry.agent)
     if (maxContext > 0 && entry.ctxTokens != null && entry.ctxTokens >= maxContext) {
@@ -576,7 +626,7 @@ locked to text-only on its first breath and reports it as a denial loop
 (`work/code-explorer-context-budget-enforcement.md` §1.5). G3 also carries the
 reuse prompt: at a high `ctx` it is stricter than the spawn-time package gate,
 which measures `pkg` against `PACKAGE_REFUSE_SHARE = 0.4` of the whole budget
-(`settings.js:384`) — 40 000 tokens under a 100 000 budget, where a session at
+(`settings.js:782`) — 40 000 tokens under a 100 000 budget, where a session at
 70 000 has only 30 000 left. The reuse path runs `packageSizeVerdict` too, for
 its wording; G3 is what actually decides.
 
@@ -612,12 +662,11 @@ Against the decided default of a **100 000-token budget for every agent type**:
 | either mode, reuse ceiling configured to `0` | **G2** | nothing; this type is never reused |
 | any mode, large reuse prompt | **G3** | `budget − pkg` |
 
-So **G2 binds in the normal case**. This is the substantive difference the new
-budget default makes: with the old per-type budgets of 40 000–60 000
-(`settings.js:78`, `:85-94`) the budget term was always the tighter one and the
-70 000 ceiling was dead code except where a type had its budget disabled with
-`0`. At 100 000 it is the other way round — the ceiling is the operative rule
-for the primary case, and the budget only takes over when a user lowers it
+So **G2 binds in the normal case**. That follows from the 100 000 budget
+default (`settings.js:116`, `:123-133`): under a budget below 70 000 the budget
+term would always be the tighter one and the 70 000 ceiling dead code except
+where a type had its budget disabled with `0`. At 100 000 it is the other way
+round — the ceiling is the operative rule for the primary case, and the budget only takes over when a user lowers it
 below 70 000 or when the reuse prompt itself is large.
 
 Two consequences follow and should be expected rather than diagnosed:
@@ -628,13 +677,13 @@ Two consequences follow and should be expected rather than diagnosed:
   is wrong; requirement 2 is simply stricter than the budget.
 - **The overshoot case stops mattering.** A session can *end* above its own
   budget, because the budget check fires only on tool calls and reads a
-  `ctxTokens` cached for `CTX_TTL_MS = 3000` (`registry.js:830`, read at
-  `hooks.js:657`), so one large tool result can carry a subagent well past its
+  `ctxTokens` cached for `CTX_TTL_MS = 3000` (`registry.js:1510`, read at
+  `hooks.js:1115`), so one large tool result can carry a subagent well past its
   ceiling before anything looks again. Under a 100 000 budget such a session is
   far above 70 000 and G2 refuses it long before G3 would. What it still means
   for the *retention* decision is that its context term is a **phase-2**
   condition (§3.2): it is evaluated on the snapshot the idle path fetches after
-  the lock is released (`hooks.js:1175`), never on the entry's older value, and
+  the lock is released (`hooks.js:2112`), never on the entry's older value, and
   a phase-1 grant it fails is revoked before the teardown runs.
 
 ### 4.5 Is a separate "very little context" threshold still needed?
@@ -653,7 +702,7 @@ rather than being shadowed by it. The reason it survives:
   the same order as an entire subagent under the old defaults, and is the
   denominator the orchestrator is already taught to reason in
   (`PACKAGE_WARN_SHARE` / `PACKAGE_REFUSE_SHARE` against `contextBudgetFor`,
-  `settings.js:383-384`).
+  `settings.js:781-782`).
 
 It stays a **share** rather than a second per-type number even though the
 budget is now uniform, for two reasons. The share survives a user lowering one
@@ -690,18 +739,18 @@ inventing a second one.
       2. settings.maxReuseContext            // flat: file, else env var
       3. DEFAULT_MAX_REUSE_CONTEXT = 70000
 
-Beside `contextBudgetFor` (`settings.js:403-409`) this is deliberately one
-level shorter, and the difference is worth stating because someone will
-otherwise "fix" it. `contextBudgetFor` needs five levels and a
-`maxContextSource` flag because it has a **built-in per-type table**
-(`DEFAULT_AGENT_CONTEXT`, `settings.js:85-94`) *and* a legacy flat key, so it
-must tell "the user set the flat value" from "the built-in table happens to
-apply" — that is the entire job of `maxContextSource`
-(`settings.js:267-268`, `:406`). The reuse ceiling has neither: one number for
+Beside `contextBudgetFor` (`settings.js:801-807`) this is deliberately one
+level shorter (`reuseCeilingFor`, `settings.js:839-843`), and the difference is
+worth stating because someone will otherwise "fix" it. `contextBudgetFor`
+needs five levels and a `maxContextSource` flag because it has a **built-in
+per-type table** (`DEFAULT_AGENT_CONTEXT`, `settings.js:123-133`) *and* a
+legacy flat key, so it must tell "the user set the flat value" from "the
+built-in table happens to apply" — that is the entire job of
+`maxContextSource` (`settings.js:534`, `:804`). The reuse ceiling has neither: one number for
 every type, because the user named one number, and no history to migrate. With
 no built-in per-type table there is nothing for a source flag to disambiguate,
 so there is none. The file parse follows the same discipline as `agentContext`
-(`settings.js:303-309`): a key survives only as a whole non-negative integer,
+(`settings.js:602-608`): a key survives only as a whole non-negative integer,
 one garbage entry costs the user that entry and not the map, and a value that
 is not a plain object leaves the map empty.
 
@@ -711,7 +760,7 @@ is not a plain object leaves the map empty.
 
 The neighbouring map reads `0` the other way — `agentContext[agent] = 0`
 disables the budget, i.e. removes the enforcement, and both enforcement sites
-check `maxContext > 0` before doing anything (`hooks.js:654`, `hooks.js:1468`).
+check `maxContext > 0` before doing anything (`hooks.js:1112`, `hooks.js:2839`).
 Three reasons the reuse ceiling reads it the opposite way and is not being
 inconsistent:
 
@@ -742,7 +791,7 @@ hold for this plugin, and the design depends on that, so it is stated with the
 lines behind it. **Both halves read and write the same file,**
 `~/.config/opencode/agent-intercom.json`:
 
-- the plugin, `src/settings.js:171`:
+- the plugin, `src/settings.js:402`:
 
       let settingsPath = join(homedir(), ".config", "opencode", "agent-intercom.json")
 
@@ -762,7 +811,7 @@ settle between two files — there is one file, and the question is only which
 half owns the *shape*.
 
 **The plugin owns the value; the TUI is a second reader and the only writer.**
-`getSettings` (`settings.js:266-287`) is the reader of record: it is what every
+`getSettings` (`settings.js:528-773`) is the reader of record: it is what every
 gate actually runs on. The TUI carries a duplicated copy of the defaults and the
 resolution order because it is a separate npm package that cannot import
 `settings.js` at runtime, and `test/settings-defaults-parity.test.js` is what
@@ -797,8 +846,10 @@ another run is editing that surface and its layout is not settled here:
 
 Nothing about this needs an opencode restart: the TUI's writes go to the file
 the plugin reads, and `getSettings` re-reads it when its cache expires
-(`settings.js:264-265`) — the same live-edit path the context budget already
-uses.
+(`settings.js:400`, `:530`) — the same live-edit path the context budget
+already uses. The one exception is switching retention on from 0, which needs
+an opencode restart because the tool surface is latched at load
+(`retentionOffered`, `settings.js:973-976`).
 
 #### A reuse ceiling above the budget: neither rejected nor clamped
 
@@ -848,51 +899,54 @@ retained session of the same agent type), is rejected on two grounds that are
 visible in the code. The orchestrator writes its prompt for a fresh context —
 "read X, then do Y" — and prepending that to a session that has already read X
 yields a run whose briefing contradicts its own history. And the package-size
-gate measures the prompt against a full budget (`tools.js:398-412`), which is
+gate measures the prompt against a full budget (`tools.js:143-178`), which is
 the wrong denominator for a session that has already spent part of it.
 
-So: `reuse(subagent, prompt, mode?)`, beside `spawn` and `abort` in the tool map
-(`tools.js:861-897`) and added to `PRIMARY_TOOLS` (`hooks.js:92-96`). It
-refuses, always naming `spawn` as the alternative so the orchestrator can never
-be stuck, when: retention is off; the handle is unknown or belongs to another
-primary (mirroring the ownership check at `tools.js:692`, with the same uniform
-"unknown" wording so foreign ownership does not leak); the entry is not
-`retained`; any of G1–G4 fails, with the failing term named in tokens so the
-orchestrator learns the rule; or the caller is itself a subagent.
+So: `reuse(subagent, prompt, mode?)` (`tools.js:1052-1312`), beside `spawn`
+and `abort` in the tool map (`tools.js:1621-1750`) and added to
+`PRIMARY_TOOLS` (`hooks.js:173-192`). It refuses, naming `spawn` as the way
+forward wherever the held session cannot serve, so the orchestrator can never
+be stuck, when: solo mode is active; retention is off; the caller is itself a
+subagent; the endless cycle has claimed its wind-down; the handle is unknown
+or belongs to another primary (mirroring the ownership check at
+`tools.js:1324`, with the same uniform "unknown" wording so foreign ownership
+does not leak); the entry is still running (the refusal points at the wake
+it is about to get) or closing; the follow-up is over the package bar; the
+fresh snapshot is unavailable or finds the session gone (§5.2); any of G1–G4
+fails, with the failing term named in tokens so the orchestrator learns the
+rule; or the subagent cap is full.
 
 ### 4.8 How a reused run is charged and reported
 
 - **No new entry.** The existing entry flips to `lifecycle = "running"`,
   `status = "busy"`, `dispatched = false`, `lastActivityAt = now`, `runs += 1`,
   `packageTokens` replaced by this package's estimate. `spawnedAt` is **not**
-  reset: the age column (`tools.js:267`, `hooks.js:938`) keeps telling the
+  reset: the age column (`tools.js:363`, `hooks.js:1699`) keeps telling the
   truth about how long the session has existed.
 - **The concurrency slot is taken like a spawn's**, through the same
   `spawnCapDecision` / `reservePendingSpawn` pair
-  (`registry.js:263-270`, `tools.js:491-502`). It must be, or the cap stops
+  (`registry.js:930-938`, `tools.js:1232-1245`). It must be, or the cap stops
   meaning "how many LLM runs are in flight".
 - **The handle is unchanged**, which is the point: the orchestrator addresses
   `researcher#1` twice.
 - **The completion notice changes tense.** `completionNotice`
-  (`notices.js:69-104`) currently ends "has finished and been destroyed" and
-  "spawn a fresh subagent — the one above is gone". For a run that is being
-  retained it says instead that the session is held, until when, at what
-  context against the 70 000 ceiling, whether a further *task* would also be
-  admitted, and that `reuse("<handle>", …)` is open. For run *n* > 1 the
-  run-size line (`notices.js:142-167`) reports a figure that is cumulative over
-  the session, so it is labelled as such ("run 2 of researcher#1 — 31k
-  cumulative"); the number is already the honest one, only its caption is wrong
-  today.
-- **The per-run counters split in two.** `nestedSpawns` (`registry.js:1176-1182`)
+  (`notices.js:238-305`) ends "has finished and been destroyed" and "spawn a
+  fresh subagent — the one above is gone" for a run that is not held. For a run
+  that is being retained it says instead that the session is held, for how
+  long, whether a further *task* would also be admitted, and that
+  `reuse("<handle>", …)` is open (`retainedTail`, `notices.js:99-116`). For run
+  *n* > 1 the headline names the follow-up run and the run-size line
+  (`notices.js:343-372`) reports a figure that is cumulative over the session,
+  labelled as such ("run-size (run 2, cumulative over the session)").
+- **The per-run counters split in two.** `nestedSpawns` (`registry.js:2300-2306`)
   is a quota and must **not** reset across a reuse — a session that could
   refill its nested quota by being re-prompted would have an unbounded one.
-  `nestedRuns` / `nestedTokens` (`registry.js:1183-1192`) are reporting figures
+  `nestedRuns` / `nestedTokens` (`registry.js:2307-2316`) are reporting figures
   and stay cumulative, with the notice caption adjusted. `stopInjections`,
   `budgetDenials` and `notifiedParentOfLoop` need nothing: they are already
-  cleared on any accepted tool call (`hooks.js:1496-1500`). The doc-comments at
-  `registry.js:1179-1181` and `:1189-1190` — "the entry lives exactly as long as
-  the one-shot run" — are false after this change and are rewritten in the same
-  step.
+  cleared on any accepted tool call (`hooks.js:2922-2926`). The doc-comments at
+  `registry.js:2304-2305` and `:2313-2314` still say "the entry lives exactly as
+  long as the one-shot run", which a reused entry contradicts.
 
 ---
 
@@ -905,7 +959,7 @@ expire it.
 
 - **The provider keeps no conversation state.** opencode assembles each request
   from its own stored messages: the v1 prompt operation takes only a session id
-  and a new part (`POST /session/:id/message`, `client.js:96-101` calls
+  and a new part (`POST /session/:id/message`, `client.js:381-387` calls
   `promptAsync` with `path.id` plus `parts`), and the history it replays comes
   from the durable `MessageTable` / `PartTable` rows
   (`work/researcher-opencode-session-lifetime.md` §1). There is no server-side
@@ -954,24 +1008,26 @@ no new step appears while the session is idle. But correct-if-nothing-happened
 is not a property the design may assume, for one concrete reason: a retained
 session is a real opencode session the user can open in the TUI and type into.
 `guardToolExecute` classifies it as a subagent because a registry entry exists
-(`hooks.js:1410-1416`), which gates its tools but does not prevent the turn or
-the context growth. The plugin's only refresh sites are the idle path
-(`hooks.js:1175`) and `contextLimitNotice` (`hooks.js:660-673`); neither is
+(`hooks.js:2747`, `:2780`), which gates its tools but does not prevent the turn
+or the context growth. The plugin's other refresh sites are the idle path
+(`hooks.js:2112`) and `contextLimitNotice` (`hooks.js:1125-1139`); neither is
 guaranteed to have run, and neither moves `retainedAt`.
 
-So `reuse` calls `fetchSnapshot` first — one HTTP call bounded by
-`SNAPSHOT_TIMEOUT_MS = 5000` (`client.js:193`) on the orchestrator's tool path,
+So `reuse` calls `fetchSnapshot` first (`tools.js:1168-1169`) — one HTTP call
+bounded by `SNAPSHOT_TIMEOUT_MS = 5000` (`client.js:721`) on the orchestrator's
+tool path,
 against the alternative of a whole `session.create` + `promptAsync`. Three
 outcomes, all decided:
 
 - **a number** → the gate runs on it, and `entry.ctxTokens` /
   `entry.lastTokensFetchAt` are updated in passing, so run 2's first
   `contextLimitNotice` sees the same figure the gate did;
-- **`{}`** from a timeout or transport error (`client.js:262-263`) → refuse this
-  reuse, keep the entry retained, tell the orchestrator to retry or spawn. The
-  stale value is never substituted: a ceiling evaluated on a guess is not a
-  ceiling;
-- **an empty message list where a session used to be** → the session was deleted
+- **`{}`** from a timeout, a transport error or a non-404 status
+  (`client.js:801-804`) → refuse this reuse, keep the entry retained, tell the
+  orchestrator to retry or spawn. The stale value is never substituted: a
+  ceiling evaluated on a guess is not a ceiling;
+- **an empty message list or a 404 where a session used to be** (`snapshotOutcome`
+  reads both as "gone", `client.js:842-845`) → the session was deleted
   underneath the plugin (`opencode session delete`, a database reset, some
   future cascade) → refuse *and* drop the entry, so the handle stops being
   offered in the snapshot and the `list` tool.
@@ -983,13 +1039,18 @@ Age is never itself a reason to distrust the figure. A missing figure is.
 ## 6. The reload leak under a one-hour window
 
 Nothing else deletes an opencode session: no TTL, no GC
-(`work/researcher-opencode-session-lifetime.md` §1), and the plugin gets no
-shutdown hook — opencode offers none, and `process.on("exit")` cannot do
-network I/O. Every plugin reload or process end that happens while a session is
-retained leaks that session permanently.
+(`work/researcher-opencode-session-lifetime.md` §1). The plugin does get a
+`dispose` hook (`index.js`, marking the directory through
+`noteInstanceDisposing` in `instancerestart.js`), but it is no cleaner: it runs
+side by side with the dispose's interruption of the instance's runs, and
+deleting a session at that moment races opencode's own writes into it
+(`learnings.md`, the instance-restart section) — which is why the hook marks
+rather than tears down. A `process.on("exit")` handler cannot do network I/O
+either. Every process end that happens while a session is retained leaks that
+session.
 
 What the requirement changes: the count per reload is still bounded by
-`maxRetainedSubagents` (3), but the **exposure** — the chance that a reload
+`maxRetainedSubagents` (2), but the **exposure** — the chance that a reload
 falls inside a retention window — scales with the window, and the window went
 from 5 minutes to 60. That is a twelvefold increase in the one cost the earlier
 design accepted, and it is the reason this section now carries its own decision
@@ -1003,22 +1064,23 @@ the TTL. The TTL multiplies dwell, not volume.
 
 Three ways to handle the exposure:
 
-**A — accept and bound.** At most 3 orphan sessions per reload that lands in a
+**A — accept and bound.** At most 2 orphan sessions per reload that lands in a
 window; a user can clear them by hand with `opencode session list` /
 `opencode session delete`.
 *Costs*: orphans accumulate across a working life of the project and nothing
 ever removes them. *Forecloses*: nothing. *Demands*: nothing.
 
-**B — a bootstrap sweep.** On the plugin factory call (`index.js:75`), before
-anything else, list sessions (`client.session.list()`, `sdk.gen.d.ts:110`) and
-delete those that are (i) marked as this plugin's own, (ii) not in this
-process's registry — at bootstrap it is empty, so every candidate qualifies —
-and (iii) idle for longer than `2 × retainedSubagentTtlMs`.
-*Costs*: one list call per plugin load; and a prerequisite — the plugin does
-**not** mark its sessions today, `tools.js:506` sets
-`title: args.description || `${args.agent}: ${args.prompt.slice(0, 60)}``, so a
-fixed marker prefix has to be added to that title first, and the sweep only
-covers sessions created after it. *Risk*: a second concurrent opencode instance
+**B — a bootstrap sweep.** On the plugin factory call (`index.js:118`,
+the sweep at `index.js:156-160`), list sessions (`client.session.list()`,
+`sdk.gen.d.ts:110`) and delete those that are (i) marked as this plugin's own,
+(ii) not in this process's registry — at bootstrap it is empty, so every
+candidate qualifies — and (iii) idle for longer than
+`2 × retainedSubagentTtlMs`, and never less than `ORPHAN_SWEEP_MIN_AGE_MS` or
+8 × the wider watchdog window (`teardown.js:792-806`, `:870-875`).
+*Costs*: one list call per plugin load; and a prerequisite — a fixed marker
+prefix on every subagent session title, `SUBAGENT_SESSION_TITLE_MARKER`
+(`teardown.js:623`), which the spawn writes (`tools.js:720`), so the sweep only
+covers sessions created with it. *Risk*: a second concurrent opencode instance
 on the same database has its own children in that list. The `2 × TTL` age
 condition is what makes that tolerable — a *running* subagent is never idle for
 two hours, because the inactivity watchdog reaps it at 90 s, so the worst the
@@ -1048,66 +1110,68 @@ not need.
 Every place that assumes a subagent session dies at idle, what has to change,
 and what breaks if it does not.
 
-### 7.1 The idle teardown — `hooks.js:1094-1232`, `teardown.js:240-307`
+### 7.1 The idle teardown — `hooks.js:1938-2251`, `teardown.js:424-580`
 
 Change: the split described in §3.2. If unchanged, nothing is ever retained
 and the feature does not exist. Low risk: the branch is one decision inside a
 critical section that already holds every value it needs, and the delivery
 half of the path is untouched.
 
-### 7.2 `countActiveSubagents` and its five consumers — `registry.js:237-243`
+### 7.2 `countActiveSubagents` and its five consumers — `registry.js:879-886`
 
 Change: count an entry only where it is **not aborted AND**
 `lifecycle === "running"`. The two terms are a conjunction, not alternatives:
-no path sets a lifecycle other than `running` — the abort paths included, since
-an abort is recorded in the `aborted` set and leaves `lifecycle` alone — so
-dropping the aborted term would put aborted entries back into the count.
+no abort path sets a lifecycle — an abort is recorded in the `aborted` set and
+leaves `lifecycle` alone — so dropping the aborted term would put aborted
+entries back into the count.
 
 Both terms live in one exported predicate, `isActiveEntry(entry)` in
-`registry.js`, and every consumer calls it rather than restating either term.
-That predicate is the definition of "active" for the whole plugin, so the
-consumers cannot drift apart. Consumers that inherit it for free: the cap
-(`registry.js:263-270`), the quiesce predicate (`registry.js:1076-1082`), both
-slot lines (`notices.js:174-179`, `tools.js:663-679`).
+`registry.js` (`registry.js:481-485`), and every consumer calls it rather than
+restating either term. That predicate is the definition of "active" for the
+whole plugin, so the consumers cannot drift apart. Consumers that inherit it
+for free: the cap (`registry.js:930-938`), the quiesce predicate
+(`registry.js:2096-2108`, through `countActiveSubagentsFor`,
+`registry.js:901-910`), both slot lines (`notices.js:384-393`,
+`tools.js:979-996`).
 
 **If unchanged, this is the collision that breaks everything else, and the
 longer window makes it worse rather than better.** With
-`DEFAULT_MAX_SUBAGENTS = 1` (`settings.js:74`), one retained subagent
+`DEFAULT_MAX_SUBAGENTS = 1` (`settings.js:112`), one retained subagent
 permanently refuses every further spawn — and the refusal text
-(`tools.js:672-676`) tells the orchestrator that no further spawn will succeed
-"until a subagent finishes (you will be woken)", which will never happen.
-`isQuiesced` never returns true, so an endless cycle abandons at its 600 s
-quiesce timeout (`endless.js:206-208`) and the idle-gated handoff stalls. Under
-the earlier 5-minute design that deadlock lasted five minutes; at a 60-minute
-TTL it lasts an hour, and the endless cycle's own 600 s timeout expires inside
-it. **The count split is not an optional refinement of this design; it is its
+(`tools.js:689-697`) tells the orchestrator to wait for one to finish — "you
+are woken automatically" — which will never happen. `isQuiesced` never returns
+true, and the endless cycle's quiesce wait, which re-arms its deadline for as
+long as a subagent of its primary counts as running (`endless.js:481-497`),
+waits out the whole retention window; the idle-gated handoff stalls with it.
+At a 60-minute TTL that deadlock lasts an hour. **The count split is not an optional refinement of this design; it is its
 precondition**, which is why it is step 1 below and lands on its own. The new
 requirement does not weaken this finding — it makes it more load-bearing.
 
-Sibling with the same shape: `activeTaskIdsFor` (`registry.js:414-421`) reads
+Sibling with the same shape: `activeTaskIdsFor` (`registry.js:1094-1102`) reads
 the same `isActiveEntry` and so skips retained entries too — without that, a
 retained entry still holding `T5` refuses
 every fresh spawn for `T5` for the whole retention window
-(`tools.js:430-442`) — an hour, not five minutes.
+(`tools.js:621-633`) — an hour, not five minutes.
 
-### 7.3 The inactivity watchdog — `watchdog.js:67-109`
+### 7.3 The inactivity watchdog — `watchdog.js:117-216`
 
-Change: the `lifecycle` switch, the retention branch, and the move of the
-`maxAge <= 0` early return, all as spelled out in §3.5. If unchanged, the
-accidental `status === "idle"` skip at `watchdog.js:80` means retained entries
+Change: the `lifecycle` switch, the retention branch, and the `maxAge <= 0`
+check inside the running branch, all as spelled out in §3.5. If unchanged, the
+accidental `status === "idle"` skip at `watchdog.js:143` means retained entries
 are never reaped by anything and live for the process lifetime — the leak this
 design exists to bound becomes unbounded.
 
-### 7.4 The delete cascade — `teardown.js:128-190`, `client.js:145-163`
+### 7.4 The delete cascade — `teardown.js:244-340`, `client.js:538-584`
 
 opencode's DELETE recurses over children; the plugin enforces child-first
-teardown because of it (`teardown.js:131-138`). Two facts keep a retained
+teardown because of it (`teardown.js:247-254`). Two facts keep a retained
 top-level subagent safe: nothing in this plugin ever deletes a *primary* (the
-handoff archives instead — `handoff.js:318`, `client.js:178-189`), and a
+handoff archives instead — `handoff.js:427`, `client.js:704-717`), and a
 retained top-level subagent has no children of its own.
 
 A retained *nested* child would not be safe. `endLiveChildrenOf` reads its
-children from the waiter map, `childwait.js:193-199`:
+children from the waiter map through `liveChildSessionIDs`,
+`childwait.js:334-335`:
 
     for (const record of pendingChildResults.values()) {
       if (record.parentSessionID === parentSessionID) out.push(record.childSessionID)
@@ -1116,48 +1180,51 @@ and a retained child has no waiter — its waiter was settled when it ended. It
 would therefore be invisible to the child-first sweep and get its rows wiped
 mid-life by its parent's delete, which is exactly the `FOREIGN KEY constraint
 failed` failure the child-first rule exists to prevent
-(`teardown.js:132-137`).
+(`teardown.js:247-254`).
 
-**Retention is refused for nested spawns outright.** It costs nothing real — a
-nested child's result is consumed as the caller's tool result
-(`tools.js:613-637`) and the caller is one-shot by design — and it keeps the
-entire nesting machinery untouched. Building retention for nested children
+**Retention is refused for nested spawns outright** (`registry.js:529`). It
+costs nothing real — a nested child's result is consumed as the caller's tool
+result (`tools.js:880-923`) and the caller is one-shot by design — and it keeps
+the entire nesting machinery untouched. Building retention for nested children
 instead would mean making `liveChildSessionIDs` registry-aware, which re-opens
-the coupling the waiter map was introduced to avoid (`childwait.js:20-24`). The
+the coupling the waiter map was introduced to avoid (`childwait.js:21-24`). The
 new requirement does not touch this exclusion: a follow-up question is asked by
 the orchestrator, and the orchestrator never has nested children.
 
-### 7.5 The child-waiter — `childwait.js`, `hooks.js:1127-1133`
+### 7.5 The child-waiter — `childwait.js`, `hooks.js:1987-1993`
 
 No change. The idle-held branch runs before the retention decision, so a
 subagent blocked on a live child is never retained; and by §7.4 a retained
 session can be neither a waited child nor a nested caller.
 
-### 7.6 Handoff and archiving — `handoff.js:318-324`, `registry.js:534-549`, `:569-584`
+### 7.6 Handoff and archiving — `handoff.js:427`, `registry.js:1214-1229`, `:1249-1264`
 
 Change: drop retained entries at the start of the handoff (§3.6).
 
 If unchanged, two things break. A retained entry carries `dispatched = true`
 from its first wake, and both `reparentSubagents` and `inFlightSubagentsFor`
-skip dispatched entries (`registry.js:543`, `:575`) — so the entry survives
+skip dispatched entries (`registry.js:1223`, `:1255`) — so the entry survives
 the handoff still pointing at the archived old primary, and a later reuse
 posts its wake into a session the user has left. The delivery router
-(`registry.js:719-727`) would redirect it only while the old→new redirect is
+(`registry.js:1356-1364`) would redirect it only while the old→new redirect is
 in place. Clearing `dispatched` on retention (§3.2) removes the second half of
 that hazard by itself, but the first half — a warm session handed to an
 orchestrator that never saw its history — is a design decision, and the answer
 is: drop.
 
-### 7.7 The wake notice and task marking — `hooks.js:1189-1216`, `notices.js:69-104`, `hooks.js:1355-1380`
+### 7.7 The wake notice and task marking — `hooks.js:2188-2228`, `notices.js:238-305`, `hooks.js:2685-2715`
 
-Change: `completionNotice` takes a `retained` argument (§4.8); the spawn tool
-description (`tools.js:863-871`) gains a sentence; the orchestrator guide
-(`prompts.js:20`) gains one about `reuse` that names the follow-up question as
-its purpose, since that is the behaviour the feature has to elicit.
+Change: `completionNotice` takes a `retained` argument (§4.8); the `list`
+description (`tools.js:1703-1711`) gains a sentence where retention is
+offered; the orchestrator guide gains a block of its own about `reuse`,
+`ORCHESTRATION_REUSE_GUIDE` (`prompts.js:72-79`), that names the follow-up
+question as its purpose, since that is the behaviour the feature has to
+elicit. The spawn description (`tools.js:1626-1635`) says nothing about
+retention.
 
 `autoMarkTask` itself needs nothing. The subagent guide line
-(`prompts.js:55`, "You are a one-shot subagent — do one focused task, then
-reply once and return") **stays exactly as it is**: it is still true of the
+(`prompts.js:102`, "You reply ONCE — do one focused task, then reply and
+return") says nothing about retention either: it is still true of the
 run. Whether the session is deleted afterwards is the orchestrator's business,
 not the subagent's, and telling a subagent it might be re-prompted invites it
 to leave work for a second turn — the opposite of what the line is for.
@@ -1167,11 +1234,13 @@ been destroyed" and that "the one above is gone" while the session is in fact
 sitting there for an hour, and the model has no way to learn that `reuse`
 applies to it.
 
-### 7.8 The `list` tool and the system-prompt snapshot — `tools.js:766-779`, `hooks.js:932-951`
+### 7.8 The `list` tool and the system-prompt snapshot — `tools.js:1477-1511`, `hooks.js:1686-1732`
 
 Change: a separate `retained` section in both renderings, with time left on the
-ceiling and the reuse verdict, and the snapshot's prose rewritten. The snapshot
-currently asserts the opposite of the feature, `hooks.js:944-947`:
+ceiling and the context the session holds (`tools.js:374-379`,
+`hooks.js:1713-1716`), and the snapshot's prose rewritten where retention is
+in effect (`hooks.js:1717-1731`). The retention-off form of the snapshot
+asserts the opposite of the feature, `hooks.js:1706-1708`:
 
     "…They are one-shot — a finished subagent disappears from this " +
     "list. To stop one, use `abort` (only on user request); for more work, spawn a fresh " +
@@ -1180,53 +1249,62 @@ currently asserts the opposite of the feature, `hooks.js:944-947`:
 If unchanged, retained entries render as `idle` rows with a growing age inside
 a block that tells the model such rows cannot exist. Note the asymmetry that
 already exists and is inherited: `list` filters by the caller's session
-(`tools.js:773-776`) while the snapshot deliberately does not
-(`hooks.js:933`, `:940` marks foreign rows) — the retained section follows
+(`tools.js:1484`) while the snapshot deliberately does not
+(`hooks.js:1689`, `:1695` marks foreign rows) — the retained section follows
 each renderer's existing rule rather than introducing a third.
 
 Cost to watch, and it grows with the window: the snapshot is memoised per user
-turn precisely so its bytes do not move mid-turn (`hooks.js:468-485`). A
+turn precisely so its bytes do not move mid-turn (`hooks.js:797-814`). A
 countdown ("expires in 47m12s") is a figure that moves; it must be rendered
 from the per-turn memo like the age already is, never re-computed per step. At
 a 60-minute TTL the countdown is also long-lived enough to sit in the
 orchestrator's prompt across many turns, so it is rendered coarsely — whole
 minutes — rather than to the second.
 
-### 7.9 `guardToolExecute` — `hooks.js:1398-1502`
+### 7.9 `guardToolExecute` — `hooks.js:2736-3009`
 
 **No change, and this is worth stating.** Classification is "has a registry
-entry → subagent, else primary" (`hooks.js:1410-1416`, `:1504-1517`). A
+entry → subagent, else primary" (`hooks.js:2747`, `:2780`, `:2930`). A
 retained entry keeps its session classified as a subagent, so if the user opens
 that session in the TUI and types into it, it is still gated by the subagent
 rules rather than being misread as a primary — which is what a retained session
 should be. Retention costs nothing here; §5.2 covers the one thing it does
 imply, that such a turn can move `ctxTokens` behind the plugin's back.
 
-### 7.10 The TUI sidebar — `tui/src/tui.tsx:933-959`, `:663-667`, `:680-686`
+### 7.10 The TUI sidebar — `tui/src/tui.tsx:1137-1153`, `:1250-1253`, `:1422-1430`
 
-The panel drops a session the moment it goes idle and files it in a set that
-the poll then keeps out permanently, `tui/src/tui.tsx:663-666`:
+The panel files a row in its `finished` map only on a terminal signal — the
+`session.deleted` event, the poll's reap, or a held row dropped from the
+panel — through one function, `tui/src/tui.tsx:1137-1145`:
 
-          // Already finished and removed — keep it gone, do not re-add.
-          if (finished.has(child.id)) {
-            next.delete(child.id);
+      const retireRow = (
+        rows: Map<string, SubagentEntry>,
+        sessionID: string,
+      ): void => {
+        const entry = rows.get(sessionID);
+        escapeRoute(sessionID, entry?.parentID, entry !== undefined, "retire");
+        finished.set(sessionID, entry);
+        rows.delete(sessionID);
 
-and `:952-955`:
+and a session the poll still lists is taken back under its own handle,
+`:1250-1253`:
 
-        const next = new Map(subagents());
-        next.delete(sessionID);
-        setSubagents(next);
-        finished.add(sessionID);
+          const existing = next.get(child.id);
+          const remembered = existing ?? finished.get(child.id);
+          finished.delete(child.id);
+          const base = remembered ?? rowFromChild(child, parentID);
 
-Change: a `retained` row status; `finished` fed by a terminal signal rather
-than by idle; the `x` control on a retained row meaning "drop it now".
+A held row has a `retained` status of its own (`:391-405`), decided by
+`decideRow` from the retention stamp in the session title
+(`tui/src/subagent-store.ts:246-254`, `readRetentionStamp` in
+`tui/src/subagent-label.ts:92`), and the `x` control on it drops it
+(`abortSubagent` → `dropRetained`, `:1422-1430`, `:1390`).
 
 If unchanged, a retained session vanishes from the panel and a reuse never
 brings it back — the user watches a run they cannot see, on a session they
 cannot abort from the panel, and now for up to an hour rather than five
 minutes. **This is where the risk is highest relative to the gain.** The
-panel's entire model is "idle means gone"; it is a separate npm package with
-its own duplicated state (see the parity test's own account of why,
+panel is a separate npm package with its own duplicated state (see the parity test's own account of why,
 `test/settings-defaults-parity.test.js:1-10`); and its only evidence of
 correctness is an optical check of a rendered terminal. It is the last step
 below for that reason, and the first thing to cut if the feature is dropped.
@@ -1241,14 +1319,14 @@ below for that reason, and the first thing to cut if the feature is dropped.
   fresh spawn cannot answer "which of the two did you mean?", because the new
   session never saw the work — the orchestrator would have to re-brief the whole
   task to get a clarification on it. The `Blocked:` path pays a full session —
-  system prompt, project snapshot (`tools.js:402-403`), re-reads — to answer
+  system prompt, project snapshot (`tools.js:581-589`), re-reads — to answer
   what is often one sentence.
 - **Forecloses**: nothing.
 - **Demands of the builder**: nothing.
 
 ### Option B — the follow-up window (recommended)
 
-Up to 3 retained sessions per process, TTL 60 minutes, admitted by the gate of
+Up to 2 retained sessions per process, TTL 60 minutes, admitted by the gate of
 §4: a **question** at up to 70 000 tokens, a **further related task** at up to
 half the agent's budget. All of §3, §4, §5, §6 and §7 apply. The three
 exclusions stand: no retention for nested children, no survival across a
@@ -1258,14 +1336,15 @@ reload leak.
 - **Costs**: the count split and its five consumers (§7.2), the lifecycle
   field, the watchdog switch, the retention branch, the bootstrap sweep plus a
   session-title marker, one tool, five strings, one TUI row state. Roughly
-  eight files plus tests. Up to 3 leaked opencode sessions per plugin reload
+  eight files plus tests. Up to 2 leaked opencode sessions per plugin reload
   that lands in a window, self-healing at the next load if the sweep is built.
 - **Forecloses**: nothing structurally — C remains reachable by raising a
   setting and relaxing the exclusions.
 - **Demands**: that the builder holds the count split coherent before anything
-  else lands; that the `maxAge <= 0` early return is moved rather than left
-  (§3.5); and that the default stays 0 so a project that never opts in is
-  byte-identical to today.
+  else lands; that the `maxAge <= 0` check sits inside the running branch
+  rather than at the top of the sweep (§3.5); and that `maxRetainedSubagents
+  = 0` stays a rollback that leaves every string byte-identical to the one-shot
+  form.
 
 ### Option C — a full reuse pool
 
@@ -1276,7 +1355,7 @@ retained too, no capacity worth the name.
   sessions handed to orchestrators that never read them (§7.6), a
   cumulative-vs-per-run accounting story in every notice, and the full TUI
   rework. The reload leak scales with N.
-- **Forecloses**: it makes the one-shot invariant at `state.js:15-20` false in
+- **Forecloses**: it makes the one-shot invariant at `state.js:19-29` false in
   general rather than by opt-in, so every future change to the lifecycle has
   to reason about warm sessions.
 - **Demands**: that whoever builds it keeps the count split, the eviction
@@ -1292,12 +1371,12 @@ Each step leaves the tree building and the suite green, and can be handed out
 on its own.
 
 **Step 1 — split "an entry exists" from "a run is in flight".** Add
-`entry.lifecycle`, set to `"running"` by `createEntry` (`registry.js:1121`) and
+`entry.lifecycle`, set to `"running"` by `createEntry` (`registry.js:2209`) and
 by nothing else. Add the exported predicate `isActiveEntry(entry)` to
 `registry.js` — not aborted **and** `lifecycle === "running"`, with a missing
 field read as `running` so a hand-built entry keeps counting — and make
-`countActiveSubagents` (`registry.js:237`), `activeTaskIdsFor` (`:414`),
-`formatSubagentSnapshot` (`hooks.js:932`) and `listHandler` (`tools.js:766`)
+`countActiveSubagents` (`registry.js:879`), `activeTaskIdsFor` (`:1094`),
+`formatSubagentSnapshot` (`hooks.js:1686`) and `listHandler` (`tools.js:1477`)
 call it in place of their own aborted check. The aborted check is kept inside
 the predicate, not replaced by the lifecycle one: nothing sets a lifecycle
 other than `running`, so a lifecycle-only test would count aborted entries as
@@ -1308,29 +1387,32 @@ renderings, and that an aborted entry stays excluded from all four.
 *Depends on: nothing.* This is the dangerous step and it lands alone.
 
 **Step 2 — settings, constants and the pure decision functions, still inert.**
-Add `maxRetainedSubagents` (0), `retainedSubagentTtlMs` (3600000),
-`maxReuseContext` (70000) and the `reuseContext` map to `settings.js:266-287`
+Add `maxRetainedSubagents` (2), `retainedSubagentTtlMs` (3600000),
+`maxReuseContext` (70000) and the `reuseContext` map to `settings.js:531-586`
 and its file-parse block, the map parsed with the same discipline as
-`agentContext` (`settings.js:303-309`). Add `DEFAULT_MAX_REUSE_CONTEXT` beside
-`DEFAULT_MAX_CONTEXT` and `reuseCeilingFor(agent)` beside `contextBudgetFor`
-(`settings.js:403-409`), with the three-level order of §4.6. Add
+`agentContext` (`settings.js:602-608`). Add `DEFAULT_MAX_REUSE_CONTEXT`
+(`settings.js:248`) and `reuseCeilingFor(agent)` beside `contextBudgetFor`
+(`settings.js:801-807`, `:839-843`), with the three-level order of §4.6. Add
 `RETAIN_TASK_SHARE` (0.5) to `registry.js`. Mirror the four new keys and the
 new default into `tui/src/settings-file.ts` — `Settings`,
 `SETTING_VALIDATORS`, `resolveSettings` — and extend
 `test/settings-defaults-parity.test.js`, which is what keeps the two copies
-honest. Add the pure `retentionDecision(entry, snapshot, settings)` (the six
-conditions of §3.2) and `reuseAdmission(entry, ctx, pkg, mode, settings)`
-(G1–G4 of §4.2) to `registry.js`, unit-tested in isolation — including the
+honest. Add the pure `retentionDecision(entry, maxRetained)` (the phase-1
+conditions of §3.2, `registry.js:521-531`),
+`retentionContextDecision(ctxTokens, { ceiling, budget })` (condition 5,
+`registry.js:557-564`) and `reuseAdmission(ctxTokens, { pkgTokens, mode,
+ceiling, budget })` (G1–G4 of §4.2, `registry.js:613-635`) to `registry.js`,
+unit-tested in isolation — including the
 table of §4.4, so the binding term per configuration is pinned rather than
 inferred, and including `reuseContext[agent] = 0` meaning never-reuse and a
 ceiling above the budget being inert rather than rejected. Nothing calls them.
 *Depends on: step 1.*
 
 **Step 3 — retain at idle, and reap.** Wire `retentionDecision` into the idle
-critical section (`hooks.js:1110-1171`); give `teardownSubagent` the retain
-short-circuit (`teardown.js:277-302`); rewrite `sweepWatchdog`
-(`watchdog.js:67-109`) as the `lifecycle` switch of §3.5, moving the
-`maxAge <= 0` early return into the `running` branch; add the drop-all at
+critical section (`hooks.js:1965-2098`); give `teardownSubagent` the retain
+short-circuit (`teardown.js:495-512`); shape `sweepWatchdog`
+(`watchdog.js:117-216`) as the `lifecycle` switch of §3.5, with the
+`maxAge <= 0` check inside the `running` branch; add the drop-all at
 handoff start and at the endless wind-down claim. After this step retention is real and
 observable with no way to use it — a session is retained, then reaped. That is
 a deliberately testable intermediate state, and the test that matters most is
@@ -1340,26 +1422,27 @@ is still reaped at `retainedSubagentTtlMs`, including with
 *Depends on: step 2.*
 
 **Step 4 — the bootstrap sweep.** Add the fixed marker prefix to the child
-session title (`tools.js:506`, `:577`), and the bootstrap pass in the plugin
-factory (`index.js:77`) that lists sessions and deletes marker-titled children
-idle for longer than `2 × retainedSubagentTtlMs`, gated on
-`maxRetainedSubagents > 0`. §6, option B.
+session title (`tools.js:720`, `handoffwiring.js:416`), and the bootstrap pass
+in the plugin factory (`index.js:156-160`, `sweepOrphanedSubagentSessions`,
+`teardown.js:904`) that lists sessions and deletes marker-titled children idle
+for longer than `2 × retainedSubagentTtlMs` and the floors of §6, at every
+retention setting and unavailable where either watchdog window is switched
+off. §6, option B.
 *Depends on: step 3. Independent of step 5 — the two can be handed out beside
 each other.*
 
 **Step 5 — the `reuse` tool.** Add it to `tools.js` beside `spawn`, with the
 fresh `fetchSnapshot` of §5.2 ahead of the gate, the `mode` argument of §4.3,
-the package-size wording (`tools.js:398-412`), the cap reservation
-(`tools.js:491-502`) and `promptSession` against the existing id
-(`client.js:96-102`); add it to `PRIMARY_TOOLS` (`hooks.js:92-96`). All
+the package-size wording (`tools.js:143-178`, called at `:1146`), the cap
+reservation (`tools.js:1232-1245`) and `promptSession` against the existing id
+(`client.js:367-407`); add it to `PRIMARY_TOOLS` (`hooks.js:173-192`). All
 refusals of §4.7, each naming the term that failed and its number.
 *Depends on: step 3.*
 
-**Step 6 — the texts.** `completionNotice` (`notices.js:69-104`), the snapshot
-prose (`hooks.js:943-950`), the `list` description (`tools.js:891-897`), the
-spawn description (`tools.js:863-871`), the orchestrator guide
-(`prompts.js:20`). All gated so that at `maxRetainedSubagents = 0` every string
-is byte-identical to today — which `test/system-prompt-stability.test.js`
+**Step 6 — the texts.** `completionNotice` (`notices.js:238-305`), the snapshot
+prose (`hooks.js:1703-1731`), the `list` description (`tools.js:1703-1711`),
+the orchestrator guide's reuse block (`prompts.js:72-79`). All gated so that at `maxRetainedSubagents = 0` every string
+is byte-identical to the one-shot form — which `test/system-prompt-stability.test.js`
 checks.
 *Depends on: step 5.*
 
@@ -1380,8 +1463,8 @@ optically on a rendered terminal, per the project's own rule. This is the last
 and most fragile step (§7.10).
 *Depends on: step 7.*
 
-**Step 9 — `README.md` (the one-shot statements at `README.md:20`, `:185`,
-`:655`) and `learnings.md`.**
+**Step 9 — `README.md` (the one-shot statement at `README.md:241`) and
+`learnings.md`.**
 *Depends on: step 8.*
 
 ---
@@ -1405,14 +1488,17 @@ Each with what would have to hold, and what would show it wrong.
    provider or opencode error on the first reuse after a long gap, or a
    `session.compacted` event firing on the reuse turn — the latter would mean
    the replayed request is large enough to trip compaction and would argue for
-   lowering `RETAIN_MAX_CTX_TOKENS` rather than shortening the window.
+   lowering the reuse ceiling (`reuseContext` / `maxReuseContext`) rather than
+   shortening the window.
 3. **The agent binding survives, or `promptSession`'s `body.agent`
-   (`client.js:100`) re-establishes it.** Shown wrong by: run 2 behaving as a
+   (`client.js:386`) re-establishes it.** Shown wrong by: run 2 behaving as a
    different role, or `entry.agent` disagreeing with what the tool guard sees.
-4. **The system transform runs again for run 2**, so the plugin's role prompt,
-   budget notice and STOP machinery apply. The transform is per message, not
-   per session (`hooks.js:508-556`), which supports it; it is not verified for
-   a second turn of a child session. Shown wrong by: a reused run passing its
+4. **The transforms run again for run 2**, so the plugin's role prompt (the
+   system transform, `hooks.js:406-785`) and its budget notice and STOP
+   machinery (the messages transform, `hooks.js:886-957`, calling
+   `contextLimitNotice` at `:923`) apply. Both run per request, not per
+   session, which supports it; it is not verified for a second turn of a child
+   session. Shown wrong by: a reused run passing its
    budget with no STOP injection.
 5. **The `ctxTokens` fetched at reuse time is the figure the budget guard will
    see on run 2's first transform.** Both read `latestContextTokens` off the
@@ -1420,8 +1506,8 @@ Each with what would have to hold, and what would show it wrong.
    the entry. Shown wrong by: a run 2 that is STOP-injected on its first turn
    despite having passed G3.
 6. **This plugin never issues a DELETE against a primary**, so a retained child
-   is never cascaded away mid-life. Read from `handoff.js:318` (archive, not
-   delete) and `client.js:178-189`. Shown wrong by: any future path calling
+   is never cascaded away mid-life. Read from `handoff.js:427` (archive, not
+   delete) and `client.js:704-717`. Shown wrong by: any future path calling
    `deleteSession` on a primary session id.
 7. **70 000 is below the context window of every model an agent runs on**, so a
    session admitted just under the ceiling can still absorb a question and its
@@ -1435,7 +1521,7 @@ Each with what would have to hold, and what would show it wrong.
    piling up `budgetDenials` on reused entries. Not a defect to fix in the tool
    — the STOP guard is the backstop, by design (§4.3).
 9. **Both halves keep reading one settings file.** The plugin reads
-   `~/.config/opencode/agent-intercom.json` (`settings.js:171`) and the TUI
+   `~/.config/opencode/agent-intercom.json` (`settings.js:402`) and the TUI
    writes the same path (`tui/src/settings-file.ts` via
    `json-object-file.ts`); the per-type reuse ceiling has one home because of
    that. Shown wrong by: a TUI edit that the plugin does not pick up after its
@@ -1451,7 +1537,8 @@ Each with what would have to hold, and what would show it wrong.
 
 ## 11. Recommendation
 
-**Build option B — the follow-up window — with the feature off by default, and
+**Build option B — the follow-up window — with the feature on by default at two
+held sessions (`DEFAULT_MAX_RETAINED_SUBAGENTS = 2`, `settings.js:229`), and
 recommend against option C.**
 
 The reasoning, in the order it carries:
@@ -1462,7 +1549,7 @@ The reasoning, in the order it carries:
   does not make the primary case expensive, it makes it impossible.
 - The capability is real and cheap on the opencode side. Re-prompting a session
   by id is supported and keeps history, the plugin's own `promptSession`
-  already has the shape (`client.js:96-102`), and a session idle for an hour is
+  already has the shape (`client.js:367-407`), and a session idle for an hour is
   exactly as promptable as one idle for a second — no TTL, no GC, durable rows
   (§5.1). The plugin only has to stop deleting.
 - The 70 000 ceiling is what makes the long window affordable. Against a
@@ -1477,14 +1564,15 @@ The reasoning, in the order it carries:
   above a type's budget is left as written, because G3 makes it inert and a
   cross-key validator would delete a number the user typed on account of a
   different one.
-- But the change is not local. "A registry entry exists" currently *means* "a
-  run is in flight", and five consumers depend on that meaning, one of which
-  has a default of 1 (`settings.js:74`). Retention without the count split does
-  not degrade — it deadlocks, and at a 60-minute TTL it deadlocks for an hour,
-  long enough for the endless cycle's own 600 s timeout to expire inside it.
+- But the change is not local. "A registry entry exists" and "a run is in
+  flight" are two things only because `isActiveEntry` separates them, and five
+  consumers depend on that line, one of which has a default of 1
+  (`settings.js:112`). Retention without the count split does not degrade — it
+  deadlocks, and at a 60-minute TTL it deadlocks for an hour, holding the
+  endless cycle's quiesce wait for the whole of it.
   That is why the split is step 1, lands alone, and is not negotiable.
 - The inactivity watchdog is the second thing that must be got right rather
-  than got working. Today a retained entry would survive by accident, through a
+  than got working. Without the lifecycle switch a retained entry would survive by accident, through a
   guard whose comment describes a different purpose; and the disabled-watchdog
   early return would silently switch off the retention reap. Both are one-line
   edits and both are the difference between a 60-minute window and a 90-second

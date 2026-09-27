@@ -14,20 +14,21 @@ opencode 1.18.25 source at `/tmp/opencode-source` (`git log -1` →
 
 ## 1. What is on disk today
 
-### 1.1 The scan runs once per directory per process
+### 1.1 The eager scan runs once per directory per process
 
-`src/hooks.js:312`, inside `transformSystem`, is the only caller:
+`src/hooks.js:670`, inside `transformSystem`, is the only caller of the eager
+scan:
 
     if (primaryScope) scanPromptFiles(primaryScope)
 
 `scanPromptFiles` gates itself on a claim it does not own,
-`src/promptsfile.js:181-182`:
+`src/promptsfile.js:275-276`:
 
     export function scanPromptFiles(directory) {
       if (!claimPromptFileScan(directory)) return
 
-The claim is a process-wide `Set` in the register, `src/overrides.js:340-341`
-and `src/overrides.js:355-359`:
+The claim is a process-wide `Set` in the register, `src/overrides.js:394-395`
+and `src/overrides.js:414-418`:
 
     // Directories whose prompt files have already been scanned in this process.
     const scannedDirectories = new Set()
@@ -38,29 +39,34 @@ and `src/overrides.js:355-359`:
       return true
     }
 
-Its own comment names both the reason and the price, `src/overrides.js:346-354`:
+Its own comment names the reason and what keeps the register true after the
+claim, `src/overrides.js:400-413`:
 
     // The scan is eager and once — nine stats at the first primary transform of a
     // directory — for two reasons. Per-request probing would put fs work on the hot
     // path of every LLM call, and the finding set has to be COMPLETE before the
-    // first block is rendered: the block lives in the stable system-prompt element
-    // and its text must not move between the turns of a session.
+    // first block is rendered: the block lives in the stable system-prompt element,
+    // and a set that filled in over the first few turns would move that element for
+    // no user action at all.
     //
-    // The cost of "once" is that a file the user repairs mid-session keeps its
-    // finding until the next process — which is the same trade the stable element
-    // demands.
+    // The claim covers that first scan alone. What keeps the register true after it
+    // is `rescanPromptFiles`, called from the primary's `session.idle`: it takes no
+    // claim and replaces the directory's finding set through
+    // `replacePromptFileFindings`, so a file the user repairs mid-session loses its
+    // finding on the next turn instead of on the next process. ...
 
-The loop itself, `src/promptsfile.js:183-200`, reads each of the nine roles
-through the mtime-cached loader, splits header from body, classifies, and writes
-a finding:
+The classification itself is `classifyDirectory` (`src/promptsfile.js:246-269`),
+which reads each of the nine roles through the mtime-cached loader, splits
+header from body and classifies; `scanPromptFiles` (`src/promptsfile.js:277-283`)
+records every stale result:
 
-      if (recordPromptFileOverride({ agent, missing, detail, file: filePath, directory })) {
-        log("override: stale prompt file", { agent, missing, file: filePath, directory })
-      }
+    if (recordPromptFileOverride({ agent, missing, detail, file, directory })) {
+      log("override: stale prompt file", { agent, missing, file, directory })
+    }
 
-### 1.2 The register only ever grows
+### 1.2 The register records, and replaces one directory's prompt-file set
 
-`record` in `src/overrides.js:89-107` writes under
+`record` in `src/overrides.js:91-109` writes under
 `` `${kind}\0${directory}\0${agent}` `` and returns whether the register
 **changed**:
 
@@ -69,16 +75,17 @@ a finding:
       findings.set(key, finding)
       return true
 
-`sameFinding` (`src/overrides.js:109-118`) compares `file`, `detail`, `fields`
-and `missing` element by element. There is **no removal path**: nothing in
-`src/overrides.js` deletes a key except the test seam `resetOverrides`
-(`src/overrides.js:364-368`), which clears the whole register. So even if a
-second scan ran, a finding for a file that has since been repaired would survive
-it.
+`sameFinding` (`src/overrides.js:111-120`) compares `file`, `detail`, `fields`
+and `missing` element by element. The removal path is
+`replacePromptFileFindings` (`src/overrides.js:154-171`): it records every entry
+of the fresh set and deletes every `KIND_PROMPT_FILE` key of that directory the
+set no longer carries, leaving other kinds and other directories untouched, and
+returns whether anything changed. Beside it, the test seam `resetOverrides`
+(`src/overrides.js:423-427`) clears the whole register.
 
 ### 1.3 The finding block is built fresh per call, from that register
 
-`overrideBlock` (`src/overrides.js:189-203`) is a pure function of the selected
+`overrideBlock` (`src/overrides.js:225-239`) is a pure function of the selected
 finding set — it is not memoised anywhere:
 
     export function overrideBlock(directory) {
@@ -86,20 +93,20 @@ finding set — it is not memoised anywhere:
       if (selected.length === 0) return ""
 
 `overrideFindings` sorts by kind then agent then directory
-(`src/overrides.js:157-162`), deliberately not by insertion order
-(`src/overrides.js:47-51`). The transform calls it on every LLM call,
-`src/hooks.js:337-346`:
+(`src/overrides.js:193-198`), deliberately not by insertion order
+(`src/overrides.js:49-53`). The transform calls it on every LLM call,
+`src/hooks.js:701-710`:
 
     let overrideNotice = ""
     if (primaryScope) {
       overrideNotice = overrideBlock(primaryScope)
 
 and lands it in the system prompt on both paths — appended after the user's
-template on the custom path, `src/hooks.js:380`:
+template on the custom path, `src/hooks.js:746`:
 
     output.system.push(result + overrideNotice)
 
-and inside the assembled stable element on the auto path, `src/hooks.js:398-404`:
+and inside the assembled stable element on the auto path, `src/hooks.js:764-769`:
 
       guideParts.push(overrideNotice)
       ...
@@ -108,32 +115,36 @@ and inside the assembled stable element on the auto path, `src/hooks.js:398-404`
         (keepAgentsMd ? slices.agentsMd : "") +
         guideParts.join("")
 
-So the block's bytes are stable today only because the register is frozen after
-the first primary transform, not because anything caches the text.
+So the block's bytes hold within a turn because nothing writes the register
+under a turn in flight — the eager scan runs before the first render, the
+re-scan only on the primary's idle — not because anything caches the text.
 
-### 1.4 The scan is stale, but the prompt itself is not
+### 1.4 The prompt and the finding follow the file on the same terms
 
-`loadCustomPrompt` (`src/promptsfile.js:109-135`) stats on every call and
-re-reads when the mtime moved:
+`loadCustomPrompt` (`src/promptsfile.js:179-181`) reads through `readPromptFile`
+(`src/promptsfile.js:147-175`), which stats on every call and re-reads when the
+mtime moved (`src/promptsfile.js:159-161`):
 
-      const entry = cache.get(filePath)
-      if (entry && entry.mtimeMs === stat.mtimeMs) return entry.content
+    const entry = cache.get(filePath)
+    if (entry && entry.mtimeMs === stat.mtimeMs) {
+      return { path: filePath, content: entry.content, unreadable: false }
 
-That is the asymmetry at the heart of the defect. A user who repairs
-`.opencode/agent-intercom/coder.md` mid-session has the repaired text in force
-on the next LLM call that uses it — while the plugin keeps telling the
-orchestrator, in the orchestrator's own system prompt, that the file "predates
-the current prompt contract" until the next opencode process. The plugin's
-report contradicts the plugin's own behaviour.
+A user who repairs `.opencode/agent-intercom/coder.md` mid-session has the
+repaired text in force on the next LLM call that uses it, and the finding
+leaves the orchestrator's system prompt on the first turn after the primary's
+next `session.idle`, where `rescanPromptFilesForPrimary`
+(`src/hooks.js:1755-1759`) re-judges the directory through the same loader.
 
-The companion TUI makes this reachable by a button: `tui/src/tui.tsx:588` calls
+The companion TUI touches the files by a button: `tui/src/tui.tsx:893` calls
 `utimesSync(p, now, now)` over the nine files and toasts
-`prompts cache busted (…) — next LLM call reloads` (`tui/src/tui.tsx:601`). The
-loader honours that touch; the finding does not.
+`prompts cache busted (…) — next LLM call reloads` (`tui/src/tui.tsx:906`). The
+loader re-reads the touched files; the re-scan re-reads them too and, their
+content unchanged, leaves the finding set and the block as they were.
 
 ### 1.5 Detector A is a different case and needs no cure
 
-The agent-entry detector writes at `src/agents.js:483`, from the `config` hook.
+The agent-entry detector writes at `src/agents.js:659` (inside
+`reportCollision`), from the `config` hook.
 opencode folds `.opencode/agent/<name>.md` into `config.agent` while resolving
 the config and calls the plugin `config` hook once, at instance bootstrap
 (`/tmp/opencode-source/packages/opencode/src/plugin/index.ts:152` and `:247`;
@@ -166,7 +177,7 @@ openaiCompatible, copilot and alibaba
 The plugin's two-element split therefore puts a breakpoint on the stable mass
 `[0]` and one on the `<env>` block `[1]`, and the per-turn blocks ride a
 synthetic text part on the last user message instead
-(`src/hooks.js:470-503`), which lands past the last breakpoint.
+(`src/hooks.js:886-957`), which lands past the last breakpoint.
 
 ### 2.2 What breaks without it
 
@@ -192,7 +203,7 @@ The thing byte-stability buys is therefore not "never move element `[0]`" but
 
 This is the decisive precedent, and it is written in the source. `limits` sits
 inside the same stable element and is rebuilt per turn from the live settings
-file, `src/hooks.js:202-206`:
+file, `src/hooks.js:453-457`:
 
     // Build the runtime parts once — both the auto-assembled path and the
     // custom-template path need them. Only blocks that hold their text
@@ -200,10 +211,10 @@ file, `src/hooks.js:202-206`:
     // it re-reads the settings file, whose content moves on a user edit and
     // not otherwise.
 
-and `formatLimitsNotice` (`src/hooks.js:731-733`) reads `getSettings()`, whose
-cache has a 2 s TTL (`src/settings.js:169` `const TTL_MS = 2000`) and whose file
+and `formatLimitsNotice` (`src/hooks.js:1436-1443`) reads `getSettings()`, whose
+cache has a 2 s TTL (`src/settings.js:400` `const TTL_MS = 2000`) and whose file
 the TUI writes live. Stepping `max subagents` in the sidebar moves element `[0]`
-on the next turn, and that is accepted design, stated at `src/hooks.js:711-712`:
+on the next turn, and that is accepted design, stated at `src/hooks.js:1393-1394`:
 "The user can change them at runtime via the settings file, so they are injected
 fresh per turn."
 
@@ -214,7 +225,7 @@ the process*.
 
 One further point on the custom path: when the file repaired is the primary's
 own `orchestrator.md`, the template **is** element `[0]`
-(`src/hooks.js:363-381`), so the edit already invalidates the prefix on the next
+(`src/hooks.js:729-748`), so the edit already invalidates the prefix on the next
 call. Dropping the finding line in the same call costs nothing at all for that
 one of the nine files.
 
@@ -226,7 +237,7 @@ one of the nine files.
    a restart.
 2. The block's text never moves **inside** a turn — a multi-step tool loop must
    not re-read its own prefix per step. This is the same rule
-   `snapshotForTurn` obeys for the per-turn part (`src/hooks.js:431-442`).
+   `snapshotForTurn` obeys for the per-turn part (`src/hooks.js:797-813`).
 3. No fs work is added to the per-LLM-call path.
 4. The prompt never carries two contradictory statements about one file.
 5. Findings stay scoped per project directory (`src/overrides.js:18-21`), and
@@ -238,12 +249,14 @@ one of the nine files.
 
 ### Option 0 — leave it, keep documenting it
 
-The status quo. README already carries it twice, as a limitation
-(`README.md:650-654`) and in the silencing instructions (`README.md:388-390`).
+Keep the once-per-directory-per-process scan and state in the README, beside
+the block and in the silencing instructions, that a finding clears only at the
+next opencode process.
 
 - **Costs**: the user is told, in the orchestrator's own system prompt, something
-  false about a file they just fixed, until they restart. Under `hideChatter`
-  the orchestrator is the only channel to the user, so the false line is the
+  false about a file they just fixed, until they restart. With `showAgentcom`
+  off (`src/settings.js:519-520`; default on, env
+  `OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM`) the orchestrator is the only channel to the user, so the false line is the
   whole report.
 - **Forecloses**: nothing.
 - **Demands**: nothing.
@@ -253,10 +266,10 @@ The status quo. README already carries it twice, as a limitation
 Drop the claim; run the nine-file classification inside `transformSystem` on
 every primary call, or on a `file.edited` event.
 
-- **Mechanism, transform variant**: `src/hooks.js:312` calls an unclaimed
+- **Mechanism, transform variant**: `src/hooks.js:670` calls an unclaimed
   `scanPromptFiles`; the register updates; `overrideBlock` at
-  `src/hooks.js:339` renders the new set.
-- **Mechanism, event variant**: `createEventHandler` (`src/hooks.js:882-936`)
+  `src/hooks.js:703` renders the new set.
+- **Mechanism, event variant**: `createEventHandler` (`src/hooks.js:1800-1900`)
   adds a `file.edited` case. This one does not work, and the source says why.
   `file.edited` is published only by opencode's own tools —
   `/tmp/opencode-source/packages/opencode/src/tool/edit.ts:115` and `:159`,
@@ -266,17 +279,18 @@ every primary call, or on a `file.edited` event.
   publisher anywhere in `packages/opencode/src` in 1.18.25 — only consumers in
   `packages/app`. And the repair path this plugin itself prescribes is an
   editor or `npx opencode-agent-intercom-init-prompts`, never an opencode edit
-  tool: the orchestrator is tool-gated to `spawn`/`abort`/`list`, and the block
+  tool: the orchestrator is tool-gated to `spawn`/`abort`/`list`/`message`/`reuse`
+  (`PRIMARY_TOOLS`, `src/hooks.js:173-192`), and the block
   tells it "nothing here is yours to change: do not edit or delete these files,
-  and do not spawn a subagent to do it" (`src/overrides.js:199-201`). The event
+  and do not spawn a subagent to do it" (`src/overrides.js:236-237`). The event
   variant would cover approximately none of the real repairs.
 - **Costs**: nine `statSync` calls on the hot path of every LLM call, including
   every step of a tool loop — requirement 3 broken; and the block can change
   **between two steps of one turn**, moving the prefix of the loop's own
   history — requirement 2 broken.
 - **Forecloses**: nothing structurally, but it puts fs work where the module
-  comment at `src/overrides.js:346-348` says it must not go.
-- **Demands of the builder**: a removal path in the register (§1.2), plus a
+  comment at `src/overrides.js:400-402` says it must not go.
+- **Demands of the builder**: the replacing write of §1.2, plus a
   per-turn or TTL gate to buy requirement 2 back — at which point this is
   Option 3 with a worse trigger.
 
@@ -285,7 +299,7 @@ every primary call, or on a `file.edited` event.
 Render the block once per project scope, cache the text, and never move it
 again; deliver every later change (a finding cleared, a new finding) as a line
 on the synthetic text part `transformMessages` already appends to the last user
-message (`src/hooks.js:483-502`).
+message (`src/hooks.js:937-955`).
 
 - **Mechanism**: a `sealedBlock` map keyed by directory in `overrides.js`;
   `overrideBlock` returns the sealed text; a new `overrideDelta(directory)`
@@ -311,25 +325,26 @@ Move the re-scan off the LLM path entirely, onto the primary's `session.idle`
 event, and give the register a write that **replaces** one directory's
 prompt-file finding set with a fresh classification.
 
-- **Mechanism**: `createEventHandler`'s existing `session.idle` case
-  (`src/hooks.js:906`) gains one call. Idle means the turn has ended, so the
-  register can only change **between** turns; the transform keeps doing exactly
-  what it does today — read the register and render. The first eager scan at
-  `src/hooks.js:312` stays as it is, so the finding set is still complete before
-  the first block is rendered.
+- **Mechanism**: `createEventHandler`'s `session.idle` case
+  (`src/hooks.js:1823`) carries one call, `rescanPromptFilesForPrimary`
+  (`src/hooks.js:1869`). Idle means the turn has ended, so the register can
+  only change **between** turns; the transform reads the register and renders.
+  The eager first scan at `src/hooks.js:670` runs at the first primary
+  transform, so the finding set is complete before the first block is
+  rendered.
 - **Costs**: nine `statSync` calls per primary idle, off the LLM path; content
   is re-read only for files whose mtime moved, because the scan goes through the
-  same mtime-cached loader (`src/promptsfile.js:180`, "costs one stat per role
+  same mtime-cached loader (`src/promptsfile.js:225-226`, "costs one stat per role
   on a directory whose files are already loaded"). Element `[0]` moves on the
   first turn after a repair — once per repair event, never otherwise, because
-  `record`/`sameFinding` (`src/overrides.js:104`) already suppress an unchanged
+  `record`/`sameFinding` (`src/overrides.js:104-106`) suppress an unchanged
   finding and `overrideBlock` is a pure function of the set.
-- **Forecloses**: nothing. The claim mechanism stays for the eager first scan;
-  the register gains one operation it lacks and detector A does not use.
+- **Forecloses**: nothing. The claim mechanism covers the eager first scan
+  alone; the replacing write is a register operation detector A does not use.
 - **Demands of the builder**: the removal path in the register, and the
-  discipline that the idle handler must never throw into the event stream
-  (already the house rule — `createEventHandler` wraps everything in
-  `try/catch`, `src/hooks.js:932-934`).
+  discipline that the idle handler must never throw into the event stream —
+  `createEventHandler` wraps everything in `try/catch`,
+  `src/hooks.js:1896-1898`.
 
 ### The comparison that decides it
 
@@ -350,7 +365,7 @@ prompt-file finding set with a fresh classification.
 it wins on the argument the trade-off was originally stated in: byte-stability
 was never a promise that element `[0]` is frozen for the process — `limits` in
 the same element is rebuilt per turn from a file the user edits at runtime
-(`src/hooks.js:202-206`, `src/hooks.js:711-712`). What the element must not do
+(`src/hooks.js:453-457`, `src/hooks.js:1393-1394`). What the element must not do
 is move for a reason the user did not cause, or move inside a turn. An
 idle-gated re-scan moves it exactly once per repair, at a turn boundary, for an
 edit the user made deliberately — the same contract the settings file already
@@ -362,7 +377,9 @@ own system prompt.
 
 ## 6. Target state
 
-### 6.1 `src/overrides.js` — the register gains a replacing write
+### 6.1 `src/overrides.js` — the register's replacing write
+
+`src/overrides.js:139-154`:
 
     // Replaces this project's prompt-file findings with `next`, the result of one
     // full re-classification of that directory. Findings of other kinds and other
@@ -372,74 +389,81 @@ own system prompt.
 
 `next` is an array of the same shape `recordPromptFileOverride` takes
 (`{ agent, missing, detail, file }`; `directory` comes from the argument).
-Implementation: compute the key set of `next`; delete every existing
-`KIND_PROMPT_FILE` key for this directory that is not in it; `record` each
-entry of `next`; return `deletedAny || anyRecordReturnedTrue`.
+Implementation (`src/overrides.js:154-171`): `record` each entry of `next` with
+a usable agent name and keep its key; delete every existing `KIND_PROMPT_FILE`
+key for this directory that was not kept; return true when any `record` or any
+deletion changed the register.
 
-`recordPromptFileOverride` stays as it is — the eager first scan keeps using it,
-and the two writes are then honestly different operations: "I found this" and
-"this is now the whole truth about this directory".
+`recordPromptFileOverride` is what the eager first scan uses, and the two writes
+are different operations: "I found this" and "this is now the whole truth about
+this directory".
 
-`resetOverrides` needs no change; it already clears the map.
+`resetOverrides` clears the map, the replacing write's findings included.
 
 ### 6.2 `src/promptsfile.js` — one classifier, two entry points
 
-Split the body of today's `scanPromptFiles` into a private
-`classifyDirectory(directory)` that returns the finding list and logs nothing,
-and two exported entry points over it:
+A private `classifyDirectory(directory)` (`src/promptsfile.js:246-269`)
+returns one result per role and logs nothing about what it found, and two
+exported entry points sit over it:
 
-- `scanPromptFiles(directory)` — unchanged behaviour and unchanged signature:
-  claim-gated, records each finding, logs `override: stale prompt file` per new
-  finding. Still called from `src/hooks.js:312`.
-- `rescanPromptFiles(directory)` — no claim; calls `classifyDirectory` and hands
-  the result to `replacePromptFileFindings`; logs once, and only when the set
-  changed, e.g. `log("override: prompt files rescanned", { directory, stale: n })`.
+- `scanPromptFiles(directory)` (`src/promptsfile.js:275-284`) — claim-gated,
+  records each stale result, logs `override: stale prompt file` per new
+  finding. Called from `src/hooks.js:670`.
+- `rescanPromptFiles(directory)` (`src/promptsfile.js:297-329`) — no claim;
+  calls `classifyDirectory` and hands the result to
+  `replacePromptFileFindings`; logs once, and only when the set changed:
+  `log("override: prompt files rescanned", { directory, stale: next.length })`.
   Returns the boolean so the caller can log or stay silent.
 
-The per-file `try/catch` that protects the other eight roles from one unreadable
-file (`src/promptsfile.js:196-199`) belongs to `classifyDirectory`, so both
-entry points inherit it. One caveat this forces into the open: a file that
-becomes unreadable mid-session yields no finding for that role, so a rescan
-would silently drop a finding that was real. `classifyDirectory` therefore
-reports per role one of three outcomes — clean, stale-with-detail, or unreadable
-— and `rescanPromptFiles` **keeps** the existing finding for an unreadable role
-rather than dropping it.
+The per-file `try/catch` that protects the other eight roles from one bad file
+(`src/promptsfile.js:253-266`) sits in `classifyDirectory`, so both entry points
+inherit it. A file that becomes unreadable mid-session yields no finding for
+that role, so a rescan that read that as clean would silently drop a finding
+that was real. `classifyDirectory` therefore reports per role one of four
+outcomes — `clean`, `stale` with `missing` and `detail`, `unreadable` (the file
+is there and could not be read) or `unknown` (the file was read and the
+classifier threw) — and `rescanPromptFiles` **keeps** the existing finding for
+an `unreadable` or `unknown` role rather than dropping it.
 
 ### 6.3 `src/hooks.js` — one call in the idle branch
 
-Inside the existing `case "session.idle":` (`src/hooks.js:906`), before or after
-the handoff latches (order is irrelevant — the calls do not interact), and gated
-on the session being a primary with a known project scope:
+Inside `case "session.idle":` (`src/hooks.js:1823`), last in the branch and
+synchronous, after the wake path and the handoff, endless and compaction latches —
+it shares no state with them, and standing after them means a throw from it
+reaches the outer catch only once they have had their run
+(`src/hooks.js:1860-1869`):
 
     // Detector B stays true within the session: the prompt files are re-judged
     // between turns, never during one, so the finding block moves its bytes only
     // where the user actually changed a file.
     rescanPromptFilesForPrimary(props?.sessionID)
 
-with the gate reading the scope the transform already holds for that primary —
-`isPrimary(sessionID)` (`src/registry.js:85-87`) and the directory recorded by
-`rememberPrimaryDirectory` (`src/registry.js:773-779`, backed by
-`primaryDirectory` in `src/state.js:122`). A subagent idle, or a primary whose
-first transform has not resolved a directory yet, does nothing.
+`rescanPromptFilesForPrimary` (`src/hooks.js:1755-1759`) gates on the project
+scope alone: the directory recorded by `rememberPrimaryDirectory`
+(`src/registry.js:1453-1458`, backed by `primaryDirectory` in
+`src/state.js:132`), which only the transform's primary branch writes. A
+subagent idle, or a primary whose first transform has not resolved a directory
+yet, finds no scope and does nothing before any fs work.
 
-`registry.js` needs a read-only accessor for the held directory
-(`primaryDirectoryOf(sessionID)`) — `rememberPrimaryDirectory` must not be
-called from the event path, because it would write a scope from the wrong side.
+The event path reads that scope through the read-only accessor
+`primaryDirectoryOf(sessionID)` (`src/registry.js:1471-1474`) —
+`rememberPrimaryDirectory` is not called from the event path, because it would
+write a scope from the wrong side.
 
 ### 6.4 What deliberately does not change
 
-- **The eager first scan.** It still runs at the first primary transform, so the
+- **The eager first scan.** It runs at the first primary transform, so the
   finding set is complete before the first block is rendered.
-- **The transform.** It keeps reading the register and rendering; no fs, no new
-  branch.
-- **The toast.** `overrideToastText` stays one-shot per scope
-  (`src/overrides.js:209-220`). A finding that appears mid-session reaches the
+- **The transform.** It reads the register and renders; no fs beyond the eager
+  first scan, no branch for the re-scan.
+- **The toast.** `overrideToastText` is one-shot per scope
+  (`src/overrides.js:245-256`). A finding that appears mid-session reaches the
   user through the block; spending a second toast on it is a product decision,
   not this one (see §9).
 - **Detector A.** Untouched, for the reason in §1.5.
 - **The block's wording.** A cleared finding removes its line; when the last one
   goes, `overrideBlock` returns `""` and both delivery paths already append the
-  empty string harmlessly (`src/hooks.js:380`, `src/hooks.js:398`).
+  empty string harmlessly (`src/hooks.js:746`, `src/hooks.js:764`).
 
 ### 6.5 Behaviour when several files are repaired in one session
 
@@ -474,7 +498,7 @@ an empty array clearing the directory. No caller yet.
 
 **Step 2 — the classifier split.** Refactor `src/promptsfile.js` into
 `classifyDirectory` + `scanPromptFiles` + `rescanPromptFiles`, with the
-three-outcome per-role result of §6.2. `scanPromptFiles` keeps its signature and
+four-outcome per-role result of §6.2. `scanPromptFiles` keeps its signature and
 its behaviour, so `test/prompt-file-staleness.test.js` must pass unchanged —
 that is the regression gate for this step. Add tests for `rescanPromptFiles`
 against a directory whose file was repaired, whose file was newly broken, and
@@ -487,7 +511,7 @@ why the event path must not use `rememberPrimaryDirectory`.
 *Depends on: nothing; can run in parallel with steps 1–2.*
 
 **Step 4 — the wiring.** Call the re-scan from the `session.idle` case in
-`createEventHandler`, gated on `isPrimary` + `primaryDirectoryOf`. Test through
+`createEventHandler`, gated on `primaryDirectoryOf`. Test through
 the plugin surface, the way `test/prompt-file-staleness.test.js` already drives
 it: primary transform → block carries the finding → repair the file on disk →
 fire `session.idle` for that primary → next transform → block no longer carries
@@ -505,15 +529,13 @@ idle with **no** file change renders `system[0]` byte-identically on the next
 turn.
 *Depends on: step 4.*
 
-**Step 6 — the documentation.** Remove the limitation from `README.md:650-654`,
-rewrite the last sentence of the silencing instructions at `README.md:388-390`
-("Either way the finding clears on the next opencode process — the scan is once
-per directory per process …"), rewrite the same claim at `README.md:367-369`
-("The block lives in the cached stable element and its text does not move
-between turns of a session, so a finding clears only on a restart …") to say
-what now holds: the block moves only between turns, and only where a file
-changed. Correct the now-false paragraph at `src/overrides.js:352-354` and the
-scan comment at `src/promptsfile.js:174-180`.
+**Step 6 — the documentation.** The README states what holds: beside the
+block (`README.md:558-564`), that its text never moves inside a turn and between
+turns moves only where a file on disk changed, the prompt files being re-judged
+whenever the orchestrator's session goes idle; in the silencing instructions for
+a stale prompt file (`README.md:579-588`), that the finding clears on the turn
+after the edit with no restart. The claim comment at `src/overrides.js:400-413`
+and the scan comment at `src/promptsfile.js:215-226` state the re-scan.
 *Depends on: step 4. `learnings.md` is not touched — it records findings about
 running under opencode, not this design.*
 
@@ -523,9 +545,9 @@ running under opencode, not this design.*
 
 **A1 — `session.idle` fires for a primary at the end of every turn.**
 *Would have to hold*: the event reaches the plugin's `event` hook for the
-primary's session id. *Grounds*: `src/hooks.js:906-920` already gates the whole
-orchestrator handoff on it, and the comment at `src/hooks.js:230-246` records
-that the idle-gating was live-verified. *Falsifier*: a repaired file whose
+primary's session id. *Grounds*: `src/hooks.js:1823-1860` gates the orchestrator
+handoff, the endless cycle and the compaction on it, and the comment at
+`src/hooks.js:488-497` records that the idle-gating was live-verified. *Falsifier*: a repaired file whose
 finding does not clear although the session went idle — visible as a missing
 `override: prompt files rescanned` line in
 `~/.cache/opencode-agent-intercom/debug.log`.
@@ -552,7 +574,7 @@ finding, which costs at most one stat in the common case.
 defined in `packages/schema/src/filesystem-watcher.ts` and has no publisher in
 `packages/opencode/src` in 1.18.25. *Falsifier*: a
 `unknown event type (logging once per process)` line naming
-`file.watcher.updated` in the debug log (`src/hooks.js:929`) — that would make a
+`file.watcher.updated` in the debug log (`src/hooks.js:1893`) — that would make a
 cheaper, edit-precise trigger available and would turn the nine stats per idle
 into zero.
 
@@ -575,7 +597,7 @@ told it is resolved. Announcing it (a line on the per-turn part, or an info
 toast) is a product decision about what the user should hear, not an
 architectural one. The design is silent-clear, and the place an announcement
 would attach is named: the boolean `rescanPromptFiles` already returns is the
-trigger, and `transformMessages` (`src/hooks.js:470-503`) is the outlet that
+trigger, and `transformMessages` (`src/hooks.js:886-957`) is the outlet that
 costs no cache. Nothing in §6 has to change to add it later.
 
 **Q2 — should the one-shot toast latch reset when the finding set changes?**

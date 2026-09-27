@@ -15,7 +15,7 @@ select.
 Boundary: the `opencode-agent-intercom` plugin under `~/opencode-agent-intercom`.
 Nothing outside `src/`, `specs/`, `test/` is designed here. The material read for this
 concept is `specs/endless-mode.md`, `src/endless.js`, `src/handoff.js`,
-`src/handoffwiring.js`, `src/todofile.js`, `src/openpoints.js`, `src/tools.js`,
+`src/handoffwiring.js`, `src/todofile.js`, `src/tools.js`,
 `src/hooks.js`, `src/agents.js`, `src/childwait.js`, `src/registry.js`, `src/notices.js`,
 `src/settings.js`, `src/state.js`, `src/client.js`, plus
 `work/code-explorer-endless-implementation.md`, `work/reader-endless-mode-spec.md` and
@@ -25,20 +25,20 @@ concept is `specs/endless-mode.md`, `src/endless.js`, `src/handoff.js`,
 
 ## 1. What the code does today, with the line behind each statement
 
-**The plugin writes the todo file; the orchestrator only speaks.** The cycle asks the old
-primary for a shaped plain-text turn, parses it, and appends one task per point:
+**A wind-down subagent writes the todo file; the plugin permits it and verifies the file.**
+The cycle asks the old primary for exactly one permitted spawn, lets the child it starts
+rewrite the file, and reads the whole file back:
 
-- `src/handoff.js:455-469` — `OPEN_POINTS_PROMPT`: *"emit ONE final plain-text reply
-  listing EVERY point that is still open … Use EXACTLY this shape … `## OPEN POINTS` …
-  Draw them from your context ONLY — do NOT read files from disk and do NOT spawn
-  anything."*
-- `src/endless.js:327` — `const points = parseOpenPoints(openPointsText)`; a reply without
-  the heading yields `null` and `src/endless.js:329` abandons the cycle.
-- `src/endless.js:369` — `const { id } = addTask(point)`, once per point, deduped on
-  `normaliseTitle` (`src/endless.js:359`).
-- `src/endless.js:385-389` — the confirmation: `const present = new Set(openTasks.map((t)
-  => t.id))` / `const missing = ids.filter((id) => !present.has(id))` / abandon on
-  `"${missing.join(",")} missing from the todo file after the write"`.
+- `src/handoff.js:553-578` — `WIND_DOWN_PROMPT`: *"You may make exactly ONE more tool call:
+  `spawn("planner", …)` whose prompt's FIRST line is `INTERCOM-WIND-DOWN <token>`"*, the
+  hand-over after that line, and a reply of exactly one of three `## WIND-DOWN DONE` lines.
+- `src/tools.js:458-508` — admission and consume of the single-use permit in one synchronous
+  block; the child's prompt is composed by the plugin (`windDownSubagentPrompt`,
+  `src/tools.js:588`, `src/prompts.js:584-592`), never passed through.
+- `src/endless.js:519-527` — prepare: `prepareTodoFile` (`src/todofile.js:273-279`) resolves
+  the file, lays the machine section down where it is absent, writes it, and the cycle
+  snapshots it; `src/endless.js:538-640` — one wind-down attempt: arm, turn, settle, re-read
+  (V1), and `verifyWindDown` (`src/endless.js:283-350`) over the file as a whole.
 
 **Spawning is restricted from the wind-down claim on, not from the latch.** The latch and
 the quiesce wait restrict nothing: the orchestrator keeps spawning, aborting and reusing, and
@@ -57,59 +57,61 @@ refused by endless mode.
 An orchestrator that spawns as fast as its subagents finish never quiesces; the wait covers
 that by re-arming its deadline while any subagent runs, and the watchdogs reap a stuck one.
 
-**The orchestrator holds four tools and no file access.** `src/hooks.js:140-147` —
-`const PRIMARY_TOOLS = new Set(["spawn", "abort", "list", "reuse"])`; the role's own
-permission map denies the rest (`src/agents.js:301-304`: `read: "deny", edit: "deny",
-bash: "deny" … glob: "deny", grep: "deny", todos_open: "deny", todo_done: "deny",
+**The orchestrator holds five tools and no file access.** `src/hooks.js:173-192` —
+`PRIMARY_TOOLS` is `spawn`, `abort`, `list`, `message` and `reuse`; the role's own
+permission map denies the rest (`src/agents.js:360-372`: `read: "deny", edit: "deny",
+bash: "deny" … glob: "deny", grep: "deny" … todos_open: "deny", todo_done: "deny",
 todo_add: "deny", todo_edit: "deny"`).
 
-**The successor is handed the task list inline.** `src/endless.js:140-168`
-(`endlessKickoffBlock`) renders the read-back through `formatOpenTasks`
-(`src/endless.js:104-120`) because, per the comment at `src/endless.js:128-131`, *"A primary
-holds spawn / abort / list / reuse and nothing else (PRIMARY_TOOLS, src/hooks.js), so the
-successor cannot open the todo file."*
+**The successor is handed the todo file's own text inline.** `src/endless.js:121-150`
+(`endlessKickoffBlock`) carries the confirmed file verbatim, cut at a block boundary by
+`cutTodoText` (`src/endless.js:101-109`) at `KICKOFF_TODO_MAX_CHARS` (16 000,
+`src/endless.js:85`), because, per the comment at `src/endless.js:111-115`, *"the successor
+holds spawn / abort / list / reuse and nothing else and cannot open the file itself."*
 
 **A subagent's `DONE:` marker deletes lines all session long, outside any cycle.**
-`src/hooks.js:2021` — `const MARKER_RE = /^\s*DONE:\s*(T\d+)\s*$/i` — drives
-`removeTask(directory, taskId)` at `src/hooks.js:2050`, from the completion path at
-`src/hooks.js:1602`, in every project and with no snapshot and no verification anywhere
-near it. Its outcome is rendered for the orchestrator by `taskOutcomeLine`
-(`src/notices.js:35-66`).
+`src/hooks.js:2673` — `const MARKER_RE = /^\s*DONE:\s*(T\d+)\s*$/i` — drives
+`removeTask(directory, taskId)` at `src/hooks.js:2704`, from the completion path at
+`src/hooks.js:2179`, in every project and with no snapshot and no verification anywhere
+near it. `removeTask` acts only on a canonical line inside the markers and answers
+`unmigrated` for a legacy line outside them (`src/todofile.js:599-610`). Its outcome is
+rendered for the orchestrator by `taskOutcomeLine` (`src/notices.js:45-86`).
 
-**Three defects the live run exposed** (`work/diagnostician-endless-stall.md`):
+**The todo-file layer the cycle rests on:**
 
-1. `src/todofile.js:95` — `const TASK_LINE_RE = /^(\s*)- (T\d+):\s*(.*)$/` does not match
-   the task lines actually in the file in use (`- T45 — docs catch-up: …`, em-dash instead
-   of colon). `listOpen` therefore returned `[]` on a file full of tasks, and
-   `nextFreeIdFrom` (`src/todofile.js:233-241`) restarted at `T1` on a file already using
-   T1–T8 and T45. The consequence is on record three times over as
-   `"task T45 not found in todos.md"` (diagnosis lines 96-98).
-2. `src/todofile.js:288-289` — `const sep = content === "" || content.endsWith("\n") ? ""
-   : "\n"` / `writeAt(directory, target, content + sep + block)`: the append is
-   heading-blind, so the three saved points landed under the human `## Not now` section
-   while `## Open` still read `None.`
-3. The confirmation of `src/endless.js:385-389` reported `confirmed=3` on that file. It is
-   tautological: it re-reads the three lines the plugin itself has just appended, in the one
-   shape the parser does match, and says nothing about the file as a whole.
-   The read-back is therefore weaker in practice than the spec claims at
-   `specs/endless-mode.md:118-123`.
+1. `src/todofile.js:125` — the read shape `TASK_LINE_RE =
+   /^(\s*)[-*]\s+(T\d+)\s*(?::|—|–|-)?\s+(.*)$/` reads colon, em-dash, en-dash, hyphen
+   and separator-less task lines, so `- T45 — docs catch-up: …` is the task it is; the
+   write shape `CANONICAL_TASK_LINE_RE` (`src/todofile.js:129`) is the only one `editTask`
+   and `removeTask` touch. `nextFreeIdFrom` (`src/todofile.js:451-457`) takes the higher of
+   the `next-id` watermark and max + 1 over the widened scan of `usedIdsFrom`
+   (`src/todofile.js:425-432`), so the id of a removed task is not handed out again.
+2. `src/todofile.js:518-529` — `addTask` inserts inside the machine section through
+   `insertIntoSection` (`src/todofile.js:496-511`), laying the section down with
+   `ensureSection` (`src/todofile.js:350-376`) where the markers are absent; nothing is
+   appended under whatever heading the file ends with.
+3. The confirmation reads the file as a whole: `verifyWindDown` (`src/endless.js:283-350`)
+   tests that the content changed or the reply says `no change` (V3), that nothing outside
+   the markers moved except migrated task blocks (V4), and that the parse yields at least
+   one task with unique ids and non-empty titles (V5). The spec states the same at
+   `specs/endless-mode.md:571-576`.
 
-Out of this boundary and owned by a separate run: the visible failure of that run was
-`selectTuiSession` (`src/client.js:875-907`), whose direct post *"carries no authorization
-header"* (`src/client.js:868-871`) and which failed to connect, so the TUI stayed on the
-predecessor and a healthy cycle looked like a stall. Nothing in this concept changes
-`src/client.js`, and no step of §8 touches it.
+Out of this boundary: the switch of the TUI to the successor, `selectTuiSession`
+(`src/client.js:1303`), which tries `client.tui.selectSession`, then the client's own
+transport, and only last a bare post that carries no authorization header
+(`src/client.js:1295-1297`). Nothing in this concept changes `src/client.js`, and no step
+of §8 touches it.
 
 ---
 
-## 2. What the owner's restatement overturns
+## 2. What the owner's restatement asks, and where the code carries it
 
-| the restatement | what it contradicts |
+| the restatement | where the code carries it |
 |---|---|
-| a subagent updates the todo file | `src/endless.js:369` `addTask(point)` and the whole `parseOpenPoints` path; `specs/endless-mode.md:214-222` §2.3, which rejects exactly this option |
-| exactly one spawn is allowed, after all running subagents have finished | the wind-down gate in `spawnHandler` (`src/tools.js`), which refuses every spawn once the cycle has claimed its wind-down |
-| the file must let the successor carry on at the point the predecessor stopped, by content or by link | the two-line `- T<n>:` / `accept:` shape carries a title and a criterion and nothing else (`src/todofile.js:8-21`) |
-| the successor gets the file's content automatically | the successor gets a *rendering of the plugin's parse* (`formatOpenTasks`, `src/endless.js:104-120`), not the file |
+| a subagent updates the todo file | the wind-down `planner` admitted through the permit (`src/tools.js:458-508`) or started by the plugin's fallback (`startWindDownSubagent`, `src/handoffwiring.js:412-450`); `specs/endless-mode.md:241-256` §2.3 recommends exactly this |
+| exactly one spawn is allowed, after all running subagents have finished | the wind-down gate in `spawnHandler` (`src/tools.js:458-508`), which from the wind-down claim on admits the one permitted spawn and refuses every other |
+| the file must let the successor carry on at the point the predecessor stopped, by content or by link | a task owns its header line and the whole indented run under it, so `accept:`, `link:` and `note:` lines travel with it (`src/todofile.js:39-40`, `parseTasks` at `src/todofile.js:386-413`) |
+| the successor gets the file's content automatically | the kickoff carries the file's own text (`endlessKickoffBlock`, `src/endless.js:121-150`) |
 
 ---
 
@@ -119,24 +121,26 @@ predecessor and a healthy cycle looked like a stall. Nothing in this concept cha
 
 | shape | cost | what it forecloses | what it demands |
 |---|---|---|---|
-| **the orchestrator spawns it under a single-use permit; the plugin spawns it itself only if the permit expires unused** (recommended) | a permit record in the registry, one branch in `spawnHandler`, one shared start helper | nothing — the fallback keeps the mode alive on a model that cannot place the call | a token the plugin generates and the model must echo, and an atomic single-use consume |
-| the orchestrator alone spawns it | no fallback code | the cycle on a weak model: a session at its ceiling that fails to emit one correct tool call abandons every cycle, five minutes of cooldown apart | trusting a tool call where `specs/endless-mode.md:224-226` argues text is the only reliable output at the ceiling |
+| **the orchestrator spawns it under a single-use permit; the plugin spawns it itself only if the permit expires unused** (recommended) | a permit record in the registry, one branch in `spawnHandler`, one fallback start function | nothing — the fallback keeps the mode alive on a model that cannot place the call | a token the plugin generates and the model must echo, and an atomic single-use consume |
+| the orchestrator alone spawns it | no fallback code | the cycle on a weak model: a session at its ceiling that fails to emit one correct tool call abandons every cycle, five minutes of cooldown apart | trusting one correct tool call at the ceiling, the assumption `specs/endless-mode.md:934-940` names |
 | the plugin alone spawns it, wind-down gate untouched | simplest; no permit at all | the owner's stated flow — the orchestrator never starts the subagent | still one plain-text turn out of the primary to get the content |
 
 Recommended: the first. It is the owner's flow on the normal path, and the third row is not
-discarded but demoted to the failure path, where both entry points converge on one helper
-(`startWindDownSubagent`) and on one confirmation. The deciding argument is that the two
-paths differ only in *who calls the helper*: the briefing text, the agent type, the standing
+discarded but demoted to the failure path, where the plugin's own `startWindDownSubagent`
+(`src/handoffwiring.js:412-450`) starts the child with the same role, the same composed
+prompt (`windDownSubagentPrompt`), the same waiter ceiling and the same `windDown` entry as
+the permitted spawn in `spawnHandler`, and both feed one confirmation. The deciding argument
+is that the two paths differ only in *who starts the child*: the agent type, the standing
 instruction block, the waiter and the verification are identical, so the fallback costs one
-call site rather than a second mechanism. Because the fallback is not optional — between a
+function rather than a second mechanism. Because the fallback is not optional — between a
 cut-over without it and a model that places no tool call lies an abandon on every cycle — it
 is built in the same step as the cut-over (§8, S5).
 
 **The role is `planner`.** It is the only role that already holds everything the job needs
 and nothing it does not: `read`, `write`, `edit`, `glob`, `grep`, and
-`todos_open`/`todo_add`/`todo_edit`/`todo_done` (`src/agents.js:307-313`, whose permission
+`todos_open`/`todo_add`/`todo_edit`/`todo_done` (`src/agents.js:375-382`, whose permission
 map denies only `SUBAGENT_NO_DELEGATION`, `NO_WEB_ACCESS` and `bash`), and its role prompt
-already owns the todo file (`src/agents.js:66-71`, `TODO_TOOLS_BLOCK`). `coder` would bring
+already owns the todo file (`src/agents.js:89-94`, `TODO_TOOLS_BLOCK`, in the planner prompt at `src/agents.js:102`). `coder` would bring
 `bash`; a new tenth role would duplicate `planner` for one call site.
 
 ### 3.2 How the plugin recognises the one permitted spawn
@@ -161,8 +165,8 @@ agent})`, `restoreEndlessWindDown(primaryID)`, `noteEndlessWindDownChild(primary
 
 Admission requires **all five** of:
 
-1. `endlessInProgress.has(root)` — a permit is never armed in the `pendingEndless` phase, so
-   the window cannot open before the cycle is claimed;
+1. `isEndlessWindingDown(root)` — the cycle has claimed its wind-down, and a permit is armed
+   only after that claim, so the window cannot open before it;
 2. the caller *is* the root primary (`toolCtx.sessionID === rootPrimaryFor(toolCtx.sessionID)`),
    so `nested === true` never reaches the branch;
 3. `args.agent === "planner"`;
@@ -171,17 +175,17 @@ Admission requires **all five** of:
    sent to that one primary;
 5. the permit is unconsumed, and consumption happens **in the same synchronous block as the
    test**, before any `await` — the discipline `reservePendingTaskId` already follows for the
-   identical reason at `src/tools.js:503-529` (*"a bare check … would leave a TOCTOU window:
+   identical reason at `src/tools.js:608-633` (*"a bare check … would leave a TOCTOU window:
    two spawn() calls in the same turn carrying the same task-id both pass"*).
 
 **The consume is a reservation, not a burn.** Everything that can still fail sits *after*
 the synchronous consume: `createChildSession` returning no session id
-(`src/tools.js:611-620`) and `promptSession` throwing (`src/tools.js:646-660`). A transient
+(`src/tools.js:718-738`) and `promptSession` throwing (`src/tools.js:782-833`). A transient
 5xx on either would otherwise burn the single permit — the orchestrator reads *"Failed to
 create subagent session"*, has no second call, and the fallback of §5 does not fire because
 its condition is an unconsumed permit, so the cycle sits out the whole window before
 abandoning. So the permit follows `reservePendingTaskId` / `releasePendingTaskId`
-(`src/registry.js:851`, released in the single `finally` at `src/tools.js:783`) in both
+(`src/registry.js:1043-1049`, released in the single `finally` at `src/tools.js:964-973`) in both
 directions:
 
 - `consumeEndlessWindDown` marks `consumed: true` synchronously at admission;
@@ -205,8 +209,9 @@ What keeps the exception from becoming a general reopening:
   that never prompted a child;
 - one agent type and one token, both chosen by the plugin;
 - **the plugin composes the child's prompt; the orchestrator supplies a payload, not
-  instructions.** `args.prompt` is not passed through. The plugin builds
-  `WIND_DOWN_SUBAGENT_PROMPT` = its own instruction block, then a fixed
+  instructions.** `args.prompt` is not passed through. The plugin builds the child prompt
+  through `windDownSubagentPrompt` (`src/prompts.js:584-592`): `WIND_DOWN_SUBAGENT_PROMPT`,
+  its own instruction block, then a fixed
   `## HAND-OVER FROM THE PREVIOUS ORCHESTRATOR` heading carrying the orchestrator's text
   with the `INTERCOM-WIND-DOWN <token>` line stripped and the whole payload capped at
   `WIND_DOWN_PAYLOAD_MAX_CHARS` (32 000 — the bound §3.2's package-size exemption already
@@ -217,7 +222,7 @@ What keeps the exception from becoming a general reopening:
   before quiesce, so §3.3's argument that a fast-spawning orchestrator can never avoid
   quiescing stands untouched;
 - disarmed in a `finally` on every exit of `runEndlessCycle`, and by `forgetPrimary`, which
-  already clears the endless flags at `src/registry.js:126-130`;
+  clears the endless flags and the permit at `src/registry.js:145-160`;
 - the refused throw, while a permit is armed, is *replaced* by a text that spells out the one
   spawn that is allowed, so a wrong attempt self-corrects instead of exhausting the window;
   a refusal never consumes the permit;
@@ -228,19 +233,20 @@ What keeps the exception from becoming a general reopening:
   the nested refusal in `spawnHandler`. The exception does not propagate downward.
 
 **The permitted spawn blocks, and the child's settlement — not the primary's text — is the
-gate.** `src/tools.js:634` registers a child waiter for nested spawns only:
-`if (nested) childResult = registerChildWaiter(sessionID, toolCtx.sessionID)`. The wind-down
-path registers one too (`if (nested || windDown)`), which `src/childwait.js:22-24` explicitly
-permits: *"the parent of a waited child may be a primary as well as a subagent, and a primary
+gate.** `src/tools.js:757-772` registers a child waiter for a nested spawn and, in its
+`else if (windDown)` branch, for the wind-down spawn, with the permit recording the child and
+the promise through `noteEndlessWindDownChild`; `src/childwait.js:21-23` explicitly
+permits that: *"the parent of a waited child may be a primary as well as a subagent, and a primary
 has no registry entry at all."*
 
 The blocking is a convenience, not a proof. What `requestDocSummaries` polls is
-`fetchSnapshot(...).result` = `finalResult(messages)` (`src/client.js:663-671`), which joins
-the text parts of the **newest assistant message** — and the text a model emits *before* its
+`fetchSnapshot(...).result` = `finalResult(messages)` (`src/client.js:814`,
+`src/client.js:898-911`), which joins the text parts of the **newest assistant message that
+carries text**, a compaction summary skipped — and the text a model emits *before* its
 tool call sits in that same assistant message. A model that writes `## WIND-DOWN DONE` and
 then calls `spawn` would satisfy `looksLikeWindDownReply` while the child is still rewriting
 the file, and `confirm` would then read a file mid-rewrite (`writeAt`,
-`src/todofile.js:170-188`, is `O_TRUNC` + `writeFileSync`, so a concurrent read can see a
+`src/todofile.js:232-250`, is `O_TRUNC` + `writeFileSync`, so a concurrent read can see a
 truncated file) or an unchanged one. So:
 
 > The shaped reply is the signal that the turn is over. The proof that the write finished is
@@ -258,13 +264,13 @@ The derived ceiling is unusable here: `childWaiterTimeoutMs()` is
 therefore passes
 
 ```
-timeoutMs = endlessWindDownTimeoutMs − DOC_SUMMARY_POLL_MS
+timeoutMs = endlessWindDownTimeoutMs − DOC_SUMMARIES_POLL_MS
 ```
 
 so the waiter's own expiry lands strictly before the turn window closes.
 
 One residue stays and is named rather than papered over: the ceiling **re-arms** while the
-child is still a tracked registry entry (`src/childwait.js:200-215`), so an explicit
+child is still a tracked registry entry (`src/childwait.js:200-226`), so an explicit
 `timeoutMs` bounds only a child the watchdog no longer owns. A tracked child is bounded
 instead by the watchdog (`maxSubagentAgeMs` / `maxSubagentToolCallMs`), whose teardown
 settles the waiter — except where the user has switched the silence watchdog off (the
@@ -278,29 +284,29 @@ Five gates the admitted spawn is exempted from, each for a stated reason:
 
 | gate | line | why exempt |
 |---|---|---|
-| multi-task bundle guard | `src/tools.js:472-482` | the briefing names every open task id by design; the guard exists against a coder batch |
-| package-size refusal | `src/tools.js:492-500` | the briefing is the whole hand-over; a refusal here would abandon the cycle over its length. The bound moves to `WIND_DOWN_PAYLOAD_MAX_CHARS`, applied by the plugin when it composes the child prompt |
-| duplicate-task-id reservation | `src/tools.js:503-529` | the prompt carries no single task id to reserve |
-| global spawn cap | `src/tools.js:579-588` | quiesce is scoped to this primary (`countActiveSubagentsFor`, `specs/endless-mode.md:45-47`); another orchestrator's subagents must not block the wind-down. §9 names what that admits |
-| retention | `src/hooks.js:1564` area | the cycle drops every retained session anyway (`src/endless.js:281-289`) |
+| multi-task bundle guard | `src/tools.js:558-575` | the briefing names every open task id by design; the guard exists against a coder batch |
+| package-size refusal | `src/tools.js:577-601` | the briefing is the whole hand-over; a refusal here would abandon the cycle over its length. The bound moves to `WIND_DOWN_PAYLOAD_MAX_CHARS`, applied by the plugin when it composes the child prompt |
+| duplicate-task-id reservation | `src/tools.js:603-633` | the prompt carries no single task id to reserve |
+| global spawn cap | `src/tools.js:672-697` | quiesce is scoped to this primary (`countActiveSubagentsFor`, `specs/endless-mode.md:337-344`); another orchestrator's subagents must not block the wind-down. §9 names what that admits |
+| retention | `retentionDecision`, `src/registry.js:528` | the cycle drops every retained session anyway (`src/endless.js:507-517`) |
 
 ### 3.3 What remains of the verification
 
 The plugin no longer assigns ids, so it does not claim ownership of their values. It still
 observes carried-over ids and title changes for V6. The verification is strictly stronger,
-because it reads the file as a whole rather than the lines the plugin itself appended — which is
-exactly the tautology §1 point 3 exposed.
+because it reads the file as a whole rather than the lines the plugin itself appended (§1,
+the todo-file layer, point 3).
 
 Before the spawn the plugin has already **created and written** the marked section where it
 was absent (§3.4.3, §4 step 4), then snapshots: the resolved target (`findTodoFile`,
-`src/todofile.js:130-141`), the raw content, its SHA-256, the section split, and
+`src/todofile.js:192-203`), the raw content, its SHA-256, the section split, and
 `parseTasks` over it. After the child has settled (§3.2) it re-resolves and re-reads, and
 **all** of these must hold or the cycle abandons without replacing the session:
 
 | # | predicate | on failure |
 |---|---|---|
 | V1 | `findTodoFile` resolves to exactly one regular file, same name as the snapshot | abandon (`multiple` / `not-a-file` / renamed) |
-| V2 | the child's outcome is `completed` (`src/childwait.js:52-58` enumerates the others) | abandon unless V3–V5 all hold anyway |
+| V2 | the child's outcome is `completed` (`src/childwait.js:48-58` enumerates the others) | abandon unless V3–V5 all hold anyway |
 | V3 | the content hash differs from the snapshot, **or** the reply carries `## WIND-DOWN DONE — no change` | abandon |
 | V4 | the marked region is intact and everything outside it matches `expectedOutside`, per the algorithm below | restore the snapshot, then abandon |
 | V5 | `parseTasks` over the new content yields ≥ 1 task, every id unique, every title non-empty | restore the snapshot, then abandon, except the explicit-empty case below |
@@ -344,9 +350,9 @@ writes the file back with exactly one final newline so the next cycle's snapshot
 
 The explicit-empty case: `parseTasks` yields zero tasks **and** the reply carries
 `## WIND-DOWN DONE — nothing open`. That is not a failure; it routes into the existing stop
-of `src/endless.js:399-401` (*"no open points left — paused for this session"*) and the
-session is not replaced, because a successor with an empty file *"would idle and be woken by
-nothing"* (`specs/endless-mode.md:449-452`).
+of `src/endless.js:666-668` (*"no open points left — paused for this session"*) and the
+session is not replaced, because a successor with an empty file *"would idle, be woken by
+nothing"* (`specs/endless-mode.md:681-683`).
 
 **A rejected rewrite is undone and retained for diagnosis.** Prepare holds the exact snapshot
 bytes, and a failure of V1, V3, V4 or V5 means the file on disk is a rewrite the plugin
@@ -364,15 +370,15 @@ back to, and the toast names the snapshot path and the original name.
 
 So: the parse survives and becomes the sole verification, moving from *"parse the model's
 words into the tasks the plugin writes"* to *"parse the file the subagent wrote, as the
-observation that the save happened"*. The invariant of `src/endless.js:31-33` — no
+observation that the save happened"*. The invariant of `src/endless.js:47-49` — no
 replacement without a confirmed save — is preserved by V1–V5 as a set; V6 and V7 add
 observations without rejecting an otherwise verified rewrite.
 
 ### 3.4 The format, the section anchor and the id allocation
 
 There is no free choice here: the `- T<n>:` shape is load-bearing beyond the endless cycle.
-`src/hooks.js:2021` (`const MARKER_RE = /^\s*DONE:\s*(T\d+)\s*$/i`) drives
-`removeTask(directory, taskId)` at `src/hooks.js:2050`, and the todo tools
+`src/hooks.js:2673` (`const MARKER_RE = /^\s*DONE:\s*(T\d+)\s*$/i`) drives
+`removeTask(directory, taskId)` at `src/hooks.js:2704`, and the todo tools
 `todo_add`/`todo_edit`/`todo_done` run all session long, not only at wind-down. A file
 without machine-readable ids breaks the whole work-off loop, which is what the three
 `"task T45 not found"` errors are.
@@ -380,7 +386,7 @@ without machine-readable ids breaks the whole work-off loop, which is what the t
 Decided:
 
 1. **One file per project directory**, resolved as today. Two files are not designed for:
-   `findTodoFile`'s `statSync` fast path (`src/todofile.js:131-136`) silently gives
+   `findTodoFile`'s `statSync` fast path (`src/todofile.js:193-198`) silently gives
    `TODO.md` precedence over a differently-cased sibling, so a `TODO.md` + `todos.md` pair
    coexists by accident rather than by design, and splitting the hand-over across two files
    contradicts *"the information must either stand in the todo file or be linked from it"*.
@@ -447,11 +453,10 @@ Decided:
    immediately following separator blank may remain or be deleted. That migration, and no
    other outside edit, is what V4 licenses, while the one shape §3.4.7 keeps the ordinary
    `DONE:` path away from.
-4. **`addTask` no longer appends at end of file.** The behaviour the diagnosis found —
-   `writeAt(directory, target, content + sep + block)` at `src/todofile.js:288-289`, which
-   put three saved points under a human `## Not now` — is removed, not left standing beside
-   the new path. Every writer reaches the same insertion point: `addTask` inserts before
-   `<!-- intercom:end -->` (calling `ensureSection` first where the markers are absent),
+4. **`addTask` does not append at end of file.** Every writer reaches the same insertion
+   point: `addTask` (`src/todofile.js:518-529`) inserts before `<!-- intercom:end -->`
+   through `insertIntoSection` (`src/todofile.js:496-511`), calling `ensureSection` first
+   where the markers are absent,
    `todo_add` reaches it through `addTask`, and the wind-down subagent is confined between
    the same two markers. There is one region, one rule, and no second way into the file.
 5. **Ids become monotone.** `addTask` and the wind-down contract maintain a watermark line
@@ -470,7 +475,7 @@ Decided:
    regex is a *reading* instrument only. It is used where a read must not miss a task:
    `listOpen`, `nextFreeId`'s scan, the drift count, and the pre-spawn snapshot's parse.
    `removeTask` and `editTask` act only on lines in the canonical `- T<n>: ` shape **inside**
-   the markers. The reason is `autoMarkTask` (`src/hooks.js:2031-2056`), which fires on the
+   the markers. The reason is `autoMarkTask` (`src/hooks.js:2685-2715`), which fires on the
    `DONE: T<n>` marker of *any* subagent reply, all session long, in every project, with the
    endless cycle nowhere near it and V4 not applying: after a naive widening, a reply
    `DONE: T1` against `~/vantage/todos.md` would delete the human prose bullet
@@ -479,19 +484,18 @@ Decided:
 
    A `DONE: T<n>` whose id resolves only to a legacy line outside the markers therefore
    returns a new outcome `{ kind: "unmigrated", id }`. It is not an error and not a
-   `no-todo`: `taskOutcomeLine` (`src/notices.js:35-66`) gains a case that tells the
+   `no-todo`: `taskOutcomeLine` (`src/notices.js:45-86`) gains a case that tells the
    orchestrator the task is finished but still stands in a legacy line outside the plugin's
    section, and that the next wind-down will migrate it. The line is left untouched until it
    does.
-8. **The no-progress bound keys on ids.** `recordEndlessCycle` (`src/registry.js:1642-1653`)
-   compares normalised task **titles** across cycles, and its stated reason is that
-   *"`nextFreeIdFrom` (src/todofile.js) reuses the id of a removed task"*. §3.4.5 removes
-   that reuse. Titles must not stay the key, because the subagent now authors them: a cycle
+8. **The no-progress bound keys on ids.** `recordEndlessCycle` (`src/registry.js:2127-2138`)
+   compares open task **ids** across cycles; §3.4.5 makes an id disappear exactly once, when
+   its task is removed. Titles cannot be the key, because the subagent authors them: a cycle
    that merely rephrases the same open work reports every previous title as gone, `completed
    > 0`, `stalledCycles = 0`, and the one bound against the failure the mode invites — an
    orchestrator that saves the same points every 250 000 tokens and never finishes one —
-   stops firing. So the record becomes `lastOpenIds` (`src/state.js:218`, reset at
-   `src/state.js:365`), `recordEndlessCycle(openIdsFound, openIdsLeft)`, and `completed`
+   stops firing. So the record is `lastOpenIds` (`src/state.js:257`, reset at
+   `src/state.js:474`), `recordEndlessCycle(openIdsFound, openIdsLeft)`, and `completed`
    counts the previous cycle's open ids that are no longer in the file. An id disappears
    only when a task is removed, and the watermark guarantees it is never handed out again.
 
@@ -500,23 +504,20 @@ Decided:
 Both, and the split is deliberate:
 
 - **Inline, automatic:** the kickoff carries the todo file's own text verbatim, bounded by
-  `KICKOFF_TODO_MAX_CHARS` (16 000, the same order as today's 40 × 400 bound at
-  `src/endless.js:88-96`), cut at a task-block boundary rather than mid-line. This is the
-  literal reading of *"must get the todo file's content automatically"*, and it is strictly
-  more than today's `formatOpenTasks` rendering: it carries the prose, the links and the
-  section structure the parse cannot represent.
+  `KICKOFF_TODO_MAX_CHARS` (16 000, `src/endless.js:85`), cut at a block boundary rather
+  than mid-line (`cutTodoText`, `src/endless.js:101-109`). This is the literal reading of
+  *"must get the todo file's content automatically"*: it carries the prose, the links and
+  the section structure a parse cannot represent.
 - **By subagent, conditionally:** where the text was truncated, or the file could not be
-  read at all, the kickoff's first instruction is a `planner` spawn that reads the file in
-  full and reports the rest — the one route a primary has, and the shape
-  `src/endless.js:153-155` already uses.
+  read at all, the kickoff tells the successor to have a subagent read the file in full
+  before it plans past what is shown — the one route a primary has
+  (`src/endless.js:128-135`).
 
 Carrying the content inline alone would lose whatever exceeds the cap; instructing a read
 alone would make the successor's first turn depend on a round trip that can fail, leaving a
-fresh session with nothing in it. `formatOpenTasks` is therefore dropped and replaced by a
-raw-text carrier. `KICKOFF_TASKS_MAX` / `KICKOFF_TASK_FIELD_MAX_CHARS`
-(`src/endless.js:88-96`) go with it — they are `OPEN_POINTS_MAX` / `OPEN_POINT_MAX_CHARS`
-from `src/openpoints.js`, which is the dependency that keeps that module alive, so this
-change and the module's deletion belong in one step (§8, S5).
+fresh session with nothing in it. The kickoff is therefore a raw-text carrier
+(`endlessKickoffBlock`, `src/endless.js:121-150`), and nothing renders a parse of the file
+for the successor.
 
 ---
 
@@ -536,7 +537,8 @@ counter that no event clears — logged `no subagent running, but not quiesced a
 **4. Prepare.** In this order:
 
 1. resolve the todo file, creating the canonical `TODO.md` where the directory has none
-   (`ensureTodoFile`, `src/todofile.js:261-275`, now exported), so the subagent has a
+   (`ensureTodoFile`, `src/todofile.js:478-492`, exported, called by `prepareTodoFile` at
+   `src/todofile.js:273-279`), so the subagent has a
    definite target and `missing` cannot be confused with *deleted* afterwards;
 2. `ensureSection` — insert the `## Intercom tasks` heading and the two markers where they
    are absent, per §3.4.3, and **write the file**;
@@ -553,7 +555,7 @@ call site.
 **6. The wind-down turn.** `promptOldPrimaryFor(client, sessionID, agentName, { prompt:
 WIND_DOWN_PROMPT(token, fileName, driftCount), looksLikeReply: looksLikeWindDownReply })`,
 over the existing baseline/re-baseline/poll discipline of `requestDocSummaries`
-(`src/handoff.js:424`), with a timeout of `endlessWindDownTimeoutMs` (new key, default
+(`src/handoff.js:669-705`), with a timeout of `endlessWindDownTimeoutMs` (new key, default
 900 000 ms — the subagent reads files and rewrites the list, which is minutes, not the 120 s
 a text turn takes). `WIND_DOWN_PROMPT` says, in substance:
 
@@ -575,15 +577,14 @@ a text turn takes). `WIND_DOWN_PROMPT` says, in substance:
 > - `## WIND-DOWN DONE — nothing open` — the subagent reports nothing is open any more.
 
 The three lines are what V7, V3 and the explicit-empty stop read, and the subagent's own
-tool result is what tells the primary which one applies; an earlier draft asked for
-`## WIND-DOWN DONE` *"and nothing else"*, which left V7 with nothing to read on every run
-and turned a genuinely empty project into an abandon with a cooldown instead of the pause
-`specs/endless-mode.md:449-452` reserves for it. `looksLikeWindDownReply` stays the loose
+tool result is what tells the primary which one applies; the `nothing open` line is what
+lets a genuinely empty project reach the pause `specs/endless-mode.md:678-683` reserves for
+it rather than an abandon with a cooldown. `looksLikeWindDownReply` stays the loose
 `/^##\s+WIND-DOWN DONE\b/m`, so a model that adds a suffix of its own still ends the turn.
 
 **7. Settle.** The shaped reply (or the expiry of the turn window) ends step 6; it does not
 end the wind-down. The plugin now awaits the permit's `settlement` — the child waiter's
-promise, whose ceiling was set to `endlessWindDownTimeoutMs − DOC_SUMMARY_POLL_MS` at
+promise, whose ceiling was set to `endlessWindDownTimeoutMs − DOC_SUMMARIES_POLL_MS` at
 registration — and additionally requires the child's registry entry to be gone. Where no
 settlement arrives by `endlessWindDownTimeoutMs` counted from the spawn, the plugin ends the
 child itself and abandons (§3.2, §5).
@@ -596,7 +597,7 @@ open-task number gets exactly ONE bounded re-ask: the cycle logs
 attempt with a freshly armed token (the registry's arm overwrites the spent permit). On the
 second attempt a byte-equal file whose reply says `no change` is accepted, fresh content is
 accepted normally, and anything else takes the restore and the `confirm` abandon below, with
-the FIRST failure's rejected bytes filed. Other failures of V1, V3, V4 or V5 restore the
+the second attempt's rejected bytes filed. Other failures of V1, V3, V4 or V5 restore the
 snapshot and abandon; V6 logs changed titles and, like V7, does not reject an otherwise
 verified rewrite. The session is not replaced on a V1/V3/V4/V5 failure.
 
@@ -604,18 +605,18 @@ verified rewrite. The session is not replaced on a V1/V3/V4/V5 failure.
 
 **10. Replace.** `performPrimaryHandoff` unchanged in structure, with the endless kickoff
 block of §3.5 and `promptOldPrimaryForDocSummaries` still standing down
-(`src/handoffwiring.js:463`). The wind-down reply fails `validateDocSummaries`' shape check
+(`src/handoffwiring.js:673`). The wind-down reply fails `validateDocSummaries`' shape check
 and its fallback block lands in the kickoff, exactly as today.
 
 **11. Record.** `recordEndlessCycle(openIdsFound, openIdsLeft)` per §3.4.8, fed by the
 before-parse of step 4 and the after-parse of step 8 — the same two snapshots the
-no-progress bound already compares (`recordCycle`, `src/endless.js:754`, `ENDLESS_MAX_STALLED_CYCLES`).
+no-progress bound already compares (`recordCycle`, `src/endless.js:777`, `ENDLESS_MAX_STALLED_CYCLES`).
 
 ---
 
 ## 5. Failure and abandon paths
 
-Every abandon does what it does today (`src/endless.js:229-235`): release the latch, arm the
+Every abandon does what it does today (`src/endless.js:434-440`): release the latch, arm the
 cooldown, log the stage, error toast, **primary not replaced** — plus, new,
 `disarmEndlessWindDown` in a `finally` so no permit can outlive its cycle, and the snapshot
 restore of §3.3 wherever the rejected state is a rewritten file.
@@ -625,7 +626,7 @@ restore of §3.3 wherever the rejected state is a rewritten file.
 | `prepare` | `multiple` / `not-a-file`, `ensureTodoFile` throws, or the section write throws | abandon, no turn spent |
 | `quiesce` | none of the primary's subagents runs, yet the claim does not come for `endlessQuiesceTimeoutMs` past the last poll that saw one — `no subagent running, but not quiesced after <elapsed>ms` | abandon |
 | `wind-down` | the primary produced no shaped reply in the window **and** the permit is unconsumed | `disarmEndlessWindDown(primaryID)` **first, synchronously**, then the **fallback**: the plugin calls `startWindDownSubagent` itself with whatever final text the primary last produced, then goes to `settle`. The disarm is not cosmetic — an armed permit would stay admissible, and a slow primary whose `spawn` lands after the fallback started would put a second `planner` against the same file, concurrently, through a non-atomic `writeAt`, with last-writer-wins. After the disarm that spawn takes the ordinary refusal. Logged `endless: wind-down spawned by the plugin — the orchestrator made no permitted spawn` |
-| `wind-down` | the permit was consumed but the child never started (`createChildSession` gave no id, or `promptSession` threw) | `restoreEndlessWindDown` gives the permit back once and the refusal text invites one repeat; a second such failure leaves it consumed and falls through to the row below |
+| `wind-down` | the permit was consumed but the child never started (`createChildSession` gave no id, or `promptSession` threw) | `restoreEndlessWindDown` gives the permit back once and the refusal text invites one repeat; a second such failure leaves it consumed: after a create failure no child is recorded and the cycle starts the fallback, after a prompt failure the recorded settlement carries `error` and the cycle runs `confirm` as in the errored-child row below |
 | `wind-down` | **the turn window expired with the permit consumed and the child unsettled** | keep waiting for the settlement, bounded by the waiter ceiling of §3.2; on settlement go to `confirm`; if no settlement arrives by `endlessWindDownTimeoutMs` from the spawn, end the child (abort + teardown, which settles the waiter) and abandon. Never `confirm` against a running writer, and never abandon leaving one alive |
 | `wind-down` | the permit was consumed and the child settled as errored, aborted, timed out or expired | run `confirm` anyway: accept if V1, V3–V5 hold (a subagent that wrote the file and then died still saved the state); abandon otherwise |
 | `wind-down` | the fallback spawn also fails to start or its child fails, with the file unchanged | abandon |
@@ -643,89 +644,89 @@ case the cycle's own end-the-child last resort covers.
 ## 6. What each source file has to change
 
 **`src/todofile.js`** — the file that carries the format changes and no endless knowledge:
-widen `TASK_LINE_RE` (`:95`) **for reads only**; give `parseTasks` (`:204-223`) ownership of
-the whole contiguous indented block; narrow `removeTask` (`:334-345`) and `editTask`
-(`:307-333`) to canonical lines inside the markers, deleting the whole block, and give them
-the `unmigrated` answer of §3.4.7; add `ensureSection(content)` and replace the end-of-file
-append in `addTask` (`:279-291`) with the marker-anchored insert of §3.4.3 and §3.4.4; add
-`usedIdsFrom` + the `next-id` watermark behind `nextFreeId` (`:233-256`); export
-`ensureTodoFile` (`:261`), `ensureSection` and a `splitSections(content)` used by V4. Header
-comment (`:8-21`) restated for the widened read shape, the narrow write shape and the
+widen `TASK_LINE_RE` (`:125`) **for reads only**; give `parseTasks` (`:386-413`) ownership of
+the whole contiguous indented block; narrow `removeTask` (`:599-610`) and `editTask`
+(`:554-590`) to canonical lines inside the markers, deleting the whole block, and give them
+the `unmigrated` answer of §3.4.7; add `ensureSection(content)` (`:350-376`) and give
+`addTask` (`:518-529`) the marker-anchored insert of §3.4.3 and §3.4.4 in place of an
+end-of-file append; add `usedIdsFrom` + the `next-id` watermark behind `nextFreeId`
+(`:425-473`); export `ensureTodoFile` (`:478`), `ensureSection` and a `splitSections(content)`
+(`:310`) used by V4. Header comment (`:1-53`) restated for the widened read shape, the narrow write shape and the
 section rule.
 
-**`src/registry.js`** — the permit map and its six functions beside `pendingEndless` /
-`endlessInProgress` (`:1461-1520`); clear it in `forgetPrimary` beside the endless flags
-(`:126-130`); `recordEndlessCycle` (`:1642-1653`) re-keyed from titles to ids per §3.4.8,
+**`src/registry.js`** — the permit map and its six functions (`:1913-1985`) beside the
+`pendingEndless` / `endlessInProgress` functions (`:1762-1836`); clear it in `forgetPrimary`
+beside the endless flags (`:145-160`); `recordEndlessCycle` (`:2127-2138`) re-keyed from titles to ids per §3.4.8,
 comment and all.
 
-**`src/state.js`** — `endlessProgress.lastOpenTitles` (`:203-218`) becomes `lastOpenIds`,
-with the reset at `:365` and the comment following it.
+**`src/state.js`** — `endlessProgress` (`:238-257`) records `lastOpenIds`, with the reset
+at `:474` and the comment above it.
 
 **`src/tools.js`** — in `spawnHandler`, the wind-down branch gains the admission
 test and the synchronous consume, and a second refusal text for the armed case; the admitted
-call is marked `windDown` and skips the five gates of §3.2 (`:472`, `:492`, `:503`, `:579`,
+call is marked `windDown` and skips the five gates of §3.2 (`:564`, `:594`, `:620`, `:686`,
 retention); the child prompt is **composed by the plugin** from its instruction block, the
 capped hand-over payload and `WIND_DOWN_SUBAGENT_CONTRACT`, in the place the project
-snapshot is already prepended (`:490-491`); `restoreEndlessWindDown` in the create-failure
-branch (`:611-620`) and in the prompt-throw cleanup (`:646-660`); the waiter registration
-widens to `if (nested || windDown)` with an explicit `{ timeoutMs }` (`:634`), and
-`noteEndlessWindDownChild` records the child id and the promise. `reuseHandler` (`:898-908`)
-unchanged.
+snapshot is already prepended (`:581-589`); `restoreEndlessWindDown` in the create-failure
+branch (`:723-738`) and in the prompt-throw cleanup (`:821-831`); the waiter registration
+gains an `else if (windDown)` branch with an explicit `{ timeoutMs }` (`:757-772`), and
+`noteEndlessWindDownChild` records the child id and the promise. `reuseHandler`'s
+wind-down refusal (`:1108-1115`) unchanged.
 
 **`src/hooks.js`** — one branch on the wind-down entry in the completion path
-(`:1595-1620`): no `postParentNotice`, because the result already reached the primary as the
+(`:2180-2194`): no `postParentNotice`, because the result already reached the primary as the
 tool result and the session is being replaced. The suppression covers **both** delivery
 routes: the ordinary one and the late-result route through `detachedParentOf`
-(`src/childwait.js:250-262`), where a wind-down child whose waiter had expired would
+(`src/childwait.js:299-303`), where a wind-down child whose waiter had expired would
 otherwise post into a primary that is retired by then — such a late result is logged and
-dropped. `autoMarkTask` (`:2031-2056`) gains the `unmigrated` outcome of §3.4.7.
-`PRIMARY_TOOLS` (`:140`) unchanged — the constraint that the orchestrator cannot touch a
+dropped. `autoMarkTask` (`:2685-2715`) gains the `unmigrated` outcome of §3.4.7.
+`PRIMARY_TOOLS` (`:173-192`) unchanged — the constraint that the orchestrator cannot touch a
 file is kept in both sessions.
 
-**`src/notices.js`** — `taskOutcomeLine` (`:35-66`) gains the `unmigrated` case: the task is
+**`src/notices.js`** — `taskOutcomeLine` (`:45-86`) gains the `unmigrated` case: the task is
 done, the line stands outside the plugin's section and was not removed, the next wind-down
 migrates it.
 
 **`src/settings.js`** — `endlessWindDownTimeoutMs`, resolved the way the neighbouring
-endless keys are (`:357-363` for env + default, `:464-466` for the file validator):
+endless keys are (`:566-573` for env + default, `:700-705` for the file validator):
 env `OPENCODE_AGENT_INTERCOM_ENDLESS_WIND_DOWN_TIMEOUT_MS`, validator
 `Number.isInteger(raw.endlessWindDownTimeoutMs) && raw.endlessWindDownTimeoutMs >= 0`,
-`DEFAULT_ENDLESS_WIND_DOWN_TIMEOUT_MS = 900000` beside
-`DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS` (`:227`). Without the validator the key silently
+`DEFAULT_ENDLESS_WIND_DOWN_TIMEOUT_MS = 900000` (`:357`) beside
+`DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS` (`:351`). Without the validator the key silently
 resolves to nothing. It is **not** shown in the sidebar, exactly like
-`endlessQuiesceTimeoutMs` (named in `tui/src/settings-file.ts:50` only as a key that passes
+`endlessQuiesceTimeoutMs` (named in `tui/src/settings-file.ts:73` only as a key that passes
 through untouched), so `test/settings-defaults-parity.test.js` — which pins `endlessMode`
 and `endlessContext` alone (`:132-133`) — needs no change.
 
 **`src/childwait.js`** — unchanged. `registerChildWaiter` already accepts
 `{ timeoutMs }` (`:146-153`), which is what the wind-down path passes.
 
-**`src/handoff.js`** — `OPEN_POINTS_PROMPT` (`:455-469`) and `looksLikeOpenPointsReply`
-replaced by `WIND_DOWN_PROMPT(token, fileName, driftCount)` — carrying the three closing
-lines of §4 step 6 — and `looksLikeWindDownReply` (`/^##\s+WIND-DOWN DONE\b/m`);
-`requestDocSummaries` (`:424`) gains an injectable timeout so the two callers can differ.
+**`src/handoff.js`** — `WIND_DOWN_PROMPT(token, fileName, driftCount)` (`:553-578`) —
+carrying the three closing lines of §4 step 6 — and `looksLikeWindDownReply` (`:583-585`,
+`/^##\s+WIND-DOWN DONE\b/m`); `requestDocSummaries` (`:669-705`) takes an injectable
+timeout so the two callers can differ.
 
-**`src/endless.js`** — steps 4a–4d (`:318-395`) replaced by prepare / arm / wind-down turn /
-settle / confirm; the dedupe (`:347-375`) and `addTask` drop out of the dependency list;
-`formatOpenTasks` (`:104-120`) and `KICKOFF_TASKS_MAX` / `KICKOFF_TASK_FIELD_MAX_CHARS`
-(`:88-96`) replaced by the raw-text carrier and `KICKOFF_TODO_MAX_CHARS`;
-`endlessKickoffBlock` (`:140-168`) takes `{ todoFileName, todoFileText, truncated }`; the
-id-keyed record call (`:432-436`); the header comment (`:27-33`) restated.
+**`src/endless.js`** — steps 4–8 (`:519-658`) are prepare / arm / wind-down turn / settle /
+confirm, with neither a dedupe nor `addTask` among the dependencies; the kickoff is the
+raw-text carrier bounded by `KICKOFF_TODO_MAX_CHARS` (`:85`); `endlessKickoffBlock`
+(`:121-150`) takes `{ todoFileName, todoFileText, truncated }`; the id-keyed record call
+(`:777`); the header comment (`:1-66`) restated.
 
-**`src/handoffwiring.js`** — the wiring of the new deps (`:412-474`): `ensureTodoFile`,
-`ensureSection`, `readTodoFile`, hashing, the section split, arm/restore/note/disarm, the
-tokened prompt, the longer timeout, the snapshot restore, and `startWindDownSubagent` for
-the fallback; `recordCycle` (`:471`) now id-keyed.
+**`src/handoffwiring.js`** — the wiring of the new deps (`:592-688`): `prepareTodoFile`
+(which calls `ensureTodoFile` and `ensureSection`), `readTodoFileNamed`, `writeTodoFile`,
+hashing, the section split, arm/disarm and the permit read, the tokened prompt, the longer
+timeout, the snapshot restore, and `startWindDownSubagent` (`:412-450`) for the fallback;
+`recordCycle` (`:681`) id-keyed.
 
 **`src/openpoints.js`** — `parseOpenPoints`, `OPEN_POINTS_MAX` and `OPEN_POINT_MAX_CHARS`
 have no remaining caller once §3.5's carrier lands; the module is deleted and `capChars`
-(`:86-89`) moves to `src/format.js`.
+lives in `src/format.js` (`src/format.js:97`).
 
 **`src/agents.js`** — unchanged. The wind-down instruction travels in the composed child
 prompt, not in the `planner` role prompt, so the role stays what it is.
 
-**`src/client.js`** — untouched by this concept. The `selectTuiSession` defect
-(`:868-871`, `:875-907`) has its own diagnosis and its own run.
+**`src/client.js`** — untouched by this concept; `selectTuiSession` (`:1303`) lies outside
+it.
 
 **`test/`** — new: the permit (armed only in-progress, single use, wrong token / wrong agent
 / nested caller refused, restored once and only from the two pre-prompt failures, disarmed on
@@ -743,10 +744,10 @@ record; the kickoff carrying the file text and its truncation notice.
 
 ## 7. What `specs/endless-mode.md` has to say instead
 
-- **§1.3** (`:85`) keeps its finding — the orchestrator cannot write the file — and gains
+- **§1.3** (`:104-131`) keeps its finding — the orchestrator cannot write the file — and gains
   the consequence: therefore a subagent does, and the plugin's job is to permit exactly one
   and to verify the result.
-- **§2.3** (`:212-227`) is rewritten head to foot. Its recommended row becomes the third row
+- **§2.3** (`:241-256`) is rewritten head to foot. Its recommended row becomes the third row
   of its own table (*"spawn a planner subagent to write it"*), and its stated objections are
   answered in the text: the spawn is *after* the quiesce gate, not before it, so §3.3's
   argument is untouched; and the planner not holding the orchestrator's context is what the
@@ -754,35 +755,35 @@ record; the kickoff carrying the file text and its truncation notice.
   the parse is a lossy funnel — a title and a criterion, no links, no prose, and its
   read-back confirms only its own appended lines) and *grant the orchestrator `todo_add`*
   (unchanged objection: it breaks `PRIMARY_TOOLS`).
-- **§3.1** (`:230-252`) — step 4 splits into *prepare / arm / wind-down / settle / confirm*.
+- **§3.1** (`:260-291`) — step 4 splits into *prepare / arm / wind-down / settle / confirm*.
 - **§3.2**'s settings table gains `endlessWindDownTimeoutMs` with its env var, default and
   the note that the sidebar does not show it.
-- **§3.3** (`:281-322`) keeps its quiesce definition and its table verbatim; the recommended
+- **§3.3** (`:327-444`) keeps its quiesce definition and its table verbatim; the recommended
   row gains the clause *"…except one permitted wind-down spawn after quiesce"* and a new
   paragraph carries §3.2 of this concept: the five admission conditions, the atomic consume
   and its single restore, the plugin-composed child prompt, the five exemptions and the
   containments.
-- **§3.4** (`:324-374`) is replaced by §3.3 and §3.4 of this concept: the wind-down prompt
+- **§3.4** (`:446-585`) is replaced by §3.3 and §3.4 of this concept: the wind-down prompt
   with its three closing lines, the composed child prompt, the blocking waiter and the
   settlement gate, V1–V7 with V4 as an algorithm over lines, the snapshot restore, the
-  section anchor, the id watermark and the two-shapes rule. The sentence *"the plugin
-  therefore knows three things by observation rather than by trust"* (`:120-123`) survives
-  with a different three: that the file resolved to one regular file, that the file as a
+  section anchor, the id watermark and the two-shapes rule. The sentence *"The plugin
+  knows three things by observation"* (`:571-576`) carries a different three: that the file resolved to one regular file, that the file as a
   whole changed and still parses, and that nothing outside the machine section moved.
-- **§3.5** (`:376-441`) — the task listing is replaced by the file's own text; the paragraph
-  at `:172-185` (*"The task listing carries the file's contents, not only its name"*) keeps
-  its argument and changes its object.
-- **§3.6.1** (`:449-455`) — the empty case is now the subagent's explicit
+- **§3.5** (`:587-644`) — the task listing is replaced by the file's own text; the paragraph
+  at `:620-629` (*"The kickoff carries the file's own text, not a re-rendered listing"*)
+  keeps its argument and changes its object.
+- **§3.6.1** (`:674-679`) — the empty case is now the subagent's explicit
   `## WIND-DOWN DONE — nothing open` plus a zero-task parse, not an empty confirmed list.
-- **§3.6.2** (`:468-479`) — the no-progress bound is re-keyed from normalised titles to open
+- **§3.6.2** (`:680-692`) — the no-progress bound is re-keyed from normalised titles to open
   **ids**, and the stated reason for titles (*"`nextFreeIdFrom` … reuses the id of a removed
   task"*) is replaced by its opposite: the watermark makes ids monotone, and titles are now
   authored by the model, so a rephrased list would read as progress that did not happen.
-- **§3.6.5** (`:490-492`) — the point of no return moves. It is no longer *"a cycle already
-  past the save step"*: prepare itself writes (the section insert), and the permit is live
-  from arm. Restated: turning the row off clears an unclaimed latch at the next
-  settings read; a cycle that has **armed the permit** runs through to `confirm` or to an
-  abandon, and the switch-off takes effect from the next schedule.
+- **§3.6.5** (`:703-709`) — the point of no return is the idle handler's claim: prepare
+  itself writes (the section insert), and the permit is live from arm. Turning the row off
+  drops an unclaimed latch (`cancelPendingEndless`, `src/registry.js:1810-1819`; read before
+  the claim in `maybeRunPendingEndless`, `src/handoffwiring.js:546-551`); a cycle the idle
+  handler has **claimed** runs through to the replacement, a self-stop or an abandon, and
+  the switch-off takes effect from the next schedule.
 - **§5** — three assumptions drop (`addTask` degrading safely, the shaped-reply-at-ceiling
   assumption in its old form) and the five of §9 below take their place.
 - **§7** — the unit list loses `parseOpenPoints` and the `addTask` save step and gains the
@@ -820,20 +821,20 @@ order or in parallel; S3 needs S1 and S2; S5 needs all four.
 ## 9. Assumptions, and what would show them wrong
 
 - **A session at its context ceiling can still emit ONE correct tool call.**
-  `specs/endless-mode.md:224-226` argues the opposite for text vs. tool calls, which is why
-  the fallback is in S5 rather than optional. Wrong when the log shows repeated
+  `specs/endless-mode.md:934-940` carries the same assumption, and it is why the fallback is
+  in S5 rather than optional. Wrong when the log shows repeated
   `spawn refused: wind-down permit` lines followed by the window expiring; the fallback is
   then the normal path, not the exception, and §3.1's third row should be adopted outright.
-- **A child waiter with a primary as parent behaves.** `src/childwait.js:22-24` states it is
-  supported, but no production path does it today — `src/tools.js:634` registers one only for
-  nested spawns. Wrong if the settlement never resolves although the child ended, or the
+- **A child waiter with a primary as parent behaves.** `src/childwait.js:21-23` states it is
+  supported, and the wind-down spawn (`src/tools.js:760-772`) and the fallback
+  (`src/handoffwiring.js:424-427`) are the production paths that do it. Wrong if the settlement never resolves although the child ended, or the
   primary is reaped mid-wait; observable as the cycle's end-the-child last resort firing on
   a run whose child finished normally.
 - **No second orchestrator primary shares the endless primary's directory.** The spawn-cap
   exemption of §3.2 is deliberate — quiesce is scoped to one primary — and it establishes
   that another primary's subagents run *during* the rewrite. Where such a subagent reports
   `DONE: T<n>` against the same file, its `removeTask` → `writeAt` (`O_TRUNC` + write, not
-  atomic, `src/todofile.js:170-188`) collides with the wind-down child's rewrite and one of
+  atomic, `src/todofile.js:232-250`) collides with the wind-down child's rewrite and one of
   the two writes is lost. An in-process write lock would not close it: the wind-down child
   writes through opencode's own `write`/`edit` tools, outside `src/todofile.js` entirely. So
   it is named, not closed. Wrong when a V4 failure names lines nobody edited, or when a task
@@ -862,6 +863,5 @@ order or in parallel; S3 needs S1 and S2; S5 needs all four.
 - This repository's own `todos.md` is **decided, not open**: it is not migrated. Its
   `## Pending` bullets stay as they are and the plugin's marked section is inserted beside
   them (§3.4.3).
-- Nothing else stands open in this concept. The `selectTuiSession` auth-header defect
-  (`src/client.js:868-871`) is a separate matter with its own diagnosis and its own run, and
-  no step here touches that file.
+- Nothing else stands open in this concept. `selectTuiSession` (`src/client.js:1303`) lies
+  outside it, and no step here touches that file.

@@ -13,26 +13,29 @@ inside `src/`, `tui/`, the prompt blocks and the settings file.
 
 ### 1.1 What this plugin does today
 
-- The whole tool map is `spawn` / `abort` / `list`, plus `reuse` only when retention is latched on
-  (`src/tools.js:1523-1603`); the map is built once, at plugin load.
-- Nothing addresses a running subagent. The three send sites into a session are the spawn prompt
-  (`src/tools.js:773`), the reuse prompt into an already **finished** session (`src/tools.js:1252`)
-  and the handoff kickoff (`src/handoffwiring.js:212,366,419`).
-- The only upward channel is the final reply turned into a wake notice (`completionNotice`,
-  `src/notices.js:108`, posted through `postParentNotice`, `src/teardown.js:169`), with `Blocked:`
-  as a marker on its first line (`isBlockedResult`, `src/notices.js:29`).
+- The tool map outside solo mode is `spawn` / `message` / `ask` / `abort` / `list`, plus `reuse`
+  where retention is latched on (`src/tools.js:1621-1750`); the map is built once, at plugin load.
+- The send sites into a session are the spawn prompt (`src/tools.js:785`), the reuse prompt into an
+  already **finished** session (`src/tools.js:1270`), the `message` delivery into a running one
+  (`src/midrun.js:239`) and the handoff kickoff (`src/handoffwiring.js:214,385,438`).
+- The upward channels are the final reply turned into a wake notice (`completionNotice`,
+  `src/notices.js:238`) and a question put with `ask` (`askNotice`, `src/notices.js:146`), both
+  posted through `postParentNotice` (`src/teardown.js:177`), with `Blocked:` as a marker on the
+  reply's first line (`isBlockedResult`, `src/notices.js:39`).
 - Subagents are denied the orchestration tools at the schema level:
-  `const SUBAGENT_NO_DELEGATION = { task: "deny", abort: "deny", list: "deny" }`
-  (`src/agents.js:189-191`); the runtime guard re-denies every agent-starting tool
-  (`src/hooks.js:2262-2271`).
-- The prompts state one-shot unconditionally: `"You are a one-shot subagent — do one focused task,
-  then reply once and return."` (`src/prompts.js:86`), `"One-shot: it replies once then is
-  destroyed."` (`src/prompts.js:29`), `"One-shot: a subagent replies once and is destroyed."`
-  (`src/tools.js:1532`), `"Finished ones are gone (one-shot)"` (`src/tools.js:1559`).
-- Retention is off in the shipped default — `export const DEFAULT_MAX_RETAINED_SUBAGENTS = 0`
-  (`src/settings.js:153`) — latched at load (`retentionOffered`, `src/settings.js:754`), so `reuse`
-  is not registered and `ORCHESTRATION_REUSE_GUIDE` is not injected (`src/prompts.js:378`). A live
-  orchestrator therefore reads nothing but the one-shot claim.
+  `const SUBAGENT_NO_DELEGATION = { task: "deny", abort: "deny", list: "deny", message: "deny" }`
+  (`src/agents.js:199-201`); the runtime guard re-denies every agent-starting tool
+  (`src/hooks.js:2795-2802`).
+- The prompts state one reply and reachability together: `"You reply ONCE — do one focused task,
+  then reply and return. While you work you are not out of contact: …"` (`src/prompts.js:102`),
+  `"It answers ONCE and is then destroyed, but it is NOT out of reach while it works."`
+  (`src/prompts.js:34`), `"It answers once and is then destroyed — but while it runs you can reach
+  it with message(subagent, text), and it can ask you back."` (`src/tools.js:1629-1630`),
+  `"Finished ones are gone; their result already arrived in the wake notice."`
+  (`src/tools.js:1704-1705`).
+- Retention is on in the shipped default — `export const DEFAULT_MAX_RETAINED_SUBAGENTS = 2`
+  (`src/settings.js:229`) — latched at load (`retentionOffered`, `src/settings.js:972-976`), so `reuse`
+  is registered and `ORCHESTRATION_REUSE_GUIDE` is injected (`src/prompts.js:72`, `:512`).
 
 ### 1.2 What opencode 1.18.30 permits (read off the installed binary and SDK)
 
@@ -62,7 +65,7 @@ Long form with the surrounding code: `work/opencode-busy-prompt-semantics.md`.
 That settles point 1 of the brief: **the message reaches the subagent at its next step boundary, and
 if it is inside a long tool call, at the moment that call returns.** Nothing can be faster, because
 the plugin and opencode alike see nothing at all between a tool call's announcement and its result
-(`src/registry.js:230-243`).
+(`src/registry.js:254-257`).
 
 ---
 
@@ -73,7 +76,7 @@ the plugin and opencode alike see nothing at all between a tool call's announcem
 `message()` writes the text into the subagent's session through `promptSession(..., { noReply: true })`.
 opencode's own runner picks it up at the subagent's next step.
 
-- Cost: one new argument on `promptSession` (`src/client.js:325`), one tool, the bookkeeping fields.
+- Cost: one new argument on `promptSession` (`src/client.js:367-370`), one tool, the bookkeeping fields.
 - Delivery: guaranteed as long as the loop is still running — and *because* appending a user message
   keeps the loop from exiting, a steering message that lands while the subagent is writing its final
   reply **forces one more step** rather than being lost. That is the strongest guarantee available.
@@ -82,20 +85,21 @@ opencode's own runner picks it up at the subagent's next step.
 - Forecloses: nothing. `noReply` starts no turn, so no path can be tricked into a second run on a
   finished subagent.
 - Demands of the builder: one race to close — a message must not be sent to an entry the idle path has
-  already claimed (`e.dispatched`, `src/hooks.js:1589`). The read-and-decide goes under
+  already claimed (`e.dispatched`, `src/hooks.js:2020`). The read-and-decide goes under
   `registryMutex.runExclusive`, exactly as the wake's critical section does.
 
 ### Option B — in-process injection through `experimental.chat.messages.transform`
 
 The plugin already carries per-turn text into a running session this way: the abort notice, the
-active-subagent snapshot and the over-budget STOP ride on the last user message as a synthetic part
-(`createTransformMessages`, `src/hooks.js:685-732`; wired at `src/index.js:228-243`), and that hook
+active-subagent snapshot and the over-budget STOP ride as a synthetic part on the primary's last user
+message, and for a subagent in a carrier message appended at the end of the array
+(`createTransformMessages`, `src/hooks.js:886-957`; wired at `src/index.js:281-298`), and that hook
 fires before every LLM request, tool-loop steps included — which is why `entry.stopInjections` can
-count turns inside one subagent's single user turn (`src/hooks.js:924-931`).
+count turns inside one subagent's single user turn (`src/hooks.js:1244-1249`).
 
 - Cost: zero I/O, cannot fail, needs no server route.
-- But: the part is pushed into the per-request copy only — *"the push is in memory only and nothing is
-  persisted to the session"* (`src/hooks.js:678-680`) — so the user never sees the message anywhere,
+- But: the part is pushed into the per-request copy only — *"both the push and the appended carrier are
+  in memory only and nothing is persisted to the session"* (`src/hooks.js:880-882`) — so the user never sees the message anywhere,
   and it can only be read on a request the subagent was going to make anyway. A subagent that has just
   emitted its final text makes no further request, and the steering is silently lost.
 - Verdict: rejected as the delivery route, for the visibility gap and the lost-at-the-end case. It
@@ -131,13 +135,13 @@ see it, and it cannot start a second turn.
 ### 3.1 Downward: `message(subagent, text)`
 
 1. The primary calls `message("coder#1", "drop the SQLite path, use the HTTP API")`.
-2. `resolve(ref)` (`src/registry.js:221`) maps handle or sessionID to the entry. The ownership check is
+2. `resolve(ref)` (`src/registry.js:241`) maps handle or sessionID to the entry. The ownership check is
    the abort handler's, in rule verbatim: `if (!entry || entry.parentID !== toolCtx.sessionID) return
-   unknown(args.subagent)` (`src/tools.js:1298-1307`) — a foreign handle reads as unknown, so ownership
+   unknown(args.subagent)` (`src/tools.js:1317-1324`) — a foreign handle reads as unknown, so ownership
    is not leaked.
 3. Under `registryMutex.runExclusive`: the entry must be `LIFECYCLE_RUNNING`, not aborted, not
    `timedOut`, not `dispatched` (the fields the wake's own critical section tests,
-   `src/hooks.js:1560-1562`). Failing that, the subagent is finished or on its way out and the tool
+   `src/hooks.js:1967`). Failing that, the subagent is finished or on its way out and the tool
    refuses with the path forward (`spawn`, or `reuse` where retention is on).
 4. If the entry holds an **open question** (`entry.pendingAsk`), the text is that question's ANSWER:
    the ask waiter is settled and the text becomes the return value of the subagent's blocked `ask`
@@ -164,9 +168,9 @@ Fold it into the task you are already on, and say in your final reply what you d
 1. The subagent calls `ask("the repo has two lockfiles — which one is authoritative?")`.
 2. The handler registers an **ask waiter** (a promise in `src/agentmsg.js`, modelled on
    `registerChildWaiter`, `src/childwait.js:153`), stamps `entry.pendingAsk`, and posts the question to
-   the caller with `postParentNotice(client, parentID, askNotice(...))` (`src/teardown.js:169`) — the
+   the caller with `postParentNotice(client, parentID, askNotice(...))` (`src/teardown.js:177`) — the
    same routed path the completion notice uses, so a question survives an orchestrator handoff
-   (buffered by the drain, redirected to the successor, `routeParentNotice`, `src/registry.js:1220`).
+   (buffered by the drain, redirected to the successor, `routeParentNotice`, `src/registry.js:1399`).
 3. The tool call **blocks** on the waiter.
 4. It settles when the caller answers with `message()`, or when the wait window expires.
 5. The tool result is either the answer, or — on expiry — *"No answer came within 5m. Go on with the
@@ -183,7 +187,7 @@ subagent** is refused at the tool (next section).
 Four rules, each closing one way this could hang:
 
 1. **`ask` is refused to a nested subagent.** A nested caller is blocked inside its own `spawn` tool
-   call (`src/tools.js:1660-1690`) and cannot run a tool round, so it could never answer — a true
+   call (`src/tools.js:898`) and cannot run a tool round, so it could never answer — a true
    deadlock. The handler refuses when `entryForSession(entry.parentID)` exists, with: *"your caller is
    itself a subagent and is blocked waiting for you; it cannot answer. Decide with what you have, or
    finish with `Blocked:`."* Nested delegation stays one-shot in both directions.
@@ -191,12 +195,12 @@ Four rules, each closing one way this could hang:
    is delivered and the tool returns at once, and any answer arrives later as a queued message.
 3. **The wait never outlives the watchdog window.** While `ask` is in flight the entry carries a tool
    call — `beginToolCall` runs for every tool of a tracked subagent, before any deny
-   (`src/hooks.js:2246-2252`) — so the entry is measured against `maxSubagentToolCallMs` counted from
-   that call's start (`watchdogLimit`, `src/watchdog.js:320-335`). The effective wait is therefore
+   (`src/hooks.js:2770-2774`) — so the entry is measured against `maxSubagentToolCallMs` counted from
+   that call's start (`watchdogLimit`, `src/watchdog.js:382-413`). The effective wait is therefore
    clamped to `min(answerWaitMs, maxSubagentToolCallMs - 60000)` where that window is finite, and left
    unclamped where it is `0` (the window is switched off). At the defaults 300 s < 600 s and the clamp
    is inert. **No new watchdog exemption is introduced**: an exemption needs its own lifting condition
-   and its own bound (compare `isWaitingOnWatchdoggedChild`, `src/watchdog.js:272`), a clamp needs
+   and its own bound (compare `isWaitingOnWatchdoggedChild`, `src/watchdog.js:297`), a clamp needs
    neither.
 4. **Nothing polls.** The subagent blocks on a promise — zero tokens, zero LLM calls. The primary is
    woken by a notice. No loop anywhere.
@@ -208,9 +212,9 @@ Four rules, each closing one way this could hang:
 ### `src/client.js` — one argument
 
 `promptSession(client, { sessionID, agent, prompt, hideable = false, noReply = false })`
-(`src/client.js:325`): `noReply` is passed straight into the request body. Its doc-comment gains the
+(`src/client.js:367-370`): `noReply` is passed straight into the request body. Its doc-comment gains the
 one sentence that matters — with `noReply` the call starts no turn, so the non-idempotency warning that
-governs the retry policy (`src/client.js:309-323`) does not apply to it; a duplicate delivery costs a
+governs the retry policy (`src/client.js:342-351`) does not apply to it; a duplicate delivery costs a
 repeated paragraph, not a second run. The retry policy for a `noReply` send may therefore match
 `postNotice`'s (both failure kinds), and the doc says so.
 
@@ -225,7 +229,7 @@ Keyed by the asking subagent's session id, for the reason `pendingChildResults` 
 (`src/childwait.js:14-24`): every path that ends a subagent has that id in hand. `resetState()` settles
 leftovers exactly as it does for child waiters.
 
-### `src/registry.js` — five fields on the entry (`createEntry`, `src/registry.js:1796`)
+### `src/registry.js` — five fields on the entry (`createEntry`, `src/registry.js:2153`)
 
 | field | meaning |
 |---|---|
@@ -241,7 +245,7 @@ shape: `noteMessageIn(entry, text)`, `markMessagesSeen(entry)`, `openAsk(entry, 
 inside `registryMutex.runExclusive`.
 
 `markMessagesSeen` is called from the one hook that fires per LLM request,
-`createTransformMessages` (`src/hooks.js:685`): the subagent making a request after the message was
+`createTransformMessages` (`src/hooks.js:886`): the subagent making a request after the message was
 queued is the observation that it has been read. That is bookkeeping only — the transform injects
 nothing for this feature.
 
@@ -252,8 +256,8 @@ nothing for this feature.
 `settle` held on the record and the `clearTimeout` inside it (`src/childwait.js:182-198`).
 
 Every ending path settles the ask, so a blocked `ask` can never outlive its session: `onSessionIdle`
-(`src/hooks.js:1540`), `timeoutSubagent` (`src/watchdog.js:346`), `abortHandler`
-(`src/tools.js:1296`), `teardownSubagent` and `resetState` — the same set that settles child waiters
+(`src/hooks.js:1949`), `timeoutSubagent` (`src/watchdog.js:424`), `abortHandler`
+(`src/tools.js:1314`), `teardownSubagent` and `resetState` — the same set that settles child waiters
 today.
 
 ### `src/settings.js` — three new scalars
@@ -275,9 +279,9 @@ mode), so switching it needs no opencode restart and the tools simply refuse whi
 
 ## 5. Tool surface
 
-Both tools are registered in the non-solo arm of the returned map (`src/tools.js:1523-1603`), beside
+Both tools are registered in the non-solo arm of the returned map (`src/tools.js:1621-1750`), beside
 `spawn` / `abort` / `list` / `reuse`, and both handlers are wrapped in `guard(name, handler)`
-(`src/tools.js:322`).
+(`src/tools.js:325`).
 
 ### `message` — the primary calls it
 
@@ -320,22 +324,22 @@ time"*; over `maxMessageTokens`; `midRunMessaging` off.
 
 ### How the two sit beside the existing surface and the denial list
 
-- `PRIMARY_TOOLS` (`src/hooks.js:153-161`) gains `"message"` and nothing else. `ask` stays out, so a
+- `PRIMARY_TOOLS` (`src/hooks.js:173-191`) gains `"message"` and nothing else. `ask` stays out, so a
   primary calling it is refused by the orchestrator-pattern allowlist with its existing text, which
-  already names what is available through `availablePrimaryTools()` (`src/hooks.js:224`).
-- `SUBAGENT_NO_DELEGATION` (`src/agents.js:189-191`) becomes
+  already names what is available through `availablePrimaryTools()` (`src/hooks.js:290-295`).
+- `SUBAGENT_NO_DELEGATION` (`src/agents.js:199-201`) becomes
   `{ task: "deny", abort: "deny", list: "deny", message: "deny" }` — a subagent may not steer another
   subagent, and its own nested child is one-shot by construction. `ask` is deliberately denied nowhere:
   every subagent role may ask, the `NO_SPAWN` roles included.
-- The orchestrator's map (`src/agents.js:346-357`) gains `ask: "deny"`, so the tool is stripped from
+- The orchestrator's map (`src/agents.js:360-372`) gains `ask: "deny"`, so the tool is stripped from
   the primary's schema rather than only thrown at runtime — the reasoning of the comment at
-  `src/agents.js:186-188`: *"Denying at the schema level is the primary defense: a tool that stays in
+  `src/agents.js:188-189`: *"Denying at the schema level is the primary defense: a tool that stays in
   the schema but gets thrown by the guard drives small models into a denial loop."*
-- `SOLO_DENIED_TOOLS` (`src/hooks.js:199`) gains both names. In solo mode neither is registered (they
+- `SOLO_DENIED_TOOLS` (`src/hooks.js:266-272`) gains both names. In solo mode neither is registered (they
   live in the non-solo arm), and the denylist is what holds if one reappears by a route the tool map
   does not decide — the reason `spawn` / `reuse` / `abort` are listed there.
 - `list` gains two columns on a running row: `msgs:N` and `asking` where a question is open, so the
-  primary sees at a glance which subagent is waiting on it (`formatListRow`, `src/tools.js:1334`).
+  primary sees at a glance which subagent is waiting on it (`formatListRow`, `src/tools.js:358-365`).
 
 ---
 
@@ -344,7 +348,7 @@ time"*; over `maxMessageTokens`; `midRunMessaging` off.
 The unconditional one-shot claim is replaced everywhere by a **two-part statement**: one reply, and
 reachable while it runs.
 
-**`ORCHESTRATION_GUIDE` (`src/prompts.js:26-50`)** — the tool list becomes:
+**`ORCHESTRATION_GUIDE` (`src/prompts.js:31-58`)** — the tool list becomes:
 
 ```
 - spawn(agent, prompt) — start a subagent non-blocking. It answers ONCE and is then destroyed, but it
@@ -365,7 +369,7 @@ unanswered question expires after a few minutes and the subagent carries on with
 not report it to the user as a result, and spawn nothing for it.
 ```
 
-**`SUBAGENT_GUIDE_CORE` (`src/prompts.js:84-91`)** — the first line becomes:
+**`SUBAGENT_GUIDE_CORE` (`src/prompts.js:100-108`)** — the first line becomes:
 
 ```
 You reply ONCE — do one focused task, then reply and return. While you work you are not out of
@@ -383,29 +387,29 @@ cannot carry on at all, where the answer would change the task itself, or where 
 no answer came. Never ask twice about the same thing, and never use `ask` to deliver findings.
 ```
 
-**Tool descriptions** — `spawn` (`src/tools.js:1530-1538`) drops *"One-shot: a subagent replies once
+**Tool descriptions** — `spawn` (`src/tools.js:1626-1635`) drops *"One-shot: a subagent replies once
 and is destroyed."* for *"It answers once and is then destroyed — but while it runs you can reach it
-with message(subagent, text), and it can ask you back."*; `list` (`src/tools.js:1558-1566`) drops
+with message(subagent, text), and it can ask you back."*; `list` (`src/tools.js:1702-1713`) drops
 *"Finished ones are gone (one-shot)"* for *"Finished ones are gone; their result already arrived in the
 wake notice. A row marked `asking` is waiting for your answer — reply with message()."*
 
-**Unchanged on purpose**: the two delegation blocks (`src/prompts.js:122-123,144-145`) keep *"There is
+**Unchanged on purpose**: the two delegation blocks (`src/prompts.js:138,160`) keep *"There is
 no wake and no second chance to ask — one answer, then that subagent is gone."* That sentence is about
 the child a *subagent* spawns, and it stays literally true (§3.3 rule 1).
 
-**Contract bookkeeping**: the `blocked-contract` element (`CONTRACT_ELEMENTS`, `src/prompts.js:216`)
+**Contract bookkeeping**: the `blocked-contract` element (`CONTRACT_ELEMENTS`, `src/prompts.js:237-239`)
 selects `` /`Blocked:`/ `` in blocks whose text changes here, so `test/fixtures/prompt-contract.json` is
-re-pinned with `scripts/pin-prompt-contract.js`, and `PROMPT_CONTRACT` (`src/prompts.js:196`) is bumped
+re-pinned with `scripts/pin-prompt-contract.js`, and `PROMPT_CONTRACT` (`src/prompts.js:219`) is bumped
 1 → 2: a prompt file written before this change describes a subagent that cannot be reached, and a user
 file carrying no `{{guide}}` placeholder would go on saying so.
 
 **Retention's default.** The one-shot claim can only stop being unconditional if the whole ladder is
 coherent: reachable while it runs, reachable for a follow-up just after it has answered. Decided:
-`DEFAULT_MAX_RETAINED_SUBAGENTS` goes `0 → 2` (`src/settings.js:153`), so a shipped install offers
+`DEFAULT_MAX_RETAINED_SUBAGENTS` goes `0 → 2` (`src/settings.js:229`), so a shipped install offers
 `message` during the run and `reuse` after it, and the `ORCHESTRATION_REUSE_GUIDE` exception
-(`src/prompts.js:63-70`) is actually injected instead of standing as dead text behind a flag the model
+(`src/prompts.js:72-79`) is actually injected instead of standing as dead text behind a flag the model
 never reads. Two held sessions are bounded by the TTL reap and the capacity eviction that already exist
-(`src/watchdog.js:193-215`). Rollback is one key: `maxRetainedSubagents: 0`. Where the user declines
+(`src/watchdog.js:123`, `:132-136`). Rollback is one key: `maxRetainedSubagents: 0`. Where the user declines
 (§10), the messaging wording stands on its own — the two features are independent in code and in text.
 
 ---
@@ -416,20 +420,20 @@ never reads. Two held sessions are bounded by the TTL reap and the capacity evic
   transcript like `spawn` does. Nothing synthetic.
 - The message itself is a **persisted user message in the subagent's session**, so the user reading
   that child session sees the steering in place, in order, between the subagent's own steps. It is
-  marked with `intercomTextPart` (`metadata: { agentIntercom: true }`, `src/pluginmsg.js:41`) so the
+  marked with `intercomTextPart` (`metadata: { agentIntercom: true }`, `src/pluginmsg.js:72-77`) so the
   handoff's goal scan skips it, and it is sent **not hideable** — the same decision the spawn task
   prompt takes, *"it lands in the SUBAGENT's session and is that session's entire instruction"*
-  (`src/client.js:317-322`). `showAgentcom` does not touch it.
+  (`src/client.js:332-334`). `showAgentcom` does not touch it.
 - The subagent's `ask(...)` call and the answer it returns are a real tool part in the subagent's
   session, visible the same way.
 - The question notice posted to the primary is an intercom notice and follows `showAgentcom`: hidden
-  (`synthetic: true`, `src/pluginmsg.js:61`) while the switch is off, exactly as the completion notice
+  (`synthetic: true`, `src/pluginmsg.js:76`) while the switch is off, exactly as the completion notice
   is today. That is acceptable **because the primary's answer is a visible tool call**: the user sees
   `message("coder#1", …)` in the transcript even where the notice that prompted it is suppressed, and
   the exchange is reported in full in the completion notice (next bullet).
 - The wake notice at the end of a run reports the traffic — `📨 exchange: 2 messages down, 1 question
   answered, 1 unanswered` — from `messagesIn` / `asksAnswered` / `asksUnanswered`, appended in
-  `completionNotice` (`src/notices.js:108`) beside the nested-runs line. A message queued but never
+  `completionNotice` (`src/notices.js:238`) beside the nested-runs line. A message queued but never
   read (`seen` still false) is named explicitly: *"the message you sent at 14:02 was never read — it
   was still inside a tool call when it finished."* A steering attempt cannot be silently lost.
 - TUI: the subagent row gains an `asking` marker (`tui/src/subagent-store.ts`, rendered in
@@ -440,11 +444,11 @@ never reads. Two held sessions are bounded by the TTL reap and the capacity evic
 
 ## 8. Interaction with the rest of the plugin
 
-**Watchdog.** §3.3 rule 3: the clamp, not an exemption. `timeoutNotice` (`src/notices.js:274`) gains a
+**Watchdog.** §3.3 rule 3: the clamp, not an exemption. `timeoutNotice` (`src/notices.js:430`) gains a
 sentence where the entry had a question open at the reap, so the primary learns that the subagent it
 never answered was then cut off.
 
-**Result-token ceiling.** Untouched. `capReplyForAgent` (`src/resultfile.js:153`) governs the final
+**Result-token ceiling.** Untouched. `capReplyForAgent` (`src/resultfile.js:240`) governs the final
 reply and nothing here changes that. Mid-run traffic has its own, much smaller ceiling
 (`maxMessageTokens`, 1000) in both directions, with no overflow file: a question or a steering note
 that does not fit in 1000 tokens is the wrong instrument, and the refusal says so. The prompt says it
@@ -453,24 +457,24 @@ too (*"a QUESTION, not a report"*), so `ask` cannot be used to route findings pa
 **Solo mode.** No second agent exists, so neither tool is registered (both sit in the non-solo arm of
 `createTools`) and both names go into `SOLO_DENIED_TOOLS`. The blocks that name them are the primary's
 orchestration guide, which solo mode already suppresses entirely (`guideBlocks`,
-`src/prompts.js:374-377`), and the subagent guide, which is never assembled in solo mode because
+`src/prompts.js:504-513`), and the subagent guide, which is never assembled in solo mode because
 nothing spawns.
 
 **Endless mode / handoff.** The question notice goes through `postParentNotice`, so it is buffered
 during a handoff and redirected after one, like every other parent notice; `reparentSubagents`
-(`src/registry.js:1035`) has already moved `entry.parentID` to the successor, so the successor's
+(`src/registry.js:1214`) has already moved `entry.parentID` to the successor, so the successor's
 `message()` passes the ownership check. A subagent blocked in `ask` is a **running** entry, so it holds
-its slot and `isQuiesced` (`src/registry.js:1743`) keeps a cycle from firing its wind-down while a
+its slot and `isQuiesced` (`src/registry.js:2106`) keeps a cycle from firing its wind-down while a
 question is open — which is right: the cycle must not replace the orchestrator that owes an answer.
 
 **Abort.** Unchanged and still user-only. `abortHandler` settles the ask waiter with `aborted` beside
-the child waiter it already settles (`src/tools.js:1317-1322`).
+the child waiter it already settles (`src/tools.js:1340-1353`).
 
 **The end-of-run race.** A queued message extends the subagent's loop (§1.2), so a message accepted by
 the tool is a message the subagent will take a step on. The one window to close is the other side: the
 idle event has fired and the wake's critical section has claimed the entry (`e.dispatched`) while the
 `message` handler is deciding. Closed by taking that decision under the same mutex and refusing on the
-same fields the critical section tests (`src/hooks.js:1560-1562`).
+same fields the critical section tests (`src/hooks.js:1967`).
 
 ---
 
@@ -480,8 +484,8 @@ same fields the critical section tests (`src/hooks.js:1560-1562`).
 |---|---|---|---|
 | A1 | A user message appended to a busy session is picked up at the next step of the running loop, without a second turn | The runner's `Running` branch returns the existing deferred, and the exit test `j.parentID===X.id` fails for a newer user message (§1.2, `work/opencode-busy-prompt-semantics.md`) | A subagent that reports seeing a steering message only in a *later* session, or two assistant turns for one subagent |
 | A2 | `noReply: true` persists the message and starts no loop | `if(t.noReply===!0)return U;` in the server; the flag is in the SDK types (`types.gen.d.ts:2252,:2337`) | A subagent session that goes busy on a `noReply` send into an idle session |
-| A3 | A plugin tool call of a subagent passes `tool.execute.before`, so a blocked `ask` sits on the wide watchdog window | `beginToolCall` is unconditional for a tracked entry and runs before every deny (`src/hooks.js:2246-2252`) | A subagent reaped at `maxSubagentAgeMs` while inside `ask` |
-| A4 | A tool call may block for minutes without an opencode-side timeout | The nested spawn already blocks its caller for the whole child run (`src/tools.js:1660-1690`) and is in production | An opencode error on a long-blocking tool call |
+| A3 | A plugin tool call of a subagent passes `tool.execute.before`, so a blocked `ask` sits on the wide watchdog window | `beginToolCall` is unconditional for a tracked entry and runs before every deny (`src/hooks.js:2770-2774`) | A subagent reaped at `maxSubagentAgeMs` while inside `ask` |
+| A4 | A tool call may block for minutes without an opencode-side timeout | The nested spawn already blocks its caller for the whole child run (`src/tools.js:898`) and is in production | An opencode error on a long-blocking tool call |
 | A5 | A model told it can be messaged acts on the message | It arrives as a user message, the strongest position in the context; the framing block is the same style as the STOP injection, which demonstrably changes behaviour | An e2e run in which the steering is visibly ignored |
 | A6 | opencode's own behaviour here is stable across versions | Read off the installed 1.18.30 binary, not from documentation | An opencode upgrade after which the e2e driver of §12 fails |
 
@@ -491,7 +495,7 @@ same fields the critical section tests (`src/hooks.js:1560-1562`).
 
 **One**, and it is the reserved kind — a change to a file that does not belong to this project: the
 live global config `~/.config/opencode/agent-intercom.json` carries `"maxRetainedSubagents": 0`
-explicitly, and a file value overrides both env and the shipped default (`src/settings.js:462-465`).
+explicitly, and a file value overrides both env and the shipped default (`src/settings.js:634-636`).
 Flipping `DEFAULT_MAX_RETAINED_SUBAGENTS` to 2 therefore changes nothing on this machine until that key
 is edited or removed there. The code change is decided; the edit to that file is not taken without the
 user's word. Everything else in this concept is decided and needs no further decision.

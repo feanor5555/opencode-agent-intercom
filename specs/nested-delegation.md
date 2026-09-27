@@ -33,14 +33,14 @@ Boundary: the plugin's server side (`src/`). The TUI is out of scope.
 ## 2. Who may delegate, and to whom
 
 **One gate, called from both sides.** `resolveSpawnPermission(client, role)`
-(`src/config.js:215`) is the sole authority: the spawn gate binds it as its
+(`src/config.js:216`) is the sole authority: the spawn gate binds it as its
 `checkSpawnPermission` method, and the prompt side calls it directly. Its rungs:
 the live config's `agent.<role>.permission.spawn`, then this plugin's own role
 definition with opencode's semantics (an explicit `deny` denies, an absent key
 allows), then deny. A role neither side defines is denied; an unreadable config
 falls through to the plugin's own map.
 
-`delegatesNested(client, role)` (`src/hooks.js:1497`) asks whether to give a role
+`delegatesNested(client, role)` (`src/hooks.js:1534`) asks whether to give a role
 the delegation block at all. It returns true only when the role is a subagent
 role, `maxNestedSpawns > 0`, its `NESTED_SPAWN_TARGETS` entry is non-empty, and
 `resolveSpawnPermission` returns null — so the prompt can never promise what
@@ -111,7 +111,7 @@ its task. The nested-specific sources are the three `nestedSpawnRefusal` checks 
 role may not delegate; the named target is not one the caller's own set contains (a role
 the table does not know answers the empty set, so every target is refused); the prompt
 carries a `T<n>:` prefix, which is refused because the child's `DONE: T<n>` would tick a
-TODO entry the orchestrator is still tracking against the caller — plus the per-run quota
+TODO entry the orchestrator is still tracking against the caller — plus the per-entry quota
 and the endless-mode wind-down gate. The gates every spawn passes apply too: the agent-type gate,
 the task-permission gate and the package gate. Refusals are returned and never thrown: a
 throw is what small models retry into a loop. Each names what IS available and tells the
@@ -166,10 +166,11 @@ on the caller having read this document.
 
 - `maxSubagents` (default 1) bounds what one PRIMARY may have running, globally across
   every primary in the process. It does not gate a nested spawn at all:
-  `spawnCapDecision` (`src/registry.js:734-742`) refuses only when the caller is not
+  `spawnCapDecision` (`src/registry.js:930-938`) refuses only when the caller is not
   nested, because a nested caller already holds the slot it would be told to wait for.
-- `maxNestedSpawns` (default 2) bounds what one SUBAGENT RUN may start. Per run, never
-  reset, and read off the caller's own registry entry.
+- `maxNestedSpawns` (default 2) bounds what one SUBAGENT may start, summed over every run
+  of its session. Per entry, cumulative across reuse — an accepted reuse leaves the count
+  standing — and read off the caller's own registry entry.
 - Together they admit three concurrent live opencode sessions per orchestrator slot at
   the shipped defaults: the primary's subagent, its `researcher`, and that researcher's
   `grounder`. The chain is serial and two levels deep, so three is the worst case. The
@@ -181,8 +182,9 @@ spawn calls in the same turn cannot both pass on the same figure, and a model lo
 failing spawns is still bounded. `nestedRuns` and `nestedTokens` count children whose
 ending actually came back, plus what those children burned inside their own sessions —
 that is the bill, and a spawn that never got as far as being prompted must not appear in
-it. Both live on the entry, which lives exactly as long as the one-shot run, so nothing
-ever has to reset them.
+it. All three live on the entry, and an accepted reuse hands them on untouched
+(`reviveRetainedEntryLocked`) — only a fresh subagent starts them at 0, so nothing ever
+has to reset them.
 
 **`maxNestedSpawns = 0` is the escape hatch.** Every nested spawn is refused before a
 session exists, and the refusal says the feature is switched off rather than reporting a
@@ -299,7 +301,7 @@ that no sweep has touched.
 
 The number alone cannot separate "stuck" from "slow", and the design does not ask it to.
 The wide window is measured from the in-flight call's own start and is not renewed by
-events arriving during it (`watchdogLimit`, `src/watchdog.js:320-335`), so a single call
+events arriving during it (`watchdogLimit`, `src/watchdog.js:382-413`), so a single call
 is bounded — but each new call starts a new window, and a healthy child making
 consecutive long calls outlives any fixed multiple. So when the timer fires it ASKS
 instead of deciding: is the child still a tracked registry entry? If it is, the watchdog

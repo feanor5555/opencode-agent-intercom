@@ -53,14 +53,19 @@ object, which it mutates in place:
 
 So the plugin's write is the **last** word, not the first. What discards the
 plugin's fields is the plugin's own merge, which puts the project's entry on top
-per top-level key:
+per top-level key, except `permission`, which it merges per tool key:
 
-    src/agents.js:325
-      config.agent[name] = { ...base, ...config.agent[name] }
-    src/agents.js:322-324 (the comment that states the intent)
+    src/agents.js:765-769
+      const merged = { ...base, ...projectEntry }
+      const projectPermission = projectEntry ? permissionMap(projectEntry.permission) : null
+      if (base.permission || projectPermission) {
+        merged.permission = { ...base.permission, ...projectPermission }
+      }
+    src/agents.js:761-764 (the comment that states the intent)
       // Plugin role as base, overlaid by whatever fields the project already set
-      // (user wins per top-level key). Idempotent: re-running just re-applies the
-      // same merge.
+      // (user wins per top-level key), except `permission`, where the plugin's
+      // denies are the base and each tool key the project names wins over them.
+      // Idempotent: re-running just re-applies the same merge.
 
 That the plugin's writes are effective is directly observable in the diagnosis:
 the eight roles the project defines no markdown for reach the model with the
@@ -104,10 +109,10 @@ A displaced orchestrator is told it may `read`/`edit`/`bash`, and then every
 such call is refused anyway, because the primary lock does not consult the
 permission map at all:
 
-    src/hooks.js:1299
+    src/hooks.js:2981
       if (!PRIMARY_TOOLS.has(input.tool)) {
-    src/hooks.js:86-90
-      const PRIMARY_TOOLS = new Set([ "spawn", "abort", "list", ])
+    src/hooks.js:173-191
+      const PRIMARY_TOOLS = new Set([ "spawn", "abort", "list", "message", "reuse", ])
 
 So the damage of problem A on the orchestrator is not a breach of enforcement —
 it is a **contradiction** handed to the model: a prompt that promises tools and a
@@ -127,21 +132,23 @@ hole opens even when the file's author wrote no `permission:` line at all.
 
 ### 1.4 The primary is identified by a header the displacement removes
 
-    src/hooks.js:184
-      const agentName = isSubagent ? entry.agent : detectAgentFromSystem(output) ?? "orchestrator"
-    src/hooks.js:499-506
+    src/hooks.js:443
+      const agentName = isSubagent ? entry.agent : resolvePrimaryAgent(sessionID, output, primaryScope)
+    src/hooks.js:1058-1064
       function detectAgentFromSystem(output) {
         ...
         const m = /^#\s*Role:\s*([A-Za-z]+)/m.exec(head)
 
 Live-observed as returning `null` under displacement
-(`work/diagnosis-orchestrator-override.md:62` `detected = null`), masked by the
-literal fallback. The name is not cosmetic: it selects the custom prompt file,
+(`work/diagnosis-orchestrator-override.md:62` `detected = null`); in
+`resolvePrimaryAgent` (`src/hooks.js:1021-1027`) it is the second rung, behind
+the name recorded at `chat.message` and ahead of `defaultAgentName`. The name is
+not cosmetic: it selects the custom prompt file,
 
-    src/hooks.js:309
-      const customTemplate = sessionDir ? loadCustomPrompt(sessionDir, agentName) : null
+    src/hooks.js:729
+      const customTemplate = scopeDir ? loadCustomPrompt(scopeDir, agentName) : null
 
-so a project whose primary is called `build` loads `orchestrator.md` today.
+so a primary resolved as `build` loads `build.md`.
 
 opencode does hand the plugin the resolved agent name — just not on this hook.
 The system transform gets two fields only:
@@ -168,44 +175,43 @@ carries it:
 `const agentName = input.agent` then `agents.get(agentName)`), and this plugin
 already reads it, with the message's own field as fallback:
 
-    src/llmmodel.js:101
-      const agent = nonEmptyString(input?.agent) ? input.agent : message.agent
+    src/llmmodel.js:142-144
+      if (nonEmptyString(input?.agent)) return input.agent
+      const fromMessage = output?.message?.agent
+      return nonEmptyString(fromMessage) ? fromMessage : null
 
 ### 1.5 The prompt file freezes the contract because the contract is inlined
 
-`renderDefaultsFile` bakes the guide text into the file as literal Markdown:
+`renderDefaultsFile` writes the guide as a placeholder, which `transformSystem`
+fills with the current guide blocks for the role (`src/hooks.js:652-662`):
 
-    src/promptsfile.js:186-188
-      const guide = stripVisualSeparators(
-        isOrch ? ORCHESTRATION_GUIDE : SUBAGENT_GUIDE_CORE,
-      ).trim()
-    src/promptsfile.js:213
-      parts.push("\n", guide, "\n")
+    src/promptsfile.js:407
+      parts.push("\n{{guide}}\n")
 
-and the loaded file then replaces the assembled prompt entirely
-(`src/hooks.js:310-322`, `output.system.push(result); return`). Every later
-change to `SUBAGENT_GUIDE_CORE` or `ORCHESTRATION_GUIDE` — the `Blocked:`
-contract is the current example — stops at that file. Note a second instance
-already on disk in every such file: `SUBAGENT_DELEGATION_GUIDE` and
-`SUBAGENT_NO_SPAWN_GUIDE` are injected by the auto path
-(`src/hooks.js:334-337`) but were never rendered into the template at all, so a
-delegating role driven from a prompt file is told nothing about spawning.
+A file that carries the guide text inline instead holds the wording it was
+written with, and the loaded file replaces the assembled prompt entirely
+(`src/hooks.js:741-747`, `output.system.push(result + overrideNotice); return`).
+Every later change to `SUBAGENT_GUIDE_CORE` or `ORCHESTRATION_GUIDE` — the
+`Blocked:` contract is the current example — stops at such a file. So do
+`SUBAGENT_DELEGATION_GUIDE` and `SUBAGENT_NO_SPAWN_GUIDE`, which are part of the
+same `guideBlocks` value (`src/prompts.js:514-526`): a file with the placeholder
+receives them, a file with inline guide text does not.
 
 ### 1.6 What surfaces exist for telling the user
 
-- `showToast` — `src/client.js:393-395`, `client.tui.showToast(...)`, fails soft.
-  Already used for handoff scheduling (`src/hooks.js:250`, `src/hooks.js:272`).
+- `showToast` — `src/client.js:1372-1378`, `client.tui.showToast(...)`, fails soft.
+  Already used for handoff scheduling (`src/hooks.js:549`, `src/hooks.js:619`).
   Direct to the user, ephemeral, needs an attached TUI.
-- The per-turn message part — `src/hooks.js:437-448`, pushed with
+- The per-turn message part — `src/hooks.js:937-955`, pushed with
   `synthetic: true` onto a per-request copy that "opencode transforms and never
-  writes back" (`src/hooks.js:411-413`). Model-visible, **not** user-visible, and
+  writes back" (`src/hooks.js:880-882`). Model-visible, **not** user-visible, and
   it moves the trailing prefix, so it costs a cache breakpoint every turn.
-- The stable system prompt element `[0]` — `src/hooks.js:348-356`. Model-visible,
+- The stable system prompt element `[0]` — `src/hooks.js:766-775`. Model-visible,
   free as long as its text does not move within a session
-  (`src/hooks.js:169-171`: "Nothing in either element varies from turn to turn").
-- `postNotice` — `src/client.js:36-51`, posts a message and **wakes** the
+  (`src/hooks.js:386`: "Nothing in either element varies from turn to turn").
+- `postNotice` — `src/client.js:258`, posts a message and **wakes** the
   session. Wrong instrument here: it would start a turn.
-- The house pattern for "the model tells the user": `src/notices.js:213-222`,
+- The house pattern for "the model tells the user": `src/notices.js:607-616`,
   `denialLoopNotice`, which ends "Tell the user the subagent appears stuck".
 
 ---
@@ -241,7 +247,7 @@ API:
 
 Findings are keyed `kind + directory + agent` so a repeated detection
 cannot duplicate a line and findings from different projects stay independent;
-`installAgents` is documented idempotent (`src/agents.js:323`) and will
+`installAgents` is documented idempotent (`src/agents.js:764`) and will
 re-report the same collision on every re-run.
 
 ### 2.2 Detector A — collision at the config hook
@@ -265,8 +271,8 @@ Naming the file is a separate, best-effort step: probe
 and the same two under the opencode global config dir, take the first that
 exists, and report `file: null` when none does (which is the honest answer when
 the entry came from `opencode.json`). `installAgents` gains an optional second
-argument for the directory; `index.js` already holds it (`src/index.js:70`
-`const { client, directory, serverUrl } = ctx`). Every fs call wrapped, failure
+argument for the directory; `index.js` already holds it (`src/index.js:119`
+`const { client, directory, worktree, serverUrl } = ctx`). Every fs call wrapped, failure
 degrades to `file: null`.
 
 ### 2.3 Detector B — stale prompt file
@@ -295,11 +301,11 @@ is a single integer in `prompts.js`, bumped by hand whenever a contract element
 changes. A file whose stamp is below the current one is stale by stamp even if
 the probes happen to pass; a file with no stamp falls back to the probes. The
 stamp is inside the comment `stripFrontmatterComment` removes
-(`src/promptsfile.js:127-129`), so it never reaches the model.
+(`src/promptsfile.js:187-190`), so it never reaches the model.
 
 **When it runs.** Once per project directory, at the first primary
 `transformSystem` — which already awaits `getSessionDirectory` on that path
-(`src/hooks.js:194-196`) — scanning all nine names in one pass and memoising per
+(`src/hooks.js:420`) — scanning all nine names in one pass and memoising per
 directory. Cost: nine `stat`s and up to nine reads of ~4 KB, once per process.
 Scanning eagerly rather than lazily per agent is deliberate: it makes the finding
 set complete before the first block is rendered, so the block's text is stable
@@ -334,16 +340,16 @@ the author's.
 2. **Toast**, once per process, on the first primary transform after the
    findings are complete: `showToast(client, { title: "agent-intercom", message:
    "<N> role(s) overridden by project files — see the orchestrator's first
-   answer", variant: "warning" })`. Same call site pattern as `src/hooks.js:250`.
+   answer", variant: "warning" })`. Same call site pattern as `src/hooks.js:619`.
    Fails soft with no TUI attached.
 3. **A block in the primary's stable system prompt**, naming every finding and
    instructing the orchestrator to report it to the user in its next answer —
-   the `denialLoopNotice` pattern (`src/notices.js:219-221`). This is the outlet
+   the `denialLoopNotice` pattern (`src/notices.js:607-616`). This is the outlet
    that actually reaches a user with no TUI open and after the toast is gone.
 
 The block is appended to `guideParts` on the auto path (after `limits`,
-`src/hooks.js:343`) and appended to the substituted result on the custom-template
-path (`src/hooks.js:319-321`, after `applyCustomPrompt`) — the template owns the
+`src/hooks.js:764`) and appended to the substituted result on the custom-template
+path (`src/hooks.js:746`, after `applyCustomPrompt`) — the template owns the
 layout, but a warning that the template itself is stale cannot be inside it.
 Primary only; a subagent cannot reach the user, and its own findings are reported
 through the primary's block because the register is process-wide.
@@ -362,15 +368,15 @@ band and one narrow addition:
 - Never refuses to load, never throws from the `config` hook, never removes or
   rewrites a project's agent entry, never refuses a `spawn` because of a finding.
 - Unchanged hard enforcement, independent of any permission map: the primary tool
-  lock (`src/hooks.js:1299`), the unconditional `task` deny for subagents
+  lock (`src/hooks.js:2981`), the unconditional `task` deny for subagents
   (`src/hooks.js` guard), the spawn gate's `SPAWNABLE_ROLES`
-  (`src/agents.js:305-310`).
+  (`src/agents.js:499-503`).
 - The one addition is 2.4: the plugin's `deny` entries survive a project map that
   does not name them. That is the whole of the line moved, and it is documented
   in `README.md` as a behaviour change.
 
 The reason the line sits there: enforcement of the delegation pattern is stated
-as the plugin's purpose and its opt-out is removal (`src/index.js:36-38`
+as the plugin's purpose and its opt-out is removal (`src/index.js:25-26`
 "Enforcement is the plugin's core purpose — to opt out, remove the plugin"), so
 silently surrendering the deny map to a file that said nothing is out of
 character; but the prompt, the model and the description carry no enforcement and
@@ -384,14 +390,14 @@ chain, most authoritative first:
 1. `entry.agent` from the registry — subagents, unchanged.
 2. **`sessionAgent.get(sessionID)`** — a new `Map` in `src/state.js`, written by
    the `chat.message` hook from `input.agent ?? output.message.agent`, exactly the
-   read `src/llmmodel.js:101` already performs. That hook fires once per user turn
+   read `src/llmmodel.js:142-144` already performs. That hook fires once per user turn
    before the request loop (§1.4), so the name is in hand at the first transform
    of every turn, displacement or not.
 3. The `# Role:` header regex — still correct whenever the plugin's own prompt is
    intact, and the only source when a session's first request arrives by a path
    that skipped `chat.message`.
 4. `config.default_agent` as resolved at the `config` hook — captured in
-   `agents.js` where it is already written (`src/agents.js:326`) — instead of the
+   `agents.js` where it is already written (`src/agents.js:807`) — instead of the
    literal `"orchestrator"`.
 
 The map is bounded by pruning on `session.deleted` / on registry removal, or
@@ -400,7 +406,7 @@ map (`src/state.js`) sets the precedent for the second.
 
 Behaviour change to note: a primary named something else stops loading
 `orchestrator.md`. It keeps `ORCHESTRATION_GUIDE`, which the non-subagent branch
-injects without consulting the name (`src/hooks.js:341-345`).
+injects without consulting the name (`src/hooks.js:760-764`).
 
 ---
 
@@ -433,7 +439,7 @@ not change.
 | option | cost | forecloses | demands | verdict |
 |---|---|---|---|---|
 | Toast only | ephemeral; invisible in headless `opencode serve` and to a user who was not looking | nothing | one call | insufficient alone |
-| Per-turn message part (`transformMessages`) | a cache breakpoint **every turn** for a text that never changes; not user-visible (the array is never written back, `src/hooks.js:411-413`) | nothing | nothing | rejected as the primary channel |
+| Per-turn message part (`transformMessages`) | a cache breakpoint **every turn** for a text that never changes; not user-visible (the array is never written back, `src/hooks.js:880-882`) | nothing | nothing | rejected as the primary channel |
 | **Stable system-prompt block + toast + log** | at most one cache invalidation per process, removed by the eager scan | nothing | the block must be text that does not move within a session | **recommended** |
 | `postNotice` into the session | starts a turn the user did not ask for | nothing | nothing | rejected |
 | A row in the companion TUI panel | a second npm package, a new file contract between them, a coordinated release | nothing | out of this concept's boundary | deferred, see §6 |
@@ -474,7 +480,7 @@ not change.
    the assumption. *Falsified by:* two sessions with different `?directory=`
    values in one server showing each other's findings.
 5. **The user wants to be told, not to be stopped.** Nothing in the material
-   states it; it follows from §2.6's reading of `src/index.js:36-38` plus the
+   states it; it follows from §2.6's reading of `src/index.js:25-26` plus the
    fact that the override mechanism is a documented feature
    (`src/agents.js:10-12`). *Falsified by:* the user asking for a hard refusal on
    a role collision.
@@ -532,7 +538,7 @@ substitutes `guide` with exactly what the auto path would inject for that role
 (core + delegation-or-no-spawn + outline), so a fresh file cannot go stale.
 Tests: a freshly rendered file substitutes to the same text the auto path
 assembles; an old inlined file still works unchanged (`substitutePrompt` leaves
-unknown keys in place, `src/promptsfile.js:134-139`). *Depends on: step 5* — the
+unknown keys in place, `src/promptsfile.js:199-207`). *Depends on: step 5* — the
 stamp is defined there and the probes must already exist so the migration note
 can point at them.
 

@@ -18,13 +18,13 @@ until the whole run was killed.
 ## 1. What the code says today
 
 **The wide window is a ceiling over one CALL, and the sweep re-derives it from
-whatever call is in flight right now.** `src/watchdog.js:172`:
+whatever call is in flight right now.** `src/watchdog.js:195`:
 
 ```js
       const last = limit.since ?? entry.lastActivityAt ?? entry.spawnedAt
 ```
 
-and `since` comes from `watchdogLimit` (`src/watchdog.js:338-349`), which reads
+and `since` comes from `watchdogLimit` (`src/watchdog.js:394-403`), which reads
 the oldest call *currently* in flight:
 
 ```js
@@ -35,20 +35,20 @@ the oldest call *currently* in flight:
 ```
 
 The map that feeds it is emptied on every `tool.execute.after`
-(`recordToolCallFinished`, `src/hooks.js:2909-2916`) and refilled on the next
-`tool.execute.before` (`src/hooks.js:2634-2636`). So `since` moves forward with
+(`recordToolCallFinished`, `src/hooks.js:3046-3054`) and refilled on the next
+`tool.execute.before` (`src/hooks.js:2770-2774`). So `since` moves forward with
 every call the subagent starts. A subagent making back-to-back short calls
 therefore restarts its own ceiling at every call, and no finite
 `maxSubagentToolCallMs` ever expires against it.
 
 **The silence window cannot catch it either.** Two bumps make sure of that:
 every event for a tracked session bumps the stamp
-(`src/hooks.js:1719`, `if (e) e.lastActivityAt = Date.now()`), and the start of
-every tool call bumps it again (`src/hooks.js:2635`). A polling subagent is
+(`src/hooks.js:1814`, `if (e) e.lastActivityAt = Date.now()`), and the start of
+every tool call bumps it again (`src/hooks.js:2772`). A polling subagent is
 never silent for 90 s — it is emitting parts the whole time.
 
 **The doctrine the code states for itself is exactly what is broken.**
-`src/watchdog.js:318-320`:
+`src/watchdog.js:362-363`:
 
 ```
 // `since` is what makes the wide window a ceiling rather than a renewable
@@ -57,7 +57,7 @@ never silent for 90 s — it is emitting parts the whole time.
 
 It is a ceiling *within* one call and a renewable lease *across* calls. The
 comment's own reason for taking the oldest call rather than the newest
-(`src/registry.js:277-278`, "a ceiling counted from the newest call would be
+(`src/registry.js:284-286`, "a ceiling counted from the newest call would be
 pushed out by every further call the subagent starts, i.e. never fire") is the
 same failure one level up: the entry has no clock that a further call cannot
 push out.
@@ -80,7 +80,7 @@ process. The unboundedness is therefore not one entry's: it propagates to the
 parent's `spawn` tool call.
 
 **What the unbounded entry costs while it stands:** one of `maxSubagents`
-concurrency slots (`isActiveEntry`, `LIFECYCLE_RUNNING`, `src/registry.js:2084`),
+concurrency slots (`isActiveEntry`, `LIFECYCLE_RUNNING`, `src/registry.js:481-485`),
 the primary's quiesce in an endless cycle — unbounded there, because the wait
 re-arms its deadline at `now + endlessQuiesceTimeoutMs` on every poll that sees
 a subagent of the primary running and abandons only once none runs
@@ -89,21 +89,21 @@ a subagent of the primary running and abandons only once none runs
 **What the sweep already has to hang a third window on.** The descriptor
 discipline: `watchdogLimit` returns `{ ms, setting, kind, tool?, since? }` and
 the descriptor travels into the log, the wake notice and the nested outcome
-(`src/watchdog.js:326-329`, `timeoutSubagent` at `:370-497`). A third kind costs
+(`src/watchdog.js:370-373`, `timeoutSubagent` at `:424-561`). A third kind costs
 no new plumbing. The reap path already rescues what the run produced before
-deleting the session (`secureSubagentState`, `src/watchdog.js:447-455`).
+deleting the session (`secureSubagentState`, `src/watchdog.js:504`).
 
 **What a per-run stamp cannot be taken from.** `spawnedAt` is set once
-(`src/registry.js:2085`) and is deliberately not moved by a reuse
-(`src/registry.js:688`, "What deliberately does NOT move: `spawnedAt`, so the
+(`src/registry.js:2210`) and is deliberately not moved by a reuse
+(`src/registry.js:703`, "What deliberately does NOT move: `spawnedAt`, so the
 age column keeps telling the truth about how long the session has existed").
 
 **The runtime notice channel a gentler step would use.** `contextLimitNotice`
-(`src/hooks.js:1060`) is called per LLM turn from the message transform
-(`src/hooks.js:878`) and its block is appended as a carrier message at the end
-of the per-request array (`tailNoticeCarrier`, `src/hooks.js:797`, used at
-`:893`). Its three bands split at `CTX_NEAR_BUDGET = 0.7` and
-`CTX_STOP_RESERVE = 0.9` (`src/hooks.js:326`, `:337`). None of that text is in
+(`src/hooks.js:1110`) is called per LLM turn from the message transform
+(`src/hooks.js:923`) and its block is appended as a carrier message at the end
+of the per-request array (`tailNoticeCarrier`, `src/hooks.js:842`, used at
+`:943`). Its three bands split at `CTX_NEAR_BUDGET = 0.7` and
+`CTX_STOP_RESERVE = 0.9` (`src/hooks.js:338`, `:349`). None of that text is in
 the prompt contract fixture — `grep -c "PLAN YOUR HANDOVER\|WRAP UP NOW"
 test/fixtures/prompt-contract.json` answers `0` — so a new runtime band needs no
 `npm run pin:contract`.
@@ -112,18 +112,18 @@ test/fixtures/prompt-contract.json` answers `0` — so a new runtime band needs 
 (`src/settings.js:152`), `DEFAULT_MAX_SUBAGENT_TOOL_CALL_MS = 660000`
 (`src/settings.js:167`, chosen as opencode's 600 000 ms bash ceiling plus a
 minute), `CHILD_WAITER_TIMEOUT_FACTOR = 4` (`src/childwait.js:97`),
-`ORPHAN_SWEEP_WATCHDOG_FACTOR = 8` (`src/teardown.js:798`),
+`ORPHAN_SWEEP_WATCHDOG_FACTOR = 8` (`src/teardown.js:806`),
 `MAX_SUBAGENT_COMPACTIONS = 3` (`src/compaction.js:81`),
-`DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS = 600000` (`src/settings.js:302`).
+`DEFAULT_ENDLESS_QUIESCE_TIMEOUT_MS = 600000` (`src/settings.js:351`).
 
 ---
 
 ## 2. Working or spinning — what the plugin can actually observe
 
 The plugin sees, per subagent: every opencode event for the session
-(`src/hooks.js:1716-1721`), the start and end of every tool call with its tool
-name (`src/hooks.js:2636`, `:2913`), the session's token count behind a 3 s
-cache (`CTX_TTL_MS`, `src/registry.js:1487`; read in `contextLimitNotice`), the
+(`src/hooks.js:1805-1815`), the start and end of every tool call with its tool
+name (`src/hooks.js:2772-2773`, `:3046-3054`), the session's token count behind a 3 s
+cache (`CTX_TTL_MS`, `src/registry.js:1510`; read in `contextLimitNotice`), the
 last-activity phrase from the snapshot, and its own bookkeeping (runs, nested
 spawns, messages, asks).
 
@@ -157,7 +157,7 @@ productive — the model, and behind it the orchestrator — can act on it.
 A second consequence, about the "uninterrupted stretch" the briefing asks about:
 **there is no observable end of a stretch.** The gaps between calls are model
 generation time, and generation emits events, so the gap is not silence
-(`src/hooks.js:1719`). Any gap that *is* silence longer than `maxSubagentAgeMs`
+(`src/hooks.js:1814`). Any gap that *is* silence longer than `maxSubagentAgeMs`
 is already fatal under the existing window. So a cumulative in-tool ceiling
 "over one uninterrupted run of tool calls", followed through, has no boundary
 short of the run itself — it *is* a run ceiling, and pretending otherwise would
@@ -234,7 +234,7 @@ denominator. C is a heuristic dressed as a bound. D is the status quo.
 
 A new flat key, an env override, and a per-type map — the shape
 `maxResultTokens` / `resultTokens` and `compaction` / `agentCompaction` already
-have (`src/settings.js:790-818`):
+have (`src/settings.js:845-894`):
 
 | | |
 | --- | --- |
@@ -250,7 +250,7 @@ value (`k × maxSubagentToolCallMs`) ties a *lifetime* to a *per-call* number,
 and the two have opposite reasons to move: a user raises the per-call window to
 admit one long build, and would silently get `k` times the lifetime with it.
 `0` also has to mean different things on the two keys — it already does on the
-existing pair (`src/settings.js:152-168`) — and a derived value cannot be
+existing pair (`src/settings.js:152-167`) — and a derived value cannot be
 switched off on its own. The whole defect is that the existing numbers cannot
 express a lifetime; expressing it as a multiple of one of them repeats the
 confusion.
@@ -286,7 +286,7 @@ The derivation, not a round guess:
   of the re-arm loop that runs forever today (`src/childwait.js:214-222`).
 - **Ceiling on the ceiling.** It must stay under the orphan sweep's age bound,
   or a live subagent would fall into another instance's kill range: that bound
-  is `8 × max(90 000, 660 000) = 5 280 000` (`src/teardown.js:798`, `:906-909`).
+  is `8 × max(90 000, 660 000) = 5 280 000` (`src/teardown.js:806`, `:914-918`).
   2 640 000 is half of it. Note the direction: a run ceiling only ever makes
   lives *shorter*, so the sweep's premise ("nothing alive is ever this old") is
   strengthened, never weakened, and `sweepOrphanedSubagentSessions` needs no
@@ -312,8 +312,8 @@ Three steps, of which only the last is a reap.
 ### Step 1 — the wrap-up band, at `RUN_WRAP_UP = 0.75` of the ceiling
 
 A new band out of the same per-turn path as the context bands
-(`contextLimitNotice`, `src/hooks.js:1060`, carried by `tailNoticeCarrier` at
-`:893`). Nothing is denied, nothing is refused, no tool is touched. The block
+(`contextLimitNotice`, `src/hooks.js:1110`, carried by `tailNoticeCarrier` at
+`:943`). Nothing is denied, nothing is refused, no tool is touched. The block
 says: how long this run has been going, how long is left before the run ceiling
 cuts it off, and the two moves the subagent actually has —
 
@@ -323,7 +323,7 @@ cuts it off, and the two moves the subagent actually has —
 2. `ask(...)` the caller whether to keep waiting, where one answer decides it.
 
 Counted in `entry.runWarnings` for the log, alongside `contextPlanNotices` /
-`contextWarnings` / `stopInjections` (`src/registry.js:2119-2131`). Re-fires on
+`contextWarnings` / `stopInjections` (`src/registry.js:2258-2270`). Re-fires on
 every crossing turn, like the context bands, since the block rides on the
 per-request copy of the message array.
 
@@ -348,7 +348,7 @@ orchestrator nothing it did not get at 0.75.
 
 ### Step 3 — the reap, at the ceiling
 
-The existing path, unchanged: `timeoutSubagent` (`src/watchdog.js:370`) — settle
+The existing path, unchanged: `timeoutSubagent` (`src/watchdog.js:424`) — settle
 any open `ask`, cooperative abort, one last read, `secureSubagentState` to a
 result file under the subagent's own `work/`, wake notice, teardown, slot freed.
 The only new thing is the descriptor:
@@ -357,9 +357,9 @@ The only new thing is the descriptor:
   { ms: runMs, setting: "maxSubagentRunMs", kind: "run", since: entry.runStartedAt }
 ```
 
-so the log line, the wake notice (`timeoutNotice`, `src/notices.js:417`) and the
+so the log line, the wake notice (`timeoutNotice`, `src/notices.js:430`) and the
 nested outcome all name the window that fired and its value — the rule
-`src/watchdog.js:326-329` already states.
+`src/watchdog.js:370-373` already states.
 
 The wake notice's wording is what makes the reap useful rather than merely
 tidy: it must say that the subagent was cut off **on its run ceiling**, not that
@@ -373,23 +373,23 @@ life for …` phrasing, which is false on this path.
 
 | with | rule | reason |
 | --- | --- | --- |
-| `maxSubagentAgeMs = 0` | the run ceiling does not fire either | the run check lives inside the running branch, after `if (maxAge <= 0) continue` (`src/watchdog.js:131`). A user who took out the dead-man's switch has asked for runs no clock cuts off — the doctrine `src/childwait.js:99-105` states |
+| `maxSubagentAgeMs = 0` | the run ceiling does not fire either | the run check lives inside the running branch, after `if (maxAge <= 0) continue` (`src/watchdog.js:137`). A user who took out the dead-man's switch has asked for runs no clock cuts off — the doctrine `src/childwait.js:99-105` states |
 | a tool call in flight | no exemption: the run ceiling fires over it | an exemption bounded by the subagent's own behaviour is the defect being fixed. The rescue read happens after the abort, so a cut call still hands its session's text over |
 | a compaction in flight (`entry.compactingSince`) | the reap is deferred while `now - compactingSince <= workingWindowMs(settings)` | reaping inside the relief the plugin itself started throws work away for nothing. Bounded: at most `MAX_SUBAGENT_COMPACTIONS = 3` compactions, each capped by the working window |
-| blocked on a live watchdogged child | the child-wait exemption keeps precedence over the run check | the alternative — checking the run ceiling first — reaps a parent that is waiting on a legitimately working child and cascades a DELETE over that child (`src/watchdog.js:140-147`), destroying work to enforce a clock. With the exemption first, the parent is still bounded by composition: every child now has its own run ceiling, and the nested quota is not refilled by a reuse (`src/registry.js:689`), so a nesting parent lives at most `(1 + maxNestedSpawns) × ceiling` |
+| blocked on a live watchdogged child | the child-wait exemption keeps precedence over the run check | the alternative — checking the run ceiling first — reaps a parent that is waiting on a legitimately working child and cascades a DELETE over that child (`src/watchdog.js:144-148`), destroying work to enforce a clock. With the exemption first, the parent is still bounded by composition: every child now has its own run ceiling, and the nested quota is not refilled by a reuse (`src/registry.js:703-705`), so a nesting parent lives at most `(1 + maxNestedSpawns) × ceiling` |
 | the child-waiter's re-arm | no change needed | the re-arm's condition is "the child is still a tracked entry"; the run ceiling is what finally makes that condition false, which turns today's endless re-arm into a terminating one |
-| `reuse` | the clock is per RUN: a new field `entry.runStartedAt`, seeded in `createEntry` and re-seeded in `reviveRetainedEntryLocked`, carried in `previous` for `restoreRetainedEntryLocked` | `spawnedAt` deliberately does not move (`src/registry.js:688`) and a reuse is a new task, exactly as `lastActivityAt`, `toolCalls` and the mid-run counters are reset there (`src/registry.js:670-683`) |
-| `ask` / `answerWaitMs` | `askWaitMs` (`src/agentmsg.js:80`) clamps against `min(workingWindowMs, remaining run budget − one sweep tick)` | "a clamp measured against a different window than the one that fires is not a clamp" (`src/settings.js:826-831`). Without this the plugin offers a five-minute wait it will itself cut off, on the very path step 1 points the subagent at |
+| `reuse` | the clock is per RUN: a new field `entry.runStartedAt`, seeded in `createEntry` and re-seeded in `reviveRetainedEntryLocked`, carried in `previous` for `restoreRetainedEntryLocked` | `spawnedAt` deliberately does not move (`src/registry.js:703`) and a reuse is a new task, exactly as `lastActivityAt`, `toolCalls` and the mid-run counters are reset there (`src/registry.js:677-696`) |
+| `ask` / `answerWaitMs` | `askWaitMs` (`src/agentmsg.js:160`) clamps against `min(workingWindowMs, remaining run budget − one sweep tick)` | "a clamp measured against a different window than the one that fires is not a clamp" (`src/settings.js:906-907`). Without this the plugin offers a five-minute wait it will itself cut off, on the very path step 1 points the subagent at |
 | the orphan sweep | unchanged | the run ceiling only shortens lives; `ORPHAN_SWEEP_WATCHDOG_FACTOR × max(windows)` stays an upper bound over everything alive |
 | solo mode | not registered, nothing to bound | no subagent exists |
-| `list` | the running row gains nothing | the age column already shows the run's wall clock (`src/tools.js:364`), and it is now the figure the ceiling is measured against for a first run |
+| `list` | the running row gains nothing | the age column already shows the run's wall clock (`src/tools.js:363`), and it is now the figure the ceiling is measured against for a first run |
 
 ---
 
 ## 7. The sidebar
 
 A third row in the Subagents block, directly under `in tool (min)`
-(`tui/src/tui.tsx:2381-2412`):
+(`tui/src/tui.tsx:2413-2442`):
 
 ```
 run (min)      [-]  44  [+]
@@ -456,7 +456,7 @@ Its own isolated configuration and its own server on `RUN_CEILING_PORT`
 it needs settings of its own in the `agent-intercom.json` the server was started
 with (`test/e2e/run-all.sh:39-46`). Request logging on through
 `OPENCODE_AGENT_INTERCOM_LOG_REQUESTS=1` +
-`OPENCODE_AGENT_INTERCOM_LOG_REQUESTS_FILE` (`src/reqlog.js:9-11`,
+`OPENCODE_AGENT_INTERCOM_LOG_REQUESTS_FILE` (`src/reqlog.js:13-16`,
 `test/e2e/context-bands-task.sh:432`), which is how an injected band is asserted
 — it never reaches the session.
 
@@ -534,8 +534,8 @@ Each step leaves the tree building (`npm run check`) and the unit suite green
 
 | assumed | what must hold | what would show it wrong |
 | --- | --- | --- |
-| opencode publishes nothing between a tool call's announcement and its result, so the plugin's in-flight map is its only knowledge of "working" | stated by the code itself (`src/registry.js:246-252`) and relied on by the existing window | an opencode version that emits a progress event during a call; the silence window would then start firing on healthy calls and this whole area needs re-reading |
-| a polling subagent's inter-call gaps stay under `maxSubagentAgeMs` | observed in the live case; generation emits events (`src/hooks.js:1719`) | a poller that is reaped by the silence window after all — then the defect is narrower than described and the run ceiling is only the backstop |
+| opencode publishes nothing between a tool call's announcement and its result, so the plugin's in-flight map is its only knowledge of "working" | stated by the code itself (`src/registry.js:254-257`) and relied on by the existing window | an opencode version that emits a progress event during a call; the silence window would then start firing on healthy calls and this whole area needs re-reading |
+| a polling subagent's inter-call gaps stay under `maxSubagentAgeMs` | observed in the live case; generation emits events (`src/hooks.js:1814`) | a poller that is reaped by the silence window after all — then the defect is narrower than described and the run ceiling is only the backstop |
 | 44 minutes is longer than the legitimate runs this project gives subagents | the roles' work is bounded by their context budgets long before that on any token-producing path | a `coder` or `deployer` run that is cut at 44 minutes while genuinely working; the fix is `agentRunMs` for that role, and a repeated occurrence is the signal that the default is wrong |
 | the run-ceiling band is worth a turn's tokens | the same judgement the three context bands already embody | a measurable share of runs ending because the band pushed a subagent into a premature `Blocked:` — visible as `runWarnings > 0` on runs that then reported nothing useful |
 | the repetition detector (option C) is not needed | the run ceiling plus the band bound the damage of a spin to one ceiling per run | spins that recur across re-dispatches — the orchestrator re-spawning a poller that is reaped, three or four times over. That pattern is what would justify C, and it is visible in the `maxSubagentRunMs` reap count per session |

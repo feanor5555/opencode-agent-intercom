@@ -8,36 +8,35 @@ opencode plugin process.
 
 ### The stamp
 
-`src/prompts.js:116`
+`src/prompts.js:219`
 
-    export const PROMPT_CONTRACT = 1
+    export const PROMPT_CONTRACT = 2
 
-Its own comment states the manual rule, `src/prompts.js:106-110`:
+Its own comment states the manual rule, `src/prompts.js:205-208`:
 
     // The prompt contract: the elements a system prompt has to carry for the
-    // mechanics around it to work — the `Blocked:` report a subagent hands up, the
-    // `DONE: T<n>` marker the wake hook removes a task on, the orchestrator's spawn
-    // protocol, and the delegation block a spawning role needs. The integer is
-    // bumped BY HAND whenever one of those elements changes.
+    // mechanics around it to work. `CONTRACT_ELEMENTS` below is the definition of
+    // which text those elements are; this integer is bumped BY HAND whenever one of
+    // them changes in a way that requires something new of a prompt file.
 
 ### Where the stamp is written
 
-`src/promptsfile.js:245`, inside the header comment `renderDefaultsFile` builds:
+`src/promptsfile.js:384`, inside the header comment `renderDefaultsFile` builds:
 
     ` ${CONTRACT_STAMP_KEY}: ${PROMPT_CONTRACT}\n` +
 
-and the same number is repeated in the header's prose, `src/promptsfile.js:256`:
+and the same number is repeated in the header's prose, `src/promptsfile.js:395`:
 
     ` then holds contract ${PROMPT_CONTRACT} whatever the plugin does next, and\n` +
 
 ### Where the stamp is read
 
-`src/overrides.js:247-248`
+`src/overrides.js:283-284`
 
     export const CONTRACT_STAMP_KEY = "agent-intercom-contract"
     const CONTRACT_STAMP = /agent-intercom-contract:\s*(\d+)/
 
-`src/overrides.js:307-311` parses it as an integer, and `src/overrides.js:321-333`
+`src/overrides.js:361-366` parses it as an integer, and `src/overrides.js:375-391`
 decides on it alone:
 
     export function classifyPromptFile(agent, { header = "", body = "" } = {}) {
@@ -45,33 +44,32 @@ decides on it alone:
       if (stamp !== null) {
         return stamp < PROMPT_CONTRACT
 
-with the report line built at `src/overrides.js:326-330`:
+with the report line built at `src/overrides.js:382-383`:
 
     `the prompt file was rendered against prompt contract ${stamp}, ` +
     `the current contract is ${PROMPT_CONTRACT}`
 
 ### The four covered elements, as they stand in the text
 
-They are not named anywhere in the source. They exist twice: as prose in the
-comment quoted above, and as four regexes over a *file body* in
-`src/overrides.js:274-300`. The text they refer to is spread over four guide
-constants:
+They are named in `CONTRACT_ELEMENTS` (`src/prompts.js:237-298`), and as four
+regexes over a *file body* in `PROMPT_FILE_PROBES` (`src/overrides.js:324-353`).
+The text they refer to is spread over four guide constants:
 
 | element | text |
 |---|---|
-| `blocked-contract` | `src/prompts.js:39` (orchestrator side: "A reply whose FIRST line starts with `` `Blocked:` `` is a decision handed up to you…"), `src/prompts.js:59` (subagent side: "Blocked: on a problem your prompt does not cover…"), `src/prompts.js:67` (no-spawn block), `src/prompts.js:89-92` (delegation block) |
-| `done-marker` | `src/prompts.js:30` ("For task-tracked spawns, tell the subagent to put `` `DONE: T<n>` ``…"), `src/prompts.js:58` |
-| `spawn-protocol` | `src/prompts.js:20-22`, the three tool lines `spawn(agent, prompt)`, `abort(handle)`, `list()` |
-| `delegation-block` | `src/prompts.js:76-92`, the whole `SUBAGENT_DELEGATION_GUIDE` |
+| `blocked-contract` | `src/prompts.js:54` (orchestrator side: "A reply whose FIRST line starts with `` `Blocked:` `` is a decision handed up to you…"), `src/prompts.js:106` (subagent side: "Blocked: on a problem your prompt does not cover…"), `src/prompts.js:114` (no-spawn block), `src/prompts.js:141-143` (delegation block) |
+| `done-marker` | `src/prompts.js:45` ("For task-tracked spawns, tell the subagent to put `` `DONE: T<n>` ``…"), `src/prompts.js:105` |
+| `spawn-protocol` | `src/prompts.js:34-37`, the four tool lines `spawn(agent, prompt)`, `message(subagent, text)`, `abort(handle)`, `list()` |
+| `delegation-block` | `src/prompts.js:127-143`, the whole `SUBAGENT_DELEGATION_GUIDE` |
 
 ### The scan and finding path
 
-`src/hooks.js:312` — `if (primaryScope) scanPromptFiles(primaryScope)`, once per
-directory per process (`claimPromptFileScan`, `src/overrides.js:353-357`).
-`scanPromptFiles` (`src/promptsfile.js:181-201`) splits each file into header and
+`src/hooks.js:670` — `if (primaryScope) scanPromptFiles(primaryScope)`, once per
+directory per process (`claimPromptFileScan`, `src/overrides.js:414-418`).
+`scanPromptFiles` (`src/promptsfile.js:275-284`) splits each file into header and
 body and calls `classifyPromptFile`; a finding goes into the register and out
 through the debug log, a one-shot toast, and `overrideBlock`
-(`src/overrides.js:186-208`), which is appended to the orchestrator's **stable**
+(`src/overrides.js:225-239`), which is appended to the orchestrator's **stable**
 system-prompt element.
 
 ### What the existing tests do and do not catch
@@ -98,14 +96,15 @@ interpolated stamp.
 
 ### The gap, exactly
 
-A maintainer rewords `src/prompts.js:59` (say, replacing the `Blocked:`
-paragraph with different wording that means the same or something new). The
-suite stays green. `PROMPT_CONTRACT` stays `1`. Every customised file in the
-wild that inlined the old paragraph keeps its stamp `1`, `stamp < PROMPT_CONTRACT`
-is false, and `classifyPromptFile` returns `{ missing: [], detail: "" }` — the
-file is silently declared current while its frozen text is the old contract.
-Recorded as pending work at `todos.md:13` and as a limitation at
-`README.md:646-653`.
+A maintainer rewords `src/prompts.js:106` (say, replacing the `Blocked:`
+paragraph with different wording that means the same or something new).
+`test/prompt-contract-pin.test.js` compares `contractElementText` against
+`test/fixtures/prompt-contract.json` and fails, naming the element; the
+maintainer then bumps `PROMPT_CONTRACT` and re-pins with `npm run pin:contract`,
+or re-pins alone. A re-pin without a bump leaves every customised file in the
+wild that inlined the old paragraph at its stamp, `stamp < PROMPT_CONTRACT` is
+false, and `classifyPromptFile` returns `{ missing: [], detail: "" }` — visible
+as a changed pin under an unchanged number in the diff.
 
 ## 2. Open questions (left open by design, designed around)
 
@@ -115,7 +114,7 @@ Recorded as pending work at `todos.md:13` and as a limitation at
   edit; option B2 and option A take it away and answer "yes, always". Whichever
   answer is later preferred, the machinery in the recommendation supports both —
   switching to "yes, always" is then a change to one test assertion.
-- **Should the wake sentence (`src/prompts.js:37`, "After spawn your turn ends —
+- **Should the wake sentence (`src/prompts.js:52`, "After spawn your turn ends —
   you are woken…") be a fifth contract element?** It is not covered today, by
   probe or prose. The design makes adding it a single table entry; the decision
   is left to whoever owns the contract.
@@ -123,8 +122,8 @@ Recorded as pending work at `todos.md:13` and as a limitation at
 ## 3. Assumptions
 
 1. **The guide constants are static at module load — no runtime input.** Read at
-   `src/prompts.js:32-35`: the only interpolations are `percent(PACKAGE_WARN_SHARE)`
-   and `percent(PACKAGE_REFUSE_SHARE)`, and `src/settings.js:383-384` defines both
+   `src/prompts.js:47-50`: the only interpolations are `percent(PACKAGE_WARN_SHARE)`
+   and `percent(PACKAGE_REFUSE_SHARE)`, and `src/settings.js:781-782` defines both
    as plain module constants (`export const PACKAGE_WARN_SHARE = 0.2`). For this to
    stay true, no guide constant may interpolate a settings *getter*. It would be
    shown wrong by a guide block whose text differs between two installs of the
@@ -132,16 +131,16 @@ Recorded as pending work at `todos.md:13` and as a limitation at
    garbage.
 2. **The stamp never reaches the LLM, so nothing here can move the cached prompt
    prefix.** The header comment is stripped by `stripFrontmatterComment`
-   (`src/promptsfile.js:142-144`) before substitution; asserted at
+   (`src/promptsfile.js:187-190`) before substitution; asserted at
    `test/prompt-guide-placeholder.test.js:140`. Shown wrong if a rendered prompt
    ever contains `agent-intercom-contract` — that assertion is the tripwire.
 3. **No consumer outside this repo parses the stamp value.** `grep` over the tree
    finds `agent-intercom-contract` only in `src/overrides.js`, the two tests, and
    the docs/work notes; the TUI half does not read it. Would be shown wrong by an
    external tool reading `.opencode/agent-intercom/*.md` headers — none is known.
-4. **Files in the wild carry stamp `1` or no stamp at all.** `PROMPT_CONTRACT`
-   has only ever been `1` (`src/prompts.js:116`), so there is no population of
-   files stamped `2` or higher. Shown wrong by a user file carrying a higher
+4. **Files in the wild carry stamp `1`, stamp `2` or no stamp at all.**
+   `PROMPT_CONTRACT` is `2` (`src/prompts.js:219`), so there is no population of
+   files stamped higher. Shown wrong by a user file carrying a higher
    stamp; harmless under the recommendation, which changes no stamp semantics.
 
 ## 4. The options
@@ -158,9 +157,9 @@ module load from the guide constants.
   line order = render order. No trimming, no case folding: the model sees these
   bytes, and any difference in them is a difference in what the contract says.
 - **On disk**: ` agent-intercom-contract: 7f3a1c9e`. `CONTRACT_STAMP`
-  (`src/overrides.js:248`) widens from `(\d+)` to `([0-9a-f]{8}|\d+)`,
+  (`src/overrides.js:284`) widens from `(\d+)` to `([0-9a-f]{8}|\d+)`,
   `readContractStamp` stops returning a number, and `classifyPromptFile`
-  (`src/overrides.js:324`) changes from `<` to `!==` — a digest carries no order,
+  (`src/overrides.js:378`) changes from `<` to `!==` — a digest carries no order,
   so "predates" can no longer be said.
 - **In the report**: "the prompt file was rendered against prompt contract
   7f3a1c9e, the current contract is 2b91e0aa" — true, byte-stable, and useless to
@@ -220,7 +219,7 @@ Extract the element sentences into named constants and compose
 `SUBAGENT_DELEGATION_GUIDE` from them, so element membership is structural and
 no extraction table is needed.
 
-- **Cost**: a rewrite of `src/prompts.js:17-92`, the highest-risk text in the
+- **Cost**: a rewrite of `src/prompts.js:31-166`, the highest-risk text in the
   repo — its bytes *are* the cached system prompt for every session. A single
   slipped space is a silent prefix-cache miss for every user.
 - **Demands**: a byte-identity snapshot test over all five guide constants before
@@ -254,7 +253,7 @@ no extraction table is needed.
 ### 6.1 `CONTRACT_ELEMENTS` in `src/prompts.js`
 
 The contract elements become nameable in the module that owns their text. Added
-after `PROMPT_CONTRACT` (`src/prompts.js:116`), touching no guide constant:
+after `PROMPT_CONTRACT` (`src/prompts.js:219`), touching no guide constant:
 
 - a frozen table, one entry per element, in probe order:
   `{ id, sources: [{ block: <guide constant>, name: "<constant name>", select: RegExp | null }] }`
@@ -281,7 +280,7 @@ Two properties this shape buys, both worth keeping:
   matters: `SUBAGENT_DELEGATION_GUIDE` is written as seven concatenated source
   literals forming four rendered lines.
 - The extraction is line-granular, so a reword of the "Right-sized chunks"
-  paragraph (`src/prompts.js:32-35`) — not a covered element — does not trip it.
+  paragraph (`src/prompts.js:47-50`) — not a covered element — does not trip it.
 
 `contractElementText` sits on no runtime path; it exists so the definition of the
 contract lives next to the text it is made of, rather than in a test file.
@@ -335,15 +334,15 @@ That message is the mechanism. Everything else only makes sure it is reached.
   substance either, since the guide is substituted at call time
   (`src/promptsfile.js:32-38`). A bump reports it anyway — pre-existing behaviour
   of the stamp rule, not introduced here, and the remedy (re-render) is cheap.
-- **An unstamped file**: untouched. The probes (`src/overrides.js:274-300`) go on
+- **An unstamped file**: untouched. The probes (`src/overrides.js:324-353`) go on
   ruling it, and the parity test goes on guarding them.
 
 ## 8. Effect on the block in the orchestrator's cached system prompt
 
 None. No guide byte changes, so the prompt the model sees is identical.
-`overrideBlock` (`src/overrides.js:186-208`) keeps rendering the same wording
+`overrideBlock` (`src/overrides.js:225-239`) keeps rendering the same wording
 from the same integers, and its byte-stability within a session still rests on
-the once-per-directory scan claim (`src/overrides.js:353-357`), untouched here.
+the once-per-directory scan claim (`src/overrides.js:414-418`), untouched here.
 This is the concrete advantage over option A, whose report line would carry two
 digests and would appear after every cosmetic release.
 
@@ -365,13 +364,13 @@ two `PROMPT_CONTRACT - 1` tests.)
 Each step leaves the tree building and `npm test` green.
 
 **Step 1 — the element table.** `src/prompts.js`: add `CONTRACT_ELEMENTS` and
-`contractElementText` after line 116; update the comment at `src/prompts.js:106-115`
+`contractElementText` after line 219; update the comment at `src/prompts.js:205-218`
 so it names the table as the definition of the four elements instead of listing
 them in prose. No guide constant is edited. Depends on nothing.
 
 **Step 2 — the id-set parity test.** `test/prompt-file-staleness.test.js`: assert
 that the `CONTRACT_ELEMENTS` ids are exactly the `PROMPT_FILE_PROBES` ids
-(`src/overrides.js:274-300`), and that `contractElementText(id)` returns at least
+(`src/overrides.js:324-353`), and that `contractElementText(id)` returns at least
 one line for every id. The second half guards the new `select` regexes the same
 way the existing parity test at `:138-157` guards the probe regexes: an element
 whose matcher stops selecting anything must fail loudly, not pin an empty array.
@@ -416,11 +415,12 @@ is later wanted.
 ## 12. What stays uncovered afterwards
 
 - A reword of guide text **outside** the four elements — the wake sentence
-  (`src/prompts.js:37`), the right-sized-chunks paragraph
-  (`src/prompts.js:32-35`), the outline discipline (`src/prompts.js:98-104`).
+  (`src/prompts.js:52`), the right-sized-chunks paragraph
+  (`src/prompts.js:47-50`), the outline discipline (`src/prompts.js:197-203`).
   Deliberate: they are not the contract. §2 leaves the wake sentence open as a
   candidate fifth element.
 - A maintainer who re-pins a genuine contract change without bumping. Visible in
   the diff by design (§6.2); removable only by adopting B2.
-- A file the user repairs mid-session: still reported until the next process
-  (`src/overrides.js:344-352`, `todos.md:12`). Untouched by this concept.
+- A file the user repairs mid-session: covered outside this concept — the rescan
+  on the primary's `session.idle` drops its finding on the next turn
+  (`src/overrides.js:407-413`, `src/hooks.js:1758`).

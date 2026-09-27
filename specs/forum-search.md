@@ -7,8 +7,8 @@ Model: the forum route in `~/.claude/agents/researcher.md` (lines 52–66).
 ## 1. What the code does today (read, with the lines behind it)
 
 - Two search tools sit beside each other and share one core: `web_search`
-  (`src/websearch.js:36`) and `forum_search` (`src/forumsearch.js:108`), registered in
-  `src/tools.js:541-542` behind `isWebsearchEnabled()` and `isForumSearchEnabled()`.
+  (`src/websearch.js:36`) and `forum_search` (`src/forumsearch.js:227`), registered in
+  `src/tools.js:1797-1798` behind `isWebsearchEnabled()` and `isForumSearchEnabled()`.
 - `src/searchcore.js` owns both transports and every pure helper: `callExa`
   (`src/searchcore.js:75`) posting JSON-RPC `tools/call` to
   `const EXA_MCP_URL = "https://mcp.exa.ai/mcp"` (`:18`) with headers from `exaHeaders()`
@@ -17,24 +17,25 @@ Model: the forum route in `~/.claude/agents/researcher.md` (lines 52–66).
   (`:115`) whose `Promise.allSettled` (`:132-135`) keeps either leg from failing the other.
   Timeouts `EXA_TIMEOUT_MS = 30_000` (`:19`) and `SEARXNG_TIMEOUT_MS = 12_000` (`:20`).
 - Pure helpers, shared: `normalizeUrl` (`:180`), `parseExaEntries` (`:193`), `searxToEntries`
-  (`:222`), `mergeAndDedup` (`:242`), `renderEntries` (`:275`), `legFailureText` (`:168`).
-  `searxToEntries` builds `{title, url, published, author, content, score, source}`
-  (`:226-234`) — it carries searxng's `score` and **drops searxng's `engine` field**.
-- `forum_search` today sends the Exa envelope `forumEnvelope` (`src/forumsearch.js:61`), the
-  bare user query behind the bangs `bangQuery` (`:68`), cuts the searxng leg with a relative
-  score threshold `cutByScore`/`cutSearxLeg` (`:76`, `:87`, `SCORE_CUT_RATIO = 0.1` at `:58`)
-  and merges with a fixed round-robin `interleave` (`:94`).
-- Settings resolve file > env > default in `getSettings()` (`src/settings.js:99-150`).
-  `forumBangs` is the one array-valued key, validated at `src/settings.js:131-139` (non-empty
+  (`:224`), `mergeAndDedup` (`:245`), `renderEntries` (`:278`), `legFailureText` (`:168`).
+  `searxToEntries` builds `{title, url, published, author, content, score, engine, source}`
+  (`:228-237`) — it carries searxng's `score` and `engine`.
+- `forum_search` sends the Exa envelope `forumEnvelope` (`src/forumsearch.js:102`), the
+  keywords behind the bangs `bangQuery` (`:129`) — the model's `keywords` or
+  `reduceToKeywords(query)` (`:112`) — bounds the searxng leg with `searxLane` (`:143`, score
+  order and `MAX_ROWS_PER_ENGINE = 2` at `:70`) and merges with `pickFromLanes` (`:176`).
+- Settings resolve file > env > default in `getSettings()` (`src/settings.js:528-773`).
+  `forumBangs` is the one array-valued key, validated at `src/settings.js:676-684` (non-empty
   trimmed strings kept, everything else dropped, nothing usable left → the built-in set) and
-  read by `getForumBangs()` (`:173`). The built-in set is `DEFAULT_FORUM_BANGS`
-  (`src/settings.js:55`).
-- Prompt and roles: `RESEARCHER_PROMPT` names both tools (`src/agents.js:96-99`); web access is
-  concentrated in the `researcher` role (`src/agents.js:137-145`), and every other role — the
-  orchestrator (`src/agents.js:157`) and every subagent — denies `webfetch`, `websearch`,
-  `web_search` and `forum_search` via the `NO_WEB_ACCESS` constant (`src/agents.js:143-145`),
-  with gitter also naming them explicitly (`src/agents.js:225-226`); the `researcher` role
-  description names both (`:201`).
+  read by `getForumBangs()` (`:1049`). The built-in set is `DEFAULT_FORUM_BANGS`
+  (`src/settings.js:327`).
+- Prompt and roles: `RESEARCHER_PROMPT` names both tools (`src/agents.js:143`); web access to
+  both is concentrated in the `researcher` role (`src/agents.js:415-436`, map built by
+  `webAccessExcept` at `:424`), and every other role — the orchestrator (`src/agents.js:356`)
+  and every subagent — denies `webfetch`, `websearch`, `web_search` and `forum_search` via the
+  `NO_WEB_ACCESS` constant (`src/agents.js:300-303`), the `grounder` through
+  `webAccessExcept("grounded_search")` (`:444`); the `researcher` role description names both
+  (`:417`).
 - The stated reason for a custom tool rather than an MCP server is prompt size
   (`src/searchcore.js` header, and `src/websearch.js:5-8`): a server-supplied description
   (~1.5 KB) would land in every LLM call's system prompt. §3.1 and §3.2 are measured against
@@ -201,7 +202,7 @@ Recommended. Three shapes were weighed:
 |---|---|---|---|
 | **separate `forum_search` tool** (recommended) | two tool descriptions (~460 B) in every subagent system prompt | nothing | a second small tool module; the name must be in the two `deny` lists |
 | a `forums: boolean` on `web_search` | no extra tool, but `web_search`'s description must grow to explain when to set it — past the saving | one tool with two query shapes, two `numResults` ceilings and two backend call shapes inside one `execute` | a branchy `execute`, and the model must remember an optional flag it can silently omit |
-| prompt rule only, no tool change | free | **impossible**: the envelope, the bang chain and the keyword reduction are provider-call changes, and the researcher has `bash: "deny"` (`src/agents.js:189`) so it cannot make them itself | — |
+| prompt rule only, no tool change | free | **impossible**: the envelope, the bang chain and the keyword reduction are provider-call changes, and the researcher has `bash: "deny"` (`src/agents.js:432`) so it cannot make them itself | — |
 
 The deciding argument is the one the source already makes for itself: this plugin buys short
 tool descriptions. A tool *name* is the strongest route signal a small model has; an optional
@@ -340,7 +341,7 @@ filter — `score` cannot express relevance (§2.3):
 
 ### 3.6 Merge and render
 
-1. `mergeAndDedup(exaEntries, searxEntries)` (`src/searchcore.js:242`): dedupe by `normalizeUrl`,
+1. `mergeAndDedup(exaEntries, searxEntries)` (`src/searchcore.js:245`): dedupe by `normalizeUrl`,
    richer snippet wins, `sources` records every leg a URL appeared in — a real confidence signal
    when both backends surface the same thread.
 2. Split the merged list into two lanes by `source`. Within each lane, stably partition the rows
@@ -356,7 +357,7 @@ filter — `score` cannot express relevance (§2.3):
 4. If fewer than `numResults` rows were picked, append the still-unpicked rows in merged order
    until the count is reached. The quota bounds a weak leg's *share*, never the tool's yield.
 5. `renderEntries` — the same `Title:/URL:/Published:/Author:/Highlights:` text shape
-   (`src/searchcore.js:275`), so nothing downstream learns a second format.
+   (`src/searchcore.js:278`), so nothing downstream learns a second format.
 6. Log one line, carrying the per-lane thread count so §7's standing observation is a property of
    every run rather than of someone remembering to look:
    `exa=<n> searxng=<kept>/<raw> merged=<n> dupesRemoved=<n> returned=<n> threads=exa <t>/<n> searxng <t>/<n>`.
@@ -372,7 +373,7 @@ reappears in step 4 only if nothing better exists.
 
 No page is fetched. Excerpts are triage material and the model is told so in both the tool
 description and the prompt; threads worth reading go through `webfetch`, which the researcher
-already has (`src/agents.js:96`).
+already has (`src/agents.js:424`).
 
 ### 3.8 Where the configurable list lives: the searxng bangs
 
@@ -406,7 +407,7 @@ and reach hosts no other engine here can, and because §3.6 already bounds what 
 
 ### 3.9 Prompt wording for the `researcher` role
 
-Three lines in `RESEARCHER_PROMPT` (`src/agents.js:96-99`), after the first line:
+Three lines in `RESEARCHER_PROMPT` (`src/agents.js:146-148`):
 
 ```
 For a question about lived experience — whether something works in practice, which settings
@@ -439,7 +440,7 @@ The prompt decides which of two tools a run takes, so the wording is deliberate:
   `reduceToKeywords` strips out of the searxng query (§3.3). One vocabulary, used three times,
   in the direction each leg needs.
 
-The `researcher` role description (`src/agents.js:189`) names `forum_search` beside `web_search`,
+The `researcher` role description (`src/agents.js:417`) names `forum_search` beside `web_search`,
 since that string is what the orchestrator reads when choosing an agent.
 
 ## 4. Steps
@@ -447,7 +448,7 @@ since that string is what the orchestrator reads when choosing an agent.
 Each step leaves the tree building (`npm run check`) and the suite green (`npm test`), and each
 can be handed out alone.
 
-**Step 1 — `engine` on searxng entries.** `searxToEntries` (`src/searchcore.js:222-237`) carries
+**Step 1 — `engine` on searxng entries.** `searxToEntries` (`src/searchcore.js:224-240`) carries
 `engine: (r.engine ?? "").trim()` beside `score`. Additive: `renderEntries` does not print it and
 `web_search` does not read it, so `web_search`'s output stays byte-identical.
 Depends on: nothing.
@@ -459,16 +460,16 @@ plus its unit tests. Depends on: nothing; can run parallel to step 1.
 argument in the tool schema and description (§3.2, §3.3); `bangQuery` takes the reduced string.
 Depends on: nothing; can run parallel to steps 1 and 2.
 
-**Step 4 — the searxng lane.** Replace `cutByScore`/`cutSearxLeg` (`src/forumsearch.js:76-91`)
-with the score ordering, the per-engine cap and the truncation of §3.5; `SCORE_CUT_RATIO` goes.
+**Step 4 — the searxng lane.** `searxLane` (`src/forumsearch.js:143-158`) carries the score
+ordering, the per-engine cap and the truncation of §3.5.
 Depends on: step 1 (the `engine` field is the cap's input).
 
-**Step 5 — the lane merge.** Replace `interleave` (`src/forumsearch.js:94-102`) with the
+**Step 5 — the lane merge.** `pickFromLanes` (`src/forumsearch.js:176-213`) carries the
 partition, quota, round-robin and fill of §3.6.
 Depends on: steps 2 and 4.
 
 **Step 6 — the bang default.** `DEFAULT_FORUM_BANGS = ["!st", "!ubuntu", "!su", "!hn", "!lo"]`
-(`src/settings.js:55`) and its header comment.
+(`src/settings.js:327`) and its header comment (`:320-326`).
 Depends on: nothing, but ship it after step 5 so the run that first sees the new set also has the
 merge that grades it.
 
@@ -529,7 +530,7 @@ Depends on: all of the above.
 ## 6. Open, and outside this boundary
 
 - Whether `forum_search` should be offered to roles beyond `researcher` — the planner chooses
-  libraries (`src/agents.js:53`) and would plausibly want it. Left as it falls out: only
+  libraries (`src/agents.js:101`) and would plausibly want it. Left as it falls out: only
   `researcher` keeps it (and `web_search`), the same as `webfetch` and `websearch`.
 - Ownership of the two things that drift: the bang set and the per-lane thread counts. Both are
   this project's own maintenance. A changed set is recorded in the README's `forumBangs` row

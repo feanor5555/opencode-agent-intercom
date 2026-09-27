@@ -8,7 +8,6 @@ Pending actions for the opencode-agent-intercom project. Only open work — no f
 - The forum search does NOT use a provider-side domain filter.
 - `work/` is untracked local scratch (not in any commit), so `todos.md` items must state their evidence self-containedly and not cite a `work/` path.
 - The automatically captured session material that was removed from the repository is archived on the house share as `opencode-agent-intercom-captured-session-material-2026-08-31.md`.
-- `~/.config/opencode/agent-intercom.json` currently holds `endlessContext: 20000` (lowered from 88000 for the endless e2e test on 19 Sep); the original is backed up at `work/e2e-endless-low-context/agent-intercom.json.orig` and has not been restored yet.
 - The endless-mode repair and context-figure change set is committed on `main` and pushed (HEAD `85ce0af`; the set: `84dbfaf`, `53b5f27`, `6015839`, `b429c55`, `974e48b`, `85ce0af`); the working tree is clean. The shared figure lives in `src/context-figure.js`, the optical-proof driver in `test/e2e/endless-optical-proof.sh`, and `specs/endless-mode.md` and `README.md` document both as finished — no concurrent edit is outstanding on them.
 
 ## Pending

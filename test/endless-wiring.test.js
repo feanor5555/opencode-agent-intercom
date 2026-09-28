@@ -39,7 +39,12 @@ import {
   beginHandoffDrain,
   bindHandoffDrainTarget,
   flushHandoffDrain,
+  releaseEndless,
+  cancelPendingEndless,
+  claimEndlessWindDown,
+  noteEndlessPrimaryIdle,
 } from "../src/registry.js"
+import { ENDLESS_RESTART_PENDING_NOTICE } from "../src/hooks.js"
 import { maybeRunPendingEndless } from "../src/handoffwiring.js"
 import { setSettingsPath, resetSettings } from "../src/settings.js"
 import { resetProjectContext } from "../src/project.js"
@@ -421,4 +426,104 @@ test("the user switching the mode off clears the pause and hands the threshold b
 
   assert.equal(isEndlessPaused(SID), false, "the pause belongs to a mode nobody is running")
   assert.equal(hasHandoffPending(SID), true, "the plain handoff owns the threshold again")
+})
+
+// ---------------------------------------------------------------------------
+// The restart-pending notice: the orchestrator keeps its tools through the
+// latch and the quiesce wait, so the limits block asks it on every turn to let
+// the running work drain and go idle, from the latch to the wind-down claim.
+// ---------------------------------------------------------------------------
+
+async function primaryTurnSystem(hooks, ctxTokens) {
+  recordPrimaryContext(SID, ctxTokens)
+  const out = { system: ["base prompt"] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: SID }, out)
+  return out.system.join("\n")
+}
+
+const RESTART_NOTICE = ENDLESS_RESTART_PENDING_NOTICE.trim()
+
+test("the restart-pending notice is absent before the latch", async () => {
+  settings({ endlessMode: true, endlessContext: 250000 })
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+
+  const system = await primaryTurnSystem(hooks, 100000)
+
+  assert.equal(hasEndlessPending(SID), false)
+  assert.equal(system.includes(RESTART_NOTICE), false)
+})
+
+test("the restart-pending notice stands on every turn from the latch until the wind-down claim", async () => {
+  settings({ endlessMode: true, endlessContext: 250000 })
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+
+  assert.equal(
+    (await primaryTurnSystem(hooks, 300000)).includes(RESTART_NOTICE),
+    true,
+    "the crossing turn itself carries it",
+  )
+  assert.equal(hasEndlessPending(SID), true)
+  assert.equal(
+    (await primaryTurnSystem(hooks, 310000)).includes(RESTART_NOTICE),
+    true,
+    "a further turn with the latch pending carries it again",
+  )
+
+  assert.equal(claimPendingEndless(SID), true)
+  assert.equal(
+    (await primaryTurnSystem(hooks, 320000)).includes(RESTART_NOTICE),
+    true,
+    "the quiesce wait of an executing cycle carries it",
+  )
+  assert.equal(
+    (await primaryTurnSystem(hooks, 330000)).includes(RESTART_NOTICE),
+    true,
+    "and keeps carrying it turn after turn while the wait lasts",
+  )
+
+  noteEndlessPrimaryIdle(SID)
+  assert.equal(await claimEndlessWindDown(SID), true)
+  assert.equal(
+    (await primaryTurnSystem(hooks, 340000)).includes(RESTART_NOTICE),
+    false,
+    "the wind-down prompt owns the session from the claim on",
+  )
+})
+
+test("the restart-pending notice is gone once the cycle is released", async () => {
+  settings({ endlessMode: true, endlessContext: 250000 })
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+
+  await primaryTurnSystem(hooks, 300000)
+  assert.equal(claimPendingEndless(SID), true)
+  releaseEndless(SID)
+
+  const system = await primaryTurnSystem(hooks, 100000)
+  assert.equal(isEndlessInProgress(SID), false)
+  assert.equal(system.includes(RESTART_NOTICE), false)
+})
+
+test("the restart-pending notice is gone once an unclaimed latch is cancelled", async () => {
+  settings({ endlessMode: true, endlessContext: 250000 })
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+
+  await primaryTurnSystem(hooks, 300000)
+  assert.equal(cancelPendingEndless(SID), true)
+
+  const system = await primaryTurnSystem(hooks, 100000)
+  assert.equal(system.includes(RESTART_NOTICE), false)
+})
+
+test("the restart-pending notice is absent in solo mode", async () => {
+  settings({ agentMode: "solo", endlessMode: true, endlessContext: 1 })
+  const { ctx } = makeCtx()
+  const hooks = await plugin(ctx)
+  markEndlessPending(SID)
+
+  const system = await primaryTurnSystem(hooks, 5000)
+  assert.equal(system.includes(RESTART_NOTICE), false)
 })

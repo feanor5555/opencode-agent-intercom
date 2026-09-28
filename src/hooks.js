@@ -59,6 +59,8 @@ import {
   cancelPendingCompaction,
   resetEndlessProgress,
   endlessPauseReason,
+  hasEndlessCycle,
+  isEndlessWindingDown,
   isEndlessPaused,
   clearEndlessPause,
   forgetEndlessStep,
@@ -629,6 +631,7 @@ export function createTransformSystem(client) {
           projectMd,
           agentsMd: slices.agentsMd || "",
           endlessPausedReason: pausedReason,
+          endlessRestartPending: hasEndlessCycle(sessionID) && !isEndlessWindingDown(sessionID),
           delegatingRoles: await delegatingRolesAmong(client, SPAWNABLE_ROLES),
         })
       } else if (delegates) {
@@ -1433,11 +1436,25 @@ async function notifyParentOfDenialLoop(client, entry) {
 // like any session with the mode off, and the sentence says so. A session the
 // user switched the mode off in gets no such sentence: there the row reads
 // `[off]` and there is nothing the orchestrator could not read off the panel.
+//
+// `endlessRestartPending` carries the restart sentence: this session holds an
+// endless cycle (latched or executing) and the wind-down has not been claimed.
+// The orchestrator may still spawn in that window, and the cycle claims its
+// wind-down only once none of its subagents runs and it is idle, so the
+// sentence asks it on every turn to let the running work drain and go idle.
+// From the wind-down claim on the wind-down prompt owns the session and the
+// sentence is gone.
+export const ENDLESS_RESTART_PENDING_NOTICE =
+  "Endless restart pending: a fresh session takes over once no subagent runs and your turn " +
+  "has ended. Finish only the work already running: wait for your running subagents, take in " +
+  "their results, then end your turn. Leave new tasks for the next session.\n"
+
 function formatLimitsNotice({
   sessionDir,
   projectMd = "",
   agentsMd = "",
   endlessPausedReason = "",
+  endlessRestartPending = false,
   delegatingRoles = new Set(),
 } = {}) {
   const s = getSettings()
@@ -1483,6 +1500,7 @@ function formatLimitsNotice({
         "session at the plain context limit. Bring the work you have to a close and say so " +
         "to the user.\n"
       : "") +
+    (endlessRestartPending ? ENDLESS_RESTART_PENDING_NOTICE : "") +
     "---\n"
   )
 }

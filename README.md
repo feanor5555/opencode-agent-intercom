@@ -982,7 +982,10 @@ A cycle runs in this order:
 
 1. **Trigger.** The orchestrator's turn-end hook sees the context cross
    `endlessContext` and sets a pending latch. The latch restricts nothing: the
-   orchestrator keeps spawning, aborting and reusing as usual.
+   orchestrator keeps spawning, aborting and reusing as usual. From the latch
+   until the wind-down claim, its limits block on every turn says a restart is
+   pending and asks it to finish only the work already running, wait for its
+   running subagents and then end its turn.
 2. **Quiesce.** On the orchestrator's `session.idle`, the cycle waits until
    none of that orchestrator's own subagents is running — those it spawned
    after the latch included — and the orchestrator is idle between turns. The

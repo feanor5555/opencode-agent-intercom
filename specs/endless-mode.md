@@ -265,6 +265,12 @@ verifies the file on disk rather than trusting either party.
    the same reason as the plain handoff (`src/hooks.js:488-497`).
 2. **Keep working.** The latch restricts nothing. The orchestrator goes on spawning,
    aborting and reusing as usual, through the rest of its turn and through the wait below.
+   From the latch until the wind-down claim (`hasEndlessCycle && !isEndlessWindingDown`), the
+   primary's per-turn limits block (`formatLimitsNotice`, `src/hooks.js`) carries
+   `ENDLESS_RESTART_PENDING_NOTICE`: a restart is pending, finish only the work already
+   running, wait for the running subagents, then end the turn. The crossing turn carries it
+   already; the release, the cancel of an unclaimed latch and the wind-down claim take it off.
+   Solo mode arms no cycle and gets no such block.
 3. **Quiesce and claim.** On the primary's `session.idle`, the endless path claims the latch
    and waits until none of the primary's subagents runs — those it started after the latch
    included — and the primary is idle. In the same synchronous step as that reading it claims
@@ -360,7 +366,9 @@ that idle runs — and by a `session.status` `idle`, and it goes with `releaseEn
 the latch and the claim it can call `spawn`, `abort` and `reuse` as usual, in the turn that
 crossed the ceiling, in a turn a wake notice starts, and in a turn a user message starts. Every
 subagent it starts is one more the quiesce waits for; the wait ends only when the count of the
-primary's own subagents is zero, however they came about, and the primary is idle.
+primary's own subagents is zero, however they came about, and the primary is idle. The
+restart-pending sentence in its limits block (step 2 of §3.1) asks it on every turn of that
+window to let the running work drain rather than refill freed slots.
 
 | how a post-trigger spawn is handled | cost | what it forecloses | what it demands |
 |---|---|---|---|
@@ -1035,6 +1043,10 @@ Unit, in the existing `node --test` style under `test/`:
   wind-down claim until it is done and the wake turn it starts has ended; from the claim on, a
   spawn without the permit is refused and takes no slot, a nested caller gets the actionable
   refusal and `reuse` throws; the release lifts the restriction.
+- The restart-pending notice (`test/endless-wiring.test.js`): absent before the latch; present
+  on the crossing turn and on every further turn while the latch is pending and while the
+  executing cycle has not claimed its wind-down; absent from the claim on, after
+  `releaseEndless`, after `cancelPendingEndless` and in solo mode.
 - The wind-down permit (`src/registry.js`): `createWindDownToken` is 16 hex characters and
   never repeats; `armEndlessWindDown` builds the record the cycle waits on and refuses to arm
   without a token; `consumeEndlessWindDown` is single-use — the second call is refused, and a

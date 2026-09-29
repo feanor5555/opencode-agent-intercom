@@ -377,7 +377,7 @@ is gone — and never tell a subagent to work around a blocker it reported.
 A blocked report carries no `DONE: <id>` marker by design, so the matching
 `TODO.md` entry stays open until you decide.
 
-The delegating subagents (`planner`/`coder`/`debugger`/`reviewer`/`documenter`)
+The delegating subagents (`planner`/`coder`/`debugger`/`reviewer`/`documenter`/`designer`/`gitter`)
 also carry `spawn`, but each is gated to a single target — `researcher` — and the
 call **blocks** until that researcher replies: there is no wake, no second ask,
 and the researcher's reply comes back as the result of the `spawn` call. The
@@ -385,14 +385,15 @@ and the researcher's reply comes back as the result of the `spawn` call. The
 second, independent search path (Google Search grounding) the researcher's own
 tools do not give it. A refusal names the caller's own allowed set, e.g.
 `a "researcher" may spawn "grounder" and nothing else — you asked for a "coder"`,
-or `a "gitter" may spawn nothing at all`. The spawn prompt sent on either path
+or `a "grounder" may spawn nothing at all`. The spawn prompt sent on either path
 carries no `T<n>:` prefix and no `DONE:` marker is expected. A per-entry quota
 (`maxNestedSpawns`, default `2`, env `OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS`,
 `0` disables) bounds how many such nested runs one subagent may start across
 every run of its session; the messages hook appends a per-turn notice to the
-last user message naming what is left. `grounder`, `designer` and `gitter` are
-denied `spawn` outright. `abort`, `list` and `task` are denied for every
-subagent.
+last user message naming what is left. `grounder` is
+denied `spawn` outright. `task`, `abort`, `list` and `message` are denied for
+every subagent, and `reuse` refuses a subagent caller; `ask` stays open to
+every subagent.
 
 Grounded search is not automatic: the `researcher` spawns a `grounder` only
 where the briefing the orchestrator writes asks for a grounded search, and
@@ -474,12 +475,12 @@ Nine roles injected by the `config` hook — no per-project
 | `debugger` | Diagnoses build/test/runtime errors. | Bash for repro, no `edit`/`write`, no web — fix goes back to `coder`. May spawn a `researcher` for web lookups. |
 | `reviewer` | Reviews staged work into `reviews/`, iterates on it. | Bash, no web tools. Convention: no source-code edits. May spawn a `researcher` for web lookups. |
 | `documenter` | Writes/iterates user docs in place (README, `docs/`, changelog). | Bash, no web tools. Convention: no source-code edits. May spawn a `researcher` for web lookups. |
-
-Each delegating role maps to exactly one target: the five above reach `researcher` (the call blocks and the reply is the tool result); `researcher` reaches `grounder` for a grounded search only when its briefing asks for one; every other role may spawn nothing. The refusal text names the caller's own allowed set — e.g. `a "researcher" may spawn "grounder" and nothing else — you asked for a "coder"`, or `a "gitter" may spawn nothing at all` — so the model has somewhere to go instead of retrying.
 | `researcher` | Web research via `web_search` + `forum_search` + `webfetch`. | The only role with Exa/searxng search and full-page fetches. Reads the project, writes its own result file and has bash; no `edit`. Convention: no source-code edits. May spawn a `grounder` for a grounded search, but only where the orchestrator's briefing asks for one; without it, searches as before and spawns nothing. |
 | `grounder` | Web research through Google Search grounding via `grounded_search`. | The only role that uses Search grounding. Pick over `researcher` for a plain factual question; pick `researcher` when the work needs forum threads, a named page fetched in full, or a choice between sources. No `edit`/`write`/`bash`. `spawn` denied — may spawn nothing at all. |
-| `designer` | Generates images via [`gen`](#gen--image-generation-no-api-key). | No `outline`, no web. Convention: no source-code edits. `spawn` denied — requests visual references in the final reply instead. |
-| `gitter` | Repo operations matching project's git style. | No `edit`/`write`/`webfetch`/`web_search`/`forum_search`/`grounded_search`. `spawn` denied. |
+| `designer` | Generates images via [`gen`](#gen--image-generation-no-api-key). | No `outline`, no web. Convention: no source-code edits. May spawn a `researcher` for visual references. |
+| `gitter` | Repo operations matching project's git style. | No `edit`/`write`/`webfetch`/`web_search`/`forum_search`/`grounded_search`. May spawn a `researcher` for web lookups. |
+
+Each delegating role maps to exactly one target: `planner`, `coder`, `debugger`, `reviewer`, `documenter`, `designer` and `gitter` reach `researcher` (the call blocks and the reply is the tool result); `researcher` reaches `grounder` for a grounded search only when its briefing asks for one; `grounder` may spawn nothing. The refusal text names the caller's own allowed set — e.g. `a "researcher" may spawn "grounder" and nothing else — you asked for a "coder"`, or `a "grounder" may spawn nothing at all` — so the model has somewhere to go instead of retrying.
 
 A project can override any role by defining one of the same name — either
 through `.opencode/agent/<name>.md` (a markdown agent file opencode loads
@@ -971,7 +972,7 @@ is environment-variable-driven:
 | `OPENCODE_AGENT_INTERCOM_DEBUG` | on | `"0"` disables logging to `~/.cache/opencode-agent-intercom/debug.log` |
 | `OPENCODE_AGENT_INTERCOM_LOG_REQUESTS` | off | `"1"` writes per-LLM-call JSONL to `~/.cache/opencode-agent-intercom/requests.jsonl` (path override: `_LOG_REQUESTS_FILE`) |
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS` | `1` | Concurrent subagents per primary. `"0"` disables. TUI file overrides. |
-| `OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS` | `2` | Nested `spawn` calls one subagent may start, across every run of its session (the caller's one allowed target — `researcher` for the five non-web roles, `grounder` for `researcher`). `"0"` disables — the subagent must do the work itself. TUI file overrides via `"maxNestedSpawns"`. |
+| `OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS` | `2` | Nested `spawn` calls one subagent may start, across every run of its session (the caller's one allowed target — `researcher` for the seven non-web roles, `grounder` for `researcher`). `"0"` disables — the subagent must do the work itself. TUI file overrides via `"maxNestedSpawns"`. |
 | `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` | `100000` | Subagent context budget (tokens). `"0"` disables. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS` | `90000` | Watchdog window (ms) for a subagent with nothing in flight. `"0"` switches the inactivity watchdog off, and with it the orphan sweep whose window is a multiple of this one. TUI file overrides via `"maxSubagentAgeMs"`; the TUI's `silence (s)` row steps it in whole seconds. |
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS` | `660000` | The same watchdog's window (ms) for a subagent with a tool call in flight, counted from the start of that call. `"0"` means no ceiling while it works; the silence window still applies to every subagent that is not working. TUI file overrides via `"maxSubagentToolCallMs"`; the TUI's `in tool (min)` row steps it in whole minutes. |

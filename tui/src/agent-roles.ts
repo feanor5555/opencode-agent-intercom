@@ -27,6 +27,8 @@ export const AGENT_NAMES = [
   "grounder",
   "designer",
   "gitter",
+  "scout",
+  "checker",
 ];
 
 // One prompt template file per installed role, under
@@ -88,4 +90,6 @@ export const DEFAULT_AGENT_CONTEXT: AgentContext = {
   grounder: 100000,
   designer: 100000,
   gitter: 100000,
+  scout: 100000,
+  checker: 100000,
 };

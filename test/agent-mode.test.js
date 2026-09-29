@@ -381,7 +381,7 @@ const soloPrompt = () => rolePrompt("orchestrator")
 test("orchestrator mode: the primary is given the orchestration prompt", () => {
   assert.equal(soloPrompt(), AGENTS.orchestrator.prompt)
   assert.equal(roleDescription("orchestrator"), AGENTS.orchestrator.description)
-  assert.match(soloPrompt(), /Your only job is to delegate work to subagents/)
+  assert.match(soloPrompt(), /You delegate work to subagents\./)
 })
 
 test("solo mode: the primary is given a prompt that says it works alone", () => {
@@ -398,7 +398,7 @@ test("solo mode: nothing false about delegation survives in the primary's prompt
   // The three statements the orchestration prompt makes that solo mode
   // falsifies: the job IS delegation, the tools ARE spawn/abort/list, and there
   // is a fleet to pick from.
-  assert.doesNotMatch(prompt, /only job is to delegate/)
+  assert.doesNotMatch(prompt, /delegate work to subagents/)
   assert.doesNotMatch(prompt, /spawn|abort\b|\blist\b/i)
   for (const role of Object.keys(AGENTS)) {
     if (role === "orchestrator") continue
@@ -466,7 +466,7 @@ test("orchestrator mode: the reference file names the guide the primary really g
     guideNote("orchestrator"),
     /agent-intercom guide block \(ORCHESTRATION_GUIDE \+ ORCHESTRATION_REUSE_GUIDE\)/,
   )
-  assert.match(renderDefaultsFile("orchestrator"), /Your only job is to delegate/)
+  assert.match(renderDefaultsFile("orchestrator"), /You delegate work to subagents\./)
 })
 
 test("solo mode: the reference files name no guide block and carry the solo prompt", () => {
@@ -477,7 +477,7 @@ test("solo mode: the reference files name no guide block and carry the solo prom
   for (const render of [renderDefaultsFile, renderOpencodeDefaultFile]) {
     const file = render("orchestrator")
     assert.match(file, /# Role: Solo/)
-    assert.doesNotMatch(file, /Your only job is to delegate/)
+    assert.doesNotMatch(file, /You delegate work to subagents/)
   }
 })
 

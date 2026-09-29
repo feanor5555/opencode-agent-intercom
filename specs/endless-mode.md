@@ -103,14 +103,17 @@ keeps that and says why.
 
 ### 1.3 The orchestrator cannot write the todo file itself
 
-- `PRIMARY_TOOLS` is `spawn`, `abort`, `list`, `message` and `reuse` (`src/hooks.js:173-192`)
+- `PRIMARY_TOOLS` is `spawn`, `abort`, `list`, `message` and `reuse` (`src/hooks.js:176-195`)
   and the guard throws for anything else from a primary session: "this is an orchestrator
   session — it delegates work, it does not run `${input.tool}` itself"
-  (`src/hooks.js:2981-2991`).
+  (`src/hooks.js:3041`).
 - The todo tools are `TODO_TOOLS = new Set(["todos_open", "todo_done", "todo_add",
-  "todo_edit"])` (`src/hooks.js:303`), restricted to `TODO_AGENTS` — planner, coder,
-  debugger, reviewer, documenter, designer (`src/hooks.js:304-306`) — and denied to every
-  other subagent (`src/hooks.js:2803`). The orchestrator is in neither set.
+  "todo_edit"])` (`src/hooks.js:309`), restricted to `TODO_AGENTS` — planner, coder,
+  debugger, reviewer, designer (`src/hooks.js:310-312`) — and denied to every other
+  subagent (`src/hooks.js:2857`). Of the five, planner and coder own the list (read, add,
+  edit, remove); debugger, reviewer and designer read it and add to it
+  (`TODO_TOOLS_BLOCK` / `TODO_READ_ADD_BLOCK`, `src/agents.js`). The orchestrator is in
+  neither set.
 - The plugin's own todo-file layer is `src/todofile.js`: `findTodoFile` (`src/todofile.js:192`)
   accepts `todo.md` / `todos.md` in any casing, gives a regular canonical `TODO.md`
   precedence, and otherwise treats several matches as a hard error
@@ -247,7 +250,7 @@ happened rather than assuming it" answerable at all.
 |---|---|---|---|
 | **the orchestrator spawns one wind-down `planner` through a one-time permit; that subagent rewrites the todo file with the todo tools; the plugin verifies the file it left** (recommended) | one permitted spawn after the wind-down claim, and a full-file verification | nothing | the single-use permit of §3.3, the composed child prompt, the settlement gate and the V1–V7 confirmation of §3.4 |
 | the orchestrator states the points in one plain-text turn; the plugin parses and calls `addTask` | a parse of a shaped reply | the file's own prose, links and structure | the parse is a lossy funnel — a title and a criterion, no links, no prose — and its read-back confirms only its own appended lines, never that the file as a whole is coherent |
-| grant the orchestrator `todo_add` for the duration | a hole in `PRIMARY_TOOLS` | the invariant that a primary runs no tool but spawn/abort/list/message/reuse (`src/hooks.js:2981`) | a time-boxed exception in the guard, and the plugin still cannot tell a successful write from a hallucinated one without re-reading the file |
+| grant the orchestrator `todo_add` for the duration | a hole in `PRIMARY_TOOLS` | the invariant that a primary runs no tool but spawn/abort/list/message/reuse (`src/hooks.js:3041`) | a time-boxed exception in the guard, and the plugin still cannot tell a successful write from a hallucinated one without re-reading the file |
 
 The spawn is *after* the wind-down claim, not before it — the permit admits exactly one
 subagent, once, after the wait is over and every other spawn is refused (§3.3). And the wind-down `planner` not holding the orchestrator's context is answered
@@ -631,7 +634,7 @@ injected dependencies differ in an endless cycle:
 
   **The kickoff carries the file's own text, not a re-rendered listing.** A primary holds
   `spawn` / `abort` / `list` / `message` / `reuse` and nothing else (`PRIMARY_TOOLS`,
-  `src/hooks.js:173`),
+  `src/hooks.js:176`),
   so the successor cannot open the todo file. Naming the file alone would hand it a session
   with nothing concrete in it. So the kickoff carries the confirmed file's own text verbatim
   (`endlessKickoffBlock`, `src/endless.js`), bounded by `KICKOFF_TODO_MAX_CHARS` (16 000) and

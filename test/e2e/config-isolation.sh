@@ -94,12 +94,12 @@ E2E_DEFAULT_MODEL="cliproxy/qwen3.8-flash-medium"
 # with. Named here so the refusal reads as itself in a driver's output.
 E2E_BANNED_MODEL="gpuserver/Qwen3.8 Flash Next"
 
-# Every agent name the pin is written for: the ten roles this plugin installs
+# Every agent name the pin is written for: the twelve roles this plugin installs
 # (src/agents.js AGENTS) minus the exempt ones below, plus the opencode
 # built-ins that can answer a turn of their own. `applyModelChoices` only
 # touches names that are already in `config.agent`, so a name no build knows
 # costs nothing.
-E2E_PINNED_AGENTS="orchestrator planner coder debugger reviewer documenter researcher designer gitter build plan general title summary compaction"
+E2E_PINNED_AGENTS="orchestrator planner coder debugger reviewer documenter researcher designer gitter scout checker build plan general title summary compaction"
 
 # The agents the pin does NOT reach, and why `grounder` is one of them: it
 # holds `grounded_search`, whose answer comes through Google's Gemini Search

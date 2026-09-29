@@ -627,14 +627,12 @@ GRANT_VERDICT=$(python3 - "$OUT_DIR/$PREFIX.agents.json" <<'PY' 2>/dev/null || p
 import json, sys
 
 # The two sides of the grant, as src/agents.js sets it: NO_SPAWN is spread into
-# `grounder` alone, so every other subagent role delegates. Together the two
-# lists are all nine subagent roles, which is what lets the evidence line below
-# call the grounder the ONE non-delegating role.
+# `grounder`, `documenter`, `gitter`, `scout` and `checker`, and every other
+# subagent role delegates. Together the two lists are all eleven subagent roles.
 DELEGATING = [
-    "planner", "coder", "debugger", "reviewer", "documenter", "researcher",
-    "designer", "gitter",
+    "planner", "coder", "debugger", "reviewer", "researcher", "designer",
 ]
-NON_DELEGATING = ["grounder"]
+NON_DELEGATING = ["grounder", "documenter", "gitter", "scout", "checker"]
 
 try:
     data = json.load(open(sys.argv[1]))
@@ -675,7 +673,7 @@ else:
     print(
         f"ok|no spawn deny rule on any of the {len(DELEGATING)} delegating roles ("
         + ", ".join(DELEGATING)
-        + "); a spawn deny rule on the one role that may not delegate: "
+        + "); a spawn deny rule on each role that may not delegate: "
         + ", ".join(NON_DELEGATING)
     )
 PY

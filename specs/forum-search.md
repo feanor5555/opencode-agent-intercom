@@ -29,13 +29,13 @@ Model: the forum route in `~/.claude/agents/researcher.md` (lines 52–66).
   trimmed strings kept, everything else dropped, nothing usable left → the built-in set) and
   read by `getForumBangs()` (`:1049`). The built-in set is `DEFAULT_FORUM_BANGS`
   (`src/settings.js:327`).
-- Prompt and roles: `RESEARCHER_PROMPT` names both tools (`src/agents.js:143`); web access to
-  both is concentrated in the `researcher` role (`src/agents.js:415-436`, map built by
-  `webAccessExcept` at `:424`), and every other role — the orchestrator (`src/agents.js:356`)
+- Prompt and roles: `RESEARCHER_PROMPT` names both tools (`src/agents.js:163`); web access to
+  both is concentrated in the `researcher` role (`src/agents.js:481-502`, map built by
+  `webAccessExcept` at `:490`), and every other role — the orchestrator (`src/agents.js:415`)
   and every subagent — denies `webfetch`, `websearch`, `web_search` and `forum_search` via the
-  `NO_WEB_ACCESS` constant (`src/agents.js:300-303`), the `grounder` through
-  `webAccessExcept("grounded_search")` (`:444`); the `researcher` role description names both
-  (`:417`).
+  `NO_WEB_ACCESS` constant (`src/agents.js:359-362`), the `grounder` through
+  `webAccessExcept("grounded_search")` (`:510`); the `researcher` role description names both
+  (`:483`).
 - The stated reason for a custom tool rather than an MCP server is prompt size
   (`src/searchcore.js` header, and `src/websearch.js:5-8`): a server-supplied description
   (~1.5 KB) would land in every LLM call's system prompt. §3.1 and §3.2 are measured against
@@ -440,7 +440,7 @@ The prompt decides which of two tools a run takes, so the wording is deliberate:
   `reduceToKeywords` strips out of the searxng query (§3.3). One vocabulary, used three times,
   in the direction each leg needs.
 
-The `researcher` role description (`src/agents.js:417`) names `forum_search` beside `web_search`,
+The `researcher` role description (`src/agents.js:483`) names `forum_search` beside `web_search`,
 since that string is what the orchestrator reads when choosing an agent.
 
 ## 4. Steps

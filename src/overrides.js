@@ -283,7 +283,7 @@ const GUIDE_PLACEHOLDER = /\{\{guide\}\}/i
 export const CONTRACT_STAMP_KEY = "agent-intercom-contract"
 const CONTRACT_STAMP = /agent-intercom-contract:\s*(\d+)/
 
-// The roles the `DONE: T<n>` marker does something for: the six that own
+// The roles the `DONE: T<n>` marker does something for: the five that own
 // TODO.md (hooks.js TODO_AGENTS) plus the orchestrator, which writes the marker
 // contract into the spawn prompt. Pinned against those sources by
 // test/prompt-file-staleness.test.js — this module cannot import either one
@@ -294,7 +294,6 @@ const DONE_MARKER_AGENTS = [
   "coder",
   "debugger",
   "reviewer",
-  "documenter",
   "designer",
 ]
 
@@ -310,10 +309,8 @@ const DELEGATING_AGENTS = [
   "coder",
   "debugger",
   "reviewer",
-  "documenter",
   "researcher",
   "designer",
-  "gitter",
 ]
 
 // One probe per contract element: `agents: null` means every role, `re` is what
@@ -344,7 +341,7 @@ export const PROMPT_FILE_PROBES = Object.freeze([
     id: "delegation-block",
     agents: Object.freeze(DELEGATING_AGENTS),
     // The alternation is the two targets the role table admits
-    // (NESTED_SPAWN_TARGETS in agents.js): the seven non-web roles are told
+    // (NESTED_SPAWN_TARGETS in agents.js): the five non-web roles are told
     // the researcher, the researcher is told the grounder. One element either way —
     // what a file must carry is the sentence that names ITS target.
     re: /spawn\("(?:researcher|grounder)"/,
@@ -397,7 +394,7 @@ const scannedDirectories = new Set()
 // Claims the one scan of a directory: true for the caller that gets to run it,
 // false for every later one.
 //
-// The scan is eager and once — nine stats at the first primary transform of a
+// The scan is eager and once — one stat per role at the first primary transform of a
 // directory — for two reasons. Per-request probing would put fs work on the hot
 // path of every LLM call, and the finding set has to be COMPLETE before the
 // first block is rendered: the block lives in the stable system-prompt element,

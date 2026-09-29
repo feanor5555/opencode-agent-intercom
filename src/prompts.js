@@ -13,7 +13,7 @@ import { percent } from "./format.js"
 // agents.js does not import this module, so this closes no cycle: the role
 // table is the one source of what a role may spawn, and the block that tells
 // the role about it is built from that table rather than from a second list.
-import { nestedSpawnTargets } from "./agents.js"
+import { nestedSpawnTargets, roleHoldsWrite } from "./agents.js"
 
 export const ABORT_NOTICE =
   "\n\n---\n🛑 agent-intercom: This subagent has been ABORTED by the orchestrator.\n" +
@@ -86,8 +86,8 @@ export const ORCHESTRATION_REUSE_GUIDE =
 // injection logic and delegationGuideFor below) and OUTLINE (only for
 // subagents whose tool gating actually grants them the `outline` tool).
 //
-// The spawn sentence is NOT in CORE: eight roles may delegate and one may
-// not, and the eight do not all name the same target — a block every subagent shares
+// The spawn sentence is NOT in CORE: six roles may delegate and three may
+// not, and the six do not all name the same target — a block every subagent shares
 // cannot say all of that. CORE is what is true of every subagent whatever its
 // permission map says.
 //
@@ -107,14 +107,14 @@ export const SUBAGENT_GUIDE_CORE =
   "Ask vs. Blocked: — `ask` where ONE answer lets you carry on inside this run; `Blocked:` where you cannot carry on at all, where the answer would change the task itself, or where you already asked and no answer came. Never ask twice about the same thing, and never use `ask` to deliver findings.\n" +
   "Reply to the orchestrator in English. Address the user directly only in the user's language.\n---\n"
 
-// For a subagent whose role denies `spawn` (grounder). The exact sentence
-// this role carried while no subagent could spawn at all, so nothing changes.
+// For a subagent whose role denies `spawn` (grounder, documenter, gitter,
+// scout, checker).
 export const SUBAGENT_NO_SPAWN_GUIDE =
   "\n\n---\n🚫 agent-intercom: you do not delegate.\n" +
   "You cannot spawn agents. If the task needs another agent, name it and what it should do in your final reply — the orchestrator dispatches it; you never spawn. Where the task cannot go on without that agent, this is a blocker: open the reply with `Blocked:`.\n---\n"
 
 // For a subagent whose role allows `spawn` and whose target is the researcher
-// (planner, coder, debugger, reviewer, documenter, designer, gitter). States the one thing
+// (planner, coder, debugger, reviewer, designer). States the one thing
 // delegation is for, the one target it may name, that it is not the normal
 // working mode, and what comes back. The researcher's own block, whose target
 // is the grounder, follows below.
@@ -191,9 +191,9 @@ export function delegationGuideNameFor(agent) {
 }
 
 // Outline+read discipline. Injected only for subagents that actually have the
-// `outline` tool enabled (planner, coder, debugger, reviewer, documenter,
-// researcher). Designer, gitter and grounder don't get this — they neither
-// read source code nor have `outline`.
+// `outline` tool enabled (planner, coder, debugger, reviewer, researcher, scout).
+// Designer, documenter, gitter, grounder and checker don't get this — they read
+// no source code and have no `outline`.
 export const SUBAGENT_OUTLINE_GUIDE =
   "\n\n---\n📖 agent-intercom: reading discipline.\n" +
   "Source code files: call `outline <path>` first to get the signatures (universal-ctags, " +
@@ -358,12 +358,15 @@ export function contractElementText(id) {
 // Subagents whose tool gating disables `outline` — they neither read source
 // code nor have the outline tool to call. Skip the outline-discipline block for
 // them so the system prompt doesn't push a tool they can't use; the codegraph
-// card rides on the same gate, since it is for the same code readers. The grounder is
+// card rides on the same gate, since it is for the same code readers. The
+// documenter is in here because its brief states the content it writes, so it
+// reads only the document it changes. The checker is in here because it reads
+// the output of the checks it runs, not the code behind them. The grounder is
 // in here for the strongest form of that reason: it holds no file tool at all
 // (`read`, `edit`, `write`, `bash`, `glob`, `grep` and `outline` are every one
 // of them denied in its permission map), so the block would name nothing it can
 // call.
-export const OUTLINE_DISABLED_AGENTS = new Set(["designer", "gitter", "grounder"])
+export const OUTLINE_DISABLED_AGENTS = new Set(["designer", "documenter", "gitter", "grounder", "checker"])
 
 // What the subagent is told about the reply ceiling. Not a constant: the
 // figure is the ceiling THIS type carries (settings.js `resultCeilingFor`), so
@@ -380,6 +383,10 @@ export const OUTLINE_DISABLED_AGENTS = new Set(["designer", "gitter", "grounder"
 // fit is written out in full and the notice carries the path. This block exists
 // so the good outcome — the subagent files its own material, under the project,
 // while it still has its tools — has a chance of happening first.
+//
+// `holdsWrite` is whether the role has `write` at all. A role without it is
+// told to keep the reply to the findings that fit and name what it left out,
+// since a file instruction would send it after a tool its schema does not show.
 // The estimator's own exchange rate, in the one place both the system-prompt
 // block and the context-band demand read it from: a model judging the length of
 // its own draft counts characters, not tokens (format.js estimateReplyTokens).
@@ -387,7 +394,9 @@ export function replyCapChars(ceiling) {
   return Math.round(ceiling * 3.5)
 }
 
-export function replyCapBlock(agent) {
+const NO_FILE_REPLY = "keep the reply to the findings that fit, and name what you left out."
+
+export function replyCapBlock(agent, { holdsWrite = roleHoldsWrite(agent) } = {}) {
   const ceiling = resultCeilingFor(agent)
   if (!(ceiling > 0)) return ""
   const chars = replyCapChars(ceiling)
@@ -396,9 +405,12 @@ export function replyCapBlock(agent) {
     `The orchestrator sees at most ~${ceiling} tokens (~${chars} characters) of your final reply. ` +
     "Everything past that is cut out of what it receives and written to a file, and it gets that " +
     "file's path instead of your words — it cannot see them.\n" +
-    "So file the long material yourself, while you still have your tools: write it under the " +
-    "project, and let your reply carry the findings and the path. A reply that leaves the cut to " +
-    "decide what survives keeps its opening and loses its conclusion.\n---\n"
+    (holdsWrite
+      ? "So file the long material yourself, while you still have your tools: write it under the " +
+        "project, and let your reply carry the findings and the path. "
+      : "So put the findings first, " + NO_FILE_REPLY + " ") +
+    "A reply that leaves the cut to decide what survives keeps its opening and loses its " +
+    "conclusion.\n---\n"
   )
 }
 
@@ -411,17 +423,21 @@ export function replyCapBlock(agent) {
 // that demand, and it comes at the two later bands.
 //
 // Empty at a ceiling of 0, like replyCapBlock: that type's reply is never cut.
-export function resultCeilingPlan(agent) {
+// `holdsWrite` as in replyCapBlock.
+export function resultCeilingPlan(agent, { holdsWrite = roleHoldsWrite(agent) } = {}) {
   const ceiling = resultCeilingFor(agent)
   if (!(ceiling > 0)) return ""
   const chars = replyCapChars(ceiling)
   return (
     `\n\nYour final reply is CAPPED at ${ceiling} tokens (~${chars} characters): everything ` +
     `past the cap is cut out of what the orchestrator receives, so a long account reaches it ` +
-    `as an opening paragraph and no conclusion. File the detail under the project AS YOU GO, ` +
-    `while you still have your tools, and plan the reply as a SUMMARY that fits the cap — the ` +
-    `state you reached, what is done, what remains, the decisions taken — naming that file's ` +
-    `absolute path.`
+    `as an opening paragraph and no conclusion. ` +
+    (holdsWrite
+      ? `File the detail under the project AS YOU GO, while you still have your tools, and plan ` +
+        `the reply as a SUMMARY that fits the cap — the state you reached, what is done, what ` +
+        `remains, the decisions taken — naming that file's absolute path.`
+      : `Plan the reply as a SUMMARY that fits the cap — the state you reached, what is done, ` +
+        `what remains, the decisions taken — and ` + NO_FILE_REPLY)
   )
 }
 
@@ -439,9 +455,15 @@ export function resultCeilingPlan(agent) {
 // lockdown every work tool is denied, so the file can only be one that already
 // exists, and asking for a fresh one would send the model into a refusal.
 //
+// `holdsWrite` is whether the role has `write` at all (as in replyCapBlock);
+// a role without it gets the no-file form in both bands.
+//
 // Empty at a ceiling of 0, like replyCapBlock: that type's reply is never cut,
 // so there is nothing to demand.
-export function resultCeilingDemand(agent, { canWrite = true } = {}) {
+export function resultCeilingDemand(
+  agent,
+  { canWrite = true, holdsWrite = roleHoldsWrite(agent) } = {},
+) {
   const ceiling = resultCeilingFor(agent)
   if (!(ceiling > 0)) return ""
   const chars = replyCapChars(ceiling)
@@ -450,7 +472,9 @@ export function resultCeilingDemand(agent, { canWrite = true } = {}) {
     `the cap is cut out of what the orchestrator receives, so a long account reaches it as an ` +
     `opening paragraph and no conclusion. Write it as a SUMMARY that fits the cap — the state ` +
     `you reached, what is done, what remains, the decisions taken — and ` +
-    (canWrite
+    (!holdsWrite
+      ? NO_FILE_REPLY
+      : canWrite
       ? "put the detail in a file under the project FIRST, then name that file's absolute path " +
         "in the summary. Writing that file is the last work tool call you should make."
       : "name the absolute path of the file the detail already stands in. You can no longer " +
@@ -525,6 +549,10 @@ export function runWrapUpBlock({ elapsedMs, ceilingMs }) {
 // reading discipline and under the same outline gate; the solo primary gets it
 // as its only block.
 //
+// `holdsWrite` is whether the role holds `write`, resolved by the caller the
+// same way (hooks.js); a caller that resolves nothing gets the plugin's own
+// map (agents.js `roleHoldsWrite`). It picks the form of the reply-cap block.
+//
 // In solo mode the primary is given no orchestration guide. The orchestration
 // protocol describes tools it does not have and a delegation pattern it does
 // not run, and nothing takes its place: the blocks around it are each
@@ -540,6 +568,7 @@ export function guideBlocks({
   delegates = false,
   retention = false,
   codegraph = null,
+  holdsWrite = roleHoldsWrite(agent),
 } = {}) {
   const codegraphCard = codegraph ? codegraphGuide(codegraph) : ""
   if (primary) {
@@ -557,7 +586,7 @@ export function guideBlocks({
     // read from the settings at call time, like the limits block: it moves when
     // the settings file moves and not from one turn to the next, which is what
     // keeps it inside the stable system-prompt element.
-    replyCapBlock(agent)
+    replyCapBlock(agent, { holdsWrite })
   )
 }
 

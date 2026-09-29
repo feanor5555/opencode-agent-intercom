@@ -579,33 +579,32 @@ test("tool.execute.before hard-denies the native `task` tool from a subagent", a
 
 // --- only-the-orchestrator-delegates enforcement ---------------------------
 
-// The eight roles that may delegate: they hold `spawn`, and a spawn of theirs
+// The six roles that may delegate: they hold `spawn`, and a spawn of theirs
 // is gated at run time (the caller's own target set, no task id, a per-entry
 // quota) rather than by the permission map. The researcher is one of them —
-// its target is the `grounder` alone. Grounder is the only role that may not:
-// it is the end of every chain and searches itself.
+// its target is the `grounder` alone. Grounder may not: it is the end of every
+// chain and searches itself. Documenter and gitter may not: they carry out
+// exact briefs and hand a gap back to their caller.
 const DELEGATING_ROLES = [
   "planner",
   "coder",
   "debugger",
   "reviewer",
-  "documenter",
   "designer",
-  "gitter",
   "researcher",
 ]
-const NON_DELEGATING_ROLES = ["grounder"]
+const NON_DELEGATING_ROLES = ["grounder", "documenter", "gitter", "scout", "checker"]
 
-test("spawn is granted to eight subagent roles and denied to one; task never", () => {
+test("spawn is granted to six subagent roles and denied to five; task never", () => {
   const subagents = Object.entries(AGENTS).filter(([, def]) => def.mode === "subagent")
-  assert.equal(subagents.length, 9, "expected 9 subagent roles")
+  assert.equal(subagents.length, 11, "expected 11 subagent roles")
   assert.deepEqual(
     subagents.map(([name]) => name).sort(),
     [...DELEGATING_ROLES, ...NON_DELEGATING_ROLES].sort(),
     "every subagent role must be accounted for on one side of the grant",
   )
   for (const [name, def] of subagents) {
-    // Unchanged for all nine: opencode's blocking `task` tool and the
+    // Unchanged for all eleven: opencode's blocking `task` tool and the
     // orchestrator's own fleet controls stay the orchestrator's alone.
     assert.equal(def.permission?.task, "deny", `${name} must deny task`)
     assert.equal(def.permission?.abort, "deny", `${name} must deny abort`)
@@ -731,19 +730,18 @@ test("the denied roles' prompts route a lookup to the researcher instead of sear
   // the two prompts that used to search now name the researcher route.
   assert.match(AGENTS.planner.prompt, /versions and their compatibility come from a `researcher`/)
   assert.match(AGENTS.debugger.prompt, /cryptic error the lookup comes from a `researcher`/)
-  // designer and gitter search as little as before — no web tool of their own —
-  // but both name the researcher route their spawn grant opens, in the prompt
-  // AND in the description the orchestrator picks the role by.
+  // the designer searches as little as before — no web tool of its own — but
+  // names the researcher route its spawn grant opens, in the prompt AND in the
+  // description the orchestrator picks the role by.
   assert.match(AGENTS.designer.description, /Visual references come from a researcher\./)
   assert.doesNotMatch(AGENTS.designer.description, /\bweb\b/i)
   assert.match(AGENTS.designer.prompt, /no web tools/)
   assert.match(AGENTS.designer.prompt, /Visual references come from a `researcher`/)
-  assert.match(
-    AGENTS.gitter.description,
-    /An unfamiliar git or forge error is looked up by a researcher\./,
-  )
-  assert.doesNotMatch(AGENTS.gitter.description, /\bweb\b/i)
-  assert.match(AGENTS.gitter.prompt, /the lookup comes from a `researcher`/)
+  // the gitter has no route to a researcher: an unknown error goes back to its
+  // caller with the command and its output.
+  assert.doesNotMatch(AGENTS.gitter.description, /researcher/)
+  assert.doesNotMatch(AGENTS.gitter.prompt, /researcher/)
+  assert.match(AGENTS.gitter.prompt, /reply `Blocked:` with the command and its full output/)
   // the researcher's carve-out: it searches itself and hands only the grounded
   // path on, and only where its briefing asked for one.
   assert.match(AGENTS.researcher.prompt, /never delegate the searching/)
@@ -1762,7 +1760,7 @@ test("the config hook installs the plugin's agent roles", async () => {
   const config = {}
   await hooks.config(config)
   assert.equal(config.agent.orchestrator.mode, "primary")
-  for (const name of ["planner", "coder", "debugger", "reviewer", "documenter", "researcher", "designer", "gitter"]) {
+  for (const name of ["planner", "coder", "debugger", "reviewer", "documenter", "researcher", "designer", "gitter", "scout", "checker"]) {
     assert.equal(config.agent[name].mode, "subagent")
     assert.ok(config.agent[name].prompt.length > 0)
   }
@@ -1789,7 +1787,7 @@ test("every subagent role is hidden, the orchestrator is not", async () => {
   for (const name of SPAWNABLE_ROLES) assert.equal(config.agent[name].hidden, true)
   // Being hidden is a visibility flag, not a spawn gate: the closed positive
   // list is what the spawn tool reads, and every hidden role is on it.
-  assert.equal(SPAWNABLE_ROLES.length, 9)
+  assert.equal(SPAWNABLE_ROLES.length, 11)
 })
 
 test("no role definition carries a sampling parameter — temperature starts unset", async () => {
@@ -2517,12 +2515,13 @@ test("outline accepts an absolute path inside the session directory", skipNoCtag
   assert.match(res.output, /abs-inside\.js:1: export const A = 1/)
 })
 
-test("the config hook disables outline for designer, gitter, grounder and orchestrator", async () => {
+test("the config hook disables outline for designer, documenter, gitter, grounder and orchestrator", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   const config = {}
   await hooks.config(config)
   assert.equal(config.agent.designer.permission.outline, "deny")
+  assert.equal(config.agent.documenter.permission.outline, "deny")
   assert.equal(config.agent.gitter.permission.outline, "deny")
   assert.equal(config.agent.grounder.permission.outline, "deny")
   assert.equal(config.agent.orchestrator.permission.outline, "deny")

@@ -777,16 +777,16 @@ test("orchestrator is DENIED from calling any TODO tool (subagent-only now)", as
   }
 })
 
-test("planner/coder/debugger/reviewer/documenter/designer can use TODO tools; researcher/gitter are DENIED (even reads)", async () => {
+test("planner/coder/debugger/reviewer/designer can use TODO tools; researcher/documenter/gitter/scout/checker are DENIED (even reads)", async () => {
   // Raise the concurrent-subagent cap so we can spawn one of each agent in
   // the same test run without hitting the default cap of 1.
-  writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 10 }))
+  writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 12 }))
   resetSettings()
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
 
-  // researcher + gitter: ALL four TODO tools (including todos_open) denied.
-  for (const agent of ["researcher", "gitter"]) {
+  // researcher, documenter, gitter, scout, checker: ALL four TODO tools (including todos_open) denied.
+  for (const agent of ["researcher", "documenter", "gitter", "scout", "checker"]) {
     const before = created.length
     await hooks.tool.spawn.execute({ agent, prompt: `task for ${agent}` }, primaryCtx)
     assert.equal(created.length, before + 1)
@@ -794,13 +794,13 @@ test("planner/coder/debugger/reviewer/documenter/designer can use TODO tools; re
     for (const t of ["todos_open", "todo_done", "todo_add", "todo_edit"]) {
       await assert.rejects(
         () => hooks["tool.execute.before"]({ tool: t, sessionID: id, callID: `${agent}-${t}` }),
-        /restricted to planner \/ coder \/ debugger \/ reviewer \/ documenter \/ designer/,
+        /restricted to planner \/ coder \/ debugger \/ reviewer \/ designer\. Other agents do not touch TODO\.md/,
       )
     }
   }
 
-  // The six TODO-owning agents: all four tools allowed.
-  for (const agent of ["planner", "coder", "debugger", "reviewer", "documenter", "designer"]) {
+  // The five TODO-owning agents: all four tools allowed.
+  for (const agent of ["planner", "coder", "debugger", "reviewer", "designer"]) {
     const before = created.length
     await hooks.tool.spawn.execute(
       { agent, prompt: `do something specific to ${agent}` },

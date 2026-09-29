@@ -40,7 +40,7 @@ definition with opencode's semantics (an explicit `deny` denies, an absent key
 allows), then deny. A role neither side defines is denied; an unreadable config
 falls through to the plugin's own map.
 
-`delegatesNested(client, role)` (`src/hooks.js:1534`) asks whether to give a role
+`delegatesNested(client, role)` (`src/hooks.js:1572`) asks whether to give a role
 the delegation block at all. It returns true only when the role is a subagent
 role, `maxNestedSpawns > 0`, its `NESTED_SPAWN_TARGETS` entry is non-empty, and
 `resolveSpawnPermission` returns null — so the prompt can never promise what
@@ -53,24 +53,30 @@ The resolved config is cached at module scope, so gate and prompt read one value
 and a config change takes effect on the next opencode start for both alike;
 unreadable configs fall through to the plugin's own role map. The one place with
 no resolved config to ask is `bin/init-prompts.js`, which writes the prompt
-files offline; `mayDelegate` (`src/agents.js:283`) is retained as that file's
+files offline; `mayDelegate` (`src/agents.js:331`) is retained as that file's
 answer and as the plugin's own default.
 
 **The grant is the absence of a deny.** `NO_SPAWN = { spawn: "deny" }`
-(`src/agents.js:219-221`) is carried by `grounder` alone among the shipped
-roles. The seven repository-reading roles — `planner`, `coder`, `debugger`,
-`reviewer`, `documenter`, `designer`, `gitter` — and `researcher` do not carry
-it, and that absence is the whole grant: the schema strip leaves the tool in
-their schema and `checkSpawnPermission` resolves the same map at run time.
+(`src/agents.js:264-266`) is carried by five of the eleven shipped subagent
+roles: `grounder`, the end of every chain; `documenter` and `gitter`, which act
+on an exact brief that already holds the whole content of their task and send a
+gap in it back to their caller as `ask` or `Blocked:`; and `scout` and
+`checker`, which answer one code lookup or one check run with their own tools.
+The five non-web roles that work out content of their own — `planner`,
+`coder`, `debugger`, `reviewer`, `designer` — and `researcher` do not carry it,
+and that absence is the whole grant: the schema strip leaves the tool in their
+schema and `checkSpawnPermission` resolves the same map at run time.
 
 **The target table decides who they may name.** `NESTED_SPAWN_TARGETS`
-(`src/agents.js:240-249`) maps the seven non-web roles to `researcher` — web
+(`src/agents.js:289-297`) maps those five non-web roles to `researcher` — web
 search and fetching is the one thing they have no tool for — and `researcher`
 to `grounder`, the second, independent search path its own tools do not give
 it. Every other role answers the empty set, so the table and the permission
-maps say the same thing from two directions.
+maps say the same thing from two directions. `scout` and `checker` are the
+target of no role: a delegating role reads code and runs its own checks with
+the tools it holds, so only the orchestrator spawns them.
 
-**Depth is bounded at two nested levels by construction.** The seven non-web
+**Depth is bounded at two nested levels by construction.** The five non-web
 roles reach `researcher`, which may itself spawn — that is the second level;
 `researcher` reaches `grounder`, which is a key of nothing in the table and
 carries `NO_SPAWN`, so there is no third. No counter and no walk of the
@@ -85,7 +91,7 @@ spawn at all — so a non-delegating role sees no change whatever. §8 bounds
 what a live run can show of those three.
 
 **A project `permission.spawn = "allow"` cannot put the tool back on a role
-with no target.** `installAgents` (`src/agents.js:779-781`) writes
+with no target.** `installAgents` (`src/agents.js:879-881`) writes
 `spawn: "deny"` onto the merged permission map AFTER the project overlay when
 the role is a subagent and `nestedSpawnTargets(name).length === 0`, so the
 schema strip matches the prompt (`SUBAGENT_NO_SPAWN_GUIDE`) and the execute
@@ -363,7 +369,7 @@ every such role already has, and only a role pointed somewhere else needs one of
 
 The delegation guide states, for both variants: the one target and that it is the only
 one; the one thing delegation is for, which is what the role cannot do itself (web
-material for the five repository-reading roles, the Google Search path for the
+material for the five non-web roles, the Google Search path for the
 `researcher`); that this is not the normal working mode; that the call BLOCKS, that the
 reply IS the result of the call, and that there is no wake and no second chance, so a
 whole question goes at once; that the prompt carries no `T<n>:` prefix, because the child

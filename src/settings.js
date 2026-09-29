@@ -137,6 +137,8 @@ export const DEFAULT_AGENT_CONTEXT = {
   grounder: 100000,
   designer: 100000,
   gitter: 100000,
+  scout: 100000,
+  checker: 100000,
 }
 // Threshold (in tokens) at which the orchestrator primary session triggers a
 // context-refresh handoff. Independent of maxContext (which gates subagents).
@@ -390,7 +392,7 @@ export const DEFAULT_COMPACTION = false
 // nothing says otherwise.
 //
 //   orchestrator — the shipped pattern: the primary delegates and runs no work
-//                  tool of its own; the nine subagent roles do the work.
+//                  tool of its own; the subagent roles do the work.
 //   solo         — one agent does everything itself: the primary keeps its
 //                  ordinary tools and gets none of the orchestration tools.
 //                  For a single-slot backend (a llama.cpp server at

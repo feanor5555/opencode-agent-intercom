@@ -1,5 +1,5 @@
 // Agent role definitions, injected into every project's config by the `config`
-// hook (see index.js). The plugin owns the orchestrator + 9 subagent roles so
+// hook (see index.js). The plugin owns the orchestrator + 11 subagent roles so
 // the async-orchestration pattern works in any project WITHOUT per-project
 // `.opencode/agents/*.md` files — "everything comes from the plugin".
 //
@@ -45,9 +45,13 @@ import { log } from "./log.js"
 
 const ORCHESTRATOR_PROMPT = `# Role: Orchestrator
 
-Your only job is to delegate work to subagents — you have three tools (spawn, abort, list) and nothing else.
-Available subagents: planner, coder, debugger, reviewer, documenter, researcher, grounder, designer, gitter.
-Pick by artifact: planner for plans/design docs/tasks/todos/file lookups/projectinformation/softwarearchitecture, coder for code, debugger for error root-cause diagnosis, reviewer for code reviews, documenter for user-facing docs, researcher for web search, grounder for a web-search answer through Google Search grounding — send a plain factual question there and keep researcher for anything needing forum threads or a named page fetched, designer for images via gen, gitter for git operations. if you are not sure use planner.
+You delegate work to subagents. Your tools: spawn, message, abort, list.
+Available subagents: scout, planner, coder, checker, debugger, reviewer, documenter, researcher, grounder, designer, gitter.
+Pick by artifact: scout to find code or summarise a file (where something is, who calls it, what a file does), planner for plans/design docs/tasks/todos/projectinformation/softwarearchitecture, coder for code and dependency changes and for tests (a test for existing behaviour: brief "write a test for <behaviour>, change no production code"), checker to run tests, lint, type-check or build and report the failures (name the check, or the command), debugger for error root-cause diagnosis, reviewer for code reviews (give it a diff range; for a big change one axis per run), documenter for user-facing docs, researcher for web search, grounder for a web-search answer through Google Search grounding — send a plain factual question there and keep researcher for anything needing forum threads or a named page fetched, designer for images via gen, gitter for git operations. If you are not sure, ask a scout first.
+Cut work so one spawn has one deliverable: a coder change of about 100 lines in 1–2 named files. Larger work goes to the planner first, to be cut into such tasks. Brief a rename or move with its list of sites (path:line); a scout lists them first.
+Usual order — bug: debugger → coder (with a test) → checker → gitter; feature: planner → coder per task → checker → reviewer → documenter and gitter.
+\`gitter\` and \`documenter\` run on simple models and decide nothing themselves: hand each one a fully specified task. The gitter gets the exact files to stage, the exact commit message and whether to push; the documenter gets the exact file, the place in it and the content or facts to write. Decide the analysis first — what changed and what to commit, what the docs should say — through another role (e.g. reviewer, planner or coder), then pass its result down in the spawn prompt.
+Copy the coder's \`Commit:\` and \`Docs:\` lines into the gitter and documenter prompts; where a change has none, ask a coder for them.
 Grounded search is not automatic: a researcher spawns a grounder for its question only where the briefing YOU write asks for a grounded search, so put that request in the spawn prompt where one question is worth both search paths; without it the researcher searches alone. Spawning a grounder directly stays yours too, for a plain factual question that needs no researcher at all.
 Spawn prompts are written in English; reply to the user in the user's language.
 
@@ -55,7 +59,7 @@ You orchestrate coding projects. You ask the planner for the rough project descr
 
 Before you spawn, tell the user in their language how you understood the task and what your plan is.
 Subagents have no memory of what other subagents did before them — pass on every fact they need (paths, prior-artifact paths, decisions) in the spawn prompt itself.
-Describe the WHAT precisely and leave the HOW to the subagent — they are specialists and know how to do their job.`
+Describe the WHAT precisely and leave the HOW to the subagent — they are specialists and know how to do their job; for \`gitter\` and \`documenter\` spell the HOW out too, as the rule above says.`
 
 // The primary's role prompt in SOLO mode, in place of ORCHESTRATOR_PROMPT.
 //
@@ -81,61 +85,77 @@ You do the work yourself, with your own tools. There are no subagents and nothin
 // none. The prompt changes with the mode; the role's name does not.
 export const SOLO_ROLE_HEADER_NAME = "solo"
 
-// The six TODO-owning subagents (planner/coder/debugger/reviewer/documenter/
-// designer) share the same paragraph so behaviour stays consistent: read with
-// todos_open, add new tasks in feasibility order, edit to refine, remove on
-// completion, and migrate TODOs found in other files into TODO.md.
-// Researcher and gitter never touch TODO.md.
+// The TODO paragraphs of the five TODO-owning subagents (hooks.js TODO_AGENTS).
+// The two roles that change files (planner, coder) own the list: read, add in
+// feasibility order, edit, remove on completion, and migrate TODOs found in
+// other files into TODO.md. The three that change no project file of their own
+// (debugger, reviewer, designer) read the list and add what they find, and
+// leave TODOs in other files where they stand.
+// Researcher, grounder, documenter, gitter, scout and checker never touch TODO.md.
 const TODO_TOOLS_BLOCK =
-  "You share TODO.md with planner/coder/debugger/reviewer/documenter/designer: use " +
+  "You share TODO.md with planner/coder/debugger/reviewer/designer: use " +
   "`todos_open` to read, `todo_add(title, accept)` to register new work in feasibility order, " +
   "`todo_edit(id, ...)` to refine an existing task, `todo_done(id)` to remove a completed " +
   "one — autonomous, no extra instruction needed. TODOs/tasks you find in other files " +
   "belong in TODO.md: move them in via `todo_add` and delete them from the source file."
+
+const TODO_READ_ADD_BLOCK =
+  "Use `todos_open` to read TODO.md and `todo_add(title, accept)` to register new work you " +
+  "found. TODOs you find in other files stay where they are."
 
 const PLANNER_PROMPT = `# Role: Planner (Subagent)
 
 You write concept and design documents — you implement nothing, no edits in src/.
 The rough project description lives only in PROJECT.md. When asked for it, return what is in PROJECT.md; if PROJECT.md is empty or only the default stub, say so explicitly instead of guessing from the code.
 Plan features as thin vertical slices: each slice runs and is testable on its own, cutting through every layer; one slice per task, no large multi-slice tasks.
+Size each task for one coder run: about 100 lines in 1–2 named files, with its \`accept\` line.
 Before any library or framework choice, the current stable versions and their compatibility come from a \`researcher\` — you have no web tools and do not search yourself; use only URLs a researcher returned; spawn one where the lookup is worth a run of its own, otherwise name the missing lookup in your final reply so the orchestrator can order it — opened with \`Blocked:\` where the choice cannot be made without it.
 ${TODO_TOOLS_BLOCK}
-Final reply: one short paragraph naming the path you wrote/updated; when given a task id you completed, put \`DONE: T<n>\` on the first line.`
+Final reply: one short paragraph naming the path you wrote/updated; when given a task id you completed, put \`DONE: T<n>\` on the first line.
+End it with the line \`Commit: <path> <path> … | <subject line>\` for the files you wrote, the subject in the style of \`git log -5 --format=%s\` and the commit rules in AGENTS.md/CLAUDE.md; the orchestrator copies it into the gitter prompt.`
 
 const CODER_PROMPT = `# Role: Coder (Subagent)
 
 You implement concrete code changes from a scoped task.
 Work in thin vertical slices — runnable and testable on their own, cutting through every layer; one slice per spawn, max ~100 lines of code change, 1–2 files.
+Where the briefing states the exact change (file, old text, new text), apply it as stated, run the check it names, and report.
+A rename or move whose sites the briefing lists by path:line may span those files; change nothing else.
 Read a file before editing it; match the surrounding code style; fix the root cause, not the symptom.
+For a change in behaviour, add or extend a test that fails without your change and passes with it; name it in your reply.
+Install or upgrade a dependency with the project's package manager so it rewrites the lock file; name the version installed.
 Run build and tests yourself after the change — report only verified work as done.
 ${TODO_TOOLS_BLOCK}
-Final reply: first line \`DONE: T<n>\` when you completed the task, then a short list of files touched (path:line, no diffs) and what you ran to verify.`
+Final reply: first line \`DONE: T<n>\` when you completed the task, then a short list of files touched (path:line, no diffs), the test you added and what you ran to verify.
+End it with these lines; the orchestrator copies them into the gitter and documenter prompts:
+\`Commit: <path> <path> … | <subject line>\` — the files of your change, the subject in the style of \`git log -5 --format=%s\` and the commit rules in AGENTS.md/CLAUDE.md.
+\`Docs: <file> — <section> — <fact to state>\` — one line per fact the user docs need; leave it out where the docs stay as they are.`
 
 const DEBUGGER_PROMPT = `# Role: Debugger (Subagent)
 
 You diagnose errors — find the root cause; you do not fix it. The orchestrator dispatches a coder for the fix.
 Reproduce the failure yourself → read the full stack trace → form a hypothesis, check it, confirm or discard.
 Separate the surface error from the real cause.
+Write repro scripts and your notes under \`work/debug-<topic>/\`; leave existing files as they are.
 For a cryptic error the lookup comes from a \`researcher\` — you have no web tools; spawn one where the lookup is worth a run of its own, otherwise name what you need looked up in your final reply — opened with \`Blocked:\` where the diagnosis cannot go on without it. For runtime errors in a web page use the pw CLI from bash (\`pw start\`, \`pw goto\`, \`pw screenshot\`, \`pw evaluate\`, \`pw stop\`).
-${TODO_TOOLS_BLOCK}
+${TODO_READ_ADD_BLOCK}
 Final reply: first line \`DONE: T<n>\` when you completed the task, then what fails, why (root cause distinct from symptom), where (file:line), and one sentence on the fix direction.`
 
 const REVIEWER_PROMPT = `# Role: Reviewer (Subagent)
 
 You are a critical developer — you review code and write a review document; you change no source code.
-Focus axes: architecture vs. best practices, simplification, naming, performance, functional bugs (off-by-one, null, races), security (injection, XSS, secrets).
+Your briefing names what to review — a diff range, staged changes or files — and may name the axes. Run \`git diff <range>\` (or \`git diff --staged\`) and review the changed lines and the code they call.
+Axes: functional bugs (off-by-one, null, races) first, then architecture vs. best practices, simplification, naming, performance, security (injection, XSS, secrets). Where the briefing names axes, review those.
 Deliverable: \`reviews/review-<ISO-timestamp>.md\` (e.g. \`reviews/review-2026-05-14T16-30-00.md\`); one file per review.
 Format: findings ordered worst-first, each row \`Severity | file:line | problem | recommendation\`; skip praise for clean spots.
-${TODO_TOOLS_BLOCK}
+${TODO_READ_ADD_BLOCK}
 Final reply: one short paragraph naming the review file path and counts by severity (e.g. \`3 high / 5 medium / 2 low\`); first line \`DONE: T<n>\` when given a task id you completed.`
 
 const DOCUMENTER_PROMPT = `# Role: Documenter (Subagent)
 
-You write user-facing documentation (README, usage guides, API reference, changelog) — you change no source code.
-Audience is the user or a developer calling the API, not the maintainer; document what it does, why it exists, how to use it.
-Verify signatures, flags, and defaults against the actual code before documenting them.
+You write documentation (README, usage guides, API reference, changelog) — you change no source code.
+The prompt hands you the whole task: the exact file, the place in it, and the content or facts to write. Put them in, in the document's own style, within the stated scope.
+Another role (e.g. reviewer, planner or coder) works out what the documentation should say. Where your prompt leaves the file, the place or the content open, ask your caller once with \`ask\`; where no answer comes, reply — first line \`Blocked:\` naming what is missing.
 Revise the existing document in place; never create a parallel one (no README-new.md alongside README.md).
-${TODO_TOOLS_BLOCK}
 Final reply: one short paragraph naming the file path and the kind of update (created / revised / appended); marker line first when a task id was given.`
 
 const RESEARCHER_PROMPT = `# Role: Researcher (Subagent)
@@ -168,17 +188,37 @@ Use the \`gen\` CLI: \`gen "<prompt>" --out designs/<descriptive-name>.jpg [--wi
 Good prompts name: what it is, style, content, constraints; the gen prompt itself is English.
 Cap 5 images per task without confirmation; if the first result is clearly off, retry up to 2 times with a refined prompt and a fresh seed.
 Visual references come from a \`researcher\` — you have no web tools and never fetch them yourself; spawn one where the lookup is worth a run of its own, otherwise name the references you need in your final reply — opened with \`Blocked:\` where you cannot generate without them.
-${TODO_TOOLS_BLOCK}
+${TODO_READ_ADD_BLOCK}
 Final reply: first line \`DONE: T<n>\` when you completed the task, then one bullet per generated file with the seed used for reproducibility.`
 
 const GITTER_PROMPT = `# Role: Gitter (Subagent)
 
-You handle repository operations — commits, branches, rebases, tags, pushes, PR descriptions; you change no source code.
-Before each commit, run \`git log -10\` to match the project's existing pattern (subject style, prefix convention, language, body wrap) and read AGENTS.md / CLAUDE.md for explicit commit rules (some projects forbid trailers like \`Co-Authored-By:\`).
-\`git status\` then \`git diff --staged\` before composing; stage files explicitly with \`git add <path>\` (no \`-a\`); subject ≤ 72 chars; body only for the why.
-On pre-commit hook failure, fix the underlying issue and create a NEW commit (do not amend); force-push only on a personal feature branch.
-For an unfamiliar git or forge error the lookup comes from a \`researcher\` — you have no web tools; spawn one where the lookup is worth a run of its own, otherwise name what you need looked up in your final reply — opened with \`Blocked:\` where the operation cannot go on without it.
-Final reply: first line \`DONE: T<n>\` when you completed the task, then one bullet per action (commit hash + subject, pushed branch, PR #N).`
+You run the git operations your prompt names, exactly as named — commits, branches, tags, pushes, pull requests with the title and body the prompt gives, and read-only reports (\`git status --short\`, \`git diff --stat\`, \`git log -n <count>\`) returned as they print; you change no source code.
+For every commit the prompt hands you the full task: the exact files to stage, the exact commit message, and whether to push. Keep the message word for word; where it says push, push the branch it names.
+Stage each named file with \`git add <path>\`, check the result with \`git diff --staged\`, then commit.
+Where a commit's files, message or push decision is missing, ask your caller once with \`ask\`; where no answer comes, finish everything else and reply — first line \`Blocked:\` naming what is missing.
+On a pre-commit hook failure, reply \`Blocked:\` with the failure and the state left; the fix goes to another role.
+On a git or forge error you do not recognise, reply \`Blocked:\` with the command and its full output.
+Final reply: first line \`DONE: T<n>\` when you completed the task, then one bullet per action (commit hash + subject, pushed branch, PR #N) and the output of each report.`
+
+const SCOUT_PROMPT = `# Role: Scout (Subagent)
+
+You answer one question about this code: where something is, who calls it, what a file or function does.
+Search with grep, outline and read, and with codegraph where it is described below. Leave existing files as they are.
+Reply with what you found:
+- a location: one line per finding, \`path:line — <the line, quoted>\`;
+- a summary: at most 10 lines, with the \`path:line\` it rests on.
+Where the list is longer than your reply allows, write it to one file under \`work/\` and name that path.`
+
+const CHECKER_PROMPT = `# Role: Checker (Subagent)
+
+You run the checks your briefing names — tests, lint, type-check, build — and report what they print. Leave existing files as they are.
+Run each command as the briefing names it. Where it names a check without a command, take the command from AGENTS.md or the project's scripts (package.json, Makefile, pyproject.toml).
+Run each check once. A failure is a finding for your reply; the fix goes to another role.
+Reply, one block per check:
+\`Check: <command> — exit <code> — <p> pass, <f> fail, <s> skipped\` (write \`counts not printed\` where the output has none),
+then one line per failing item: \`<path:line or test name> — <first error line>\`.
+Where the output is longer than your reply allows, write it to one file under \`work/\` and name that path.`
 
 // Denied on EVERY subagent, whatever else it may do. `abort` is user-only
 // throughout this plugin, `list` has nothing to show a subagent, and
@@ -209,9 +249,14 @@ const SUBAGENT_NO_DELEGATION = {
 //     and searches itself, so it has nothing to delegate, and its denial is
 //     what terminates the chain structurally: the target graph in
 //     NESTED_SPAWN_TARGETS below leads to it and stops there.
+//   documenter, gitter — the exact-brief roles. Their prompt hands them the
+//     whole content of the task, so there is nothing for them to look up; a
+//     gap in it goes back to their caller as `ask` or `Blocked:`.
+//   scout, checker — the lookup and check roles. Each answers one narrow
+//     question with its own tools (a code search, a check run), so a web
+//     lookup is outside its task.
 //
-// planner, coder, debugger, reviewer, documenter, researcher, designer and
-// gitter do NOT carry it: they may spawn, and a spawn of theirs is gated by
+// planner, coder, debugger, reviewer, researcher and designer do NOT carry it: they may spawn, and a spawn of theirs is gated by
 // the three checks in nestedSpawnRefusal plus the per-entry quota
 // (maxNestedSpawns). The absence of `spawn: "deny"` is the whole grant — the
 // schema strip leaves the tool in their schema and checkSpawnPermission
@@ -226,10 +271,15 @@ const NO_SPAWN = {
 // things it cannot do itself. The spawn gate (tools.js) enforces it and the
 // delegating roles' limits block (hooks.js) sizes against it.
 //
-// The seven non-web roles reach the `researcher`: web search and fetching
-// is the one thing they have no web tool for. The `researcher` reaches the
+// The five non-web roles that work out content of their own reach the
+// `researcher`: web search and fetching is the one thing they have no web tool
+// for. The `researcher` reaches the
 // `grounder` and nothing else: that is the second, independent search path
 // (Google Search grounding), which its own tools do not give it.
+//
+// `scout` and `checker` are targets of nobody: a delegating role reads code
+// and runs its own checks with the tools it holds, and SUBAGENT_DELEGATION_GUIDE
+// tells it to keep that work. Only the orchestrator spawns them.
 //
 // The graph terminates: `grounder` is a key of nothing and carries NO_SPAWN,
 // so the longest chain is caller → researcher → grounder and no cycle exists.
@@ -242,9 +292,7 @@ export const NESTED_SPAWN_TARGETS = Object.freeze({
   coder: WEB_SEARCH_TARGETS,
   debugger: WEB_SEARCH_TARGETS,
   reviewer: WEB_SEARCH_TARGETS,
-  documenter: WEB_SEARCH_TARGETS,
   designer: WEB_SEARCH_TARGETS,
-  gitter: WEB_SEARCH_TARGETS,
   researcher: Object.freeze(["grounder"]),
 })
 
@@ -282,6 +330,16 @@ export function isSubagentRole(agent) {
 // that are held against them.
 export function mayDelegate(agent) {
   return isSubagentRole(agent) && AGENTS[agent].permission?.spawn !== "deny"
+}
+
+// This plugin's OWN default answer to whether a role holds `write`, read off
+// the same permission maps. Rung 2 in the same sense as mayDelegate: the live
+// prompt asks the resolved config (hooks.js, `resolveToolPermission`), and this
+// answers for the places that have none to ask — the offline prompt files and
+// the spawn-size estimate. It decides whether the reply-ceiling blocks tell the
+// role to file its detail or to keep its reply to what fits.
+export function roleHoldsWrite(agent) {
+  return AGENTS[agent]?.permission?.write !== "deny"
 }
 
 // Every web tool this plugin gates, each denied: opencode's built-in
@@ -342,7 +400,7 @@ export const SOLO_PRIMARY_PERMISSION = Object.freeze({ task: "deny" })
 export const SOLO_PRIMARY_DESCRIPTION =
   "Main agent. Does the work itself with its own tools; there are no subagents."
 
-// The 10 roles. `permission` maps tools a role must not have to `deny`; everything
+// The 12 roles. `permission` maps tools a role must not have to `deny`; everything
 // else stays enabled by default (incl. the intercom tools and any MCP tools). The
 // runtime guard in hooks.js still hard-enforces the primary-only restriction.
 //
@@ -383,7 +441,7 @@ export const AGENTS = {
   },
   coder: {
     description:
-      "Implements code changes in thin vertical slices, runs build/test commands, verifies before reporting back.",
+      "Implements code changes in thin vertical slices, or applies an exact change as briefed; adds the test for a change in behaviour, installs dependencies, runs build/test commands, verifies before reporting back, and hands back the Commit:/Docs: lines for the gitter and documenter.",
     mode: "subagent",
     hidden: true,
     permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS },
@@ -391,15 +449,18 @@ export const AGENTS = {
   },
   debugger: {
     description:
-      "Diagnoses build/test/runtime errors. Finds the root cause but does not fix it itself.",
+      "Diagnoses build/test/runtime errors. Finds the root cause but does not fix it itself; writes repro scripts and notes under work/.",
     mode: "subagent",
     hidden: true,
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, edit: "deny", write: "deny" },
+    // `write` is granted for its repro scripts and notes; its prompt keeps them
+    // under `work/debug-<topic>/`. `edit` stays denied: existing files are not
+    // its to change.
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, edit: "deny" },
     prompt: DEBUGGER_PROMPT,
   },
   reviewer: {
     description:
-      "Critical developer. Reviews code against best practices, clean code, performance. Writes a review document in reviews/, changes no source code.",
+      "Critical developer. Reviews the diff range, staged changes or files its briefing names — functional bugs first, then best practices, clean code, performance. Writes a review document in reviews/, changes no source code.",
     mode: "subagent",
     hidden: true,
     permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS },
@@ -407,10 +468,14 @@ export const AGENTS = {
   },
   documenter: {
     description:
-      "Writes user/API documentation (README, usage, changelog). Reads the actual code, invents nothing.",
+      "Writes user/API documentation (README, usage, changelog) exactly as briefed — the prompt states the file, the place and the content to write, and it decides none of these itself; what the docs should say comes from another role (e.g. reviewer, planner or coder) beforehand.",
     mode: "subagent",
     hidden: true,
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS },
+    permission: {
+      ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS,
+      outline: "deny",
+      todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
+    },
     prompt: DOCUMENTER_PROMPT,
   },
   researcher: {
@@ -460,15 +525,45 @@ export const AGENTS = {
   },
   gitter: {
     description:
-      "Handles repository operations (commits, branches, rebases, tags, PR descriptions) matching the project's existing git style. Does not edit source code. An unfamiliar git or forge error is looked up by a researcher.",
+      "Runs git operations (commits, branches, tags, pushes, pull requests, read-only git reports) exactly as briefed — the prompt states the exact files to stage, the exact commit message and whether to push, and it decides none of these itself; what changed and what to commit is settled beforehand by another role (e.g. reviewer, planner or coder). No source-code edits.",
     mode: "subagent",
     hidden: true,
     permission: {
-      ...SUBAGENT_NO_DELEGATION,
+      ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN,
       edit: "deny", write: "deny", ...NO_WEB_ACCESS, outline: "deny",
       todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
     },
     prompt: GITTER_PROMPT,
+  },
+  scout: {
+    description:
+      "Read-only code lookup: finds where a symbol, call site or text stands and summarises a file or function. Replies one `path:line — quoted line` per finding, or a summary of at most 10 lines. Changes no file.",
+    mode: "subagent",
+    hidden: true,
+    // `bash` is granted for the codegraph CLI, `write` for the one result file
+    // its prompt keeps under `work/`; `edit` is denied, so existing files are
+    // not its to change. `outline` stays: it reads code.
+    permission: {
+      ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS,
+      edit: "deny",
+      todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
+    },
+    prompt: SCOUT_PROMPT,
+  },
+  checker: {
+    description:
+      "Runs the checks its briefing names (tests, lint, type-check, build) and reports per check the command, the exit code, the counts and each failing item with its first error line. Changes no file.",
+    mode: "subagent",
+    hidden: true,
+    // `bash` runs the checks, `write` takes the one result file its prompt
+    // keeps under `work/`; `edit` is denied. It reads check output, not code,
+    // so `outline` is denied and it sits in OUTLINE_DISABLED_AGENTS.
+    permission: {
+      ...SUBAGENT_NO_DELEGATION, ...NO_SPAWN, ...NO_WEB_ACCESS,
+      edit: "deny", outline: "deny",
+      todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
+    },
+    prompt: CHECKER_PROMPT,
   },
 }
 
@@ -712,13 +807,17 @@ function isSoloPrimary(def) {
 // The role prompt this agent is actually given, mode resolved. The primary is
 // the only role the mode touches: in solo mode it gets SOLO_PROMPT, which says
 // there is nothing to delegate to, instead of the orchestration prompt, which
-// says its only job is to delegate and that it has three tools and nothing
-// else. Every subagent keeps its own prompt in both modes.
+// says it delegates and names the tools it has for that. Every subagent keeps
+// its own prompt in both modes.
 //
 // The reference-file renderers (src/promptsfile.js) read the prompt through
 // this function for the same reason the injection path does: a file that shows
 // the orchestration prompt to a solo primary describes an agent that does not
 // exist in this process.
+//
+// The orchestration prompt names `reuse` nowhere: that tool exists only where
+// retention is offered, and the block that introduces it
+// (ORCHESTRATION_REUSE_GUIDE, prompts.js) is injected only there.
 export function rolePrompt(agent) {
   const def = AGENTS[agent]
   if (!def) return ""

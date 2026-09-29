@@ -107,7 +107,7 @@ import {
   DEFAULT_AGENT,
   SOLO_ROLE_HEADER_NAME,
 } from "./agents.js"
-import { resolveSpawnPermission } from "./config.js"
+import { resolveSpawnPermission, resolveToolPermission } from "./config.js"
 import { codegraphCommand, codegraphCommandFor } from "./codegraph.js"
 import { overrideBlock, overrideToastText } from "./overrides.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
@@ -166,14 +166,14 @@ export { timeoutSubagent } from "./watchdog.js"
 
 // The only tools a primary session may execute — everything else must be
 // delegated to a subagent. Pure orchestration: spawn / abort / list. Even
-// glob, grep, and TODO.md reads are delegated (to the planner), so the
+// glob and grep (to a scout) and TODO.md reads (to the planner) are delegated, so the
 // orchestrator stays at the coordination layer.
 //
 // The ORCHESTRATOR pattern's list, and it governs a primary only there. In
 // solo mode none of these tools is registered and the primary is the worker,
 // so the guard below takes its other branch and this set gates nothing — see
 // soloModeActive (src/settings.js).
-const PRIMARY_TOOLS = new Set([
+export const PRIMARY_TOOLS = new Set([
   "spawn",
   "abort",
   "list",
@@ -297,15 +297,18 @@ function availablePrimaryTools() {
     .join(", ")
 }
 
-// TODO.md is the domain of the six agents that produce concrete deliverables:
-// planner (plans), coder (code), debugger (diagnoses), reviewer (reviews),
-// documenter (docs), designer (images). Each one can read AND write TODO.md
-// — list, add new tasks, edit existing ones, remove completed ones.
-// The other three subagents (researcher, grounder, gitter) get no TODO tools at
-// all: they hand off whatever they find to the others, who manage the list.
+// TODO.md is the domain of the five agents that work out deliverables of their
+// own: planner (plans), coder (code), debugger (diagnoses), reviewer (reviews),
+// designer (images). Each one holds all four TODO tools; its role prompt
+// (agents.js) says which of them it uses — planner and coder own the list,
+// the other three read it and add to it.
+// The other six subagents (researcher, grounder, documenter, gitter, scout,
+// checker) get no TODO tools at all: documenter and gitter carry out exact
+// briefs, scout and checker answer one lookup or check, and the web roles hand
+// off whatever they find to the others, who manage the list.
 export const TODO_TOOLS = new Set(["todos_open", "todo_done", "todo_add", "todo_edit"])
 export const TODO_AGENTS = new Set([
-  "planner", "coder", "debugger", "reviewer", "documenter", "designer",
+  "planner", "coder", "debugger", "reviewer", "designer",
 ])
 
 // Subagents that get AGENTS.md content preserved in their system prompt.
@@ -314,15 +317,19 @@ export const TODO_AGENTS = new Set([
 // down and always keeps AGENTS.md.
 //   - coder / debugger / reviewer keep it: build/test commands, code style,
 //     PR rules are central to their work.
+//   - checker keeps it: the check commands a briefing names without the
+//     command are looked up there.
 //   - planner / documenter strip it: planner writes design docs and is told
 //     in its role prompt to reference AGENTS.md via Sources when relevant;
-//     documenter writes user-facing docs that rarely need dev conventions.
-//   - researcher / grounder / designer / gitter strip it: web research, image
-//     generation, git operations don't need project code conventions.
+//     documenter writes the content its brief states, into the place it names.
+//   - researcher / grounder / designer / gitter / scout strip it: web
+//     research, image generation, git operations and a code lookup don't need
+//     project code conventions.
 const AGENTS_MD_SUBAGENTS = new Set([
   "coder",
   "debugger",
   "reviewer",
+  "checker",
 ])
 
 // The share of the budget at which the subagent is first told anything about
@@ -665,6 +672,9 @@ export function createTransformSystem(client) {
         // The command this role may run, asked of the same resolved `bash`
         // permission the runtime re-check applies when the role calls it.
         codegraph: await codegraphCommandFor(client, agentName),
+        // Whether the role holds `write`, asked of the same resolved config:
+        // it picks the reply-cap block's file instruction or its no-file form.
+        holdsWrite: await roleHoldsWriteResolved(client, agentName),
       })
 
       // Detector B (overrides.js): the prompt files this project has on disk,
@@ -1147,6 +1157,11 @@ async function contextLimitNotice(client, entry) {
 
   if (entry.ctxTokens == null || entry.ctxTokens < maxContext * CTX_NEAR_BUDGET) return ""
 
+  // Whether this role holds `write` at all, from the same resolved config its
+  // system prompt was built from: the three bands below name a result file only
+  // for a role that can write one.
+  const holdsWrite = await roleHoldsWriteResolved(client, entry.agent)
+
   // Plan band: the subagent is told what is coming while it still has room to
   // act on it. Nothing is denied here and nothing is demanded — a wrap-up
   // demand at CTX_NEAR_BUDGET would throw away a fifth of a budget the
@@ -1184,7 +1199,7 @@ async function contextLimitNotice(client, entry) {
       `the account unwritten.` +
       // The ceiling, in the form that fits a subagent that is still working:
       // file the detail as it goes, so the summary has a path to name.
-      resultCeilingPlan(entry.agent) +
+      resultCeilingPlan(entry.agent, { holdsWrite }) +
       `\n---\n`
     )
   }
@@ -1217,8 +1232,9 @@ async function contextLimitNotice(client, entry) {
       `the ONLY thing the orchestrator receives from you — start no new line of investigation, ` +
       `open no further files.` +
       // The result ceiling, named at the moment the reply is being demanded and
-      // while the subagent still has the `write` the demand asks for.
-      resultCeilingDemand(entry.agent, { canWrite: true }) +
+      // while the subagent still has the `write` the demand asks for — where
+      // its role holds one.
+      resultCeilingDemand(entry.agent, { canWrite: true, holdsWrite }) +
       `\n---\n`
     )
   }
@@ -1317,7 +1333,7 @@ async function contextLimitNotice(client, entry) {
     // The same ceiling the reserve band named, for the subagent that is here
     // without having passed through that band — a single turn can cross both.
     // `canWrite: false`: every work tool is denied on this figure.
-    resultCeilingDemand(entry.agent, { canWrite: false }) +
+    resultCeilingDemand(entry.agent, { canWrite: false, holdsWrite }) +
     "\n---\n"
   )
 }
@@ -1549,8 +1565,8 @@ function formatLimitsNotice({
 // can spawn nothing however its `permission.spawn` reads — and the delegation
 // guide would name it a target it cannot have (delegationGuideFor falls back to
 // the researcher block for a role the target table does not key). For the roles
-// as they ship the condition is inert: the eight with `spawn` all have a target
-// and the one without has neither. It bites only where a project opens
+// as they ship the condition is inert: the six with `spawn` all have a target
+// and the three without have neither. It bites only where a project opens
 // `spawn` on a role the target table does not carry, which is exactly the case
 // reading the resolved config makes reachable here.
 async function delegatesNested(client, agent) {
@@ -1558,6 +1574,13 @@ async function delegatesNested(client, agent) {
   if (getSettings().maxNestedSpawns <= 0) return false
   if (nestedSpawnTargets(agent).length === 0) return false
   return (await resolveSpawnPermission(client, agent)) === null
+}
+
+// Whether `agent` holds `write`, asked of the resolved config — the answer the
+// runtime re-check gives when the role calls it (config.js
+// resolveToolPermission). Decides the form of the reply-ceiling blocks.
+async function roleHoldsWriteResolved(client, agent) {
+  return (await resolveToolPermission(client, agent, "write")) === null
 }
 
 // Which of `agents` actually delegate, as a Set — the predicate above resolved
@@ -2838,11 +2861,9 @@ export function createGuardToolExecute(client, permissionGuard) {
           tool: input.tool,
         })
         throw new Error(
-          `agent-intercom: \`${input.tool}\` is restricted to planner / coder / debugger / ` +
-            "reviewer / documenter / designer. The researcher, grounder and gitter agents do not " +
-            "touch " +
-            "TODO.md. Put `DONE: T<n>` on the FIRST or LAST non-empty line of your final message " +
-            "if your spawn was task-tracked and you finished the work.",
+          `agent-intercom: \`${input.tool}\` is restricted to ${[...TODO_AGENTS].join(" / ")}. ` +
+            "Other agents do not touch TODO.md. Put `DONE: T<n>` on the FIRST or LAST non-empty " +
+            "line of your final message if your spawn was task-tracked and you finished the work.",
         )
       }
       // Defense in depth: re-check the per-agent `permission.<tool> = "deny"`

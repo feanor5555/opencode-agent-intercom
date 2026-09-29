@@ -100,7 +100,7 @@ test("the probe role sets are the sets they mirror, not a list that can drift", 
 
   assert.equal(byId["blocked-contract"].agents, null, "the blocked contract binds every role")
 
-  // The marker does something for the six roles that own TODO.md, plus the
+  // The marker does something for the five roles that own TODO.md, plus the
   // orchestrator, which writes the contract into every task-tracked spawn.
   assert.deepEqual(
     [...byId["done-marker"].agents].sort(),

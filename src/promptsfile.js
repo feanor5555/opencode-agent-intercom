@@ -85,13 +85,14 @@ const HAS_OUTLINE = new Set(
 )
 
 // Which agents get AGENTS.md in their default template (mirrors hooks.js
-// AGENTS_MD_SUBAGENTS = {coder, debugger, reviewer} plus orchestrator, which
+// AGENTS_MD_SUBAGENTS = {coder, debugger, reviewer, checker} plus orchestrator, which
 // is treated as primary there and always keeps AGENTS.md).
 const HAS_AGENTS_MD = new Set([
   "orchestrator",
   "coder",
   "debugger",
   "reviewer",
+  "checker",
 ])
 
 export function getPromptsDir(directory) {
@@ -517,7 +518,7 @@ export function renderOpencodeDefaultFile(agent) {
   ]
   // The reference template ALWAYS includes AGENTS.md because that is what
   // opencode itself would do — the active <agent>.md may omit it for some
-  // roles (planner/documenter/researcher/grounder/designer/gitter); the
+  // roles (planner/documenter/researcher/grounder/designer/gitter/scout); the
   // difference is
   // exactly what the strip-notes above describe.
   parts.push("\n{{agents_md}}\n")

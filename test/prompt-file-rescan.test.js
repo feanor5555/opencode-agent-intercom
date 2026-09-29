@@ -306,6 +306,6 @@ test("an idle that finds nothing changed leaves the next turn byte-identical", a
   await idleFor(hooks, sid)
   const second = await primaryTransform(hooks, sid)
 
-  assert.equal(second.system[0], first.system[0], "nine stats, nothing moved")
+  assert.equal(second.system[0], first.system[0], "one stat per role, nothing moved")
   assert.match(second.system[0], /- coder: the prompt file predates/, "and the finding still stands")
 })

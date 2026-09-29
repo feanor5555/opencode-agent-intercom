@@ -64,12 +64,10 @@ const DELEGATING_ROLES = [
   "coder",
   "debugger",
   "reviewer",
-  "documenter",
   "designer",
-  "gitter",
   "researcher",
 ]
-const NON_DELEGATING_ROLES = ["grounder"]
+const NON_DELEGATING_ROLES = ["grounder", "documenter", "gitter", "scout", "checker"]
 
 const PRIMARY = "ses_primary"
 
@@ -200,14 +198,16 @@ test("the target table maps each spawning role to what it may name", () => {
   assert.deepEqual([...nestedSpawnTargets("coder")], ["researcher"])
   assert.deepEqual([...nestedSpawnTargets("debugger")], ["researcher"])
   assert.deepEqual([...nestedSpawnTargets("reviewer")], ["researcher"])
-  assert.deepEqual([...nestedSpawnTargets("documenter")], ["researcher"])
   assert.deepEqual([...nestedSpawnTargets("designer")], ["researcher"])
-  assert.deepEqual([...nestedSpawnTargets("gitter")], ["researcher"])
   // The researcher's own one target, and only that one.
   assert.deepEqual([...nestedSpawnTargets("researcher")], ["grounder"])
   // A role outside the table — denied here and unknown alike — answers with the
   // empty set rather than null, so every caller can read it without a guard.
   assert.deepEqual([...nestedSpawnTargets("grounder")], [])
+  // The exact-brief roles look nothing up: a gap in their brief goes back to
+  // their caller.
+  assert.deepEqual([...nestedSpawnTargets("documenter")], [])
+  assert.deepEqual([...nestedSpawnTargets("gitter")], [])
   assert.deepEqual([...nestedSpawnTargets("orchestrator")], [])
   assert.deepEqual([...nestedSpawnTargets("some-project-agent")], [])
   assert.deepEqual([...nestedSpawnTargets(undefined)], [])
@@ -266,7 +266,7 @@ test("delegating roles get the delegation guide and not the no-spawn one", async
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
 
-  for (const agent of ["planner", "designer", "gitter"]) {
+  for (const agent of ["planner", "designer", "coder"]) {
     const sessionID = `ses_${agent}`
     subagentCaller(sessionID, agent)
 
@@ -372,7 +372,7 @@ test("delegating roles' limits blocks carry their three figures and nothing more
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
 
-  for (const agent of ["planner", "designer", "gitter"]) {
+  for (const agent of ["planner", "designer", "coder"]) {
     const sessionID = `ses_limits_${agent}`
     subagentCaller(sessionID, agent)
 
@@ -407,7 +407,7 @@ test("the quota line reaches delegating roles on the last user message", async (
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
 
-  for (const agent of ["planner", "designer", "gitter"]) {
+  for (const agent of ["planner", "designer", "coder"]) {
     const sessionID = `ses_quota_${agent}`
     subagentCaller(sessionID, agent)
 

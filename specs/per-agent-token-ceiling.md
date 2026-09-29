@@ -20,7 +20,7 @@ Read out of the source, each claim with its line:
   `maxContext` and the env var `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` are the
   value for every type without an own entry (`src/settings.js:6-21`,
   `src/settings.js:804`); the built-in per-type default table is
-  `DEFAULT_AGENT_CONTEXT` (`src/settings.js:123-133`) and an unknown name
+  `DEFAULT_AGENT_CONTEXT` (`src/settings.js:130-142`) and an unknown name
   falls back to `DEFAULT_MAX_CONTEXT = 100000` (`src/settings.js:116`). Whole
   tokens, settings cached for `TTL_MS = 2000` (`src/settings.js:400`, `:530`).
   `0` is a real value at every level and disables the budget for that type.
@@ -103,12 +103,12 @@ Read out of the source, each claim with its line:
 - The TUI already fetches the live agent list: `const res = await api.client.app.agents({})`
   (`tui/src/tui.tsx:670`), whose records are typed
   `mode: "subagent" | "primary" | "all"` (`@opencode-ai/sdk` `types.gen.d.ts:1399-1402`).
-  Its own hardcoded list is `export const AGENT_NAMES = [...]`, ten names
-  (`tui/src/agent-roles.ts:19-30`).
+  Its own hardcoded list is `export const AGENT_NAMES = [...]`, twelve names
+  (`tui/src/agent-roles.ts:19-32`).
 - Roles the plugin itself installs: `export const AGENTS = { orchestrator, planner,
-  coder, debugger, reviewer, documenter, researcher, grounder, designer, gitter }`
-  (`src/agents.js:355-472`), merged non-destructively by `installAgents`
-  (`src/agents.js:735-824`).
+  coder, debugger, reviewer, documenter, researcher, grounder, designer, gitter,
+  scout, checker }` (`src/agents.js:414-568`), merged non-destructively by
+  `installAgents` (`src/agents.js:835-924`).
 
 ## 2. Target state
 
@@ -155,8 +155,8 @@ an environment string; per-type values live in the file.
 
 ### 2.2 Built-in per-type defaults
 
-In `src/settings.js`, exported (`src/settings.js:116`, `:123-133`); the TUI
-mirrors both (`tui/src/settings-file.ts:175`, `tui/src/agent-roles.ts:80-90`)
+In `src/settings.js`, exported (`src/settings.js:123`, `:130-142`); the TUI
+mirrors both (`tui/src/settings-file.ts:175`, `tui/src/agent-roles.ts:83-95`)
 and `test/settings-defaults-parity.test.js` pins the two halves against each
 other and the table's keys against `SPAWNABLE_ROLES`:
 
@@ -165,7 +165,7 @@ export const DEFAULT_MAX_CONTEXT = 100000   // unknown agent name, legacy flat k
 export const DEFAULT_AGENT_CONTEXT = {
   planner: 100000, coder: 100000, debugger: 100000, reviewer: 100000,
   documenter: 100000, researcher: 100000, grounder: 100000, designer: 100000,
-  gitter: 100000,
+  gitter: 100000, scout: 100000, checker: 100000,
 }
 ```
 
@@ -260,7 +260,8 @@ project's `PROJECT.md`, `AGENTS.md` and snapshot):
 Context budget per agent: planner 100k (−10k fixed → 90k) · coder 100k (−12k
 fixed → 88k) · debugger 100k (−12k fixed → 88k) · reviewer 100k (−10k fixed →
 90k) · documenter 100k (−10k fixed → 90k) · researcher 100k (−12k fixed → 88k)
-· grounder 100k (−8k fixed → 92k) · designer 100k (−8k fixed → 92k) · gitter off.
+· grounder 100k (−8k fixed → 92k) · designer 100k (−8k fixed → 92k) · gitter off
+· scout 100k (−10k fixed → 90k) · checker 100k (−10k fixed → 90k).
 Per entry: the budget, the fixed overhead every spawn of that type carries
 before your own words (subagent guides, PROJECT.md, the project snapshot the
 plugin prepends, AGENTS.md where that type keeps it), and the headroom left of
@@ -273,7 +274,7 @@ right-sized-chunks rule of the orchestration protocol above.
 from the user's screen…" — is appended only while that setting is off.)
 
 The list is built from `SPAWNABLE_ROLES` (`src/hooks.js:1453`; the `mode: "subagent"`
-roles of `AGENTS`, `src/agents.js:499-503`) mapped through `contextBudgetFor` — the
+roles of `AGENTS`, `src/agents.js:595-599`) mapped through `contextBudgetFor` — the
 plugin's own roles, which are the ones the orchestrator prompt tells it to spawn
 (`src/agents.js:49`). Cost: the block grows from one line to three, ~40 tokens
 per orchestrator turn.
@@ -307,7 +308,7 @@ type's own value stepping below zero **drops the entry** so the inherited
 default shows again, the behaviour `stepLlmParam` already implements
 (`tui/src/llm-params-file.ts:148-149`).
 
-The cycler walks `AGENT_NAMES` (`tui/src/agent-roles.ts:19-30`, `cycleLlmAgent` at
+The cycler walks `AGENT_NAMES` (`tui/src/agent-roles.ts:19-32`, `cycleLlmAgent` at
 `tui/src/tui.tsx:776-780`), the plugin's own roles with `orchestrator` included; a
 project's own agents get no row.
 
@@ -328,7 +329,7 @@ Weighed and rejected:
   there is no global left, so the sidebar would offer no way to set a ceiling at
   all, and the file key has no in-product discovery path — a user would have to
   read the README to change a limit they can see biting on screen.
-- **One row per agent type.** Nine rows today, unbounded with project agents;
+- **One row per agent type.** Eleven rows today, unbounded with project agents;
   it buries the three sibling limits and breaks the fixed sidebar layout the
   column widths assume (`tui/src/tui.tsx:176-186`).
 - **Effective ceiling on the running subagent's row instead of the settings
@@ -340,10 +341,10 @@ Weighed and rejected:
 
 ### 2.8 Agent types known at runtime
 
-- Server: `AGENTS` (`src/agents.js:355-472`) — ten roles — merged into
-  opencode's resolved config by `installAgents` (`src/agents.js:735-824`), where
+- Server: `AGENTS` (`src/agents.js:414-568`) — twelve roles — merged into
+  opencode's resolved config by `installAgents` (`src/agents.js:835-924`), where
   a project may add its own or override one. The `spawn` tool's gate reads
-  `SPAWNABLE_ROLES` (`src/agents.js:499-503`), the nine `mode: "subagent"` roles
+  `SPAWNABLE_ROLES` (`src/agents.js:595-599`), the eleven `mode: "subagent"` roles
   minus `orchestrator` — the closed spawnable set is this plugin's own
   roles, nothing else. `contextBudgetFor` keeps its unknown-name fallback of
   2.2 for any read path that is not the spawn gate (e.g. a per-type editor

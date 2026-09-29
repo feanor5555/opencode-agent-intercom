@@ -268,7 +268,7 @@ The setup the drivers are written against:
 - `opencode serve` started in `$HOME/testopencode`
 - `E2E_MODEL` defaults to `cliproxy/qwen3.8-flash-medium` — reached through the
   `cliproxy` provider, proven reachable and reasoning-capable on this machine.
-  Every agent, the primary and the nine
+  Every agent, the primary and the eleven
   subagent roles alike, is pinned to it, except `grounder` (see the pin
   exception below); `gpuserver/Qwen3.8 Flash Next` is
   refused outright, whatever `E2E_MODEL` says
@@ -320,7 +320,7 @@ can: through the isolated `llm-models.json`. The model a driver names in its
 POST does **not** decide what answers — `applyModelChoices` (`src/llmmodel.js`)
 writes the file's entry into `config.agent[<name>].model` at instance bootstrap
 and that wins; a live run was answered by Qwen although the request named
-another model. The isolated file therefore pins the nine plugin roles that
+another model. The isolated file therefore pins the eleven plugin roles that
 take the pin and the opencode built-ins that can answer a turn, with no
 `variant` key, and the isolated `opencode.json` carries `model` and
 `small_model` for anything not named there at all.

@@ -3,10 +3,10 @@
 // blocking behaviour that makes the child's ending the caller's tool result, and
 // the two pieces of session bookkeeping a nested child needs.
 //
-// `spawn` is granted to eight of the nine roles (planner, coder, debugger,
-// reviewer, documenter, designer, gitter, researcher); only grounder keeps
-// `spawn: "deny"`. What each grantee may NAME comes from
-// NESTED_SPAWN_TARGETS (agents.js): the seven non-web roles reach the
+// `spawn` is granted to six of the eleven roles (planner, coder, debugger,
+// reviewer, designer, researcher); grounder, documenter, gitter, scout and
+// checker keep `spawn: "deny"`. What each grantee may NAME comes from
+// NESTED_SPAWN_TARGETS (agents.js): the five non-web roles reach the
 // researcher, the researcher reaches the grounder.
 // The tests that drive the ADMITTED path still open it through a config
 // override on the caller's role — rung 1 of checkSpawnPermission's resolution —
@@ -54,12 +54,10 @@ const DELEGATING_ROLES = [
   "coder",
   "debugger",
   "reviewer",
-  "documenter",
   "designer",
-  "gitter",
   "researcher",
 ]
-const NON_DELEGATING_ROLES = ["grounder"]
+const NON_DELEGATING_ROLES = ["grounder", "documenter", "gitter", "scout", "checker"]
 
 const PRIMARY = "ses_primary"
 const primaryCtx = { sessionID: PRIMARY, agent: "orchestrator", messageID: "m1" }
@@ -185,13 +183,13 @@ function subagentCaller(sessionID, agent) {
 
 // ---- the gate: which caller may nest at all -------------------------------
 
-test("the caller gate splits the nine roles exactly as the grant does", async () => {
+test("the caller gate splits the eleven roles exactly as the grant does", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   const roles = Object.entries(AGENTS)
     .filter(([, def]) => def.mode === "subagent")
     .map(([name]) => name)
-  assert.equal(roles.length, 9, "expected 9 subagent roles")
+  assert.equal(roles.length, 11, "expected 11 subagent roles")
   assert.deepEqual(
     roles.slice().sort(),
     [...DELEGATING_ROLES, ...NON_DELEGATING_ROLES].sort(),
@@ -262,11 +260,12 @@ test("checkSpawnPermission: config decides, then the plugin's map, then deny", a
   // rung 1: the config's explicit deny wins over a role whose own map allows.
   assert.match(await guard.checkSpawnPermission("orchestrator"), /permission\.spawn/)
   // rung 2: a role the config does not decide for falls to the plugin's map —
-  // deny for the one that carries `spawn: "deny"`, allow for the eight grants
+  // deny for the three that carry `spawn: "deny"`, allow for the six grants
   // (an absent key resolves to allow).
   assert.match(await guard.checkSpawnPermission("grounder"), /permission\.spawn/)
+  assert.match(await guard.checkSpawnPermission("gitter"), /permission\.spawn/)
+  assert.match(await guard.checkSpawnPermission("documenter"), /permission\.spawn/)
   assert.equal(await guard.checkSpawnPermission("designer"), null)
-  assert.equal(await guard.checkSpawnPermission("gitter"), null)
   assert.equal(await guard.checkSpawnPermission("planner"), null)
   assert.equal(await guard.checkSpawnPermission("researcher"), null)
   // rung 3: a role neither side defines.
@@ -278,7 +277,7 @@ test("an ABSENT permission.spawn key allows — the shape S6 gives a delegating 
   const { ctx } = makeCtx()
   const guard = createPermissionGuard(ctx.client)
   // The orchestrator's map carries no `spawn` key at all; that absence is what
-  // planner/coder/debugger/reviewer/documenter/designer/gitter/researcher get
+  // planner/coder/debugger/reviewer/designer/researcher get
   // by dropping NO_SPAWN.
   assert.equal(AGENTS.orchestrator.permission?.spawn, undefined)
   assert.equal(await guard.checkSpawnPermission("orchestrator"), null)
@@ -308,7 +307,7 @@ test("a researcher may spawn a grounder and nothing else", async () => {
   const hooks = await plugin(ctx)
   const callerCtx = subagentCaller("ses_researcher", "researcher")
 
-  for (const agent of ["researcher", "coder", "planner", "designer", "gitter"]) {
+  for (const agent of ["researcher", "coder", "planner", "designer", "gitter", "scout", "checker"]) {
     const res = await hooks.tool.spawn.execute({ agent, prompt: "do it" }, callerCtx)
     assert.match(res.output, /a "researcher" may spawn "grounder" and nothing else/)
     assert.match(res.output, new RegExp(`you\\s+asked for a "${agent}"`))

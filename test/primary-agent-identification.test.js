@@ -45,7 +45,7 @@ setSettingsPath(join(fixtureDir, "agent-intercom.json"))
 // which would append the override block to the prompt asserted below. The
 // comment is stripped before the prompt is assembled, so the file still
 // substitutes to its one line. `build.md` needs none: the scan covers the
-// plugin's nine roles and `build` is not one of them.
+// plugin's roles and `build` is not one of them.
 const promptsDir = join(fixtureDir, ".opencode", "agent-intercom")
 mkdirSync(promptsDir, { recursive: true })
 writeFileSync(

@@ -218,7 +218,7 @@ test("grounder is exempt from the pin and no other plugin role is", () => {
   const exempt = /E2E_PIN_EXEMPT_AGENTS="([^"]*)"/.exec(src)[1].split(/\s+/).filter(Boolean)
   assert.deepEqual(exempt, ["grounder"])
   assert.ok(!pinned.includes("grounder"), "grounder must not be pinned")
-  for (const role of ["orchestrator", "planner", "coder", "debugger", "reviewer", "documenter", "researcher", "designer", "gitter"]) {
+  for (const role of ["orchestrator", "planner", "coder", "debugger", "reviewer", "documenter", "researcher", "designer", "gitter", "scout", "checker"]) {
     assert.ok(pinned.includes(role), `${role} is missing from the pinned list`)
   }
   assert.ok(!pinned.some((n) => exempt.includes(n)), "a name may be on one list only")

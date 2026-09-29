@@ -161,8 +161,8 @@ An accepted `reuse` resets `messagesIn` and writes the plain title back, so run
 `completionNotice` ends with `📨 exchange: 2 messages down, 1 question answered,
 1 unanswered`, read off `messagesIn` / `asksOut` / `asksAnswered` /
 `asksUnanswered` by `exchangeSnapshot` inside the critical section that removes
-the entry. Absent for a run with no traffic, so an ordinary completion notice is
-unchanged.
+the entry. Absent for a run with no traffic, so an ordinary completion notice
+carries no such line.
 
 `asksOut` counts every question opened, `asksAnswered` and `asksUnanswered` only
 those a wait was taken on; a question delivered under `answerWaitMs: 0` ends
@@ -197,17 +197,17 @@ sidebar row: they are file and env only.
 
 ## What the prompts say
 
-The unconditional one-shot claim is gone. `ORCHESTRATION_GUIDE` names `message`
+The prompts state one reply and reachability together. `ORCHESTRATION_GUIDE` names `message`
 in its tool list, marks an `asking` row in `list()`, and carries a paragraph on
 answering a question in the same turn. `SUBAGENT_GUIDE_CORE` opens with one reply
 AND reachability, and discriminates `ask` from `Blocked:` — `ask` where one
 answer lets the run carry on, `Blocked:` where it cannot carry on at all, where
 the answer would change the task, or where a question already went unanswered.
-The two nested-delegation blocks keep "There is no wake and no second chance to
+The two nested-delegation blocks say "There is no wake and no second chance to
 ask — one answer, then that subagent is gone", which is about the child a
-*subagent* spawns and stays literally true.
+*subagent* spawns and is literally true for it.
 
-`PROMPT_CONTRACT` is `2` for this change; the element text is pinned in
+`PROMPT_CONTRACT` is `2`; the element text is pinned in
 `test/fixtures/prompt-contract.json` and re-pinned with `npm run pin:contract`.
 
 ## Solo mode

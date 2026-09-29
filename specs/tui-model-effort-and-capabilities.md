@@ -15,31 +15,8 @@ the active variant in a freshly started session.
 ## 1. Capability metadata kept from `/config/providers`
 
 `refreshModelChoices` (`tui/src/tui.tsx:724-772`) reads the response through a
-structural cast that names `id`, `providerID`, `name` and the capability block
-(`tui/src/tui.tsx:727-740`):
-
-```ts
-models?: Record<string, {
-  id?: string; providerID?: string; name?: string;
-  capabilities?: { reasoning?: boolean; input?: { image?: boolean } };
-}>;
-```
-
-`ModelChoice` (`tui/src/tui.tsx:204-209`) gains two booleans, filled with a strict
-`=== true` test so a missing block reads as `false`:
-
-```ts
-interface ModelChoice extends ModelRef {
-  label: string;
-  vision: boolean;    // m.capabilities?.input?.image === true
-  reasoning: boolean; // m.capabilities?.reasoning === true
-}
-```
-
-Nothing else is kept. `cost`, `limit`, `toolcall`, `attachment`, `status`,
-`release_date`, `options` and `headers` stay dropped.
-
-`variants` is read. The cast gains one nested block:
+structural cast that names `id`, `providerID`, `name`, the capability block and
+the `variants` map (`tui/src/tui.tsx:727-740`):
 
 ```ts
 models?: Record<string, {
@@ -49,10 +26,11 @@ models?: Record<string, {
 }>;
 ```
 
-`ModelChoice` (`tui/src/tui.tsx:204-209`) gains one nullable field, filled by
-`variantNames` (`tui/src/tui.tsx:214-216`) — the keys of the model's `variants`
-map, or null where the provider list reports no such map (an unknown list, not
-an empty one):
+`ModelChoice` (`tui/src/tui.tsx:204-209`) carries two booleans, filled with a
+strict `=== true` test so a missing block reads as `false`, and one nullable
+field filled by `variantNames` (`tui/src/tui.tsx:214-216`) — the keys of the
+model's `variants` map, or null where the provider list reports no such map (an
+unknown list, not an empty one):
 
 ```ts
 interface ModelChoice extends ModelRef {
@@ -64,10 +42,10 @@ interface ModelChoice extends ModelRef {
 ```
 
 Nothing else is kept. `cost`, `limit`, `toolcall`, `attachment`, `status`,
-`release_date`, `options` and `headers` stay dropped.
+`release_date`, `options` and `headers` are dropped.
 
-Sorting (`tui/src/tui.tsx:764-767`) and the 60 s poll (`tui/src/tui.tsx:774`) are
-unchanged.
+The list is sorted by provider, then label (`tui/src/tui.tsx:764-767`), and
+re-fetched every 60 s (`tui/src/tui.tsx:774`).
 
 ## 2. Model row: badge columns
 
@@ -77,11 +55,9 @@ The model row (`tui/src/tui.tsx:2644-2673`) renders
   model          [<] grok 4.6     [>] ★ VR
 ```
 
-Two changes to that row:
-
 **The ★ slot is fixed-width.** It is an unconditional two-column `<text>` holding
 `" ★"` or `"  "` (`tui/src/tui.tsx:2667-2669`), so the badge field to its right never
-shifts sideways. The colour stays `theme.success`.
+shifts sideways. The colour is `theme.success`.
 
 **A badge cell follows it**: one leading space and two fixed columns, rendered as
 two separate `<text>` nodes so each carries its own colour.
@@ -100,25 +76,26 @@ Unicode.
 
 The model row is itself the selection surface — `[<]`/`[>]` cycle the pick list in
 place (`cycleModel`, `tui/src/tui.tsx:816-818`) — so the badges describe the model
-currently under the cursor and requirement (c) needs no separate dialog.
+currently under the cursor and no separate dialog is needed.
 
-`formatLlmModel` (`tui/src/tui.tsx:295-298`) and the 12-column cut
-`fitCell(..., MODEL_NAME_W)` (`tui/src/tui.tsx:193-194`, `:186`) are unchanged: the badges
-sit outside the name cell and cost the row three columns. The row becomes the
-widest in the section at 42 columns (2 indent + 15 label + 3 + 14 + 3 + 2 + 3);
-the section does not wrap to `panelWidth` (`tui/src/tui.tsx:2033-2038`) and needs
-no other adjustment.
+The model name is formatted by `formatLlmModel` (`tui/src/tui.tsx:295-298`) and
+cut to 12 columns by `fitCell(..., MODEL_NAME_W)` (`tui/src/tui.tsx:193-194`,
+`:186`); the badges sit outside the name cell and cost the row three columns.
+The row is the widest in the section at 42 columns (2 indent + 15 label + 3 +
+14 + 3 + 2 + 3); the section does not wrap to `panelWidth`
+(`tui/src/tui.tsx:2033-2038`).
 
-`tui/src/subagent-label.ts` is untouched: the subagent list rows keep naming the
-model alone (`subagentModel`, `tui/src/subagent-label.ts:311-321`, `MODEL_MAX_W = 12`
+The subagent list rows (`tui/src/subagent-label.ts`) name the model alone (`subagentModel`, `tui/src/subagent-label.ts:311-321`, `MODEL_MAX_W = 12`
 at `:62`) and carry no badges and no effort.
 
 ## 3. The `effort` row
 
-A new row directly under the model row and above `[reset current agent]`
-(`tui/src/tui.tsx:2865-2870`), built like the model row: label `effort`,
+The row sits directly under the model row and above the `max Token(k)`,
+`reuse Token(k)` and `result Token` ceiling rows
+(`tui/src/tui.tsx:2679-2701`), built like the model row: label `effort`,
 `[<]`/`[>]` with `holdRepeat`, value in `fitCell(..., MODEL_NAME_W)` so the agent,
-model and effort rows line their buttons up.
+model and effort rows line their buttons up, and a fixed-width ★ column for a
+stored effort.
 
 **Value set — a per-model ladder built from the model's `variants` map:**
 
@@ -144,7 +121,7 @@ prepended with `default` so it can always be cycled to. `default` means no
 override: the entry carries no `variant` and the model's own default effort
 stands. There is no numeric budget-token control; a model whose provider wants
 a token budget or an exotic effort name is served by hand-editing
-`llm-params.json`, whose unknown keys already ride through into `output.options`
+`llm-params.json`, whose unknown keys ride through into `output.options`
 (`src/llmparams.js:114-116`).
 
 **What the cell shows,** resolved on the priority the other rows use:
@@ -164,28 +141,27 @@ there is none → the cell shows the stored `variant` where one is stored and
 `n/a` otherwise, with the same always-wired, in-action guard. A stale or
 hand-written choice stays visible rather than turning silently into `default`.
 
-**The inherited effort** comes from a new signal
-`opencodeEfforts: Record<string, string>`, filled in `refreshOpencodeDefaults`
+**The inherited effort** comes from the signal
+`opencodeEfforts: Record<string, string>` (`tui/src/tui.tsx:667`), filled in `refreshOpencodeDefaults`
 (`tui/src/tui.tsx:668-710`) from each agent's `options` map — `Agent.options` is
 `{ [key: string]: unknown }` in the SDK type the TUI compiles against. The probe
 takes the first string it finds, lowercased, in this order:
 `reasoningEffort`, `effort`, `reasoning.effort`, `thinkingConfig.thinkingLevel`.
-It is a separate signal rather than a widening of `OpencodeDefaults`
+It is a signal of its own beside `OpencodeDefaults`
 (`tui/src/tui.tsx:257`), which is typed to numbers.
 
 **Setting an effort pins the model.** Where the row's model came from opencode
 rather than the file, stepping the effort writes the full entry
-`{ providerID, modelID, variant }`, so the model row gains its `★` in the same
-step. Both rows then describe one file entry.
+`{ providerID, modelID, variant }`, so the model row shows its `★` from the same
+step on. Both rows then describe one file entry.
 
 **Changing the model drops the effort.** `setLlmModel`
-(`tui/src/llm-models-file.ts:157-167`) and `cycleLlmModel` (`:175-197`) already
-assign a fresh object to `models[agent]`; keeping that assignment as it stands
-means no `variant` can outlive the model it was chosen for. No validation code is
-added anywhere for this.
+(`tui/src/llm-models-file.ts:157-167`) and `cycleLlmModel` (`:175-197`)
+assign a fresh object to `models[agent]`, so no `variant` outlives the model it
+was chosen for.
 
-**Store helper**, new in `tui/src/llm-models-file.ts`, same read-modify-write
-shape as its neighbours:
+**Store helpers** in `tui/src/llm-models-file.ts`, same read-modify-write
+shape as their neighbours:
 
 ```ts
 export const EFFORT_LADDER = ["default", "low", "medium", "high", "xhigh", "off"] as const;
@@ -206,12 +182,12 @@ rather than overwritten. Landing on `default` deletes only the `variant` key
 and leaves `{ providerID, modelID }` in place; landing anywhere else writes
 `models[agent] = { ...model, variant }`, materialising the pair from the
 resolved model where the agent had no entry. `resetLlmAgent`
-(`tui/src/tui.tsx:849-856`) needs no change: it drops the whole entry.
+(`tui/src/tui.tsx:849-856`) drops the whole entry, effort included.
 
 ## 4. Persistence
 
-`~/.config/opencode/llm-models.json` keeps its shape and gains one optional key
-per entry. No new file, no version key, no migration.
+`~/.config/opencode/llm-models.json` holds one entry per agent: the model pair
+plus one optional `variant` key. There is no version key.
 
 ```jsonc
 { "researcher": { "providerID": "xai", "modelID": "grok-4-6", "variant": "high" } }
@@ -219,21 +195,20 @@ per entry. No new file, no version key, no migration.
 
 In `tui/src/llm-models-file.ts`:
 
-- `ModelRef` (`:24-27`) stays the pure pair, and `sameModel` (`:103-104`) keeps
-  comparing only the pair, so an effort never affects model matching in the
+- `ModelRef` (`:24-27`) is the pure pair, and `sameModel` (`:103-104`)
+  compares only the pair, so an effort never affects model matching in the
   cycler.
-- new `export interface ModelEntry extends ModelRef { variant?: string }`, and
-  `LlmModels = Record<string, ModelEntry>`.
-- `isModelRef` (`:93-101`) is unchanged: the gate stays `providerID` + `modelID`.
+- `export interface ModelEntry extends ModelRef { variant?: string }` (`:82`),
+  and `LlmModels = Record<string, ModelEntry>` (`:86`).
+- `isModelRef` (`:93-101`) gates on `providerID` + `modelID`.
 - `filterModels` (`:117-127`) copies `variant` through only when it is a member of
-  `EFFORT_LADDER` other than `default`, and drops it otherwise. An old file
+  `EFFORT_LADDER` other than `default`, and drops it otherwise. A file
   without `variant`, and a file with a nonsense `variant`, both read as a plain
-  pair; the next write persists the cleanup, exactly as it does for a half-entry
-  today.
+  pair; the next write persists the cleanup, as it does for a half-entry.
 
 Server side, `src/llmmodel.js` mirrors this: `resolveModelForAgent` (`:91-98`)
-keeps returning the bare pair, and a sibling reads the effort off the same
-mtime-keyed cache (`:65-82`):
+returns the bare pair, and `resolveEffortForAgent` (`:116`) reads the effort off
+the same mtime-keyed cache (`:65-82`):
 
 ```js
 export function resolveEffortForAgent(agent)   // -> "low" | "medium" | "high" | "xhigh" | "off" | null
@@ -290,83 +265,47 @@ ways:
 so the message hook does not write one; the input side of `chat.message`
 does expose `variant?: string`, which the plugin reads but cannot set.
 
-
-
 ## 6. Tests
 
-Touched under `test/`:
-
-- `test/tui-llm-models-write.test.js` — `"only the pair is stored, not the label the pick list carries"` (`:100`)
-  and `"only the pair is stored when the cycle lands on a pick-list entry"` (`:176`)
-  assert the exact stored entry; they keep asserting that a model write stores no
-  `variant`.
-- `test/llmmodel.test.js` — the `resolveModelForAgent` block (`:55-135`) keeps
-  proving the pair is returned unchanged when a `variant` sits beside it.
-- `test/llmparams.test.js` — the setup now also points `setModelsPath` at an empty
-  temp file, so the effort merge is inert for the existing cases and
-  `"llama.cpp keys and unknown keys ride through output.options"` (`:114`) keeps
-  its exact `output.options`.
-- `test/plugin.test.js` — asserts the hook surface; unchanged in content, checked
-  because it imports the same modules.
-
-New:
-
 - `test/reasoning-effort.test.js` — `effortOptions`: one case per family row of
-  §5; unknown `api.npm` → null; `capabilities.reasoning === false` → null; an
-  effort outside the ladder → null; a missing `model` → null.
+  §5, `off` through the chat template for `@ai-sdk/openai-compatible` only;
+  unknown `api.npm` → nothing; `capabilities.reasoning === false` → nothing; an
+  effort outside the ladder → nothing; a missing `model` → nothing.
 - `test/llm-effort-apply.test.js` — the hook: a stored `variant` reaches
   `output.options.reasoningEffort` for an openai-family model; no stored variant
   writes nothing; a non-reasoning model writes nothing; a key the params file
   already set is not overwritten by the patch; a `variant` outside the ladder in
   the file writes nothing.
-- `test/tui-llm-models-write.test.js`, added cases — `cycleLlmVariant` steps from
-  the file's value rather than the caller's; landing on `default` deletes only
-  `variant` and keeps the pair; setting an effort on an agent with no entry
-  materialises the pair from the resolved model; a following model cycle drops
-  the `variant`; a nonsense `variant` in the file is dropped by the write that
-  merges over it.
+- `test/tui-llm-models-write.test.js` — a model write stores the pair and no
+  `variant` (`"only the pair is stored, not the label the pick list carries"`,
+  `:104`; `"only the pair is stored when the cycle lands on a pick-list entry"`,
+  `:181`); the ladder per model; `cycleLlmVariant` steps from the file's value
+  rather than the caller's; landing on `default` deletes only `variant` and
+  keeps the pair; setting an effort on an agent with no entry materialises the
+  pair from the resolved model; a following model cycle drops the `variant`; a
+  nonsense `variant` in the file is dropped by the write that merges over it.
+- `test/llmmodel.test.js` — `resolveModelForAgent` returns the pair unchanged
+  when a `variant` sits beside it (`:363`).
+- `test/llmparams.test.js` — the setup points `setModelsPath` at an empty temp
+  file, so the effort merge is inert for the parameter cases and
+  `"llama.cpp keys and unknown keys ride through output.options"` (`:123`)
+  asserts its exact `output.options`.
 
-No render test is added: the TUI tests under `test/` are store tests
-(`tui-llm-models-write`, `tui-subagent-store`) and the panel has no render
-harness. The rows and badges are verified optically, by a screenshot of the
-sidebar with the LLM section expanded.
+The TUI tests under `test/` are store tests (`tui-llm-models-write`,
+`tui-subagent-store`) and the panel has no render harness. The rows and badges
+are verified optically, by a screenshot of the sidebar with the LLM section
+expanded.
 
-## 7. Build order
+## 7. What the feature relies on in opencode
 
-Each step leaves `npm run check` and `npm test` green.
-
-1. **File shape and server read.** `ModelEntry` + `variant` filtering in
-   `tui/src/llm-models-file.ts`; `resolveEffortForAgent` in `src/llmmodel.js`;
-   the touched cases of `test/tui-llm-models-write.test.js` and
-   `test/llmmodel.test.js`. Depends on nothing.
-2. **Effort application.** `src/reasoningeffort.js`, the merge at the end of
-   `chatParamsHook`, `test/reasoning-effort.test.js`,
-   `test/llm-effort-apply.test.js`, the `setModelsPath` setup in
-   `test/llmparams.test.js`. Depends on step 1 for `resolveEffortForAgent`.
-   After this step the feature works end to end by hand-editing the file.
-3. **Badges.** The capability fields in `refreshModelChoices`, the fixed-width ★
-   slot and the badge cell on the model row. Depends on nothing; independent of
-   1 and 2.
-4. **Effort row.** `EFFORT_LADDER` and `cycleLlmVariant` in
-   `tui/src/llm-models-file.ts`, the `opencodeEfforts` signal, the row itself and
-   its added store cases. Depends on 1 and 3 (`reasoning` on `ModelChoice` decides
-   whether the row is live).
-
-## 8. Assumptions
-
-- **A1 — `/config/providers` reports capabilities per model.** Taken from the
-  generated SDK type `Model.capabilities.{reasoning, input.image}`, not from a
-  live response. Holds if the running opencode serialises that block. Shown
-  wrong by the badge cell reading `--` for a model that is known to take images.
-  Consequence if wrong: badges read `--` everywhere and the effort row is inert;
-  nothing else breaks.
-- **A2 — the AI-SDK provider packages accept the §5 keys passed through
-  `output.options`.** Taken from opencode's provider-option lowering as
-  documented, not from a request of ours. Shown wrong by a provider rejecting the
-  first request after an effort is set, or by the captured request body
-  (`captureParams`, `src/index.js:332-336`) not carrying the key. Consequence if
-  wrong: the key is corrected in one table row in `src/reasoningeffort.js`.
-- **A3 — `app.agents()` exposes a project-set effort in the agent's `options`
-  map.** Shown wrong by the effort row reading `default` for an agent whose
-  `opencode.json` sets `reasoningEffort`. Consequence if wrong: the row shows
-  `default` until the user sets a value; setting still works.
+- **`/config/providers` reports capabilities per model** — the SDK type
+  `Model.capabilities.{reasoning, input.image}`. Where the running opencode does
+  not serialise that block, the badges read `--` everywhere and the effort row
+  is inert; nothing else breaks.
+- **The AI-SDK provider packages accept the §5 keys passed through
+  `output.options`.** The captured request body (`captureParams`,
+  `src/index.js:344-348`) shows whether a key reached the provider; the key per
+  family is one table row in `src/reasoningeffort.js`.
+- **`app.agents()` exposes a project-set effort in the agent's `options` map.**
+  Where it does not, the effort row shows `default` for such an agent until the
+  user sets a value; setting still works.

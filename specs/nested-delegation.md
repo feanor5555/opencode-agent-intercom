@@ -33,7 +33,7 @@ Boundary: the plugin's server side (`src/`). The TUI is out of scope.
 ## 2. Who may delegate, and to whom
 
 **One gate, called from both sides.** `resolveSpawnPermission(client, role)`
-(`src/config.js:216`) is the sole authority: the spawn gate binds it as its
+(`src/config.js:224`) is the sole authority: the spawn gate binds it as its
 `checkSpawnPermission` method, and the prompt side calls it directly. Its rungs:
 the live config's `agent.<role>.permission.spawn`, then this plugin's own role
 definition with opencode's semantics (an explicit `deny` denies, an absent key
@@ -98,7 +98,7 @@ schema strip matches the prompt (`SUBAGENT_NO_SPAWN_GUIDE`) and the execute
 gate (`nestedSpawnRefusal`'s empty-target check) — three layers saying the
 same thing, with the schema strip the one a model sees. The empty-target test
 is subagent-only and is not consulted for the primary, whose targets are also
-empty and who must keep `spawn`. The patch is not in `resolveSpawnPermission`:
+empty and who must keep `spawn`. The deny is not in `resolveSpawnPermission`:
 that function also serves the primary and never reads `NESTED_SPAWN_TARGETS`,
 because the table has no runtime counterpart — the static map in `agents.js`
 is the single source, used by prompt, gate and schema strip alike.
@@ -143,7 +143,7 @@ ending renders — `completed`, `error`, `aborted`, `timeout`, `expired`, `ended
 `abandoned` — because the caller asked a question inside a tool call and has to be told
 either the answer or why there is none, or it sits on an empty result it cannot read. A
 `completed` ending carries the reply and what the child burned getting there. A
-non-`completed` ending that still carries text — today only `timeout`, whose text the
+non-`completed` ending that still carries text — only `timeout`, whose text the
 watchdog rescues off the session before deleting it — renders that text framed as a
 fragment of an unfinished run: the cause sentence in front, "this is not the answer you
 asked for" behind, so a half-run cannot be read as a finished reply. Without text the
@@ -156,7 +156,7 @@ gets the `error` ending naming the failure. The spawn was charged against the qu
 cost the orchestrator nothing.
 
 **(iii) A thrown failure**, which the tool wrapper surfaces as `spawn failed: <text>`. No
-nested path produces one today, and none should: this class is what remains if an
+nested path produces one, and none should: this class is what remains if an
 unforeseen throw escapes the handler. It is the only result class this design does not
 shape, so a nested path found producing it is a defect, not a variant.
 
@@ -172,7 +172,7 @@ on the caller having read this document.
 
 - `maxSubagents` (default 1) bounds what one PRIMARY may have running, globally across
   every primary in the process. It does not gate a nested spawn at all:
-  `spawnCapDecision` (`src/registry.js:930-938`) refuses only when the caller is not
+  `spawnCapDecision` (`src/registry.js:934-942`) refuses only when the caller is not
   nested, because a nested caller already holds the slot it would be told to wait for.
 - `maxNestedSpawns` (default 2) bounds what one SUBAGENT may start, summed over every run
   of its session. Per entry, cumulative across reuse — an accepted reuse leaves the count
@@ -453,20 +453,18 @@ nested run ticks no TODO entry.
 
 ## 9. Current state
 
-No open points. The asymmetry named in the earlier O4 — a project could open
-`permission.spawn` on a role the table did not key, producing a role that was
-told it could delegate but was refused at every spawn — is closed by the
-schema-strip patch in `installAgents`: `permission.spawn` is now denied
-after the overlay on every subagent with an empty target set, so the
-prompt, the schema strip and the execute gate all say the same thing.
-
+No open points. A project that opens `permission.spawn` on a role the target
+table does not key gets no role that is told it may delegate and is refused at
+every spawn: `installAgents` denies `permission.spawn` after the overlay on
+every subagent with an empty target set, so the prompt, the schema strip and
+the execute gate all say the same thing.
 
 ## 10. Out of scope
 
-- The TUI is unchanged. The nested figures ride on the wake snapshot and are read by the
+- The TUI shows no nested figures. They ride on the wake snapshot and are read by the
   server-side notice only; no row carries them.
-- The orchestrator-side wake notice keeps its shape. The `⤷ nested:` line is added inside
-  the per-run verdict; nothing else about the completion message changes.
+- The orchestrator-side wake notice carries the `⤷ nested:` line inside the per-run
+  verdict and is otherwise the ordinary completion message.
 - Cross-primary nesting is not designed. A primary's `spawn` is non-nested by the
   registry-entry test and returns the wake-notice shape.
 - Nothing wider than two nested levels is on offer. A third would need a target set for

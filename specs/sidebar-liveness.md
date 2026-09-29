@@ -50,8 +50,8 @@ Two consequences, and they are the point:
   poll. No stamp, no held row: the refusal is a decision the panel is told
   about rather than one it has to observe by the session's disappearance.
 - the countdown is the plugin's own window, not a second one measured from when
-  the panel happened to see the run end. The two used to be a poll apart; now
-  there is one figure and both halves render it.
+  the panel happened to see the run end. There is one figure and both halves
+  render it.
 
 A held row still ends when its session does. Every way a retention ends — the
 TTL reap, the capacity eviction, the drop at a handoff or at an endless wind-down claim,
@@ -60,7 +60,7 @@ a held row lives exactly as long as its session is still listed among its
 parent's children. `reapRows` is where that is enforced, for held and unheld
 rows alike, and it is what keeps a row from outliving the session it names.
 
-With `maxRetainedSubagents` at its default of `0` nothing about retention is
+With `maxRetainedSubagents` at `0` (the default is `2`) nothing about retention is
 reachable: the plugin stamps no title, `decideRow` never returns a hold, no row
 ever carries `retained`, and `reapRows` reaps on the session's absence alone.
 
@@ -73,7 +73,7 @@ else on the same database, and it is what the readRetentionStamp reader uses to
 find the stamp after it.
 
 `spawn` writes the marker unconditionally (`src/tools.js:720`,
-`title: SUBAGENT_SESSION_TITLE_MARKER + title`): the marker is no longer a
+`title: SUBAGENT_SESSION_TITLE_MARKER + title`): the marker is not a
 retention property and is not gated on `retentionOffered()`. Every spawned
 session carries it, at the shipped default too. The session-title marker is not
 tied to retention; it is the plugin's own attribution on every session it
@@ -84,7 +84,7 @@ composed by `retentionStampedTitle` (`src/teardown.js:722-724`, through `stamped
 `publishRetentionState` → `updateSessionTitle` → `client.session.update`
 (`src/teardown.js:748-754`, `src/client.js`). `publishRetentionState` returns
 `false` immediately and writes nothing where `retentionOffered()` is false
-(`src/teardown.js:749`), so at the shipped default no stamp byte moves.
+(`src/teardown.js:749`), so with `maxRetainedSubagents` at `0` no stamp byte moves.
 
 The reader, on the panel side, is `readRetentionStamp` in
 `tui/src/subagent-label.ts`, with `RETENTION_STAMP_RE` mirrored on the same
@@ -162,7 +162,7 @@ the active route, retires the row, and increments the completed counter.
 The idle event says one thing and one thing only: opencode has no run fiber in
 that session at this moment. It is not the end of a subagent — a nested spawn,
 a run not yet forked, and a retained session being re-prompted are all idle —
-so it no longer takes a row. The row ends where the plugin ends the subagent,
+so it takes no row. The row ends where the plugin ends the subagent,
 which is `session.deleted`. What stays in `onSessionIdle` is the route jump:
 if the user is inside the session and the last completed poll still listed it
 unstamped, the route jumps to the parent before the session goes. The jump is
@@ -275,7 +275,7 @@ ending the plugin knows about that does not pass through `teardownSubagent`.
 
 If the plugin process dies mid-run, its subagent rows stay until the bootstrap
 sweep clears the leftover sessions. `sweepOrphanedSubagentSessions`
-(`src/teardown.js:904`) runs once at plugin load (`src/index.js:157`), on the
+(`src/teardown.js:904`) runs once at plugin load (`src/index.js:169`), on the
 shipped default too — it is not gated on `retentionOffered()`. It deletes a
 session only when ALL of the following hold:
 
@@ -350,8 +350,7 @@ registry (criterion 4) and the sweep does not run with a watchdog window off.
    that ended under them and their rescued text, and ending with the slots line
    counted after every teardown. It does not depend on `maxSubagentAgeMs`.
 
-The "publishRetentionState is gated on retentionOffered" guard is gone from
-the sweep's precondition — that gate names a writer-side concern (whether this
+The sweep's precondition does not test `retentionOffered` — that gate names a writer-side concern (whether this
 process stamps titles at all) and is unrelated to whether a leftover session
 should be deleted. The sweep is its own attribution test.
 
@@ -410,7 +409,7 @@ side without needing a transport that does not exist.
 
 The decisions the row makes live in `tui/src/subagent-store.ts` and are
 unit-tested there; the server-side publish path is unit-tested in the
-existing `src/teardown.js` tests. The cases that matter:
+`src/teardown.js` tests. The cases that matter:
 
 1. `test/tui-subagent-label.test.js` — `RETENTION_STAMP_RE` and
    `readRetentionStamp` pinned against `src/teardown.js`'s writer; the marker
@@ -459,7 +458,7 @@ existing `src/teardown.js` tests. The cases that matter:
 
 ### End-to-end — the nested case is the one that reproduces it
 
-`test/e2e/nested-task.sh` already drives orchestrator → coder → researcher.
+`test/e2e/nested-task.sh` drives orchestrator → coder → researcher.
 The sidebar grandchild row is the case the existence rule exists for. With a
 rendered TUI and the sidebar open, a screenshot taken inside the blocked
 window must show, in the ORCHESTRATOR's panel, the caller's row present with
@@ -469,5 +468,5 @@ one indent level under it, the header count naming both.
 The bootstrap sweep is observed by running an `opencode serve` against a
 fixture database with two pre-seeded subagent sessions (one under the marker,
 one foreign), waiting past the sweep bound, and asserting that only the
-marked session is deleted — at the shipped default, where `publishRetentionState`
-writes no stamp at all.
+marked session is deleted — with `maxRetainedSubagents` at `0`, where
+`publishRetentionState` writes no stamp at all.

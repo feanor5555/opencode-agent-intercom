@@ -40,10 +40,10 @@ promptSession are the only two functions in src/ that call session.promptAsync".
 
 | Kind | Call site |
 |---|---|
-| Subagent completion notice (handle, full result, task outcome, run-size, free slots) | `src/hooks.js:2196-2221` → `postParentNotice` (`src/teardown.js:177-242`) |
-| Error / abort notice | `src/hooks.js:2594-2601`, text `src/notices.js:535-561` |
+| Subagent completion notice (handle, full result, task outcome, run-size, free slots) | `src/hooks.js:2250-2275` → `postParentNotice` (`src/teardown.js:177-242`) |
+| Error / abort notice | `src/hooks.js:2648-2655`, text `src/notices.js:535-561` |
 | Watchdog timeout notice | `src/watchdog.js:554-556`, text `src/notices.js:430-491` |
-| Denial-loop notice | `src/hooks.js:1377-1379`, text `src/notices.js:607-616` |
+| Denial-loop notice | `src/hooks.js:1400-1402`, text `src/notices.js:607-616` |
 | Drain flush / abortDrain re-posts after a handoff | `src/handoffwiring.js:265-314` |
 | Handoff kickoff (summary + history + doc summaries) | `src/handoff.js:358` through the adapter at `src/handoffwiring.js:213-219` |
 | `DOC_SUMMARY_PROMPT` / `OPEN_POINTS_PROMPT` to the old primary | `src/handoffwiring.js:384-390` |
@@ -64,7 +64,7 @@ role=user  parts=[ { type: "text", metadata: {"agentIntercom": true},
 exactly `id, messageID, sessionID, type, text, metadata`.
 
 `isPluginGeneratedMessage` (`src/pluginmsg.js:120-139`) reads that marker; its consumer
-is `lastUserGoal` (`src/handoff.js:844-866`), which uses it to keep plugin text out of
+is `lastUserGoal` (`src/handoff.js:845-867`), which uses it to keep plugin text out of
 the handoff's goal scan, with a text-prefix backstop (`src/pluginmsg.js:155-166`). The
 marker is unconditional, so hidden and visible postings are recognised alike. The
 retroactive sweep (§3.3) identifies a notice part by the same marker
@@ -72,13 +72,13 @@ retroactive sweep (§3.3) identifies a notice part by the same marker
 
 ### 1.4 Model-only paths, invisible regardless of the switch
 
-`experimental.chat.system.transform` (`src/index.js:270-277`, `src/hooks.js:406-785`)
+`experimental.chat.system.transform` (`src/index.js:282-289`, `src/hooks.js:416-802`)
 rewrites `output.system` wholesale. The orchestration and subagent guides, the project
 block and the limits block travel there and never enter `session.messages`. The
 active-subagent snapshot, the abort notice and the subagent over-budget STOP notice are
-delivered by `createTransformMessages` (`src/hooks.js:886-957`) as a synthetic text part
+delivered by `createTransformMessages` (`src/hooks.js:903-974`) as a synthetic text part
 on a primary's last user message, and for a subagent in a carrier message appended at the end
-of the array (`tailNoticeCarrier`, `src/hooks.js:842`) — the same mechanism opencode uses for its own per-turn
+of the array (`tailNoticeCarrier`, `src/hooks.js:859`) — the same mechanism opencode uses for its own per-turn
 reminders. None of them is ever rendered, so the switch does not govern them.
 
 ### 1.5 The sidebar, and what it can and cannot do
@@ -92,14 +92,14 @@ no slot inside the transcript. A plugin cannot re-render, filter or suppress the
 list from the TUI side; the switch therefore acts on the posted parts themselves.
 
 The section ships hidden and needs room: it is off until `session.sidebar.toggle`
-(`learnings.md:179-188`) and it overlays the content at 120 columns and below
-(`learnings.md:206-219`).
+(`learnings.md:191-200`) and it overlays the content at 120 columns and below
+(`learnings.md:220-235`).
 
 ## 2. What opencode 1.18.25 offers
 
 A text part in opencode carries two optional booleans besides its text —
-`node_modules/@opencode-ai/sdk/dist/gen/types.gen.d.ts:142-160` (`TextPart`) and
-`:1235-1247` (`TextPartInput`, i.e. accepted on the wire):
+`node_modules/@opencode-ai/sdk/dist/gen/types.gen.d.ts:142-157` (`TextPart`) and
+`:1231-1244` (`TextPartInput`, i.e. accepted on the wire):
 
 ```ts
 export type TextPartInput = {
@@ -153,26 +153,26 @@ key that hides messages (`Config.tui` holds only `scroll_speed`, `scroll_acceler
 ### 3.1 The setting
 
 - **File key:** `showAgentcom`, in the shared `~/.config/opencode/agent-intercom.json`.
-  Taken from the file only as a real boolean (`src/settings.js:724-726`); anything else
+  Taken from the file only as a real boolean (`src/settings.js:741-743`); anything else
   leaves the env-or-default resolution standing.
 - **Env var:** `OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM`, `"1"` / `"0"` through `envBool`
-  (`src/settings.js:582`).
-- **Default:** `true` — `DEFAULT_SHOW_AGENTCOM`, `src/settings.js:369`, and the TUI's own
+  (`src/settings.js:596`).
+- **Default:** `true` — `DEFAULT_SHOW_AGENTCOM`, `src/settings.js:380`, and the TUI's own
   copy at `tui/src/settings-file.ts:289`.
 - **Precedence:** file key over env var over default, as for every key of the file.
 - **Read:** per send, through `getSettings()` (cached for `TTL_MS = 2000`,
-  `src/settings.js:400`; the settings-file watch of §3.3 invalidates the cache on a write).
+  `src/settings.js:411`; the settings-file watch of §3.3 invalidates the cache on a write).
 
 The server-side path end to end:
 
 | Step | Location |
 |---|---|
-| Server default | `src/settings.js:369` |
-| Env read | `src/settings.js:582` |
-| File validator | `src/settings.js:724-726` |
+| Server default | `src/settings.js:380` |
+| Env read | `src/settings.js:596` |
+| File validator | `src/settings.js:741-743` |
 | Read at send time | `src/client.js:259`, `:371-372` |
-| Limits sentence | `src/hooks.js:1445`, `:1472-1476` |
-| Retroactive sweep | `src/agentcomsync.js`, started at `src/index.js:137` |
+| Limits sentence | `src/hooks.js:1445`, `:1509-1513` |
+| Retroactive sweep | `src/agentcomsync.js`, started at `src/index.js:146` |
 
 The TUI half:
 
@@ -212,7 +212,7 @@ store are the same as with the switch on.
 
 The switch governs the parts already in the transcript, not only the ones posted from then
 on. `startAgentcomVisibilityWatch` (`src/agentcomsync.js:152-170`, started once per process
-from the plugin factory at `src/index.js:137`) watches the **directory** of the settings
+from the plugin factory at `src/index.js:146`) watches the **directory** of the settings
 file with `fs.watch` — the TUI replaces the file rather than rewriting it in place — and,
 `AGENTCOM_WATCH_DEBOUNCE_MS = 120` after the events of one write settle, compares the
 resolved `showAgentcom` with the last value seen. A fallback tick every
@@ -230,7 +230,7 @@ session sets:
   hideable `promptSession` target, which covers the fresh orchestrator a handoff creates
   before it has called a tool.
 
-For each session `applyAgentcomVisibility` (`src/client.js:1155-1227`) reads the history,
+For each session `applyAgentcomVisibility` (`src/client.js:1155-1233`) reads the history,
 collects newest-first every plugin-marked text part whose `synthetic` differs from the
 target, and PATCHes up to `MAX_VISIBILITY_PATCHES = 200` of them through the part route of
 §2 (`patchPartSynthetic`, `src/client.js:1092`), via the client's own transport and only
@@ -246,8 +246,8 @@ session enters neither set.
 
 ### 3.4 The orchestrator is told the user cannot see its notices
 
-While `showAgentcom` is off, `formatLimitsNotice` (`src/hooks.js:1436`, assembled at
-`src/hooks.js:627`) — the runtime block the primary receives every turn — carries one
+While `showAgentcom` is off, `formatLimitsNotice` (`src/hooks.js:1472`, assembled at
+`src/hooks.js:637`) — the runtime block the primary receives every turn — carries one
 sentence:
 
 > Subagent results and handoff messages are hidden from the user's screen. The user sees
@@ -255,7 +255,7 @@ sentence:
 
 In solo mode the whole block is reduced to its hidden-postings form ("what this plugin
 posts into your session is hidden from the user's screen. The user sees only what you
-write."), and is empty while the switch is on (`src/hooks.js:1444-1450`).
+write."), and is empty while the switch is on (`src/hooks.js:1481-1487`).
 
 ### 3.5 Tool results are not governed
 
@@ -278,7 +278,7 @@ A click calls `toggleShowAgentcom` (`tui/src/settings-file.ts:814-816`), which f
 value the file holds at that moment through the read-modify-write path `applySetting`, and
 disarms a pending `mode` confirmation (`alsoDisarmAgentMode`, `tui/src/tui.tsx:1792`). The
 row takes effect without a restart: new postings read the setting per send, and the
-retroactive sweep of §3.3 brings the existing ones to the new state.
+retroactive sweep of §3.3 brings the existing ones to the switch's current value.
 
 ## 4. What the user loses with the switch off
 
@@ -293,8 +293,8 @@ retroactive sweep of §3.3 brings the existing ones to the new state.
   leaving the `✓ N done` counter (`tui/src/tui.tsx:2253`).
 
 What stays visible: the toasts beside the notices — `${handle} finished`, variant `success`
-(`src/hooks.js:2222-2226`), plus the ones on spawn (`src/tools.js:873`), on a stuck subagent
-(`src/hooks.js:1384-1388`) and on a scheduled handoff (`src/hooks.js:549-554`, `:619-623`).
+(`src/hooks.js:2276-2280`), plus the ones on spawn (`src/tools.js:873`), on a stuck subagent
+(`src/hooks.js:1407-1411`) and on a scheduled handoff (`src/hooks.js:559-564`, `:629-633`).
 Toasts are not transcript.
 
 ## 5. Assumptions, and what would show them wrong
@@ -306,7 +306,7 @@ Toasts are not transcript.
   (`~/.cache/opencode-agent-intercom/debug.log`) would show `notified primary of
   completion` with no turn following.
 - **`promptAsync` accepts `synthetic` on input and persists it.** It is a first-class field
-  of `TextPartInput` (`types.gen.d.ts:1235-1247`). Wrong if the prompt call returns 400 —
+  of `TextPartInput` (`types.gen.d.ts:1231-1244`). Wrong if the prompt call returns 400 —
   visible as `postNotice: retrying after failure` in the debug log and, once the retries are
   exhausted, as a lost wake.
 - **Nothing renders for an all-synthetic user message.** Read from the `Show when` guard

@@ -1,10 +1,10 @@
-# Concept: `forum_search` — a forum route for the plugin's web search
+# `forum_search` — a forum route for the plugin's web search
 
-Status: wired; this file is the design it is built to. Boundary: the plugin at
+Status: wired. Boundary: the plugin at
 `~/opencode-agent-intercom`.
 Model: the forum route in `~/.claude/agents/researcher.md` (lines 52–66).
 
-## 1. What the code does today (read, with the lines behind it)
+## 1. The code, read with the lines behind it
 
 - Two search tools sit beside each other and share one core: `web_search`
   (`src/websearch.js:36`) and `forum_search` (`src/forumsearch.js:227`), registered in
@@ -24,11 +24,11 @@ Model: the forum route in `~/.claude/agents/researcher.md` (lines 52–66).
   keywords behind the bangs `bangQuery` (`:129`) — the model's `keywords` or
   `reduceToKeywords(query)` (`:112`) — bounds the searxng leg with `searxLane` (`:143`, score
   order and `MAX_ROWS_PER_ENGINE = 2` at `:70`) and merges with `pickFromLanes` (`:176`).
-- Settings resolve file > env > default in `getSettings()` (`src/settings.js:528-773`).
-  `forumBangs` is the one array-valued key, validated at `src/settings.js:676-684` (non-empty
+- Settings resolve file > env > default in `getSettings()` (`src/settings.js:541-790`).
+  `forumBangs` is the one array-valued key, validated at `src/settings.js:693-701` (non-empty
   trimmed strings kept, everything else dropped, nothing usable left → the built-in set) and
-  read by `getForumBangs()` (`:1049`). The built-in set is `DEFAULT_FORUM_BANGS`
-  (`src/settings.js:327`).
+  read by `getForumBangs()` (`:1072`). The built-in set is `DEFAULT_FORUM_BANGS`
+  (`src/settings.js:338`).
 - Prompt and roles: `RESEARCHER_PROMPT` names both tools (`src/agents.js:163`); web access to
   both is concentrated in the `researcher` role (`src/agents.js:481-502`, map built by
   `webAccessExcept` at `:490`), and every other role — the orchestrator (`src/agents.js:415`)
@@ -196,20 +196,12 @@ Two rules the rest of the design obeys:
 
 ### 3.1 Shape: a separate `forum_search` tool
 
-Recommended. Three shapes were weighed:
-
-| shape | cost | what it forecloses | what it demands of the implementer |
-|---|---|---|---|
-| **separate `forum_search` tool** (recommended) | two tool descriptions (~460 B) in every subagent system prompt | nothing | a second small tool module; the name must be in the two `deny` lists |
-| a `forums: boolean` on `web_search` | no extra tool, but `web_search`'s description must grow to explain when to set it — past the saving | one tool with two query shapes, two `numResults` ceilings and two backend call shapes inside one `execute` | a branchy `execute`, and the model must remember an optional flag it can silently omit |
-| prompt rule only, no tool change | free | **impossible**: the envelope, the bang chain and the keyword reduction are provider-call changes inside the tool, which no prompt rule reaches | — |
-
-The deciding argument is the one the source already makes for itself: this plugin buys short
-tool descriptions. A tool *name* is the strongest route signal a small model has; an optional
-boolean on an existing tool is the weakest, and when the model forgets it the run silently takes
-the wrong route leaving no trace. Two short descriptions beat one long one carrying a mode
-switch. The routes also differ in the query string sent to *both* backends, in the `numResults`
-ceiling and in what the results are for — that is not a flag, it is a second tool wearing one.
+`forum_search` is a tool of its own beside `web_search`, costing two tool descriptions (~460 B)
+in every subagent system prompt; its name stands in the `deny` lists of every role but
+`researcher`. A tool *name* is the strongest route signal a small model has. The two routes
+differ in the query string sent to *both* backends, in the `numResults` ceiling and in what the
+results are for, and the envelope, the bang chain and the keyword reduction are provider-call
+behaviour inside the tool, which no prompt rule reaches.
 
 ### 3.2 Argument schema
 
@@ -233,12 +225,6 @@ derivable with confidence: Exa wants the prose (§2.2), searxng wants two to fou
 (§2.3), and the words to remove are semantic ("practice", "breaks") rather than grammatical. The
 model that wrote the question knows which words are the topic; a stopword stripper has to guess,
 and a wrong guess costs the leg four fifths of its rows.
-
-| how the searxng leg gets its query | cost | what it forecloses | what it demands |
-|---|---|---|---|
-| **model-supplied `keywords`, derived fallback** (recommended) | ~130 B of tool description; one more argument the model may omit | nothing — the fallback is the derivation-only option | `reduceToKeywords`, plus the argument |
-| derivation only, no argument | no prompt cost | the model can never correct a bad reduction | a stopword list that must also strip the route's own experience vocabulary, and is wrong silently |
-| the bare `query`, as prose | none | the leg itself: measured 4 rows from the one engine whose URLs are not threads (§2.3) | — |
 
 Description, held near the length of `web_search`'s:
 
@@ -333,12 +319,6 @@ filter — `score` cannot express relevance (§2.3):
    engine held 4 of 4.
 3. Truncate the lane to `numResults` rows.
 
-| how the searxng lane is bounded | cost | what it forecloses | what it demands |
-|---|---|---|---|
-| **per-engine cap of 2, ordered by score** (recommended) | a lane of at most 2 × engines rows | nothing; every engine that answered is represented | the `engine` field on searxng entries |
-| relative score threshold (a fraction of the top score) | none | it is arithmetically inert: against `1/position` scores a one-tenth threshold keeps positions 1–10 of a single engine, so it removes nothing a cap does not | — |
-| top N by score | none | same defect: N rows of the loudest engine | — |
-
 ### 3.6 Merge and render
 
 1. `mergeAndDedup(exaEntries, searxEntries)` (`src/searchcore.js:245`): dedupe by `normalizeUrl`,
@@ -373,7 +353,7 @@ reappears in step 4 only if nothing better exists.
 
 No page is fetched. Excerpts are triage material and the model is told so in both the tool
 description and the prompt; threads worth reading go through `webfetch`, which the researcher
-already has (`src/agents.js:424`).
+already has (`src/agents.js:490`).
 
 ### 3.8 Where the configurable list lives: the searxng bangs
 
@@ -407,7 +387,7 @@ and reach hosts no other engine here can, and because §3.6 already bounds what 
 
 ### 3.9 Prompt wording for the `researcher` role
 
-Three lines in `RESEARCHER_PROMPT` (`src/agents.js:146-148`):
+Three lines in `RESEARCHER_PROMPT` (`src/agents.js:166-168`):
 
 ```
 For a question about lived experience — whether something works in practice, which settings
@@ -443,46 +423,27 @@ The prompt decides which of two tools a run takes, so the wording is deliberate:
 The `researcher` role description (`src/agents.js:483`) names `forum_search` beside `web_search`,
 since that string is what the orchestrator reads when choosing an agent.
 
-## 4. Steps
+## 4. Where it lives
 
-Each step leaves the tree building (`npm run check`) and the suite green (`npm test`), and each
-can be handed out alone.
-
-**Step 1 — `engine` on searxng entries.** `searxToEntries` (`src/searchcore.js:224-240`) carries
-`engine: (r.engine ?? "").trim()` beside `score`. Additive: `renderEntries` does not print it and
-`web_search` does not read it, so `web_search`'s output stays byte-identical.
-Depends on: nothing.
-
-**Step 2 — the thread shape.** New module holding `isThreadUrl(url)` per §3.4, pure, no network,
-plus its unit tests. Depends on: nothing; can run parallel to step 1.
-
-**Step 3 — the keyword form of the searxng query.** `reduceToKeywords(query)` and the `keywords`
-argument in the tool schema and description (§3.2, §3.3); `bangQuery` takes the reduced string.
-Depends on: nothing; can run parallel to steps 1 and 2.
-
-**Step 4 — the searxng lane.** `searxLane` (`src/forumsearch.js:143-158`) carries the score
-ordering, the per-engine cap and the truncation of §3.5.
-Depends on: step 1 (the `engine` field is the cap's input).
-
-**Step 5 — the lane merge.** `pickFromLanes` (`src/forumsearch.js:176-213`) carries the
-partition, quota, round-robin and fill of §3.6.
-Depends on: steps 2 and 4.
-
-**Step 6 — the bang default.** `DEFAULT_FORUM_BANGS = ["!st", "!ubuntu", "!su", "!hn", "!lo"]`
-(`src/settings.js:327`) and its header comment (`:320-326`).
-Depends on: nothing, but ship it after step 5 so the run that first sees the new set also has the
-merge that grades it.
-
-**Step 7 — the log line.** Extend the `forumsearch merge` line with the per-lane thread counts
-(§3.6.6), which is what §7's standing observation reads.
-Depends on: steps 2 and 5.
-
-**Step 8 — documentation.** The `forum_search` row (`README.md:159`) gains `keywords?`; the
-`forumBangs` default (`README.md:306`) is restated with the five bangs and what each returns.
-Depends on: steps 3 and 6.
-
-**Step 9 — the live check.** §7's live section, once, after step 8.
-Depends on: all of the above.
+- **`engine` on searxng entries** — `searxToEntries` (`src/searchcore.js:224-240`) carries
+  `engine: (r.engine ?? "").trim()` beside `score`. `renderEntries` does not print it and
+  `web_search` does not read it.
+- **The thread shape** — `isThreadUrl(url)` per §3.4 in `src/threadshape.js:69`, pure, no
+  network.
+- **The keyword form of the searxng query** — `reduceToKeywords(query)`
+  (`src/forumsearch.js:112`) and the `keywords` argument in the tool schema and description
+  (§3.2, §3.3); `bangQuery` (`:129`) takes the reduced string.
+- **The searxng lane** — `searxLane` (`src/forumsearch.js:143-158`): the score ordering, the
+  per-engine cap and the truncation of §3.5.
+- **The lane merge** — `pickFromLanes` (`src/forumsearch.js:176-213`): the partition, quota,
+  round-robin and fill of §3.6.
+- **The bang default** — `DEFAULT_FORUM_BANGS = ["!st", "!ubuntu", "!su", "!hn", "!lo"]`
+  (`src/settings.js:338`) with its header comment (`:331-337`).
+- **The log line** — `forumsearch merge` (`src/forumsearch.js:288`) with the per-lane thread
+  counts (§3.6.6), which is what §7's standing observation reads.
+- **Documentation** — the `forum_search(query, keywords?, numResults?)` row of the README's tool
+  table and the `forumBangs` default in the README's settings section, with the five bangs and
+  what each returns.
 
 ## 5. Assumptions, and what would show them wrong
 
@@ -529,20 +490,19 @@ Depends on: all of the above.
 
 ## 6. Open, and outside this boundary
 
-- Whether `forum_search` should be offered to roles beyond `researcher` — the planner chooses
-  libraries (`src/agents.js:101`) and would plausibly want it. Left as it falls out: only
-  `researcher` keeps it (and `web_search`), the same as `webfetch` and `websearch`.
+- Only `researcher` holds `forum_search` (and `web_search`), the same as `webfetch` and
+  `websearch`; the planner, which chooses libraries (`src/agents.js:112`), does not.
 - Ownership of the two things that drift: the bang set and the per-lane thread counts. Both are
   this project's own maintenance. A changed set is recorded in the README's `forumBangs` row
   (`README.md:306`) with what each added engine returns per §2.3's table; a sustained fall in the
   Exa lane's thread count is the §5 falsification and is acted on there, not silently absorbed.
 
-## 7. What must be tested
+## 7. What is tested
 
-Unit, in the existing `node --test` style under `test/`:
+Unit, in the `node --test` style under `test/`:
 
 - `searxToEntries` carries `engine` and `score` and defaults both on a row that has neither;
-  `renderEntries` output for the same entries is unchanged.
+  `renderEntries` output for the same entries carries neither.
 - `isThreadUrl`: true for `forums.example.com/viewtopic.php?t=1`, `example.com/questions/12/x`,
   `example.com/q/12`, `discuss.example.org/t/topic/9`, `example.com/r/x/comments/abc`,
   `news.ycombinator.com/item?id=1`, `github.com/o/r/issues/7`, `community.example.net/topic/4`;
@@ -575,7 +535,7 @@ Unit, in the existing `node --test` style under `test/`:
 - `searxngUrl` unset → no searxng call is attempted and the Exa leg still renders.
 - `isForumSearchEnabled()` false → `src/tools.js` exposes no `forum_search` key.
 
-Live, once each, after step 8 — no series, no averaging. One `forum_search` on a genuine
+Live, once each — no series, no averaging. One `forum_search` on a genuine
 experience question, judged per leg against §3.4 and against the run's own log line:
 
 - **(a) the Exa lane.** A majority of the Exa-sourced rows in the returned set are threads. This

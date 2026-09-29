@@ -231,13 +231,14 @@ The primary never blocks. You stay in the driver's seat the entire time.
 | `ask(question)` | Put ONE question to the caller that briefed you and block on the answer. The answer is the result of the call; on expiry the result says no answer came and the run goes on. Refused to a NESTED subagent (its caller is itself blocked and could not answer), to a session that is no tracked subagent at all, while a question is already open, over `maxMessageTokens`, and while `midRunMessaging` is off. | Subagents |
 | `abort(subagent)` | Cooperatively abort and hard-deny further tool calls. User-requested stops. | Orchestrator |
 | `list()` | List active subagents. A running row carries `msgs:N` and `asking` where a question is open. | Orchestrator |
+| `calc(expression)` | Exact arithmetic on figures the agent already holds — sizes, budgets, offsets, token sums — with no model call and no subagent run. One or more statements separated by `;` or new lines, `name = expr` keeps a value for later statements; operators `+ - * / // % **`, comparisons, `min max abs floor ceil round sqrt log2 log10 ln pow`, `_` separators, `0x`/`0b`, suffixes `k M G T` and `Ki Mi Gi Ti`. A result beyond 2^53 is marked `(not exact: beyond 2^53)`; an error comes back as `calc: <message> at column <n>`. Bounded at 4000 characters, 100 statements and 64 levels of nesting. | Orchestrator, every subagent, the solo primary |
 | `task` | Denied everywhere. opencode's native tool is blocking; the schema strip hides it. | — |
 | `todos_open()` | List open tasks from `TODO.md` with their stable id (`T5`) and `accept:` criterion. | `planner`, `coder`, `debugger`, `reviewer`, `designer` |
 | `todo_add(title, accept?)` / `todo_edit(id, …)` / `todo_done(id)` | Add / refine / remove a task in `TODO.md`. `todo_done` deletes the completed task — usually the wake-hook does it for you. | `planner` and `coder` own the list; `debugger`, `reviewer` and `designer` are told to read it and add to it, and to leave TODOs in other files where they stand |
 | `web_search(query, numResults?)` | Anonymous web search via Exa (no key, 150/day; an Exa key lifts the cap). | `researcher` only |
 | `forum_search(query, keywords?, numResults?)` | Discussion-forum search (Exa + searxng with forum-only engine bangs). Use for lived user experience; `web_search` for docs/releases/official facts. | `researcher` only |
 | `grounded_search(query, max_sources?)` | One call to Google's Gemini with Search grounding on, on the fixed model `gemini-3.7-flash` and no other. Returns a written answer plus the numbered sources it was grounded in (`max_sources` 1–20, default 8). | `grounder` only |
-| `outline(path)` | Top-level declarations of a source file via universal-ctags. ~100 languages, ~95 % token savings vs `read`. | Subagents (except `designer`/`documenter`/`gitter`/`grounder`/`checker`) |
+| `outline(path)` | Top-level declarations of a source file via universal-ctags. ~100 languages, ~95 % token savings vs `read`. | Subagents (except `designer`/`documenter`/`gitter`/`grounder`/`checker`/`verifier`/`releaser`) |
 
 A subagent answers exactly once and is then destroyed: **spawn → run → reply →
 deleted.** The primary is woken automatically with the full (capped) result on
@@ -265,7 +266,8 @@ opencode); the plugin drops the entry and tells the orchestrator the handle is
 gone, naming the held subagent and saying `reuse(...)` will not reach it — only
 a fresh `spawn` with a full briefing is left. `list()` renders the held ones in
 a `RETAINED` section, the per-turn snapshot does the same, and the next tool
-addresses them.
+addresses them. The orchestrator is told to send a follow-up for a subagent
+`list()` shows RETAINED to it with `reuse`, before any new spawn.
 
 The reuse tool:
 
@@ -422,11 +424,11 @@ A budget of `0` for a type disables the gate for that type: no refusal, no
 warning. The limits block the orchestrator sees lists `off` for a
 disabled type.
 
-A `spawn` may name one of the plugin's own eleven subagent roles and
+A `spawn` may name one of the plugin's own subagent roles and
 nothing else. Any other name is refused — including an agent the project
 declares in its `config.agent` map and opencode's own `general`/`explore` —
 and the refusal states why that particular name is not a target and lists
-the eleven. The same closed list is what the limits block shows.
+them. The same closed list is what the limits block shows.
 
 When a subagent finishes, the completion notice carries a `run-size` line
 that reports the tokens the whole run consumed against the same budget,
@@ -463,17 +465,19 @@ list with `todo_add` / `todo_edit` / `todo_done`.
 
 ## Agent roles
 
-Twelve roles injected by the `config` hook — no per-project
+Fifteen roles injected by the `config` hook — no per-project
 `.opencode/agents/*.md` needed. Orchestrator is the default primary unless
 `default_agent` is explicit.
 
 | Agent | Role | Notes |
 |---|---|---|
-| `orchestrator` | Primary. Coordinates only: cuts work into one deliverable per spawn (a coder change of about 100 lines in 1–2 files), sends lookups to a `scout` first where it is unsure, runs a `checker` after each coder change, and copies the coder's `Commit:`/`Docs:` lines into the gitter and documenter briefs. | Restricted to `spawn`/`message`/`abort`/`list`, and `reuse` where retention is on. |
+| `orchestrator` | Primary. Coordinates only: cuts work into one deliverable per spawn (a coder change of about 100 lines in 1–2 files), sends lookups to a `scout` first where it is unsure, sends a fact about the tree it is about to brief to a `refuter` as a claim, runs a `checker` after each coder change and a `verifier` where the change shows only at runtime, starts a `releaser` only when no coder, debugger or other releaser runs in the project and after the verifier's PASS where there is one, before each spawn takes the first cheaper move that fits — `calc` for a figure from numbers it holds, the `documenter` with the file, place and text it already holds, a `refuter` for a fact about the tree it is about to brief — and copies the coder's `Commit:`/`Docs:` lines into the gitter and documenter briefs. | Restricted to `spawn`/`message`/`abort`/`list`/`calc`, and `reuse` where retention is on. |
 | `scout` | Read-only code lookup: where a symbol, call site or text stands, who calls it, what a file or function does. Replies one `path:line — quoted line` per finding, or a summary of at most 10 lines; a longer list goes to one file under `work/`. | Bash for the `codegraph` CLI, `outline`, `write` for its result file under `work/`; no `edit`, no web, no TODO tools, no AGENTS.md. `spawn` denied — may spawn nothing at all. |
+| `refuter` | Checks a numbered list of claims about the code against the tree and gives each one a verdict — holds, false, or not checkable here with who checks it — with the `path:line` that decides it; first reply line `Claims: <n> — <h> hold, <f> false, <u> not checkable`. For a claim with "all", "only" or "every" it searches the whole tree (codegraph `callers`/`impact`, grep for every spelling); a longer list goes to one file under `work/`. | Bash for the `codegraph` CLI, `outline`, `write` for its result file under `work/`; no `edit`, no web, no TODO tools, no AGENTS.md. `spawn` denied — may spawn nothing at all. |
 | `planner` | Concept/design docs in `plans/`; sizes each task for one coder run. Ends its reply with a `Commit:` line for the files it wrote. | Bash, no web tools — version facts come from a `researcher`. May spawn a `researcher` for web lookups. |
 | `coder` | Implements code in thin vertical slices (about 100 lines in 1–2 files), or applies an exact change as briefed; a rename may span the sites the brief lists. Adds the test for a change in behaviour, installs dependencies through the package manager, and ends its reply with `Commit: <paths> \| <subject>` (subject in the style of `git log -5 --format=%s`) and `Docs: <file> — <section> — <fact>` lines. | Bash, edit, build/test. No web. May spawn a `researcher` for web lookups. |
 | `checker` | Runs the checks its briefing names (tests, lint, type-check, build) once each and reports per check `Check: <command> — exit <code> — <p> pass, <f> fail, <s> skipped`, then one line per failing item with its first error line; a longer output goes to one file under `work/`. A check named without a command is looked up in AGENTS.md or the project's scripts. | Bash, AGENTS.md, `write` for its result file under `work/`; no `edit`, no `outline`, no web, no TODO tools. `spawn` denied — may spawn nothing at all. |
+| `verifier` | Runs a built artefact where it really runs — a page in a real browser through `pw`, the binary, the installed package — screenshots what it renders, reads each screenshot and judges it itself. Per check it gives the command, the exit code, the evidence and `PASS`, `FAIL` or `NOT RUN` with the reason; first reply line `Checks: <n> — <p> pass, <f> fail, <r> not run`. A check only a test runner or a stub can run is marked `NOT RUN, reason: checker`. Needs a model with image input: on one without, its system prompt tells it to mark every look at a screenshot `NOT RUN, reason: no vision`, and the sidebar's model row notes `needs a vision model (V)`. | Bash, `read`, `write` with no path limit, AGENTS.md; no `edit`, no `outline`, no web, no TODO tools. `spawn` denied — may spawn nothing at all. |
 | `debugger` | Diagnoses build/test/runtime errors. | Bash for repro, `write` for repro scripts and notes under `work/debug-<topic>/`, no `edit`, no web — fix goes back to `coder`. May spawn a `researcher` for web lookups. |
 | `reviewer` | Reviews the diff range, staged changes or files its briefing names into `reviews/` — functional bugs first, or only the axes the briefing names. | Bash, no web tools. Convention: no source-code edits. May spawn a `researcher` for web lookups. |
 | `documenter` | Writes/iterates user docs in place (README, `docs/`, changelog) exactly as briefed — the spawn prompt states the file, the place and the content; deciding what the docs should say belongs to another role (e.g. reviewer, planner or coder) beforehand. A missing file, place or content is asked once, then reported `Blocked:`. | Bash, no web tools, no `outline`, no TODO tools. Convention: no source-code edits. `spawn` denied — may spawn nothing at all. |
@@ -481,8 +485,9 @@ Twelve roles injected by the `config` hook — no per-project
 | `grounder` | Web research through Google Search grounding via `grounded_search`. | The only role that uses Search grounding. Pick over `researcher` for a plain factual question; pick `researcher` when the work needs forum threads, a named page fetched in full, or a choice between sources. No `edit`/`write`/`bash`. `spawn` denied — may spawn nothing at all. |
 | `designer` | Generates images via [`gen`](#gen--image-generation-no-api-key). | No `outline`, no web. Convention: no source-code edits. May spawn a `researcher` for visual references. |
 | `gitter` | Runs git operations (commits, branches, tags, pushes, pull requests with the title and body the brief gives, read-only reports such as `git status --short`, `git diff --stat`, `git log -n`) exactly as briefed — the spawn prompt states the files to stage, the commit message and whether to push; deciding what changed and what to commit belongs to another role (e.g. reviewer, planner or coder) beforehand. A missing field is asked once, then reported `Blocked:`; an unknown git or forge error comes back `Blocked:` with the command and its output. | No `edit`/`write`/`webfetch`/`web_search`/`forum_search`/`grounded_search`. `spawn` denied — may spawn nothing at all. |
+| `releaser` | Carries out a project's release procedure file (the one the brief names, else `RELEASE.md`) step by step — build, sync, edit, commit, push, re-pin, install — running the check the file gives after each step and stopping at the first failure with `Blocked:`. Changes a file only where a step says so; each commit takes the message the file or the brief states (a `<value from step k>` is filled from that step's output), staged and pushed by the same steps as the `gitter`. Replies `Release: done — <n> steps`, or on a stop `Blocked: release stopped at step <k> — <n> steps` (`Blocked: no procedure file` where there is none), then one line per step. | Bash, `edit`, `write`, AGENTS.md; no `outline`, no web, no TODO tools. `spawn` denied — may spawn nothing at all. |
 
-Each delegating role maps to exactly one target: `planner`, `coder`, `debugger`, `reviewer` and `designer` reach `researcher` (the call blocks and the reply is the tool result); `researcher` reaches `grounder` for a grounded search only when its briefing asks for one; `grounder`, `documenter`, `gitter`, `scout` and `checker` may spawn nothing, and no subagent may spawn a `scout` or a `checker` — the orchestrator alone starts them. The refusal text names the caller's own allowed set — e.g. `a "researcher" may spawn "grounder" and nothing else — you asked for a "coder"`, or `a "grounder" may spawn nothing at all` — so the model has somewhere to go instead of retrying.
+Each delegating role maps to exactly one target: `planner`, `coder`, `debugger`, `reviewer` and `designer` reach `researcher` (the call blocks and the reply is the tool result); `researcher` reaches `grounder` for a grounded search only when its briefing asks for one; `grounder`, `documenter`, `gitter`, `releaser`, `scout`, `refuter`, `checker` and `verifier` may spawn nothing, and no subagent may spawn a `scout`, a `refuter`, a `checker` or a `verifier` — the orchestrator alone starts them. The refusal text names the caller's own allowed set — e.g. `a "researcher" may spawn "grounder" and nothing else — you asked for a "coder"`, or `a "grounder" may spawn nothing at all` — so the model has somewhere to go instead of retrying.
 
 A project can override any role by defining one of the same name — either
 through `.opencode/agent/<name>.md` (a markdown agent file opencode loads
@@ -506,7 +511,7 @@ the role name.
 Two kinds of project file can silently displace what this plugin installs:
 
 1. **A markdown agent file or `opencode.json` entry that shares one of the
-   plugin's twelve role names** — `prompt`, `permission`, `model`,
+   plugin's role names** — `prompt`, `permission`, `model`,
    `description`, `mode`, `hidden` or `color` from that entry overrides
    the plugin's value of the same field. `prompt`, `model` and
    `description` are the user's to own, so the plugin records that they
@@ -571,7 +576,7 @@ Both kinds are reported through three outlets:
 How to silence a report:
 
 - For a markdown-agent collision: remove the file, or rename the agent so
-  it no longer shares one of the plugin's twelve role names, or accept the
+  it no longer shares one of the plugin's role names, or accept the
   override and leave it. There is no way to keep the file, keep the name
   and clear the report for `prompt`: a markdown agent's prompt is the file
   **body**, not a frontmatter key, and an empty body still resolves to a
@@ -664,7 +669,8 @@ exposes every runtime knob:
   call in flight before the watchdog aborts it, frees its slot and wakes the
   orchestrator with a timeout notice. Shown and stepped in whole seconds, 15
   at a step; writes `"maxSubagentAgeMs"` in ms. `0` shows as `off` and
-  switches that watchdog off entirely — with it off the orphan sweep in
+  switches that watchdog off entirely, the `in tool` window with it; the
+  `run (min)` ceiling stays in force. With it off the orphan sweep in
   `src/teardown.js`, whose window is a multiple of this one, stops running
   too; the settling of subagents an instance restart ended does not depend on
   it. Default 90 s.
@@ -693,8 +699,8 @@ exposes every runtime knob:
   cuts the run off where it stands (the session is aborted and deleted). Shown
   and stepped in whole minutes; writes `"maxSubagentRunMs"` in ms. `0` shows
   as `off` and means NO run ceiling — not the `0` of the two windows next to
-  it, which switches the inactivity watchdog off entirely. The per-role
-  `agentRunMs` map overrides the flat key; `0` at that level means no ceiling
+  it, which switches those windows off and leaves this ceiling standing. The
+  per-role `agentRunMs` map overrides the flat key; `0` at that level means no ceiling
   for that type only. Default 44 min.
 - **`endless mode [on/off]`** / **`endless (k)`** — arms the self-restarting
   orchestrator loop and sets its context threshold. The row has a third
@@ -716,7 +722,7 @@ exposes every runtime knob:
   gone is ignored.
 - **`mode [orchestrator|solo]`** — the agent mode the plugin runs the
   primary in. `orchestrator` is the delegation pattern this plugin
-  enforces — the primary delegates, the eleven subagent roles do the
+  enforces — the primary delegates, the subagent roles do the
   work; `solo` runs the primary as a single agent that does the work
   itself, with no second agent of any kind starting. In solo mode none
   of `spawn`/`abort`/`list`/`reuse` is registered, opencode's native
@@ -874,11 +880,18 @@ effect at the next opencode start.
 
 ### `pw` — headless Chromium with persistent state
 
-`coder` and `debugger` get a `pw` CLI in their shell — a thin wrapper around
+Every subagent's shell has a `pw` CLI — a thin wrapper around
 [Playwright](https://playwright.dev) driving a **persistent** headless
-Chromium. State survives across calls: navigate once, then `pw screenshot`,
+Chromium; the `verifier` and the `debugger` are the roles told to use it.
+State survives across calls: navigate once, then `pw screenshot`,
 `pw textContent`, `pw click` against the same page in separate shell
 invocations.
+
+The plugin's `shell.env` hook puts its own `bin/shims` in front of a
+subagent's `PATH`, so `pw` resolves to the plugin's copy with no installer
+step, and sets `PW_SESSION` to the subagent's session id: each session runs
+its own daemon (`pw-<session>.sock`), so two subagents never drive the same
+page. A `pw` run by hand, without `PW_SESSION`, uses `pw.sock`.
 
 ```sh
 pw start
@@ -887,6 +900,7 @@ pw waitForSelector "#app" 5000
 pw screenshot /tmp/page.png       # then `read /tmp/page.png`
 pw textContent "main"
 pw click "button.submit"
+pw console                        # what the page logged and threw so far
 pw stop
 ```
 
@@ -894,8 +908,16 @@ All command names mirror Playwright's
 [Page API](https://playwright.dev/docs/api/class-page) 1:1 — an LLM that
 knows Playwright already knows `pw`. The escape hatch is
 `pw evaluate '<expr>'` (any JS expression) or `pw evaluate --body '<js>'`
-(multi-statement). First `pw start` fetches Chromium (~170 MB, one time).
-Internally: detached daemon on a Unix socket under `$TMPDIR`.
+(multi-statement). `pw console [--clear]` prints the page's console messages
+(`[<type>] <text>`) and uncaught page errors (`[pageerror] <message>`), the
+last 500 lines, recorded from the daemon's start — an error thrown while a page
+loads included; `--clear` empties the record. `pw start` uses the Chromium
+the installer put in place and downloads nothing: where no browser is
+installed it exits 1 at once with `pw: browser not installed — report this
+check as NOT RUN`. Internally: a detached daemon on a Unix socket
+under `$XDG_RUNTIME_DIR/opencode-agent-intercom/` (else
+`~/.cache/opencode-agent-intercom/`); it exits on its own after
+`PW_IDLE_EXIT_MS` (default 900000, `0` = never) without a request.
 
 ### `codegraph` — code search, where installed
 
@@ -976,7 +998,7 @@ is environment-variable-driven:
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENTS` | `1` | Concurrent subagents per primary. `"0"` disables. TUI file overrides. |
 | `OPENCODE_AGENT_INTERCOM_MAX_NESTED_SPAWNS` | `2` | Nested `spawn` calls one subagent may start, across every run of its session (the caller's one allowed target — `researcher` for `planner`, `coder`, `debugger`, `reviewer` and `designer`, `grounder` for `researcher`). `"0"` disables — the subagent must do the work itself. TUI file overrides via `"maxNestedSpawns"`. |
 | `OPENCODE_AGENT_INTERCOM_MAX_CONTEXT` | `100000` | Subagent context budget (tokens). `"0"` disables. TUI file overrides. |
-| `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS` | `90000` | Watchdog window (ms) for a subagent with nothing in flight. `"0"` switches the inactivity watchdog off, and with it the orphan sweep whose window is a multiple of this one. TUI file overrides via `"maxSubagentAgeMs"`; the TUI's `silence (s)` row steps it in whole seconds. |
+| `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_AGE_MS` | `90000` | Watchdog window (ms) for a subagent with nothing in flight. `"0"` switches the silence and tool-call windows off, and with them the orphan sweep whose window is a multiple of this one; the run ceiling stays in force. TUI file overrides via `"maxSubagentAgeMs"`; the TUI's `silence (s)` row steps it in whole seconds. |
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_TOOL_CALL_MS` | `660000` | The same watchdog's window (ms) for a subagent with a tool call in flight, counted from the start of that call. `"0"` means no ceiling while it works; the silence window still applies to every subagent that is not working. TUI file overrides via `"maxSubagentToolCallMs"`; the TUI's `in tool (min)` row steps it in whole minutes. |
 | `OPENCODE_AGENT_INTERCOM_MAX_SUBAGENT_RUN_MS` | `2640000` | The watchdog's third window (ms), the wall-clock ceiling on ONE RUN of a subagent, counted from `entry.runStartedAt` and not moved by activity. At `RUN_WRAP_UP = 0.75` of the ceiling the wrap-up band fires and names the room left; at the ceiling the watchdog cuts the run off. `"0"` disables — no run ceiling, not the `0` of the two windows above. TUI file overrides via `"maxSubagentRunMs"` (and per-role `"agentRunMs"`); the TUI's `run (min)` row steps it in whole minutes. |
 | `OPENCODE_AGENT_INTERCOM_MAX_RETAINED_SUBAGENTS` | `2` | How many finished subagents may be held as retained sessions in this process. `"0"` switches retention off — every subagent's session is deleted the moment its result is delivered. TUI file overrides. **Enabling retention needs an opencode restart** — the tool surface is resolved at plugin load, so the `reuse` tool only appears once the next instance boots with this set. Disabling takes effect at once. |
@@ -988,7 +1010,7 @@ is environment-variable-driven:
 | `OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS` | `2000` | Per-type token ceiling on a subagent's final reply forwarded to the primary. `"0"` disables — that type's reply is never cut. The TUI panel shows and edits the per-type `resultTokens` map; the flat key is only what an untouched type inherits. Everything past the ceiling is cut out of the wake notice and written to `<entry.directory>/work/agent-intercom-result-<handle>-<sessionID>[-runN].md` (mode `0600`) where the subagent's directory is absolute — the project owns the file, and only a subagent can read it. Where the subagent has no absolute project directory, the overflow file falls back to `~/.cache/opencode-agent-intercom/results/` (mode `0700`); project files are not pruned, only the cache fallback is reaped after 7 days. If the write fails the session is HELD, not deleted — the opencode session is the only remaining copy of the cut text and is collected by the orphan sweep at the next plugin load. Each subagent is told its own ceiling in its system prompt and again at the context bands: a role holding `write` is told to file its detail under the project and name the path, a role without it (`gitter`, `grounder`) to keep its reply to the findings that fit and name what it left out. |
 | `OPENCODE_AGENT_INTERCOM_PROJECT_CONTEXT` | on | `"0"` skips the project snapshot prepended to spawn prompts |
 | `OPENCODE_AGENT_INTERCOM_RESPECT_TASK_PERMS` | on | `"0"` ignores `permission.task` allowlist in `spawn` |
-| `OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH` / `_DISABLE_OUTLINE` / `_DISABLE_FORUM_SEARCH` / `_DISABLE_GROUNDED_SEARCH` | off | `"1"` skips that tool |
+| `OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH` / `_DISABLE_OUTLINE` / `_DISABLE_FORUM_SEARCH` / `_DISABLE_GROUNDED_SEARCH` / `_DISABLE_CALC` | off | `"1"` skips that tool |
 | `OPENCODE_AGENT_INTERCOM_SKIP_CTAGS` / `_SKIP_CHROMIUM` | off | Installer-only: skip ctags build / Chromium download |
 | `OPENCODE_AGENT_INTERCOM_GROUNDING_TIMEOUT_MS` | `90000` | Per-request ceiling (ms) for `grounded_search`. |
 | `OPENCODE_AGENT_INTERCOM_CODEGRAPH_BIN` | — | Absolute path to the [`codegraph`](#codegraph--code-search-where-installed) binary the code-reading roles are told to run. Unset or unusable: `codegraph` on `PATH`; neither found: no role is told about it. A usable file key `"codegraphBin"` overrides. Read once per opencode process. |
@@ -1041,7 +1063,7 @@ A cycle runs in this order:
    the project's todo file (`TODO.md` / `todos.md`) itself with the todo
    tools, inside a machine-owned `## Intercom tasks` section the plugin fences
    off. The orchestrator has no file-writing tool of its own (`PRIMARY_TOOLS`
-   is `spawn` / `abort` / `list`); the permitted subagent does the writing.
+   is `spawn` / `abort` / `list` / `message` / `reuse` / `calc`); the permitted subagent does the writing.
    When it has finished, the plugin verifies the file it left — one regular
    file, still parsing, nothing outside the machine section moved except whole
    migrated task blocks — and restores the exact pre-write bytes if any check
@@ -1110,7 +1132,7 @@ Built for behaviour, not deference: the orchestration pattern is **enforced**,
 not requested.
 
 - **Primary tool-gating** — `tool.execute.before` rejects any tool call from
-  a primary session other than `spawn`/`abort`/`list` (and denies two `list`
+  a primary session other than `spawn`/`abort`/`list`/`message`/`reuse`/`calc` (and denies two `list`
   calls in a row). The primary orchestrates; it cannot read, edit, run commands
   or fetch the web. Subagents are not restricted by this guard — their tool
   limits come from the per-role `permission:` map in `agents.js`, which also
@@ -1172,13 +1194,13 @@ removing every "do it yourself" tool from the primary is the enforcement lever.
   survive — the plugin's write wins, or the row would say something that is
   not in effect.
 - **Solo-maintainer surface area.** `pw` daemon, `gen` CLI, Exa SSE parser,
-  ctags subprocess, four opencode hooks. 2305 unit tests, no CI against real
+  ctags subprocess, eleven opencode hooks. 2671 unit tests, no CI against real
   opencode. Bugs are addressed at hobby-project pace.
 
 ## Development
 
 ```sh
-npm run check   # syntax check (node --check)
+npm run check   # syntax check (node --check over src/, scripts/ and bin/)
 npm test        # unit tests (node --test)
 ```
 

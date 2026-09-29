@@ -69,6 +69,12 @@
 #   E2E_MODEL_REF / E2E_MODEL_PROVIDER / E2E_MODEL_ID   the resolved pin,
 #                             kept across a further source in the same process
 #   E2E_MODEL_OWNER           the pid the pin was resolved for
+#   E2E_VISION_MODEL_REF / E2E_VISION_MODEL_PROVIDER / E2E_VISION_MODEL_ID
+#                             the resolved E2E_VISION_MODEL, "" where it is
+#                             unset — set by e2e_resolve_vision_model
+#   E2E_AGENT_PINS            the agents pinned to a model of their own, as
+#                             `agent=provider/model` words — written by
+#                             e2e_iso_pin_agent, read by the model audit
 #   E2E_ISO_HOME              the temporary HOME, removed by e2e_iso_remove
 #   E2E_ISO_CONFIG_HOME       $E2E_ISO_HOME/.config, exported
 #   E2E_ISO_OPENCODE_DIR      its opencode/ directory
@@ -94,12 +100,12 @@ E2E_DEFAULT_MODEL="cliproxy/qwen3.8-flash-medium"
 # with. Named here so the refusal reads as itself in a driver's output.
 E2E_BANNED_MODEL="gpuserver/Qwen3.8 Flash Next"
 
-# Every agent name the pin is written for: the twelve roles this plugin installs
+# Every agent name the pin is written for: the roles this plugin installs
 # (src/agents.js AGENTS) minus the exempt ones below, plus the opencode
 # built-ins that can answer a turn of their own. `applyModelChoices` only
 # touches names that are already in `config.agent`, so a name no build knows
 # costs nothing.
-E2E_PINNED_AGENTS="orchestrator planner coder debugger reviewer documenter researcher designer gitter scout checker build plan general title summary compaction"
+E2E_PINNED_AGENTS="orchestrator planner coder debugger reviewer documenter researcher designer gitter scout refuter checker verifier releaser build plan general title summary compaction"
 
 # The agents the pin does NOT reach, and why `grounder` is one of them: it
 # holds `grounded_search`, whose answer comes through Google's Gemini Search
@@ -233,6 +239,100 @@ e2e_resolve_model() {
   E2E_MODEL_OWNER=$$
   E2E_MODEL="$ref"
   export E2E_MODEL
+  return 0
+}
+
+# Resolves E2E_VISION_MODEL — a model with image input, form provider/model,
+# taken as given — into E2E_VISION_MODEL_REF/PROVIDER/ID. Unset is not an
+# error: the three stay "" and a driver that needs a model that sees reports
+# the step that needs it as skipped. A malformed value and the banned model are
+# refused, like E2E_MODEL.
+e2e_resolve_vision_model() {
+  E2E_VISION_MODEL_REF=""
+  E2E_VISION_MODEL_PROVIDER=""
+  E2E_VISION_MODEL_ID=""
+  local ref=${E2E_VISION_MODEL:-}
+  [ -n "$ref" ] || return 0
+  local provider=${ref%%/*} id=${ref#*/}
+  if [ -z "$provider" ] || [ "$id" = "$ref" ] || [ -z "$id" ]; then
+    e2e_fail "E2E_VISION_MODEL must be a provider/model pair (got: $ref)"
+    return 1
+  fi
+  if [ "$ref" = "$E2E_BANNED_MODEL" ]; then
+    e2e_fail "E2E_VISION_MODEL names $E2E_BANNED_MODEL — no end-to-end run may use that model."
+    return 1
+  fi
+  E2E_VISION_MODEL_REF="$ref"
+  E2E_VISION_MODEL_PROVIDER="$provider"
+  E2E_VISION_MODEL_ID="$id"
+  return 0
+}
+
+# Whether the opencode.json in force declares image input for a model:
+# `modalities.input` of its provider entry holds "image". 0 when it does, 1
+# when it does not or the model is not declared there — the reading opencode
+# itself takes, where a model without the key cannot see.
+# Usage: e2e_model_has_image_input <provider/model>
+e2e_model_has_image_input() {
+  local ref="$1"
+  python3 -c '
+import json, sys
+path, provider, model_id = sys.argv[1:4]
+try:
+    with open(path) as handle:
+        config = json.load(handle)
+    entry = config["provider"][provider]["models"][model_id]
+    modalities = entry.get("modalities") or {}
+    sys.exit(0 if "image" in (modalities.get("input") or []) else 1)
+except Exception:
+    sys.exit(1)
+' "$(e2e_opencode_config_dir)/opencode.json" "${ref%%/*}" "${ref#*/}" 2>/dev/null
+}
+
+E2E_AGENT_PINS="${E2E_AGENT_PINS:-}"
+
+# Pins one agent to a model of its own in the isolated llm-models.json, apart
+# from E2E_MODEL, and records the pin for the model audit, which then holds
+# that agent's turns to it. The file is read at instance bootstrap, so the pin
+# reaches the next server the driver starts, not one already running. The
+# banned model is refused. Pinning an agent to E2E_MODEL itself takes its own
+# pin back off.
+# Usage: e2e_iso_pin_agent <agent> <provider/model>
+e2e_iso_pin_agent() {
+  local agent="$1" ref="$2"
+  local provider=${ref%%/*} id=${ref#*/}
+  local word kept=""
+  if [ -z "${E2E_ISO_MODELS_FILE:-}" ] || [ ! -f "$E2E_ISO_MODELS_FILE" ]; then
+    e2e_fail "e2e_iso_pin_agent: no isolated llm-models.json — call e2e_iso_create first"
+    return 1
+  fi
+  if [ -z "$agent" ] || [ -z "$provider" ] || [ "$id" = "$ref" ] || [ -z "$id" ]; then
+    e2e_fail "e2e_iso_pin_agent: usage <agent> <provider/model> (got: $agent $ref)"
+    return 1
+  fi
+  if [ "$ref" = "$E2E_BANNED_MODEL" ]; then
+    e2e_fail "e2e_iso_pin_agent: $E2E_BANNED_MODEL is banned — no end-to-end run may use that model."
+    return 1
+  fi
+  python3 -c '
+import json, sys
+path, agent, provider, model_id = sys.argv[1:5]
+with open(path) as handle:
+    models = json.load(handle)
+models[agent] = {"providerID": provider, "modelID": model_id}
+with open(path, "w") as handle:
+    json.dump(models, handle, indent=2)
+    handle.write("\n")
+' "$E2E_ISO_MODELS_FILE" "$agent" "$provider" "$id" || {
+    e2e_fail "e2e_iso_pin_agent: could not write $E2E_ISO_MODELS_FILE"
+    return 1
+  }
+  for word in $E2E_AGENT_PINS; do
+    [ "${word%%=*}" = "$agent" ] || kept="$kept $word"
+  done
+  [ "$ref" = "$E2E_MODEL_REF" ] || kept="$kept $agent=$ref"
+  E2E_AGENT_PINS="${kept# }"
+  e2e_say "isolated config: $agent pinned to $ref (from the next server start)"
   return 0
 }
 
@@ -444,6 +544,7 @@ e2e_iso_remove() {
   E2E_ISO_MODELS_FILE=""
   E2E_ISO_OWNER=""
   E2E_SERVER_ENV=()
+  E2E_AGENT_PINS=""
   unset E2E_ISO_HOME E2E_ISO_CONFIG_HOME E2E_ISO_OPENCODE_DIR E2E_ISO_SETTINGS_FILE E2E_ISO_MODELS_FILE
   return 0
 }
@@ -563,6 +664,9 @@ e2e_audit_subagent_sids() {
 # assistant message at all — nothing audited is a failure, not a pass, because
 # an audit over an empty capture would pass whatever the run did.
 #
+# An agent e2e_iso_pin_agent pinned to a model of its own is held to that model
+# (E2E_AGENT_PINS, each word passed as --agent-model).
+#
 # The agents of E2E_PIN_EXEMPT_AGENTS are passed to the audit as exempt: their
 # turns ran on the machine's entry rather than the pin by design, and an
 # off-pin turn of one of them is allowed and reported separately — the banned
@@ -573,10 +677,14 @@ E2E_AUDIT_LINE=""
 e2e_model_audit() {
   local label="$1" report="$2" status
   shift 2
-  local lib
+  local lib word
+  local -a own_pins=()
+  for word in ${E2E_AGENT_PINS:-}; do
+    own_pins+=(--agent-model "$word")
+  done
   lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib
   E2E_AUDIT_LINE=$(python3 "$lib/model-audit.py" --expect "$E2E_MODEL_REF" --banned "$E2E_BANNED_MODEL" \
-    --exempt-agent "$E2E_PIN_EXEMPT_AGENTS" --label "$label" "$@" 2>&1)
+    --exempt-agent "$E2E_PIN_EXEMPT_AGENTS" "${own_pins[@]}" --label "$label" "$@" 2>&1)
   status=$?
   if [ "$status" = 0 ]; then
     printf 'PASS  model-pin (%s)\n      %s\n' "$label" "$E2E_AUDIT_LINE" | tee -a "$report"

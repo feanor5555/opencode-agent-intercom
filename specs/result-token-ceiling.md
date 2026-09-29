@@ -40,48 +40,48 @@ Each claim with the line it was read from.
   `jsonc-parser`, `playwright-core`).
 - The subagent is told no figure in its core guide:
   `"Final reply: brief plain text. Reference files by path:line; do not paste file contents back.\n"`
-  (`src/prompts.js:104`), inside `export const SUBAGENT_GUIDE_CORE`
-  (`src/prompts.js:100`), assembled by `export function guideBlocks({`
-  (`src/prompts.js:565`), which receives `agent` (`src/prompts.js:567`) and
-  appends `replyCapBlock(agent)` (`src/prompts.js:589`, defined at `:399`),
+  (`src/prompts.js:106`), inside `export const SUBAGENT_GUIDE_CORE`
+  (`src/prompts.js:102`), assembled by `export function guideBlocks({`
+  (`src/prompts.js:576`), which receives `agent` (`src/prompts.js:578`) and
+  appends `replyCapBlock(agent)` (`src/prompts.js:600`, defined at `:410`),
   which carries the figure.
 - That line is **not** one of the pinned contract elements: `CONTRACT_ELEMENTS`
-  (`src/prompts.js:263`) covers the `Blocked:` report, the `DONE: T<n>` marker,
+  (`src/prompts.js:265`) covers the `Blocked:` report, the `DONE: T<n>` marker,
   the orchestrator's spawn protocol and the delegation block —
   `test/fixtures/prompt-contract.json` pins those four elements and no other.
-  `export const PROMPT_CONTRACT = 2` (`src/prompts.js:245`).
+  `export const PROMPT_CONTRACT = 2` (`src/prompts.js:247`).
 - The orchestrator cannot read a file: `const PRIMARY_TOOLS = new Set([` holds
-  `spawn`, `abort`, `list`, `message` and `reuse` (`src/hooks.js:176-195`), and every
-  other tool from a primary session is thrown back (`src/hooks.js:3033-3044`).
+  `spawn`, `abort`, `list`, `message`, `reuse` and `calc` (`src/hooks.js:180-204`), and every
+  other tool from a primary session is thrown back (`src/hooks.js:3080-3091`).
 - A subagent at or over its budget has every work tool denied — only `message`
   and `ask` pass:
   `if (maxContext > 0 && entry.ctxTokens != null && entry.ctxTokens >= maxContext)`
-  inside `guardToolExecute` (`src/hooks.js:2790`, `src/hooks.js:2891`). So the
+  inside `guardToolExecute` (`src/hooks.js:2837`, `src/hooks.js:2938`). So the
   subagent that most needs to file its bulk output is the one that can no
   longer write a file.
 - The idle path holds everything a per-type decision needs, and holds it before
   the session is deleted: `const snapshot = await fetchSnapshot(client, sessionID)`
-  (`src/hooks.js:2166`), `agent`, `handle`, `taskId`, `directory` read off the
-  entry (`src/hooks.js:2119-2128`), the cap `capReplyForAgent(snapshot.result, {`
-  (`src/hooks.js:2203`), the child hand-back `settleChildWaiter(sessionID, {`
-  (`src/hooks.js:2223`) and the notice `completionNotice(` (`src/hooks.js:2253`).
+  (`src/hooks.js:2213`), `agent`, `handle`, `taskId`, `directory` read off the
+  entry (`src/hooks.js:2166-2175`), the cap `capReplyForAgent(snapshot.result, {`
+  (`src/hooks.js:2250`), the child hand-back `settleChildWaiter(sessionID, {`
+  (`src/hooks.js:2270`) and the notice `completionNotice(` (`src/hooks.js:2300`).
 - The error path re-reads the session for the same purpose:
-  `const snapshot = await fetchSnapshot(client, sessionID)` (`src/hooks.js:2613`),
-  secures it through `secureSubagentState(snapshot, {` (`src/hooks.js:2628`,
+  `const snapshot = await fetchSnapshot(client, sessionID)` (`src/hooks.js:2660`),
+  secures it through `secureSubagentState(snapshot, {` (`src/hooks.js:2675`,
   defined at `src/resultfile.js:324`), then
-  `errorNotice(entry, errText, wasAborted, recovered.text, …)` (`src/hooks.js:2648`).
+  `errorNotice(entry, errText, wasAborted, recovered.text, …)` (`src/hooks.js:2695`).
 - One caller uses `result` **without** pushing it into a context:
   `fetchResult: async () => (await fetchSnapshot(client, primarySessionID))?.result`
   (`src/handoffwiring.js:383`) — the primary's open-points / doc-summaries
   reply, which is parsed into todo entries, not injected.
 - The per-type settings pattern the ceiling shares: `export function contextBudgetFor(agent)`
-  (`src/settings.js:818`, five levels, table `DEFAULT_AGENT_CONTEXT`
+  (`src/settings.js:821`, five levels, table `DEFAULT_AGENT_CONTEXT`
   `src/settings.js:130`) and the shorter
-  `export function reuseCeilingFor(agent)` (`src/settings.js:856-860`) over
-  `export const DEFAULT_MAX_REUSE_CONTEXT = 70000` (`src/settings.js:257`),
+  `export function reuseCeilingFor(agent)` (`src/settings.js:859-863`) over
+  `export const DEFAULT_MAX_REUSE_CONTEXT = 70000` (`src/settings.js:260`),
   `maxReuseContext: envNum("OPENCODE_AGENT_INTERCOM_MAX_REUSE_CONTEXT", …)`
-  (`src/settings.js:568`) and the validated map `reuseContext`
-  (`src/settings.js:662-668`).
+  (`src/settings.js:571`) and the validated map `reuseContext`
+  (`src/settings.js:665-671`).
 - The TUI side of that pattern: `function stepPerAgentCeiling(`
   (`tui/src/settings-file.ts:699`), `export function stepAgentContext(`
   (`:734`), `export function stepReuseContext(` (`:754`), rendered as the
@@ -97,7 +97,7 @@ Each claim with the line it was read from.
   (`src/log.js:18-26`), deliberately not `/tmp` (`src/log.js:9-11`).
 - A once-per-process cleanup runs at load:
   `void sweepOrphanedSubagentSessions(client, { directory })`
-  (`src/index.js:169`).
+  (`src/index.js:170`).
 
 ---
 
@@ -132,7 +132,7 @@ export function estimateReplyTokens(text) {
 ```
 
 `estimateTokens` (chars / 4) serves the other callers: the work-package
-gate's bars at fifths of a budget (`src/tools.js:146-148`) and the limits
+gate's bars at fifths of a budget (`src/tools.js:148-150`) and the limits
 block's headroom figures, which the prompt tests pin. The two are never applied
 to the same text.
 
@@ -154,11 +154,11 @@ of its own.
 
 | Crossing point | Capped | Ceiling resolved for |
 |---|---|---|
-| `completionNotice` on the idle path (`src/hooks.js:2253`) | yes | the finished subagent's `entry.agent` |
-| `settleChildWaiter` hand-back to a waiting parent (`src/hooks.js:2223`) | yes, the same capped text | the **child's** type |
-| `errorNotice` on the LLM-error path (`src/hooks.js:2648`) | yes | the failed subagent's `entry.agent` |
+| `completionNotice` on the idle path (`src/hooks.js:2300`) | yes | the finished subagent's `entry.agent` |
+| `settleChildWaiter` hand-back to a waiting parent (`src/hooks.js:2270`) | yes, the same capped text | the **child's** type |
+| `errorNotice` on the LLM-error path (`src/hooks.js:2695`) | yes | the failed subagent's `entry.agent` |
 | open-points / doc-summaries reply (`src/handoffwiring.js:383`) | **no** | — |
-| `contextLimitNotice`, primary-context measurement (`src/hooks.js:1127`, `:479-480`) | not applicable — they read `ctxTokens` only | — |
+| `contextLimitNotice`, primary-context measurement (`src/hooks.js:1175`, `:520-521`) | not applicable — they read `ctxTokens` only | — |
 
 The open-points reply is parsed into todo entries and never enters a context as
 text; cutting it there loses open points, which is the loss the endless cycle
@@ -178,7 +178,7 @@ reply that reached a file lets the session be deleted.
 The rule — *everything beyond the ceiling goes into a file* — is not carried
 by the subagent alone: the truncation is decided plugin-side, after the reply
 exists, and a subagent at its budget has every work tool denied
-(`src/hooks.js:2891`) precisely when its reply is longest. So the rule is split,
+(`src/hooks.js:2938`) precisely when its reply is longest. So the rule is split,
 and the guarantee sits on the plugin's side.
 
 **Asked of the subagent** (prompt, best effort): put long material in a file
@@ -194,13 +194,13 @@ ever lost, whatever the subagent did or could not do.
 
 The prompt side in `src/prompts.js`:
 
-- `src/prompts.js:104` reads
+- `src/prompts.js:106` reads
   `"Final reply: brief plain text. Reference files by path:line; do not paste file contents back.\n"`
   — the figure stands in the block below, which knows the type's own value.
-- `replyCapBlock(agent)` (`src/prompts.js:399`), appended by `guideBlocks` on
-  the subagent branch (`src/prompts.js:578-590`) and rendered from
+- `replyCapBlock(agent)` (`src/prompts.js:410`), appended by `guideBlocks` on
+  the subagent branch (`src/prompts.js:589-601`) and rendered from
   `resultCeilingFor(agent)`. Omitted entirely when that ceiling is `0`. For a
-  role that holds `write` (`roleHoldsWrite`, `src/agents.js:341-343`):
+  role that holds `write` (`roleHoldsWrite`, `src/agents.js:395-397`):
 
 ```
 ---
@@ -216,10 +216,10 @@ So file the long material yourself, while you still have your tools: write it un
 
 The figure in the block is the resolved ceiling for that agent type. The block
 sits in the stable system-prompt element and moves only when the settings file
-moves, exactly as the limits block does (`src/hooks.js:404-408`).
+moves, exactly as the limits block does (`src/hooks.js:426-430`).
 
 The block is not a contract element: the contract covers the four elements
-the plugin relies on a subagent to *carry back* (`src/prompts.js:263`,
+the plugin relies on a subagent to *carry back* (`src/prompts.js:265`,
 `test/fixtures/prompt-contract.json`), and the reply cap is enforced by the
 plugin whatever a frozen prompt file says.
 
@@ -263,12 +263,12 @@ size: ~5412 tokens (estimated), cut to 2000 in the orchestrator's notice
 
   The `task:` line is omitted where the spawn carried no `T<n>:` prefix.
 - **Read by:** a subagent, never the orchestrator — a primary session may run
-  `spawn`/`abort`/`list`/`message`/`reuse` and nothing else (`src/hooks.js:176-195`,
-  `:3041`). The notice says so explicitly.
+  `spawn`/`abort`/`list`/`message`/`reuse`/`calc` and nothing else (`src/hooks.js:180-204`,
+  `:3088`). The notice says so explicitly.
 - **Lifetime:** the files are the only copy once the session is deleted, so
   nothing removes them on the wake path. `pruneResultFiles` runs once per
   process at load over the cache fallback only (`src/resultfile.js:348`,
-  `src/index.js:180-185`); files written under a project's `work/` are NOT pruned,
+  `src/index.js:181-186`); files written under a project's `work/` are NOT pruned,
   because `work/` belongs to the project and the project decides what stays.
   The cache directory itself is bounded by
   `RESULT_FILE_TTL_MS = 7 * 24 * 3600 * 1000`. Fixed constant, no setting —
@@ -325,7 +325,7 @@ integers (the notice's other token figures use `fmtTokens`, which rounds to
 `5.4k`; an omitted-count that reads `3.4k` where the ceiling reads `2000` is
 two units on one line). The word is **cut**, not *truncated*, so a reader of
 the notice cannot confuse it with `outline`'s
-`[truncated — N more declarations]` (`test/plugin.test.js:2452`).
+`[truncated — N more declarations]` (`test/plugin.test.js:2471`).
 
 The marker itself is plugin framing and is not counted against the ceiling,
 like the notice's head, tail, run-size and slots lines.
@@ -351,7 +351,7 @@ Resolution order in `resultCeilingFor(agent)`:
    `OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS`,
 3. `DEFAULT_MAX_RESULT_TOKENS`.
 
-Validation of the map mirrors `reuseContext` (`src/settings.js:662-668`): a key
+Validation of the map mirrors `reuseContext` (`src/settings.js:665-671`): a key
 is kept only when `Number.isInteger(v) && v >= 0`, anything else is dropped
 silently. Resolved per call, never cached on a registry entry, for the reason
 `contextBudgetFor` states.
@@ -409,7 +409,7 @@ under the agent cycler like any other type. No code names such a type.
   subagent replies and compared with `estimateReplyTokens`, checks it; a real
   count above the estimate on prose would mean the divisor is too high.
 - **A held session's reply reaches the orchestrator through the same idle
-  path** (`src/hooks.js:2003-2305`), so `reuse` runs have no capping site of
+  path** (`src/hooks.js:2050-2352`), so `reuse` runs have no capping site of
   their own; a `reuse` answer arriving uncut in the notice would show otherwise.
 
 ---
@@ -431,17 +431,17 @@ under the agent cycler like any other type. No code names such a type.
   the session instead of deleting it; `secureSubagentState` is the error path's variant; and
   `pruneResultFiles()` reaps the cache fallback.
 - **Wiring** — the idle path in `src/hooks.js` caps through
-  `capReplyForAgent(snapshot.result, {` (`src/hooks.js:2203`) before
-  `settleChildWaiter` (`:2223`) and `completionNotice` (`:2253`); the error
-  path secures through `secureSubagentState(snapshot, {` (`src/hooks.js:2628`,
+  `capReplyForAgent(snapshot.result, {` (`src/hooks.js:2250`) before
+  `settleChildWaiter` (`:2270`) and `completionNotice` (`:2300`); the error
+  path secures through `secureSubagentState(snapshot, {` (`src/hooks.js:2675`,
   which calls `capReplyForAgent` with `secure: true`,
-  `src/resultfile.js:324-332`) before `errorNotice` (`src/hooks.js:2648`).
+  `src/resultfile.js:324-332`) before `errorNotice` (`src/hooks.js:2695`).
   `fetchSnapshot` applies no cap and returns the full text
   (`result: finalResult(messages)`, `src/client.js:814`).
 - **Prompt** — the final-reply line of `SUBAGENT_GUIDE_CORE`
-  (`src/prompts.js:104`) and the per-type `replyCapBlock` in `guideBlocks`.
+  (`src/prompts.js:106`) and the per-type `replyCapBlock` in `guideBlocks`.
 - **Pruning at load** — `pruneResultFiles()` runs once per process beside the
-  bootstrap sweep (`src/index.js:168-185`), on the next event-loop turn.
+  bootstrap sweep (`src/index.js:169-186`), on the next event-loop turn.
 - **TUI** — `effectiveResultTokens` and `stepResultTokens` in
   `tui/src/settings-file.ts`, and the `result Token` row in `tui/src/tui.tsx`.
 - **Documentation** — the `OPENCODE_AGENT_INTERCOM_MAX_RESULT_TOKENS` row of
@@ -480,7 +480,7 @@ under the agent cycler like any other type. No code names such a type.
 
 Elsewhere:
 
-- `test/plugin.test.js:1420` — *an oversized subagent result is cut at the
+- `test/plugin.test.js:1432` — *an oversized subagent result is cut at the
   token ceiling and filed in full*, end to end through the wake notice.
 - `test/settings.test.js`, `test/settings-defaults-parity.test.js` —
   resolution of `maxResultTokens` / `resultTokens`, the map's validation, and
@@ -494,8 +494,8 @@ Elsewhere:
 - `test/system-prompt-stability.test.js` — the reply-cap block belongs to the
   stable element and does not move between turns of one session.
 - `test/nested-delegation.test.js` — a nested child's reply reaching its parent
-  is cut against the child's own ceiling (`:529`), and a `resultTokens` entry
-  for the child's type lets it through whole (`:557`).
+  is cut against the child's own ceiling (`:543`), and a `resultTokens` entry
+  for the child's type lets it through whole (`:571`).
 - `test/sweep-state-securing.test.js` — a subagent whose session is HELD because
   the overflow file could not be written is not addressable by `reuse`: its
   entry is removed and only the opencode session remains. The orphan sweep
@@ -508,4 +508,4 @@ Elsewhere:
   and agent read `ORPHAN_RESULT_HANDLE = "orphan"` /
   `ORPHAN_RESULT_AGENT = "unknown"`.
 - `test/prompt-contract-pin.test.js` — pins the contract elements; the
-  final-reply line at `src/prompts.js:104` is not one of them.
+  final-reply line at `src/prompts.js:106` is not one of them.

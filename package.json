@@ -22,7 +22,7 @@
     "tui/dist"
   ],
   "scripts": {
-    "check": "mkdir -p work; output=\"work/npm-check-$(date +%Y%m%d-%H%M%S)-$$.log\"; (for f in src/*.js scripts/*.js; do node --check \"$f\" || exit 1; done) >\"$output\" 2>&1; status=$?; cat \"$output\"; printf '\\nCheck output: %s\\n' \"$output\"; exit \"$status\"",
+    "check": "mkdir -p work; output=\"work/npm-check-$(date +%Y%m%d-%H%M%S)-$$.log\"; (for f in src/*.js scripts/*.js bin/*.js; do node --check \"$f\" || exit 1; done) >\"$output\" 2>&1; status=$?; cat \"$output\"; printf '\\nCheck output: %s\\n' \"$output\"; exit \"$status\"",
     "test": "mkdir -p work; output=\"work/npm-test-$(date +%Y%m%d-%H%M%S)-$$.log\"; node --test --test-concurrency=1 --import ./test/helpers/no-codegraph.js test/*.test.js >\"$output\" 2>&1; status=$?; cat \"$output\"; printf '\\nTest output: %s\\n' \"$output\"; exit \"$status\"",
     "pin:contract": "node scripts/pin-prompt-contract.js"
   },

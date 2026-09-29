@@ -53,6 +53,10 @@
       {
         "block": "ORCHESTRATION_GUIDE",
         "line": "- list() — your active subagents; a row marked `asking` is waiting for your answer."
+      },
+      {
+        "block": "ORCHESTRATION_GUIDE",
+        "line": "- calc(expression) — exact arithmetic on figures you already hold (sizes, budgets, offsets, token sums). Answers at once and starts no subagent."
       }
     ],
     "delegation-block": [

@@ -39,24 +39,30 @@
 #                          this suite's server writes (src/reqlog.js)
 #   E2E_MODEL              cliproxy/qwen3.8-flash-medium — the model every agent is
 #                          pinned to and the only one a turn may answer on
+#   E2E_VISION_MODEL       unset — a model with image input (provider/model),
+#                          taken as given; verifier-task.sh pins the verifier to
+#                          it for its vision leg and reports that leg SKIP
+#                          where it is unset
 #   SERVER_START_TIMEOUT_S 60     readiness probe budget
 #
 # ask-expiry-task.sh, context-bands-task.sh, run-ceiling-task.sh,
-# mcp-after-task.sh and endless-task.sh run last and are the five drivers
-# that do NOT use this server: each needs settings of its own in the
-# agent-intercom.json a server was started with — the expiry driver an
+# mcp-after-task.sh, verifier-task.sh and endless-task.sh run last and are the
+# six drivers that do NOT use this server: each needs settings of its own in
+# the configuration a server was started with — the expiry driver an
 # `answerWaitMs` / `maxSubagentToolCallMs` pair per phase, the context-band
 # driver an `agentContext` budget low enough for one subagent to cross it
 # and the request log switched on, the run-ceiling driver a
 # `maxSubagentRunMs` pin with the request log switched on so the wrap-up
 # band can be asserted, the MCP-after driver an MCP server patched into
-# its isolated opencode.json and the request log switched on, the endless
+# its isolated opencode.json and the request log switched on, the verifier
+# driver a verifier pin per leg in llm-models.json, the endless
 # driver a threshold the primary is known to cross — so each builds its own
 # isolated configuration and starts and stops its own server, on
 # ASK_EXPIRY_PORT (default 4588), CONTEXT_BANDS_PORT (default 4606),
-# RUN_CEILING_PORT (default 4612), MCP_AFTER_PORT (default 4608) resp.
-# ENDLESS_PORT (default 4599). See their headers for their own parameters.
-# This script stops its own server before those five, so no session of the
+# RUN_CEILING_PORT (default 4612), MCP_AFTER_PORT (default 4608),
+# VERIFIER_PORT (default 4614) resp. ENDLESS_PORT (default 4599). See their
+# headers for their own parameters. This script stops its own server before
+# those six, so no session of the
 # drivers above is still alive under the settings those write.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -172,6 +178,11 @@ ASSERTING_FAILED=""
 # running tool call, this one only into the gap between two steps. It needs no
 # setting of its own either, so it runs on this server beside the two above.
 "$HERE/between-steps-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED between-steps-task.sh(exit $?)"
+# The two role drivers: one refuter on claims about this repository, one
+# releaser on a throwaway project with a local bare remote. Neither needs a
+# setting of its own, so both run on this server.
+"$HERE/refuter-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED refuter-task.sh(exit $?)"
+"$HERE/releaser-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED releaser-task.sh(exit $?)"
 
 # The suite server goes down HERE, before the last driver, not only in the EXIT
 # trap. endless-task.sh starts a server of its own, but it arms endless mode
@@ -217,11 +228,18 @@ e2e_server_stop
 # after context-bands so the two request-log servers never share a process.
 "$HERE/mcp-after-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED mcp-after-task.sh(exit $?)"
 
+# The verifier on a throwaway web page. Own servers, own port: the verifier's
+# model is a pin in the isolated llm-models.json, read at server start, and one
+# of its legs needs a server environment without a browser, so it restarts its
+# server per pin. Its vision leg runs where E2E_VISION_MODEL is set and reports
+# SKIP otherwise.
+"$HERE/verifier-task.sh" || ASSERTING_FAILED="$ASSERTING_FAILED verifier-task.sh(exit $?)"
+
 "$HERE/endless-task.sh"
 
 # The asserting drivers' verdict, held back above so the endless cycle still ran.
 if [ -n "$ASSERTING_FAILED" ]; then
   echo ""
-  echo "asserting driver(s) failed:$ASSERTING_FAILED — see $OUTDIR/19-tui-route.report.txt, $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt, $OUTDIR/16-between-steps.report.txt, $OUTDIR/15-ask-expiry.report.txt, $OUTDIR/17-context-bands.report.txt, $OUTDIR/20-run-ceiling.report.txt and $OUTDIR/18-mcp-after.report.txt" >&2
+  echo "asserting driver(s) failed:$ASSERTING_FAILED — see $OUTDIR/19-tui-route.report.txt, $OUTDIR/13-message.report.txt, $OUTDIR/14-ask.report.txt, $OUTDIR/16-between-steps.report.txt, $OUTDIR/21-refuter.report.txt, $OUTDIR/22-releaser.report.txt, $OUTDIR/15-ask-expiry.report.txt, $OUTDIR/17-context-bands.report.txt, $OUTDIR/20-run-ceiling.report.txt, $OUTDIR/18-mcp-after.report.txt and $OUTDIR/23-verifier.report.txt" >&2
   exit 1
 fi

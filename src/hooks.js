@@ -106,6 +106,7 @@ import {
   defaultAgentName,
   DEFAULT_AGENT,
   SOLO_ROLE_HEADER_NAME,
+  VISION_ROLES,
 } from "./agents.js"
 import { resolveSpawnPermission, resolveToolPermission } from "./config.js"
 import { codegraphCommand, codegraphCommandFor } from "./codegraph.js"
@@ -119,6 +120,7 @@ import {
   resultCeilingDemand,
   resultCeilingPlan,
   runWrapUpBlock,
+  VERIFIER_NO_VISION_LINE,
 } from "./prompts.js"
 import {
   loadCustomPrompt,
@@ -152,6 +154,7 @@ import {
 } from "./notices.js"
 import { capReplyForAgent, secureSubagentState } from "./resultfile.js"
 import { ensureWatchdogStarted } from "./watchdog.js"
+import { isCalcEnabled } from "./calc.js"
 import { instanceDisposing, entryInstanceDirectory } from "./instancerestart.js"
 import { maybeRunPendingCompaction, startSubagentCompaction } from "./compaction.js"
 import {
@@ -165,7 +168,8 @@ import {
 export { timeoutSubagent } from "./watchdog.js"
 
 // The only tools a primary session may execute — everything else must be
-// delegated to a subagent. Pure orchestration: spawn / abort / list. Even
+// delegated to a subagent. Orchestration (spawn / abort / list / message /
+// reuse) plus `calc`, which reads and writes nothing. Even
 // glob and grep (to a scout) and TODO.md reads (to the planner) are delegated, so the
 // orchestrator stays at the coordination layer.
 //
@@ -192,6 +196,11 @@ export const PRIMARY_TOOLS = new Set([
   // `maxRetainedSubagents: 0` the tool is not registered (see createTools) and
   // this entry gates nothing.
   "reuse",
+  // Pure arithmetic on figures the primary already holds (src/calc.js). It
+  // reads nothing and writes nothing, so the primary still does no project
+  // work. Not registered under OPENCODE_AGENT_INTERCOM_DISABLE_CALC=1, where
+  // this entry gates nothing.
+  "calc",
 ])
 
 // Every tool name established as starting an agent of its own. Read off the
@@ -290,10 +299,12 @@ const midRunMessagingTools = new Set(MID_RUN_MESSAGING_TOOLS)
 // `midRunMessaging` is off it refuses every call, so naming it would send the
 // model after something it cannot use. The difference is only where the answer
 // comes from — retention was latched at load, this one is read live.
+// `calc` is left out under its kill switch, where it is not registered.
 function availablePrimaryTools() {
   return [...PRIMARY_TOOLS]
     .filter((name) => name !== "reuse" || retentionActive())
     .filter((name) => name !== "message" || getSettings().midRunMessaging)
+    .filter((name) => name !== "calc" || isCalcEnabled())
     .join(", ")
 }
 
@@ -302,10 +313,12 @@ function availablePrimaryTools() {
 // designer (images). Each one holds all four TODO tools; its role prompt
 // (agents.js) says which of them it uses — planner and coder own the list,
 // the other three read it and add to it.
-// The other six subagents (researcher, grounder, documenter, gitter, scout,
-// checker) get no TODO tools at all: documenter and gitter carry out exact
-// briefs, scout and checker answer one lookup or check, and the web roles hand
-// off whatever they find to the others, who manage the list.
+// The other nine subagents (researcher, grounder, documenter, gitter,
+// releaser, scout, refuter, checker, verifier) get no TODO tools at all:
+// documenter, gitter and releaser carry out exact briefs, scout, refuter,
+// checker and verifier answer one lookup, claim list, check or runtime check,
+// and the web roles hand off whatever they find to the others, who manage the
+// list.
 export const TODO_TOOLS = new Set(["todos_open", "todo_done", "todo_add", "todo_edit"])
 export const TODO_AGENTS = new Set([
   "planner", "coder", "debugger", "reviewer", "designer",
@@ -319,17 +332,26 @@ export const TODO_AGENTS = new Set([
 //     PR rules are central to their work.
 //   - checker keeps it: the check commands a briefing names without the
 //     command are looked up there.
+//   - verifier keeps it: how the project builds, serves and starts its
+//     artefact stands there.
+//   - releaser keeps it: the project's build, commit and push rules stand
+//     there beside the procedure file it carries out.
 //   - planner / documenter strip it: planner writes design docs and is told
 //     in its role prompt to reference AGENTS.md via Sources when relevant;
 //     documenter writes the content its brief states, into the place it names.
-//   - researcher / grounder / designer / gitter / scout strip it: web
-//     research, image generation, git operations and a code lookup don't need
-//     project code conventions.
-const AGENTS_MD_SUBAGENTS = new Set([
+//   - researcher / grounder / designer / gitter / scout / refuter strip it:
+//     web research, image generation, git operations, a code lookup and a
+//     claim check don't need project code conventions; a claim about a
+//     convention is checked against the file that states it.
+// The offline prompt files carry the same set plus orchestrator as
+// HAS_AGENTS_MD (src/promptsfile.js).
+export const AGENTS_MD_SUBAGENTS = new Set([
   "coder",
   "debugger",
   "reviewer",
   "checker",
+  "verifier",
+  "releaser",
 ])
 
 // The share of the budget at which the subagent is first told anything about
@@ -413,6 +435,25 @@ const BUDGET_NOTIFY_AFTER = 3
 //
 // Returns the hook bound to a client (needed for the context-budget check,
 // which reads the subagent's live message history).
+// The no-vision line for a subagent whose role needs to see images
+// (VISION_ROLES) while the model of THIS request declares no image input —
+// `model` is what the request runs on, pinned or not, and a missing one counts
+// as unable to see. "" for every other case. The first time it applies to an
+// entry it is logged.
+function noVisionLineFor(entry, model, sessionID) {
+  if (!VISION_ROLES.includes(entry.agent)) return ""
+  if (model?.capabilities?.input?.image === true) return ""
+  if (!entry.noVisionLogged) {
+    entry.noVisionLogged = true
+    log("vision role on non-vision model", {
+      sessionID,
+      agent: entry.agent,
+      model: model ? `${model.providerID ?? "?"}/${model.id ?? "?"}` : null,
+    })
+  }
+  return VERIFIER_NO_VISION_LINE
+}
+
 export function createTransformSystem(client) {
   return async function transformSystem(input, output) {
     try {
@@ -743,6 +784,11 @@ export function createTransformSystem(client) {
       // The user's template owns the whole layout, so this path emits ONE
       // element: `{{env}}` sits wherever the file puts it and cannot be split
       // off into its own system message.
+      // Its own element after the role's blocks, in either path: the model of
+      // a session does not change between its turns, so the line holds its
+      // bytes and the cached prefix with it.
+      const noVisionLine = isSubagent ? noVisionLineFor(entry, input?.model, sessionID) : ""
+
       const customTemplate = scopeDir ? loadCustomPrompt(scopeDir, agentName) : null
       if (customTemplate) {
         const result = applyCustomPrompt(customTemplate, {
@@ -761,6 +807,7 @@ export function createTransformSystem(client) {
         // or that the template itself is stale — cannot be inside the very file
         // it warns about.
         output.system.push(result + overrideNotice)
+        if (noVisionLine) output.system.push(noVisionLine)
         return
       }
 
@@ -790,7 +837,8 @@ export function createTransformSystem(client) {
       // `output.system = [...]` would be a silent no-op.
       output.system.length = 0
       output.system.push(stable)
-      // Second element only when there is one to make: parseOpencodeSystem
+      if (noVisionLine) output.system.push(noVisionLine)
+      // Next element only when there is one to make: parseOpencodeSystem
       // returns an empty `env` whenever opencode's markers are absent, and an
       // empty system message is worth nothing to either the model or the cache.
       if (slices.env) output.system.push(slices.env)
@@ -1358,15 +1406,14 @@ async function contextLimitNotice(client, entry) {
 // hear nothing of its ceiling at all.
 //
 // Silent where the run ceiling cannot fire, so the block never announces a cut
-// that is not coming: with the type's ceiling at 0, and with the inactivity
-// watchdog switched off (`maxSubagentAgeMs <= 0`), which disables the sweep's
-// whole running branch — the run ceiling included.
+// that is not coming: with the type's ceiling at 0. The inactivity watchdog
+// switched off (`maxSubagentAgeMs <= 0`) leaves the run ceiling standing, so the
+// band speaks there as well.
 //
 // Counted in `entry.runWarnings`, apart from the three context counters. For
 // the log only; nothing escalates on it.
 function runCeilingNotice(entry) {
   const settings = getSettings()
-  if (settings.maxSubagentAgeMs <= 0) return ""
   const ceilingMs = runCeilingFor(entry.agent, settings)
   if (!(ceilingMs > 0)) return ""
   const startedAt = entry.runStartedAt
@@ -3028,8 +3075,8 @@ export function createGuardToolExecute(client, permissionGuard) {
       return
     }
 
-    // The orchestrator pattern: a primary may only run the intercom tools
-    // (spawn/abort/list); everything else it must delegate.
+    // The orchestrator pattern: a primary may only run the PRIMARY_TOOLS;
+    // everything else it must delegate.
     if (!PRIMARY_TOOLS.has(input.tool)) {
       log("denied non-orchestration tool from primary", { sessionID, tool: input.tool })
       const hint =

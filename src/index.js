@@ -97,6 +97,7 @@ import { installAgents, suppressBuiltinAgentTurns } from "./agents.js"
 import { applyCompactionPolicy } from "./compaction.js"
 import { recordSessionAgent } from "./registry.js"
 import { chatParamsHook } from "./llmparams.js"
+import { shellEnvHook } from "./shellenv.js"
 import { chatMessageHook, applyModelChoices, messageAgent } from "./llmmodel.js"
 import { captureSystem, captureMessages, captureParams, captureToolExecute } from "./reqlog.js"
 import { setServerUrl } from "./client.js"
@@ -346,6 +347,12 @@ export default async (ctx) => {
       } catch (err) {
         log("reqlog params error", err?.message ?? String(err))
       }
+    },
+    // A subagent's shell: the plugin's `pw` on PATH and a `pw` daemon of its
+    // own (shellenv.js). The hook catches its own failures, so a shell call
+    // never fails on it.
+    "shell.env": async (input, output) => {
+      shellEnvHook(input, output)
     },
     event: createEventHandler(client),
     // Logged first so a throw out of the guard still leaves a `before` record:

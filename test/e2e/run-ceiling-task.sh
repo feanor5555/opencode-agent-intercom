@@ -319,7 +319,7 @@ CONTROL_FINISH_S=$(( CONTROL_SLEEP_S + 180 ))
 [ "$RUN_MS" -gt 0 ] 2>/dev/null ||
   mr_die "RUN_CEILING_RUN_MS=$RUN_MS — a ceiling of 0 switches the run window off (runCeilingFor, src/settings.js), so nothing this driver asserts could fire"
 [ "$SUB_AGE_MS" -gt 0 ] 2>/dev/null ||
-  mr_die "RUN_CEILING_AGE_MS=$SUB_AGE_MS — maxSubagentAgeMs<=0 disables the sweep's running branch, run ceiling included"
+  mr_die "RUN_CEILING_AGE_MS=$SUB_AGE_MS — maxSubagentAgeMs<=0 switches off the silence window the control phase and the neither-old proof are measured against"
 [ "$WRAP_AT_MS" -lt "$RUN_MS" ] ||
   mr_die "wrap-up threshold $WRAP_AT_MS is not below the ceiling $RUN_MS"
 [ "$CONTROL_SLEEP_MS" -gt "$SUB_AGE_MS" ] ||

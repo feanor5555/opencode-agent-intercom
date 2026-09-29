@@ -275,7 +275,7 @@ test("switched on without a restart: list and the snapshot stay as they were", a
 
   // `message` stands in the list beside the three: the mid-run channel is on by
   // default and is not gated by the retention latch this file is about.
-  assert.match(await refusalText(hooks), /Available orchestration tools: spawn, abort, list, message\./)
+  assert.match(await refusalText(hooks), /Available orchestration tools: spawn, abort, list, message, calc\./)
 })
 
 // Re-decided here: a `list` that runs after retention was switched off shows no
@@ -303,7 +303,7 @@ test("switched off: a retained entry is neither listed nor shown in the snapshot
   assert.match(refused.output, /switched off for this installation/)
   // `message` stands in the list beside the three: the mid-run channel is on by
   // default and is not gated by the retention latch this file is about.
-  assert.match(await refusalText(hooks), /Available orchestration tools: spawn, abort, list, message\./)
+  assert.match(await refusalText(hooks), /Available orchestration tools: spawn, abort, list, message, calc\./)
 
   // Untouched by the read paths themselves — no sweep has run yet.
   assert.equal(entryLifecycle(entryForSession(sessionID)), LIFECYCLE_RETAINED)
@@ -316,7 +316,7 @@ test("offered and on: the refusal names reuse among the orchestration tools", as
   assert.ok(hooks.tool.reuse, "the map carries the tool")
   assert.match(
     await refusalText(hooks),
-    /Available orchestration tools: spawn, abort, list, message, reuse\./,
+    /Available orchestration tools: spawn, abort, list, message, reuse, calc\./,
   )
 })
 

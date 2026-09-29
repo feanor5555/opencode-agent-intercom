@@ -8,8 +8,10 @@
 // exact-brief roles' single `ask`, the TODO paragraph split, the debugger's
 // `write` for `work/`, the orchestrator's tool list, and the reply-ceiling
 // wording by `write` permission — in the blocks and through the transform —
-// and the two narrow roles, `scout` for a code lookup and `checker` for a check
-// run: their reply forms, their maps, and the orchestrator's routing to them.
+// and the narrow roles, `scout` for a code lookup, `refuter` for a claim check
+// and `checker` for a check run: their reply forms, their maps, and the
+// orchestrator's routing to them; and the `releaser`, which carries out a
+// procedure file with the gitter's commit steps (`GIT_STEPS`).
 //
 // Run: node --test test/role-briefs.test.js
 
@@ -18,8 +20,9 @@ import assert from "node:assert/strict"
 
 import plugin from "../src/index.js"
 import { upsertSession } from "../src/registry.js"
-import { AGENTS, NESTED_SPAWN_TARGETS, SPAWNABLE_ROLES, roleHoldsWrite } from "../src/agents.js"
-import { PRIMARY_TOOLS } from "../src/hooks.js"
+import { AGENTS, GIT_STEPS, NESTED_SPAWN_TARGETS, SPAWNABLE_ROLES, mayDelegate, roleHoldsWrite } from "../src/agents.js"
+import { AGENTS_MD_SUBAGENTS, PRIMARY_TOOLS } from "../src/hooks.js"
+import { HAS_AGENTS_MD, renderDefaultsFile } from "../src/promptsfile.js"
 import {
   guideBlocks,
   OUTLINE_DISABLED_AGENTS,
@@ -86,7 +89,7 @@ test("the orchestrator and the planner size work by one coder run", () => {
   assert.match(prompt, /one spawn has one deliverable: a coder change of about 100 lines in 1–2 named files/)
   assert.match(prompt, /Larger work goes to the planner first/)
   assert.match(prompt, /Brief a rename or move with its list of sites \(path:line\)/)
-  assert.match(prompt, /Usual order — bug: debugger → coder \(with a test\) → checker → gitter; feature: planner → coder per task → checker → reviewer → documenter and gitter\./)
+  assert.match(prompt, /Usual order — bug: debugger → coder \(with a test\) → checker → gitter; feature: planner → refuter \(claims\) → coder per task → checker → verifier where the change shows at runtime → reviewer → documenter and gitter; release: verifier → releaser\./)
   assert.match(prompt, /coder for code and dependency changes and for tests/)
   assert.match(prompt, /write a test for <behaviour>, change no production code/)
   assert.match(prompt, /reviewer for code reviews \(give it a diff range; for a big change one axis per run\)/)
@@ -234,14 +237,37 @@ test("the transform asks the resolved config whether the role holds write", asyn
   assert.match(debuggerPrompt, FILE_FORM, "the debugger now holds write and is told to file")
 })
 
-// ---- scout and checker -----------------------------------------------------
+// ---- the role lists kept by hand --------------------------------------------
+
+// The orchestrator can only pick a role its prompt names: a spawnable role left
+// out of the "Available subagents" line is one it never dispatches.
+test("the orchestrator's Available line names every spawnable role, and only those", () => {
+  const line = AGENTS.orchestrator.prompt.split("\n").find((l) => l.startsWith("Available subagents: "))
+  assert.ok(line, "the Available line is there")
+  const named = line.replace(/^Available subagents: /, "").replace(/\.$/, "").split(", ")
+  assert.deepEqual([...named].sort(), [...SPAWNABLE_ROLES].sort())
+})
+
+// The offline prompt files and the live system prompt decide AGENTS.md by two
+// sets, one in each module; they say the same thing.
+test("the prompt files keep AGENTS.md for exactly the roles the live prompt does", () => {
+  assert.deepEqual(
+    [...HAS_AGENTS_MD].sort(),
+    ["orchestrator", ...AGENTS_MD_SUBAGENTS].sort(),
+  )
+  for (const role of AGENTS_MD_SUBAGENTS) {
+    assert.ok(SPAWNABLE_ROLES.includes(role), `${role} is a spawnable role`)
+  }
+})
+
+// ---- scout, refuter and checker --------------------------------------------
 
 const WEB_TOOLS = ["webfetch", "websearch", "web_search", "forum_search", "grounded_search"]
 const TODO_TOOL_NAMES = ["todos_open", "todo_add", "todo_edit", "todo_done"]
 
 test("the orchestrator routes lookups to the scout and check runs to the checker", () => {
   const { prompt } = AGENTS.orchestrator
-  assert.match(prompt, /Available subagents: scout, planner, coder, checker, debugger,/)
+  assert.match(prompt, /Available subagents: scout, refuter, planner, coder, checker, verifier, debugger,/)
   assert.match(prompt, /scout to find code or summarise a file \(where something is, who calls it, what a file does\)/)
   assert.match(prompt, /checker to run tests, lint, type-check or build and report the failures \(name the check, or the command\)/)
   assert.match(prompt, /If you are not sure, ask a scout first\./)
@@ -249,8 +275,8 @@ test("the orchestrator routes lookups to the scout and check runs to the checker
   assert.doesNotMatch(prompt, /file lookups|use planner/, "lookups no longer go to the planner")
 })
 
-test("both roles are spawnable by the orchestrator alone and spawn nothing", () => {
-  for (const agent of ["scout", "checker"]) {
+test("the narrow roles are spawnable by the orchestrator alone and spawn nothing", () => {
+  for (const agent of ["scout", "refuter", "checker"]) {
     assert.ok(SPAWNABLE_ROLES.includes(agent), `${agent} is a spawn target`)
     assert.equal(AGENTS[agent].permission.spawn, "deny", `${agent} spawns nothing`)
     assert.equal(NESTED_SPAWN_TARGETS[agent], undefined, `${agent} names no nested target`)
@@ -260,8 +286,8 @@ test("both roles are spawnable by the orchestrator alone and spawn nothing", () 
   }
 })
 
-test("both roles hold bash and write for work/, no edit, no web, no TODO tools", () => {
-  for (const agent of ["scout", "checker"]) {
+test("the narrow roles hold bash and write for work/, no edit, no web, no TODO tools", () => {
+  for (const agent of ["scout", "refuter", "checker"]) {
     const { permission, prompt } = AGENTS[agent]
     assert.equal(permission.bash, undefined, `${agent}: bash is granted by absence`)
     assert.equal(permission.write, undefined, `${agent}: write is granted by absence`)
@@ -286,6 +312,70 @@ test("the scout replies path:line with the quoted line, or a summary of at most 
   const guide = guideBlocks({ agent: "scout", delegates: false, codegraph: "codegraph" })
   assert.match(guide, /reading discipline/, "the scout gets the outline block")
   assert.match(guide, /code search/, "and the codegraph card")
+  assert.doesNotMatch(prompt, /Claims:/, "the claim check is the refuter's")
+})
+
+test("the orchestrator sends claims to the refuter and briefs with its verdict", () => {
+  const { prompt } = AGENTS.orchestrator
+  assert.match(prompt, /refuter to check facts before you brief them — send them as a numbered claim list/)
+  assert.match(
+    prompt,
+    /Before you brief a coder or debugger on a fact about the tree that no subagent showed you in this session, send it to a refuter as a claim and brief with the verdict\./,
+  )
+  assert.match(prompt, /If you are not sure, ask a scout first\./, "a question still goes to the scout")
+})
+
+// The pre-spawn checklist: three cheaper moves than a fresh run, taken in
+// order, each naming a tool the orchestrator holds or a role it can spawn, and
+// placed after the dispatch rules it narrows.
+test("the orchestrator checks for a cheaper move before each spawn", () => {
+  const { prompt } = AGENTS.orchestrator
+  const lines = prompt.split("\n")
+  const checklist = lines.findIndex((line) => line.startsWith("Before each spawn, "))
+  assert.equal(
+    lines[checklist],
+    "Before each spawn, take the first that fits: a figure from numbers you hold → calc; text you already hold → give it to the documenter with the file, the place in it and the text; a fact about the tree you are about to brief → a refuter, as a numbered claim list. What none of these covers gets its own run.",
+  )
+  assert.equal(prompt.split("Before each spawn, ").length, 2, "the checklist stands once")
+  assert.ok(PRIMARY_TOOLS.has("calc"), "calc is a tool the orchestrator holds")
+  for (const role of ["documenter", "refuter"]) {
+    assert.ok(SPAWNABLE_ROLES.includes(role), `${role} is a role the orchestrator can spawn`)
+  }
+  const releaseRule = lines.findIndex((line) => line.startsWith("Start a releaser when "))
+  const cutRule = lines.findIndex((line) => line.startsWith("Cut work so one spawn "))
+  assert.ok(releaseRule >= 0 && cutRule >= 0)
+  assert.equal(checklist, releaseRule + 1, "the checklist follows the dispatch rules")
+  assert.ok(checklist < cutRule)
+})
+
+test("the refuter gives each claim one verdict with the path:line that decides it", () => {
+  const { prompt } = AGENTS.refuter
+  assert.match(prompt, /look for the proof that it is false/)
+  assert.match(prompt, /`Claims: <n> — <h> hold, <f> false, <u> not checkable`/)
+  assert.match(prompt, /`<#> <verdict> — <path:line> — <what is there>`/)
+  assert.match(prompt, /- holds — the path:line that shows it;/)
+  assert.match(prompt, /- false — the path:line that contradicts it, and what stands there;/)
+  assert.match(prompt, /- not checkable here — it is about runtime, the web or another machine; name who checks it: verifier for runtime, researcher for the web\./)
+  assert.match(prompt, /For a claim with "all", "only", "every", "never" or "no other", search the whole tree: codegraph callers or impact, and grep for every spelling\./)
+  assert.match(prompt, /Compare figures with calc\./)
+})
+
+test("the refuter reads code: outline, the codegraph card, no AGENTS.md", () => {
+  assert.equal(AGENTS.refuter.permission.outline, undefined, "the refuter holds outline")
+  assert.ok(!OUTLINE_DISABLED_AGENTS.has("refuter"))
+  const guide = guideBlocks({ agent: "refuter", delegates: false, codegraph: "codegraph" })
+  assert.match(guide, /reading discipline/, "the refuter gets the outline block")
+  assert.match(guide, /code search/, "and the codegraph card")
+  assert.ok(!AGENTS_MD_SUBAGENTS.has("refuter"))
+  assert.ok(!HAS_AGENTS_MD.has("refuter"))
+})
+
+test("the coder asks about a briefed fact the tree contradicts and checks nothing itself", () => {
+  const { prompt } = AGENTS.coder
+  assert.match(
+    prompt,
+    /Where a file you read contradicts a fact in your briefing, `ask` your caller with the fact and the path:line; the answer lets you go on\./,
+  )
 })
 
 test("the checker reports command, exit code, counts and each failing item", () => {
@@ -326,4 +416,103 @@ test("the checker keeps AGENTS.md for the check commands; the scout does not", a
   const scoutOut = { system: [opencodeSystemWithAgentsMd()] }
   await hooks["experimental.chat.system.transform"]({ sessionID: "ses_scout" }, scoutOut)
   assert.doesNotMatch(scoutOut.system.join(""), /make check-all/)
+})
+
+// ---- the releaser ----------------------------------------------------------
+
+test("the releaser's map grants bash, write and edit and denies outline, spawn, web and TODO tools", async () => {
+  const { permission } = AGENTS.releaser
+  assert.equal(AGENTS.releaser.mode, "subagent")
+  assert.equal(AGENTS.releaser.hidden, true)
+  for (const tool of ["bash", "write", "edit"]) {
+    assert.equal(permission[tool], undefined, `releaser: ${tool} is granted by absence`)
+  }
+  assert.equal(permission.outline, "deny")
+  assert.equal(permission.spawn, "deny")
+  for (const tool of [...WEB_TOOLS, ...TODO_TOOL_NAMES]) {
+    assert.equal(permission[tool], "deny", `releaser denies ${tool}`)
+  }
+  assert.equal(mayDelegate("releaser"), false)
+  assert.equal(NESTED_SPAWN_TARGETS.releaser, undefined, "the releaser names no nested target")
+  for (const [caller, targets] of Object.entries(NESTED_SPAWN_TARGETS)) {
+    assert.ok(!targets.includes("releaser"), `${caller} may not spawn a releaser`)
+  }
+
+  const { ctx } = makeCtx(newProject())
+  const hooks = await plugin(ctx)
+  const config = {}
+  await hooks.config(config)
+  const installed = config.agent.releaser.permission
+  for (const tool of ["bash", "write", "edit"]) {
+    assert.equal(installed[tool], undefined, `installed releaser holds ${tool}`)
+  }
+  assert.equal(installed.outline, "deny")
+  assert.equal(installed.spawn, "deny", "the installed map carries the forced spawn deny")
+})
+
+test("the releaser changes a file only where a step says so and stops at the first failure", () => {
+  const { prompt } = AGENTS.releaser
+  assert.match(prompt, /Use the file your briefing names, else RELEASE\.md in the project root\./)
+  assert.match(prompt, /Run the steps in order\. After each step, run the check the file gives for it\./)
+  assert.match(prompt, /Change a file only where a step tells you to, exactly as the step says\./)
+  assert.match(prompt, /Where a commit has no message, ask your caller once with `ask`\./)
+  assert.match(prompt, /When a step or its check fails, or an asked question stays unanswered, stop there\./)
+  assert.match(prompt, /`<k> <ok\|fail\|not run> — <command> — <check result>`, with commit hashes and pushed refs\. After a stop, add the failed command's exit code and output\./)
+})
+
+test("the releaser's reply has one head: Release: when done, Blocked: on every stop", () => {
+  const { prompt } = AGENTS.releaser
+  assert.match(
+    prompt,
+    /Reply with one of these first lines:\n- all steps done: `Release: done — <n> steps`\n- stopped: `Blocked: release stopped at step <k> — <n> steps`\n- no procedure file: `Blocked: no procedure file`\n/,
+  )
+  const heads = prompt.match(/`(Release|Blocked):[^`]*`/g)
+  assert.deepEqual(heads, [
+    "`Blocked:` with the failure and the state left",
+    "`Release: done — <n> steps`",
+    "`Blocked: release stopped at step <k> — <n> steps`",
+    "`Blocked: no procedure file`",
+  ].map((h) => h.match(/`[^`]*`/)[0]), "the reply form is stated once, in the reply block")
+  assert.doesNotMatch(prompt, /Release: <done\|stopped/, "a stop is never a Release: head")
+})
+
+test("gitter and releaser carry out a commit by the one GIT_STEPS text", () => {
+  assert.match(GIT_STEPS, /then commit with the stated message word for word\./)
+  assert.match(GIT_STEPS, /Where the message holds `<value from step k>`, put in the value step k printed\./)
+  assert.match(GIT_STEPS, /Push only the branch the task names; force-push only where the task says so\./)
+  assert.match(GIT_STEPS, /On a pre-commit hook failure, reply `Blocked:` with the failure and the state left/)
+  for (const agent of ["gitter", "releaser"]) {
+    assert.ok(AGENTS[agent].prompt.includes(GIT_STEPS), `${agent} carries GIT_STEPS`)
+    assert.equal(AGENTS[agent].prompt.split("git diff --staged").length, 2, `${agent} states the staging step once`)
+  }
+})
+
+test("the orchestrator routes a release to the releaser and starts it alone", () => {
+  const { prompt } = AGENTS.orchestrator
+  assert.match(prompt, /Available subagents: .*, gitter, releaser\./)
+  assert.match(prompt, /releaser to carry out the project's release procedure file \(name the file; add the coder's `Commit:` line where a change goes with it\)/)
+  assert.match(prompt, /Start a releaser when no coder, debugger or other releaser runs in the same project, and after the verifier's PASS where there is one\./)
+})
+
+test("the releaser reads no code but keeps AGENTS.md, live and in its prompt file", async () => {
+  assert.ok(OUTLINE_DISABLED_AGENTS.has("releaser"))
+  const guide = guideBlocks({ agent: "releaser", delegates: false, codegraph: "codegraph" })
+  assert.doesNotMatch(guide, /reading discipline|code search/, "the releaser gets no code-reading block")
+  assert.ok(AGENTS_MD_SUBAGENTS.has("releaser"))
+  assert.match(renderDefaultsFile("releaser"), /\{\{agents_md\}\}/, "the offline prompt file keeps AGENTS.md")
+  assert.doesNotMatch(renderDefaultsFile("refuter"), /\{\{agents_md\}\}/, "the refuter's does not")
+
+  const dir = newProject()
+  const { ctx } = makeCtx(dir)
+  const hooks = await plugin(ctx)
+  upsertSession("ses_releaser", { agent: "releaser", prompt: "release", parentID: "ses_parent", directory: dir })
+  upsertSession("ses_refuter", { agent: "refuter", prompt: "1. x holds", parentID: "ses_parent", directory: dir })
+
+  const releaserOut = { system: [opencodeSystemWithAgentsMd()] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_releaser" }, releaserOut)
+  assert.match(releaserOut.system.join(""), /make check-all/)
+
+  const refuterOut = { system: [opencodeSystemWithAgentsMd()] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_refuter" }, refuterOut)
+  assert.doesNotMatch(refuterOut.system.join(""), /make check-all/)
 })

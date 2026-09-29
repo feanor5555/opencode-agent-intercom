@@ -21,7 +21,7 @@ export const ABORT_NOTICE =
 
 // Injected into every primary session. Pure tool-usage protocol — no workflow,
 // no project conventions, no phases. The orchestrator role prompt in agents.js
-// covers per-project behaviour; this block only describes the four tools and
+// covers per-project behaviour; this block only describes the primary's tools and
 // the wake-hook marker convention so the model knows how the mechanics work.
 //
 // The spawn line states one reply and reachability in one breath, because both
@@ -35,6 +35,7 @@ export const ORCHESTRATION_GUIDE =
   "- message(subagent, text) — say something to a subagent that is still running: a correction, a fact it is missing, or your answer to a question it asked. It reads it at its next step.\n" +
   "- abort(handle) — stop a subagent. Use only when the user asks you to.\n" +
   "- list() — your active subagents; a row marked `asking` is waiting for your answer.\n" +
+  "- calc(expression) — exact arithmetic on figures you already hold (sizes, budgets, offsets, token sums). Answers at once and starts no subagent.\n" +
   "Every other tool is disabled. Delegate the goal you want; let the subagent pick its own tools.\n" +
   "\n" +
   "Spawn prompts are short and English (reply to the user in the user's language):\n" +
@@ -74,6 +75,7 @@ export const ORCHESTRATION_REUSE_GUIDE =
   "- reuse(subagent, prompt, mode?) — put a follow-up to a subagent that has already finished. `list()` shows which ones are still held, as RETAINED, with the context each holds and the minutes it has left.\n" +
   "Not every subagent is destroyed when it finishes: a held one keeps the whole session it worked in. So a question about work it already did needs no re-briefing and no re-reading — and it can be asked LATER, in a turn long after the one you were woken in, not only straight away.\n" +
   "Reuse it when something about a finished reply strikes you afterwards: which of two things it meant, whether it also looked at X, what it found and left out. That is what this tool is for.\n" +
+  "A follow-up for a subagent that `list()` shows RETAINED goes to it with `reuse`, before any new spawn.\n" +
   "Spawn a fresh subagent instead for work that is new, for work the held session's own history would push the wrong way, and after a `Blocked:` report — a blocked task continues through a FRESH subagent carrying your decision, never through the one that stopped.\n" +
   'mode: "question" (the default) for a follow-up question; "task" for a further related piece of work, admitted only at a much lower context because a task needs room to run.\n' +
   "reuse can refuse — the session may be too large to be handed more, its window may have run out, or it may be gone. Each refusal names the rule and the figure it refused on, and spawn is always the way forward: a refused reuse costs you a fresh spawn, never the work.\n---\n"
@@ -108,7 +110,7 @@ export const SUBAGENT_GUIDE_CORE =
   "Reply to the orchestrator in English. Address the user directly only in the user's language.\n---\n"
 
 // For a subagent whose role denies `spawn` (grounder, documenter, gitter,
-// scout, checker).
+// releaser, scout, refuter, checker, verifier).
 export const SUBAGENT_NO_SPAWN_GUIDE =
   "\n\n---\n🚫 agent-intercom: you do not delegate.\n" +
   "You cannot spawn agents. If the task needs another agent, name it and what it should do in your final reply — the orchestrator dispatches it; you never spawn. Where the task cannot go on without that agent, this is a blocker: open the reply with `Blocked:`.\n---\n"
@@ -191,9 +193,9 @@ export function delegationGuideNameFor(agent) {
 }
 
 // Outline+read discipline. Injected only for subagents that actually have the
-// `outline` tool enabled (planner, coder, debugger, reviewer, researcher, scout).
-// Designer, documenter, gitter, grounder and checker don't get this — they read
-// no source code and have no `outline`.
+// `outline` tool enabled (planner, coder, debugger, reviewer, researcher, scout,
+// refuter). Designer, documenter, gitter, grounder, checker, verifier and
+// releaser don't get this — they read no source code and have no `outline`.
 export const SUBAGENT_OUTLINE_GUIDE =
   "\n\n---\n📖 agent-intercom: reading discipline.\n" +
   "Source code files: call `outline <path>` first to get the signatures (universal-ctags, " +
@@ -361,12 +363,21 @@ export function contractElementText(id) {
 // card rides on the same gate, since it is for the same code readers. The
 // documenter is in here because its brief states the content it writes, so it
 // reads only the document it changes. The checker is in here because it reads
-// the output of the checks it runs, not the code behind them. The grounder is
+// the output of the checks it runs, not the code behind them, the verifier
+// because it reads what the running artefact does, and the releaser because it
+// reads the procedure file it carries out. The grounder is
 // in here for the strongest form of that reason: it holds no file tool at all
 // (`read`, `edit`, `write`, `bash`, `glob`, `grep` and `outline` are every one
 // of them denied in its permission map), so the block would name nothing it can
 // call.
-export const OUTLINE_DISABLED_AGENTS = new Set(["designer", "documenter", "gitter", "grounder", "checker"])
+export const OUTLINE_DISABLED_AGENTS = new Set(["designer", "documenter", "gitter", "grounder", "checker", "verifier", "releaser"])
+
+// Appended to the system prompt of a role in VISION_ROLES (agents.js) whose
+// model of the current request declares no image input: opencode replaces a
+// screenshot with an error text for such a model, so every check that needs a
+// look becomes NOT RUN instead of a guess.
+export const VERIFIER_NO_VISION_LINE =
+  "Your model cannot see images. Mark every check that needs a look at a screenshot NOT RUN, reason: no vision."
 
 // What the subagent is told about the reply ceiling. Not a constant: the
 // figure is the ceiling THIS type carries (settings.js `resultCeilingFor`), so

@@ -60,6 +60,50 @@ that opencode upgrades don't shift the system-prompt composition.
   not the model's taste, and forbids it to put that word into the spawn
   prompt. The driver then asserts that the answer came back as the output of
   the subagent's own `ask` call.
+- `refuter-task.sh` — `refuter` role harness. Hands a refuter three claims
+  about this repository — one true, one naming a constant that stands nowhere,
+  and the universal "only `src/tools.js` calls `spawnCapDecision`", which the
+  unit tests make false — and asserts the reply head
+  `Claims: 3 — 1 hold, 2 false, 0 not checkable`, each verdict (each false one
+  with a `path:line`, the universal one outside `src/tools.js`), and that no
+  file of the repository changed outside `work/`. Sessions run against this
+  repository (`REFUTER_PROJECT_DIR`).
+- `releaser-task.sh` — `releaser` role harness. Builds a throwaway project with
+  a local bare `origin` and a six-step `RELEASE.md` (build printing a version,
+  a hand edit of `manifest.json` to `<value from step 1>`, a commit
+  `release <value from step 1>`, a push, a check that fails on purpose, an
+  announce step) and asserts `Blocked: release stopped at step 5`, steps 1–4 `ok`,
+  5 `fail`, 6 `not run`, the version and the exact subject on the remote, that
+  neither step 6's file nor the file the failing check expects was made, and
+  that nothing changed beyond the build output and `manifest.json`. The three
+  role drivers read the subagent's reply off the primary's wake notice
+  (`lib/wake-reply.py` through `rr_read_reply` in `lib/role-run.sh`), and the
+  refuter's and releaser's file checks leave out the `PROJECT.md`,
+  `ARCHITECTURE.md` and `TODO.md` the plugin writes where they are absent
+  (`rr_plugin_scaffold`).
+- `verifier-task.sh` — `verifier` role harness. Builds a throwaway web project
+  (an `AGENTS.md` that serves it with `python3 -m http.server`, an
+  `index.html` whose module throws in the browser and imports fine under node,
+  a `canvas.html` that draws a red `BROKEN` box with no DOM text) and owns its
+  servers on `VERIFIER_PORT` (default 4614), restarting per pin. Leg 1: the
+  page-error check on `E2E_MODEL` — `1 fail`, the `[pageerror]` line quoted,
+  `pw start` answered in the verifier's shell. Leg 3: the green-banner check on
+  `E2E_MODEL` where it declares no image input — `NOT RUN` for `no vision`,
+  never `PASS` (SKIP where `E2E_MODEL` sees). Leg 2: the same check with the
+  verifier pinned to `E2E_VISION_MODEL` — `FAIL`, a screenshot under
+  `work/verify-*/` written after the leg started, the evidence naming red or `BROKEN` (SKIP where it is
+  unset). Leg 4: the page-error check with `PLAYWRIGHT_BROWSERS_PATH` pointed
+  at an empty, read-only directory and the isolated home's `.cache` rebuilt
+  without `ms-playwright`, where `pw start` exits 1 at once with
+  `pw: browser not installed — report this check as NOT RUN` — `NOT RUN`, never `PASS`, no bash call that
+  clears or re-points `PLAYWRIGHT_BROWSERS_PATH`, and no tool call that names
+  `ms-playwright`, a Chromium build or `playwright install` (the machine's
+  browser directory stays reachable by its absolute path, so this is judged
+  from the transcript). Over the run: no tracked fixture file changed, and
+  each leg's turns answered on the model pinned for their agent. The three
+  role drivers' cleanup stops every process the subagent's shell left
+  running — detached ones included — found by the `PW_SESSION=<session>` the
+  plugin puts into its shell (`rr_stop_session_procs` in `lib/role-run.sh`).
 - `ask-expiry-task.sh` — mid-run ASK expiry and clamp harness, and the only
   driver that owns a server besides `endless-task.sh` and `nested-task.sh`.
   Three phases, each with its own primary session, its own subagent and its own
@@ -268,10 +312,18 @@ The setup the drivers are written against:
 - `opencode serve` started in `$HOME/testopencode`
 - `E2E_MODEL` defaults to `cliproxy/qwen3.8-flash-medium` — reached through the
   `cliproxy` provider, proven reachable and reasoning-capable on this machine.
-  Every agent, the primary and the eleven
+  Every agent, the primary and the
   subagent roles alike, is pinned to it, except `grounder` (see the pin
   exception below); `gpuserver/Qwen3.8 Flash Next` is
   refused outright, whatever `E2E_MODEL` says
+- `E2E_VISION_MODEL` (form `provider/model`, taken as given, unset by default)
+  names a model with image input for a driver whose role has to see:
+  `e2e_resolve_vision_model` resolves it and refuses the banned model,
+  `e2e_iso_pin_agent <agent> <provider/model>` pins that one agent to it in the
+  isolated `llm-models.json` (from the next server start), and the model audit
+  then holds that agent's turns to its own pin (`E2E_AGENT_PINS`, passed to
+  `lib/model-audit.py` as `--agent-model`). `verifier-task.sh` is the one
+  user; where it is unset its vision leg reports SKIP, never PASS
 - Multi-agent test: 4 subagent spawns (planner / coder / reviewer / gitter), all
   status=completed, ~6:26 min wall-clock, 92 messages, produces `bytes()` in
   `src/format.js` plus 5 unit tests in `test/plugin.test.js`
@@ -320,8 +372,8 @@ can: through the isolated `llm-models.json`. The model a driver names in its
 POST does **not** decide what answers — `applyModelChoices` (`src/llmmodel.js`)
 writes the file's entry into `config.agent[<name>].model` at instance bootstrap
 and that wins; a live run was answered by Qwen although the request named
-another model. The isolated file therefore pins the eleven plugin roles that
-take the pin and the opencode built-ins that can answer a turn, with no
+another model. The isolated file therefore pins every plugin role that
+takes the pin and the opencode built-ins that can answer a turn, with no
 `variant` key, and the isolated `opencode.json` carries `model` and
 `small_model` for anything not named there at all.
 
@@ -352,7 +404,7 @@ otherwise.
 
 A driver that uses a server it does not own — `run-task.sh`, `multi-task.sh`,
 `tui-route-task.sh` when `OPENCODE_URL` already answers, `message-task.sh`,
-`ask-task.sh`, `todo-driver.mjs` — builds no configuration: it inherits the
+`ask-task.sh`, `refuter-task.sh`, `releaser-task.sh`, `todo-driver.mjs` — builds no configuration: it inherits the
 `E2E_ISO_*` variables `run-all.sh` exports. Started standalone against a server
 somebody else launched, it audits that server's answers but cannot isolate its
 configuration — that belongs to whoever starts it. `tui-route-task.sh` started

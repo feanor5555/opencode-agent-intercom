@@ -15,6 +15,12 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { spawnSync } from "node:child_process"
 
+import { AGENT_NAMES } from "../tui/src/agent-roles.ts"
+
+// opencode's built-in agents that can answer a turn of their own, pinned beside
+// the plugin's roles in E2E_PINNED_AGENTS.
+const OPENCODE_TURN_AGENTS = ["build", "plan", "general", "title", "summary", "compaction"]
+
 const LIB = resolve(import.meta.dirname, "e2e/config-isolation.sh")
 const AUDIT = resolve(import.meta.dirname, "e2e/lib/model-audit.py")
 const PLUGIN_ROOT = resolve(import.meta.dirname, "..")
@@ -211,16 +217,25 @@ echo "ISO=$E2E_ISO_OPENCODE_DIR"
 })
 
 // The name list itself: grounder on the exempt list, nowhere on the pinned
-// one, so a later edit that re-adds it to E2E_PINNED_AGENTS fails here.
+// one, so a later edit that re-adds it to E2E_PINNED_AGENTS fails here; every
+// other installed role on the pinned one, so a new role left off it — which an
+// e2e run would put on the machine's model — fails here too.
 test("grounder is exempt from the pin and no other plugin role is", () => {
   const src = readFileSync(LIB, "utf8")
   const pinned = /E2E_PINNED_AGENTS="([^"]*)"/.exec(src)[1].split(/\s+/).filter(Boolean)
   const exempt = /E2E_PIN_EXEMPT_AGENTS="([^"]*)"/.exec(src)[1].split(/\s+/).filter(Boolean)
   assert.deepEqual(exempt, ["grounder"])
   assert.ok(!pinned.includes("grounder"), "grounder must not be pinned")
-  for (const role of ["orchestrator", "planner", "coder", "debugger", "reviewer", "documenter", "researcher", "designer", "gitter", "scout", "checker"]) {
-    assert.ok(pinned.includes(role), `${role} is missing from the pinned list`)
-  }
+  assert.deepEqual(
+    pinned.filter((name) => AGENT_NAMES.includes(name)).sort(),
+    AGENT_NAMES.filter((name) => !exempt.includes(name)).sort(),
+    "every installed role but the exempt ones is pinned",
+  )
+  assert.deepEqual(
+    pinned.filter((name) => !AGENT_NAMES.includes(name)).sort(),
+    [...OPENCODE_TURN_AGENTS].sort(),
+    "the rest of the pinned list is opencode's own agents that answer a turn",
+  )
   assert.ok(!pinned.some((n) => exempt.includes(n)), "a name may be on one list only")
 })
 
@@ -939,4 +954,98 @@ test("every e2e shell file parses", () => {
     assert.equal(r.status, 0, `bash -n ${name}: ${r.stderr}`)
     assert.ok(existsSync(join(e2e, name)))
   }
+})
+
+// ---- a model that sees, and an agent on a pin of its own --------------------
+
+test("e2e_resolve_vision_model takes E2E_VISION_MODEL as given, leaves it empty when unset and refuses the banned model", () => {
+  const r = runShell(`
+. "$LIB"
+unset E2E_VISION_MODEL
+e2e_resolve_vision_model && echo "UNSET=[$E2E_VISION_MODEL_REF]"
+E2E_VISION_MODEL="cliproxy/gpt-6-luna" e2e_resolve_vision_model && echo "SET=$E2E_VISION_MODEL_REF/$E2E_VISION_MODEL_PROVIDER/$E2E_VISION_MODEL_ID"
+E2E_VISION_MODEL="gpuserver/Qwen3.8 Flash Next" e2e_resolve_vision_model && echo BANNED_ACCEPTED || echo BANNED_REFUSED
+E2E_VISION_MODEL="nopair" e2e_resolve_vision_model && echo PAIR_ACCEPTED || echo PAIR_REFUSED
+`)
+  assert.match(r.stdout, /UNSET=\[\]/)
+  assert.match(r.stdout, /SET=cliproxy\/gpt-6-luna\/cliproxy\/gpt-6-luna/)
+  assert.match(r.stdout, /BANNED_REFUSED/)
+  assert.match(r.stdout, /PAIR_REFUSED/)
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("e2e_model_has_image_input reads modalities.input of the isolated opencode.json", () => {
+  const r = runShell(`
+set -e
+. "$LIB"
+e2e_resolve_model
+e2e_iso_create "$PLUGIN_ROOT" '{}'
+python3 -c '
+import json, sys
+path = sys.argv[1]
+config = json.load(open(path))
+config["provider"]["openai"]["models"]["gpt-5.6-luna"]["modalities"] = {"input": ["text", "image"]}
+json.dump(config, open(path, "w"))
+' "$E2E_ISO_OPENCODE_DIR/opencode.json"
+e2e_model_has_image_input openai/gpt-5.6-luna && echo LUNA_SEES || echo LUNA_BLIND
+e2e_model_has_image_input cliproxy/qwen3.8-flash-medium && echo QWEN_SEES || echo QWEN_BLIND
+e2e_model_has_image_input nowhere/at-all && echo UNKNOWN_SEES || echo UNKNOWN_BLIND
+e2e_iso_remove >/dev/null
+`)
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  assert.match(r.stdout, /LUNA_SEES/)
+  assert.match(r.stdout, /QWEN_BLIND/)
+  assert.match(r.stdout, /UNKNOWN_BLIND/)
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("e2e_iso_pin_agent pins one agent in the isolated file, records it for the audit and refuses the banned model", () => {
+  const r = runShell(`
+set -e
+. "$LIB"
+e2e_resolve_model
+e2e_iso_create "$PLUGIN_ROOT" '{}'
+e2e_iso_pin_agent verifier openai/gpt-5.6-luna
+echo "PINS=[$E2E_AGENT_PINS]"
+echo "FILE=$E2E_ISO_MODELS_FILE"
+e2e_iso_pin_agent verifier "gpuserver/Qwen3.8 Flash Next" && echo BANNED_ACCEPTED || echo BANNED_REFUSED
+e2e_iso_pin_agent verifier "$E2E_MODEL_REF"
+echo "BACK=[$E2E_AGENT_PINS]"
+cp "$E2E_ISO_MODELS_FILE" "$DIR/models-after.json"
+e2e_iso_remove >/dev/null
+`)
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  assert.match(r.stdout, /PINS=\[verifier=openai\/gpt-5\.6-luna\]/)
+  assert.match(r.stdout, /BANNED_REFUSED/)
+  assert.match(r.stdout, /BACK=\[\]/)
+  const models = JSON.parse(readFileSync(join(r.dir, "models-after.json"), "utf8"))
+  assert.deepEqual(models.verifier, { providerID: "cliproxy", modelID: "qwen3.8-flash-medium" })
+  assert.deepEqual(models.coder, { providerID: "cliproxy", modelID: "qwen3.8-flash-medium" }, "other pins stay")
+  const machine = JSON.parse(readFileSync(join(r.machine, "llm-models.json"), "utf8"))
+  assert.equal(machine.verifier, undefined, "the machine's file is not written")
+  rmSync(r.dir, { recursive: true, force: true })
+})
+
+test("the model audit holds an agent with a pin of its own to that pin", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-test-"))
+  const good = capture(dir, "good.json", [
+    ["cliproxy", "qwen3.8-flash-medium"],
+    ["openai", "gpt-5.6-luna", "verifier"],
+  ])
+  const onRunPin = capture(dir, "run-pin.json", [["cliproxy", "qwen3.8-flash-medium", "verifier"]])
+  const own = ["--agent-model", "verifier=openai/gpt-5.6-luna"]
+
+  const passed = audit([good], "cliproxy/qwen3.8-flash-medium", own)
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr)
+
+  const missed = audit([onRunPin], "cliproxy/qwen3.8-flash-medium", own)
+  assert.equal(missed.status, 1, missed.stdout)
+  assert.match(missed.stdout, /turn on cliproxy\/qwen3\.8-flash-medium — agent verifier \(pinned to openai\/gpt-5\.6-luna\)/)
+
+  const withoutPin = audit([good])
+  assert.equal(withoutPin.status, 1, "without --agent-model the verifier's turn is off the run's pin")
+
+  const malformed = audit([good], "cliproxy/qwen3.8-flash-medium", ["--agent-model", "verifier"])
+  assert.equal(malformed.status, 2)
+  rmSync(dir, { recursive: true, force: true })
 })

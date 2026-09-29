@@ -43,6 +43,7 @@ import {
 import {
   AGENTS,
   NESTED_SPAWN_TARGETS,
+  SPAWNABLE_ROLES,
   nestedSpawnTargets,
   mayDelegate,
   installAgents,
@@ -67,7 +68,7 @@ const DELEGATING_ROLES = [
   "designer",
   "researcher",
 ]
-const NON_DELEGATING_ROLES = ["grounder", "documenter", "gitter", "scout", "checker"]
+const NON_DELEGATING_ROLES = ["grounder", "documenter", "gitter", "releaser", "scout", "refuter", "checker", "verifier"]
 
 const PRIMARY = "ses_primary"
 
@@ -176,6 +177,19 @@ async function turnNotice(hooks, sessionID, messageID = "msg_user1") {
 }
 
 // ---- the grant -------------------------------------------------------------
+
+test("the two literal side lists together are exactly the spawnable roles", () => {
+  assert.deepEqual(
+    [...DELEGATING_ROLES, ...NON_DELEGATING_ROLES].sort(),
+    [...SPAWNABLE_ROLES].sort(),
+    "a new subagent role must be placed on one side of the grant here",
+  )
+  assert.equal(
+    new Set([...DELEGATING_ROLES, ...NON_DELEGATING_ROLES]).size,
+    DELEGATING_ROLES.length + NON_DELEGATING_ROLES.length,
+    "no role stands on both sides",
+  )
+})
 
 test("mayDelegate is derived from the permission maps and matches the grant", () => {
   for (const role of DELEGATING_ROLES) {

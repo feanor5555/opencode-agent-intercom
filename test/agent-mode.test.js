@@ -264,7 +264,7 @@ function toolNames() {
 
 test("orchestrator mode: the primary gets the orchestration tools", () => {
   const names = toolNames()
-  for (const tool of ["spawn", "abort", "list", "message", "reuse"]) {
+  for (const tool of ["spawn", "abort", "list", "message", "reuse", "calc"]) {
     assert.ok(names.includes(tool), tool)
   }
 })
@@ -283,7 +283,7 @@ test("solo mode: none of the four orchestration tools is registered", () => {
     assert.ok(!names.includes(tool), `${tool} must not exist in solo mode`)
   }
   // The rest of the tool map is untouched — the primary works with it.
-  for (const tool of ["todos_open", "todo_done", "todo_add", "todo_edit"]) {
+  for (const tool of ["todos_open", "todo_done", "todo_add", "todo_edit", "calc"]) {
     assert.ok(names.includes(tool), tool)
   }
 })

@@ -28,7 +28,10 @@ export const AGENT_NAMES = [
   "designer",
   "gitter",
   "scout",
+  "refuter",
   "checker",
+  "verifier",
+  "releaser",
 ];
 
 // One prompt template file per installed role, under
@@ -91,5 +94,22 @@ export const DEFAULT_AGENT_CONTEXT: AgentContext = {
   designer: 100000,
   gitter: 100000,
   scout: 100000,
+  refuter: 100000,
   checker: 100000,
+  verifier: 100000,
+  releaser: 100000,
 };
+
+// The roles whose work needs a model that sees images. The TUI's copy of
+// VISION_ROLES in src/agents.js, held to it by
+// test/settings-defaults-parity.test.js.
+export const VISION_ROLES: readonly string[] = ["verifier"];
+
+// The note the model row shows beneath itself for a role that needs to see
+// images: only where the resolved model is known and declares no image input
+// (the vision badge reads `-`). An unknown model (`?`), no model at all, a
+// model that sees, and every other role get no note.
+export function visionNote(agent: string, visionBadge: string): string {
+  if (!VISION_ROLES.includes(agent)) return "";
+  return visionBadge === "-" ? "needs a vision model (V)" : "";
+}

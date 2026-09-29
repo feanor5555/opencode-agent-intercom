@@ -627,12 +627,13 @@ GRANT_VERDICT=$(python3 - "$OUT_DIR/$PREFIX.agents.json" <<'PY' 2>/dev/null || p
 import json, sys
 
 # The two sides of the grant, as src/agents.js sets it: NO_SPAWN is spread into
-# `grounder`, `documenter`, `gitter`, `scout` and `checker`, and every other
-# subagent role delegates. Together the two lists are all eleven subagent roles.
+# `grounder`, `documenter`, `gitter`, `releaser`, `scout`, `refuter` and
+# `checker`, and every other subagent role delegates. Together the two lists
+# are every subagent role.
 DELEGATING = [
     "planner", "coder", "debugger", "reviewer", "researcher", "designer",
 ]
-NON_DELEGATING = ["grounder", "documenter", "gitter", "scout", "checker"]
+NON_DELEGATING = ["grounder", "documenter", "gitter", "releaser", "scout", "refuter", "checker"]
 
 try:
     data = json.load(open(sys.argv[1]))

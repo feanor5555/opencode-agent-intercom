@@ -72,7 +72,7 @@ is what the bootstrap sweep uses to tell this plugin's leftovers from anything
 else on the same database, and it is what the readRetentionStamp reader uses to
 find the stamp after it.
 
-`spawn` writes the marker unconditionally (`src/tools.js:720`,
+`spawn` writes the marker unconditionally (`src/tools.js:722`,
 `title: SUBAGENT_SESSION_TITLE_MARKER + title`): the marker is not a
 retention property and is not gated on `retentionOffered()`. Every spawned
 session carries it, at the shipped default too. The session-title marker is not
@@ -275,7 +275,7 @@ ending the plugin knows about that does not pass through `teardownSubagent`.
 
 If the plugin process dies mid-run, its subagent rows stay until the bootstrap
 sweep clears the leftover sessions. `sweepOrphanedSubagentSessions`
-(`src/teardown.js:904`) runs once at plugin load (`src/index.js:169`), on the
+(`src/teardown.js:904`) runs once at plugin load (`src/index.js:170`), on the
 shipped default too — it is not gated on `retentionOffered()`. It deletes a
 session only when ALL of the following hold:
 

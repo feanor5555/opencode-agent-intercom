@@ -36,7 +36,7 @@ import { setSettingsPath, resetSettings, PACKAGE_WARN_SHARE, PACKAGE_REFUSE_SHAR
 import { resetPermissionGuardCache } from "../src/config.js"
 import { completionNotice } from "../src/notices.js"
 import { estimateTokens } from "../src/format.js"
-import { SPAWNABLE_ROLES } from "../src/agents.js"
+import { AGENTS, SPAWNABLE_ROLES } from "../src/agents.js"
 
 const fixtureDir = mkdtempSync(join(tmpdir(), "intercom-size-"))
 writeFileSync(join(fixtureDir, "package.json"), JSON.stringify({ name: "fixture-proj" }))
@@ -385,7 +385,7 @@ test("an unknown agent type is refused by name, with the available types listed"
   assert.equal(entryForSession("ses_sub1"), undefined)
 })
 
-test("the available types are the plugin's eleven subagent roles and nothing else", async () => {
+test("the available types are the plugin's subagent roles and nothing else", async () => {
   const { ctx } = makeCtx({
     agentConfig: { scribe: { description: "writes" } },
     serverAgents: OPENCODE_BUILTINS,
@@ -397,12 +397,16 @@ test("the available types are the plugin's eleven subagent roles and nothing els
   assert.deepEqual(listed, [...SPAWNABLE_ROLES].sort())
   assert.deepEqual(
     [...SPAWNABLE_ROLES].sort(),
-    ["checker", "coder", "debugger", "designer", "documenter", "gitter", "grounder", "planner", "researcher", "reviewer", "scout"],
+    Object.entries(AGENTS).filter(([, def]) => def.mode === "subagent").map(([name]) => name).sort(),
+    "the plugin's subagent roles, exactly",
   )
+  for (const other of ["scribe", ...OPENCODE_BUILTINS.map((agent) => agent.name)]) {
+    assert.ok(!listed.includes(other), `${other} is not offered`)
+  }
 })
 
 test("every one of the plugin's roles spawns", async () => {
-  withSettings({ maxSubagents: 0 }) // unlimited: all eleven run in one go
+  withSettings({ maxSubagents: 0 }) // unlimited: every role runs in one go
   const { ctx, created } = makeCtx({ serverAgents: OPENCODE_BUILTINS })
   const hooks = await plugin(ctx)
 

@@ -32,7 +32,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { SPAWNABLE_ROLES } from "../src/agents.js"
+import { SPAWNABLE_ROLES, VISION_ROLES } from "../src/agents.js"
 import { AGENT_NAMES } from "../src/promptsfile.js"
 import {
   DEFAULT_AGENT_CONTEXT,
@@ -63,6 +63,7 @@ import {
   DEFAULT_AGENT_CONTEXT as TUI_DEFAULT_AGENT_CONTEXT,
   PROMPT_AGENT_FILES,
   SPAWNABLE_ROLES as TUI_SPAWNABLE_ROLES,
+  VISION_ROLES as TUI_VISION_ROLES,
   spawnableAgentNames,
 } from "../tui/src/agent-roles.ts"
 import {
@@ -280,6 +281,11 @@ test("the two modules carry the same built-in defaults", () => {
 test("the two modules carry the same role set", () => {
   assert.deepEqual(TUI_AGENT_NAMES, AGENT_NAMES)
   assert.deepEqual(TUI_SPAWNABLE_ROLES, [...SPAWNABLE_ROLES])
+})
+
+test("the two modules carry the same vision roles, each a spawnable role", () => {
+  assert.deepEqual([...TUI_VISION_ROLES], [...VISION_ROLES])
+  for (const role of VISION_ROLES) assert.ok(SPAWNABLE_ROLES.includes(role), role)
 })
 
 test("the budget table names exactly the spawnable roles", () => {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// `pw` — tiny CLI wrapper around Playwright so subagents (coder/debugger) can
+// `pw` — tiny CLI wrapper around Playwright so subagents (verifier, debugger) can
 // inspect a generated web page from bash.
 //
 // Architecture
@@ -20,6 +20,12 @@
 // (`goto`, `click`, `fill`, `evaluate`, `screenshot`, `textContent`,
 // `innerText`, `waitForSelector`, `url`, `title`, `content`, `press`, `hover`,
 // `selectOption`). `evaluate` is the escape hatch for anything not covered.
+//
+// One daemon per caller session: where `PW_SESSION` is set (the plugin sets it
+// in every subagent's shell, src/shellenv.js) the socket, pid and log names
+// carry it, so two subagents drive two browsers. The daemon keeps the page's
+// console messages and uncaught page errors in a ring (`pw console`) and exits
+// on its own after `PW_IDLE_EXIT_MS` without a request.
 
 import net from "node:net"
 import fs from "node:fs"
@@ -27,7 +33,17 @@ import path from "node:path"
 import os from "node:os"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
-import { ensureChromium, chromiumExecutable } from "./chromium.js"
+import { chromiumExecutable, chromiumInstalled } from "./chromium.js"
+import {
+  PW_BROWSER_MISSING_LINE,
+  consoleLine,
+  createConsoleRing,
+  formatConsoleRecord,
+  pageErrorLine,
+  parseConsoleArgs,
+  pwIdleExitMs,
+  pwPaths,
+} from "./pw-lib.js"
 
 // User-private runtime dir for the daemon socket/pid/log. Deliberately NOT under
 // a shared /tmp: a fixed socket path there is reachable by any local user, who
@@ -42,9 +58,8 @@ function runtimeDir() {
 const RUNTIME_DIR = runtimeDir()
 try { fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 }) } catch {}
 
-const SOCKET = path.join(RUNTIME_DIR, "pw.sock")
-const PID = path.join(RUNTIME_DIR, "pw.pid")
-const LOG = path.join(RUNTIME_DIR, "pw.log")
+const { socket: SOCKET, pid: PID, log: LOG } = pwPaths(RUNTIME_DIR, process.env.PW_SESSION)
+const IDLE_EXIT_MS = pwIdleExitMs(process.env.PW_IDLE_EXIT_MS)
 const READY_TIMEOUT_MS = 30_000
 // Inactivity ceiling for a single daemon round-trip (sendOverSocket). A hung
 // daemon (dead event loop, deadlocked page) would otherwise block the caller's
@@ -79,9 +94,7 @@ async function cmdStart(headed) {
   }
   try { fs.unlinkSync(SOCKET) } catch {}
 
-  // Make sure chromium is installed BEFORE we spawn the daemon — otherwise the
-  // ~170 MB download would happen behind the socket and trip READY_TIMEOUT_MS.
-  await ensureChromiumInstalled()
+  await requireInstalledBrowser()
 
   const self = fileURLToPath(import.meta.url)
   const out = fs.openSync(LOG, "a")
@@ -104,21 +117,19 @@ async function cmdStart(headed) {
   process.exit(1)
 }
 
-// Verify chromium's bundled binary is on disk; run `npx playwright install
-// chromium` in the foreground (so the user sees progress) if it isn't. Runs
-// only on first `pw start` per machine — afterwards it is a fast existsSync.
-// The download deliberately happens HERE, before the daemon is spawned, so the
-// ~170 MB fetch never blocks the daemon's socket (see `runDaemon`).
-async function ensureChromiumInstalled() {
+// `pw start` uses the Chromium already on disk and never downloads one: where
+// playwright-core or its Chromium binary is missing it prints one line and
+// exits 1 before any daemon is spawned. The installer
+// (`npx opencode-agent-intercom-install`) is what puts Chromium in place.
+async function requireInstalledBrowser() {
+  let installed = false
   try {
-    await ensureChromium({
-      onDownload: () => {
-        console.log("pw: chromium binary not found — running `npx playwright install chromium`…")
-        console.log("    (one-time, ~170 MB; subsequent `pw start` is instant)")
-      },
-    })
-  } catch (err) {
-    console.error("pw:", err.message)
+    ;({ installed } = await chromiumInstalled())
+  } catch {
+    installed = false
+  }
+  if (!installed) {
+    console.error(PW_BROWSER_MISSING_LINE)
     process.exit(1)
   }
 }
@@ -194,6 +205,10 @@ function buildRequest(cmd, args) {
     case "title":
     case "content":
       return { cmd }
+    case "console": {
+      const parsed = parseConsoleArgs(args)
+      return parsed.error ? bad(cmd, parsed.error) : parsed.request
+    }
     case "press":
       return need(cmd, args, ["key"])
     case "selectOption":
@@ -281,13 +296,10 @@ async function runDaemon(headed) {
     process.exit(1)
   }
 
-  // The daemon NEVER downloads chromium: a ~170 MB fetch here would block the
-  // socket the waiting CLI is polling, tripping its timeout. The download is
-  // done up front by `pw start` (foreground) or the installer. If the binary is
-  // somehow still missing, exit with a clear pointer instead of hanging.
+  // The daemon never downloads Chromium; a missing binary ends it at once.
   const exe = chromiumExecutable(chromium)
   if (!exe || !fs.existsSync(exe)) {
-    console.error("pw daemon: chromium binary missing — run `pw start` (which downloads it in the foreground) or the installer `npx opencode-agent-intercom-install` first")
+    console.error(PW_BROWSER_MISSING_LINE)
     process.exit(1)
   }
 
@@ -301,22 +313,42 @@ async function runDaemon(headed) {
     process.exit(1)
   }
 
+  // What the page prints and throws, kept for `pw console`. Registered before
+  // the first `goto`, so an error thrown while a page loads is in the record.
+  const record = createConsoleRing()
+  page.on("console", (msg) => record.push(consoleLine(msg.type(), msg.text())))
+  page.on("pageerror", (err) => record.push(pageErrorLine(err?.message ?? String(err))))
+
+  // A daemon whose caller is gone exits on its own: the timer is re-armed at
+  // every request and at every reply, and 0 switches it off.
+  let idleTimer = null
+  const armIdleExit = () => {
+    if (IDLE_EXIT_MS <= 0) return
+    clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => {
+      console.log(`[${new Date().toISOString()}] pw daemon idle for ${IDLE_EXIT_MS}ms — exiting`)
+      shutdown(browser, server).then(() => process.exit(0))
+    }, IDLE_EXIT_MS)
+  }
+
   try { fs.unlinkSync(SOCKET) } catch {}
   // `allowHalfOpen: true` is critical — without it Node auto-closes the
   // writable side as soon as the client's FIN arrives, racing our async
   // response write to a silent drop. The client sends data+FIN, we read it,
   // then need the writable side still open to send the JSON response back.
   const server = net.createServer({ allowHalfOpen: true }, (conn) => {
+    armIdleExit()
     let buf = ""
     conn.on("data", (chunk) => { buf += chunk.toString() })
     conn.on("end", async () => {
       let res
       try {
         const req = JSON.parse(buf)
-        res = { ok: true, result: await dispatch(req, { page, browser, server }) }
+        res = { ok: true, result: await dispatch(req, { page, browser, server, record }) }
       } catch (err) {
         res = { ok: false, error: err.message }
       }
+      armIdleExit()
       conn.end(JSON.stringify(res))
     })
     conn.on("error", () => {})
@@ -327,6 +359,7 @@ async function runDaemon(headed) {
     try { fs.chmodSync(SOCKET, 0o600) } catch {}
     fs.writeFileSync(PID, String(process.pid))
     console.log(`[${new Date().toISOString()}] pw daemon ready on ${SOCKET}`)
+    armIdleExit()
   })
 
   // Best-effort cleanup so a kill -TERM doesn't leave a stale socket.
@@ -335,7 +368,7 @@ async function runDaemon(headed) {
   }
 }
 
-async function dispatch(req, { page, browser, server }) {
+async function dispatch(req, { page, browser, server, record }) {
   switch (req.cmd) {
     case "__ping": return "ok"
     case "stop":
@@ -384,6 +417,11 @@ async function dispatch(req, { page, browser, server }) {
       return await page.title()
     case "content":
       return await page.content()
+    case "console": {
+      const text = formatConsoleRecord(record.lines())
+      if (req.clear) record.clear()
+      return text
+    }
     case "press":
       await page.keyboard.press(req.key)
       return null
@@ -406,7 +444,8 @@ async function shutdown(browser, server) {
 function printHelp() {
   process.stdout.write(`pw — Playwright control for opencode subagents
 
-  pw start [--headed]              launch a persistent chromium daemon
+  pw start [--headed]              launch a persistent chromium daemon; with
+                                   no browser installed it exits 1 at once
   pw stop                          stop the daemon
 
   pw goto <url>                    page.goto
@@ -420,10 +459,14 @@ function printHelp() {
   pw waitForSelector <sel> [ms]    page.waitForSelector
   pw screenshot <path> [--fullPage]  page.screenshot
   pw url | pw title | pw content   page.url / .title / .content
+  pw console [--clear]             console messages and page errors so far
+                                   (last 500 lines); --clear empties the record
   pw press <key>                   page.keyboard.press
   pw hover <selector>              page.hover
   pw selectOption <sel> <value>    page.selectOption
 
 State persists across calls — navigation, cookies, localStorage, DOM.
+With PW_SESSION set, each session runs its own daemon. A daemon exits after
+PW_IDLE_EXIT_MS (default 900000, 0 = never) without a request.
 `)
 }

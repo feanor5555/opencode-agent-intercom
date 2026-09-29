@@ -106,11 +106,17 @@ export function ensureWatchdogStarted(client) {
 // keeps the two apart; the `status === "idle"` skip in the running branch
 // stays what its comment says it is, a race guard for the removal gap.
 //
-// For the same reason `maxSubagentAgeMs <= 0` — the watchdog switched off —
-// disables the running branch alone. It must not also switch off the reap:
-// nothing outside this plugin ever deletes a subagent session, so a user who
-// turns the inactivity timer off precisely because they do not want subagents
-// killed on a clock would otherwise be given an unbounded leak instead.
+// For the same reason `maxSubagentAgeMs <= 0` — the inactivity watchdog
+// switched off — reaches the running branch alone. It must not also switch off
+// the reap: nothing outside this plugin ever deletes a subagent session, so a
+// user who turns the inactivity timer off precisely because they do not want
+// subagents killed on a clock would otherwise be given an unbounded leak
+// instead.
+//
+// Inside the running branch it switches off the silence and the tool-call
+// windows and leaves the run ceiling standing. The three are independent
+// settings, each with its own `0 = off`: a run is unbounded only where its
+// type's run ceiling (`runCeilingFor`) is 0.
 //
 // Best-effort: a single failed abort or delete on one entry doesn't stop the
 // others from being checked.
@@ -134,7 +140,6 @@ export async function sweepWatchdog() {
         await reapRetainedSubagent(entry, ttl, now - (entry.retainedAt ?? 0))
         continue
       }
-      if (maxAge <= 0) continue // watchdog disabled
       if (entry.timedOut) continue
       if (entry.errored) continue
       if (aborted.has(entry.sessionID)) continue
@@ -174,6 +179,9 @@ export async function sweepWatchdog() {
       // subagent has no second clock behind it, and bumping would push its
       // ceiling out on every tick — i.e. never reap it.
       const limit = watchdogLimit(entry, settings, now)
+      // The inactivity watchdog switched off takes the silence and tool-call
+      // windows with it; the run ceiling keeps its own switch.
+      if (maxAge <= 0 && limit.kind !== "run") continue
       if (limit.ms <= 0) continue // this window switched off
       // The run ceiling defers to a compaction the plugin itself started and is
       // still inside its own working window: reaping in the middle of the very
@@ -185,9 +193,8 @@ export async function sweepWatchdog() {
       //
       // The deferral needs a window to be bounded by: with the working window
       // switched off (`maxSubagentToolCallMs: 0`) there is none, so the run
-      // ceiling fires rather than becoming a wait nothing ends. Only
-      // `maxSubagentAgeMs = 0` lifts the run ceiling, and it does so above,
-      // where the whole running branch is skipped.
+      // ceiling fires rather than becoming a wait nothing ends. Only the type's
+      // own run ceiling of 0 (`runCeilingFor`) lifts it.
       if (limit.kind === "run" && entry.compactingSince) {
         const compactionMs = workingWindowMs(settings)
         if (compactionMs > 0 && now - entry.compactingSince <= compactionMs) continue

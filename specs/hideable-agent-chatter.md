@@ -40,15 +40,15 @@ promptSession are the only two functions in src/ that call session.promptAsync".
 
 | Kind | Call site |
 |---|---|
-| Subagent completion notice (handle, full result, task outcome, run-size, free slots) | `src/hooks.js:2250-2275` → `postParentNotice` (`src/teardown.js:177-242`) |
-| Error / abort notice | `src/hooks.js:2648-2655`, text `src/notices.js:535-561` |
-| Watchdog timeout notice | `src/watchdog.js:554-556`, text `src/notices.js:430-491` |
-| Denial-loop notice | `src/hooks.js:1400-1402`, text `src/notices.js:607-616` |
+| Subagent completion notice (handle, full result, task outcome, run-size, free slots) | `src/hooks.js:2297-2322` → `postParentNotice` (`src/teardown.js:177-242`) |
+| Error / abort notice | `src/hooks.js:2695-2702`, text `src/notices.js:535-561` |
+| Watchdog timeout notice | `src/watchdog.js:561-563`, text `src/notices.js:430-491` |
+| Denial-loop notice | `src/hooks.js:1447-1449`, text `src/notices.js:607-616` |
 | Drain flush / abortDrain re-posts after a handoff | `src/handoffwiring.js:265-314` |
 | Handoff kickoff (summary + history + doc summaries) | `src/handoff.js:358` through the adapter at `src/handoffwiring.js:213-219` |
 | `DOC_SUMMARY_PROMPT` / `OPEN_POINTS_PROMPT` to the old primary | `src/handoffwiring.js:384-390` |
 | Endless-cycle kickoff block, appended to the kickoff | `src/endless.js:766` → same adapter |
-| Spawn task prompt (project snapshot + task) — lands in the **subagent's** session | `src/tools.js:785` |
+| Spawn task prompt (project snapshot + task) — lands in the **subagent's** session | `src/tools.js:787` |
 
 ### 1.3 The marking round-trips on 1.18.25
 
@@ -72,13 +72,13 @@ retroactive sweep (§3.3) identifies a notice part by the same marker
 
 ### 1.4 Model-only paths, invisible regardless of the switch
 
-`experimental.chat.system.transform` (`src/index.js:282-289`, `src/hooks.js:416-802`)
+`experimental.chat.system.transform` (`src/index.js:283-290`, `src/hooks.js:457-850`)
 rewrites `output.system` wholesale. The orchestration and subagent guides, the project
 block and the limits block travel there and never enter `session.messages`. The
 active-subagent snapshot, the abort notice and the subagent over-budget STOP notice are
-delivered by `createTransformMessages` (`src/hooks.js:903-974`) as a synthetic text part
+delivered by `createTransformMessages` (`src/hooks.js:951-1022`) as a synthetic text part
 on a primary's last user message, and for a subagent in a carrier message appended at the end
-of the array (`tailNoticeCarrier`, `src/hooks.js:859`) — the same mechanism opencode uses for its own per-turn
+of the array (`tailNoticeCarrier`, `src/hooks.js:907`) — the same mechanism opencode uses for its own per-turn
 reminders. None of them is ever rendered, so the switch does not govern them.
 
 ### 1.5 The sidebar, and what it can and cannot do
@@ -153,26 +153,26 @@ key that hides messages (`Config.tui` holds only `scroll_speed`, `scroll_acceler
 ### 3.1 The setting
 
 - **File key:** `showAgentcom`, in the shared `~/.config/opencode/agent-intercom.json`.
-  Taken from the file only as a real boolean (`src/settings.js:741-743`); anything else
+  Taken from the file only as a real boolean (`src/settings.js:744-746`); anything else
   leaves the env-or-default resolution standing.
 - **Env var:** `OPENCODE_AGENT_INTERCOM_SHOW_AGENTCOM`, `"1"` / `"0"` through `envBool`
-  (`src/settings.js:596`).
-- **Default:** `true` — `DEFAULT_SHOW_AGENTCOM`, `src/settings.js:380`, and the TUI's own
+  (`src/settings.js:599`).
+- **Default:** `true` — `DEFAULT_SHOW_AGENTCOM`, `src/settings.js:383`, and the TUI's own
   copy at `tui/src/settings-file.ts:289`.
 - **Precedence:** file key over env var over default, as for every key of the file.
 - **Read:** per send, through `getSettings()` (cached for `TTL_MS = 2000`,
-  `src/settings.js:411`; the settings-file watch of §3.3 invalidates the cache on a write).
+  `src/settings.js:414`; the settings-file watch of §3.3 invalidates the cache on a write).
 
 The server-side path end to end:
 
 | Step | Location |
 |---|---|
-| Server default | `src/settings.js:380` |
-| Env read | `src/settings.js:596` |
-| File validator | `src/settings.js:741-743` |
+| Server default | `src/settings.js:383` |
+| Env read | `src/settings.js:599` |
+| File validator | `src/settings.js:744-746` |
 | Read at send time | `src/client.js:259`, `:371-372` |
-| Limits sentence | `src/hooks.js:1445`, `:1509-1513` |
-| Retroactive sweep | `src/agentcomsync.js`, started at `src/index.js:146` |
+| Limits sentence | `src/hooks.js:1492`, `:1556-1560` |
+| Retroactive sweep | `src/agentcomsync.js`, started at `src/index.js:147` |
 
 The TUI half:
 
@@ -198,7 +198,7 @@ The TUI half:
   - `src/handoffwiring.js:384-390` (`promptOldPrimaryFor`: doc-summary, open-points) →
     `hideable: true`;
   - every other call site passes no `hideable` and stays visible: the spawn task prompt
-    (`src/tools.js:785`), the `reuse` follow-up (`src/tools.js:1270`), the wind-down
+    (`src/tools.js:787`), the `reuse` follow-up (`src/tools.js:1272`), the wind-down
     subagent prompt (`src/handoffwiring.js:438`) and the mid-run `message` delivery
     (`src/midrun.js:239-248`). Each lands in a **subagent's** session and is that session's
     instruction.
@@ -212,7 +212,7 @@ store are the same as with the switch on.
 
 The switch governs the parts already in the transcript, not only the ones posted from then
 on. `startAgentcomVisibilityWatch` (`src/agentcomsync.js:152-170`, started once per process
-from the plugin factory at `src/index.js:146`) watches the **directory** of the settings
+from the plugin factory at `src/index.js:147`) watches the **directory** of the settings
 file with `fs.watch` — the TUI replaces the file rather than rewriting it in place — and,
 `AGENTCOM_WATCH_DEBOUNCE_MS = 120` after the events of one write settle, compares the
 resolved `showAgentcom` with the last value seen. A fallback tick every
@@ -246,8 +246,8 @@ session enters neither set.
 
 ### 3.4 The orchestrator is told the user cannot see its notices
 
-While `showAgentcom` is off, `formatLimitsNotice` (`src/hooks.js:1472`, assembled at
-`src/hooks.js:637`) — the runtime block the primary receives every turn — carries one
+While `showAgentcom` is off, `formatLimitsNotice` (`src/hooks.js:1519`, assembled at
+`src/hooks.js:678`) — the runtime block the primary receives every turn — carries one
 sentence:
 
 > Subagent results and handoff messages are hidden from the user's screen. The user sees
@@ -255,7 +255,7 @@ sentence:
 
 In solo mode the whole block is reduced to its hidden-postings form ("what this plugin
 posts into your session is hidden from the user's screen. The user sees only what you
-write."), and is empty while the switch is on (`src/hooks.js:1481-1487`).
+write."), and is empty while the switch is on (`src/hooks.js:1528-1534`).
 
 ### 3.5 Tool results are not governed
 
@@ -293,8 +293,8 @@ retroactive sweep of §3.3 brings the existing ones to the switch's current valu
   leaving the `✓ N done` counter (`tui/src/tui.tsx:2253`).
 
 What stays visible: the toasts beside the notices — `${handle} finished`, variant `success`
-(`src/hooks.js:2276-2280`), plus the ones on spawn (`src/tools.js:873`), on a stuck subagent
-(`src/hooks.js:1407-1411`) and on a scheduled handoff (`src/hooks.js:559-564`, `:629-633`).
+(`src/hooks.js:2323-2327`), plus the ones on spawn (`src/tools.js:875`), on a stuck subagent
+(`src/hooks.js:1454-1458`) and on a scheduled handoff (`src/hooks.js:600-605`, `:670-674`).
 Toasts are not transcript.
 
 ## 5. Assumptions, and what would show them wrong

@@ -102,9 +102,10 @@ export const CHILD_WAITER_TIMEOUT_FACTOR = 4
 //
 // Only `maxSubagentAgeMs = 0` lifts the ceiling: that switches the inactivity
 // watchdog off entirely, and a user who has taken out the dead-man's switch has
-// asked for runs no clock cuts off — a rescue timer firing anyway would
-// contradict the setting rather than back it up. The registry entry of such a
-// child is never reaped, so the re-arm below would never expire it in any case.
+// asked for runs no silence clock cuts off — a rescue timer firing anyway would
+// contradict the setting rather than back it up. Such a child is reaped at its
+// run ceiling at most, and where its type has none its entry is never reaped,
+// so the re-arm below would never expire it in any case.
 //
 // `maxSubagentToolCallMs = 0` does NOT lift it. That 0 says "no ceiling while a
 // subagent works", and the re-arm in registerChildWaiter is what honours it: a

@@ -98,7 +98,7 @@ import {
   statusMarker,
   summariseRows,
 } from "./subagent-store.ts";
-import { AGENT_NAMES, PROMPT_AGENT_FILES } from "./agent-roles.ts";
+import { AGENT_NAMES, PROMPT_AGENT_FILES, visionNote } from "./agent-roles.ts";
 import {
   type LimitKey,
   type Settings,
@@ -2451,8 +2451,7 @@ function SubagentPanel(props: {
 
               The line under the row is what the number alone does not say: a
               ceiling inside the in-tool window, or one with no room left after
-              the wrap-up warning, cannot do what the row suggests, and neither
-              can any ceiling while the inactivity watchdog is off
+              the wrap-up warning, cannot do what the row suggests
               (run-ceiling-row.ts). */}
           <box flexDirection="row">
             <text fg={props.theme.textMuted}>{rowLabel("run (min)")}</text>
@@ -2621,6 +2620,7 @@ function SubagentPanel(props: {
             const badges = createMemo(() =>
               modelBadges(resolvedModel().value, props.modelChoices()),
             );
+            const noVision = createMemo(() => visionNote(props.llmAgent(), badges().vision));
             const effort = createMemo(() =>
               resolveLlmEffort(
                 props.llmModels(),
@@ -2672,6 +2672,13 @@ function SubagentPanel(props: {
                   <text fg={badgeColour(badges().vision)}>{` ${badges().vision}`}</text>
                   <text fg={badgeColour(badges().reasoning)}>{badges().reasoning}</text>
                 </box>
+                {/* A role that judges screenshots, on a model that cannot see
+                    them: said beneath the row, where the badge shows it. */}
+                <Show when={noVision() !== ""}>
+                  <box flexDirection="row">
+                    <text fg={props.theme.warning}>{`${" ".repeat(rowLabel("model").length)}${noVision()}`}</text>
+                  </box>
+                </Show>
                 {/* Reasoning effort for the same agent. Inert — muted
                     buttons, a dead cycler — where the model cannot take an
                     effort or is unknown. An effort opencode resolved rather

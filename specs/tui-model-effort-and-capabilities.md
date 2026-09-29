@@ -304,7 +304,7 @@ expanded.
   is inert; nothing else breaks.
 - **The AI-SDK provider packages accept the §5 keys passed through
   `output.options`.** The captured request body (`captureParams`,
-  `src/index.js:344-348`) shows whether a key reached the provider; the key per
+  `src/index.js:345-349`) shows whether a key reached the provider; the key per
   family is one table row in `src/reasoningeffort.js`.
 - **`app.agents()` exposes a project-set effort in the agent's `options` map.**
   Where it does not, the effort row shows `default` for such an agent until the

@@ -179,6 +179,8 @@ test("the reuse block teaches the tool, the late follow-up, the alternative and 
   assert.match(g, /reuse can refuse — the session may be too large to be handed more, its window/)
   assert.match(g, /Each refusal names the rule and the figure it refused on/)
   assert.match(g, /spawn is always the way forward/)
+  // a follow-up goes to the retained subagent before a new run is started
+  assert.match(g, /A follow-up for a subagent that `list\(\)` shows RETAINED goes to it with `reuse`, before any new spawn\./)
 })
 
 test("retention off: the primary's system prompt carries no word about reuse", async () => {

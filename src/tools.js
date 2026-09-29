@@ -1,4 +1,5 @@
-// The three tools the primary agent gets: spawn, abort, list.
+// The plugin's custom tools: the primary's orchestration tools, the mid-run
+// channel, the TODO tools, the web tools, `outline` and `calc`.
 
 import { tool } from "@opencode-ai/plugin"
 import { registry, aborted, registryMutex } from "./state.js"
@@ -81,6 +82,7 @@ import {
 import { createWebsearchTool, isWebsearchEnabled } from "./websearch.js"
 import { createForumSearchTool, isForumSearchEnabled } from "./forumsearch.js"
 import { createGroundedSearchTool, isGroundedSearchEnabled } from "./groundedsearch.js"
+import { createCalcTool, isCalcEnabled } from "./calc.js"
 import { createOutlineTool, isOutlineEnabled } from "./outline.js"
 import {
   listOpen,
@@ -1797,6 +1799,9 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
     ...(isWebsearchEnabled() ? { web_search: createWebsearchTool() } : {}),
     ...(isForumSearchEnabled() ? { forum_search: createForumSearchTool() } : {}),
     ...(isGroundedSearchEnabled() ? { grounded_search: createGroundedSearchTool() } : {}),
+    // Pure arithmetic, registered in both agent modes: it starts no agent and
+    // touches no file, process or network.
+    ...(isCalcEnabled() ? { calc: createCalcTool() } : {}),
     ...(isOutlineEnabled() ? { outline: createOutlineTool({ dirFor }) } : {}),
   }
 }

@@ -416,7 +416,7 @@ test("spawn honors the caller's permission.task allowlist", async () => {
   assert.match(allowed.output, /Spawned subagent "coder#1"/)
 })
 
-test("tool.execute.before restricts a primary to the orchestration tools (spawn/abort/list only)", async () => {
+test("tool.execute.before restricts a primary to the orchestration tools and calc", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   // native task -> denied, redirected to spawn
@@ -434,10 +434,15 @@ test("tool.execute.before restricts a primary to the orchestration tools (spawn/
       /orchestrator/i,
     )
   }
-  // only the orchestration tools pass the guard
-  for (const t of ["spawn", "abort", "list", "message"]) {
+  // only the orchestration tools and calc pass the guard
+  for (const t of ["spawn", "abort", "list", "message", "calc"]) {
     await hooks["tool.execute.before"]({ tool: t, sessionID: "ses_primary", callID: `a-${t}` })
   }
+  // the refusal of a foreign tool names calc among the tools the primary has
+  await assert.rejects(
+    () => hooks["tool.execute.before"]({ tool: "read", sessionID: "ses_primary", callID: "d-read-2" }),
+    /Available orchestration tools: [^.]*\bcalc\b/,
+  )
   // send_message is not one of them — it must be rejected like any
   // non-orchestration tool, `message` beside it notwithstanding
   await assert.rejects(
@@ -583,8 +588,10 @@ test("tool.execute.before hard-denies the native `task` tool from a subagent", a
 // is gated at run time (the caller's own target set, no task id, a per-entry
 // quota) rather than by the permission map. The researcher is one of them —
 // its target is the `grounder` alone. Grounder may not: it is the end of every
-// chain and searches itself. Documenter and gitter may not: they carry out
-// exact briefs and hand a gap back to their caller.
+// chain and searches itself. Documenter, gitter and releaser may not: they
+// carry out exact briefs and hand a gap back to their caller. Scout, refuter
+// and checker may not: each answers one lookup, claim list or check with its
+// own tools.
 const DELEGATING_ROLES = [
   "planner",
   "coder",
@@ -593,18 +600,22 @@ const DELEGATING_ROLES = [
   "designer",
   "researcher",
 ]
-const NON_DELEGATING_ROLES = ["grounder", "documenter", "gitter", "scout", "checker"]
+const NON_DELEGATING_ROLES = ["grounder", "documenter", "gitter", "releaser", "scout", "refuter", "checker", "verifier"]
 
-test("spawn is granted to six subagent roles and denied to five; task never", () => {
+test("spawn is granted to the delegating roles and denied to the rest; task never", () => {
   const subagents = Object.entries(AGENTS).filter(([, def]) => def.mode === "subagent")
-  assert.equal(subagents.length, 11, "expected 11 subagent roles")
   assert.deepEqual(
-    subagents.map(([name]) => name).sort(),
     [...DELEGATING_ROLES, ...NON_DELEGATING_ROLES].sort(),
-    "every subagent role must be accounted for on one side of the grant",
+    [...SPAWNABLE_ROLES].sort(),
+    "every spawnable role must be accounted for on exactly one side of the grant",
+  )
+  assert.equal(
+    new Set([...DELEGATING_ROLES, ...NON_DELEGATING_ROLES]).size,
+    DELEGATING_ROLES.length + NON_DELEGATING_ROLES.length,
+    "no role stands on both sides",
   )
   for (const [name, def] of subagents) {
-    // Unchanged for all eleven: opencode's blocking `task` tool and the
+    // Unchanged for every role: opencode's blocking `task` tool and the
     // orchestrator's own fleet controls stay the orchestrator's alone.
     assert.equal(def.permission?.task, "deny", `${name} must deny task`)
     assert.equal(def.permission?.abort, "deny", `${name} must deny abort`)
@@ -866,6 +877,7 @@ test("orchestration guide exposes the three tools and marker contract without TO
   assert.match(joined, /spawn\(agent, prompt\)/, "guide must list spawn")
   assert.match(joined, /abort\(handle\)/, "guide must list abort")
   assert.match(joined, /\blist\(\)/, "guide must list list()")
+  assert.match(joined, /^- calc\(expression\) — /m, "guide must list calc")
   assert.match(joined, /DONE: T<n>.*FIRST or LAST non-empty line/i, "guide must state the marker position")
   assert.match(joined, /marker must occupy a whole line/i, "guide must state whole-line strictness")
   assert.doesNotMatch(joined, /todo_done|todos_open|todo_add|todo_edit/, "guide must not mention TODO tools")
@@ -1760,13 +1772,17 @@ test("the config hook installs the plugin's agent roles", async () => {
   const config = {}
   await hooks.config(config)
   assert.equal(config.agent.orchestrator.mode, "primary")
-  for (const name of ["planner", "coder", "debugger", "reviewer", "documenter", "researcher", "designer", "gitter", "scout", "checker"]) {
+  for (const name of SPAWNABLE_ROLES) {
     assert.equal(config.agent[name].mode, "subagent")
     assert.ok(config.agent[name].prompt.length > 0)
   }
   // the orchestrator must not have the do-it-yourself tools
   assert.equal(config.agent.orchestrator.permission.bash, "deny")
   assert.equal(config.agent.orchestrator.permission.edit, "deny")
+  // calc it holds, like every role: no map denies it
+  for (const name of Object.keys(AGENTS)) {
+    assert.equal(config.agent[name].permission?.calc, undefined, `${name} holds calc`)
+  }
   // and it is made the startup primary
   assert.equal(config.default_agent, "orchestrator")
 })
@@ -1787,7 +1803,10 @@ test("every subagent role is hidden, the orchestrator is not", async () => {
   for (const name of SPAWNABLE_ROLES) assert.equal(config.agent[name].hidden, true)
   // Being hidden is a visibility flag, not a spawn gate: the closed positive
   // list is what the spawn tool reads, and every hidden role is on it.
-  assert.equal(SPAWNABLE_ROLES.length, 11)
+  assert.deepEqual(
+    [...SPAWNABLE_ROLES].sort(),
+    Object.entries(AGENTS).filter(([, def]) => def.hidden).map(([name]) => name).sort(),
+  )
 })
 
 test("no role definition carries a sampling parameter — temperature starts unset", async () => {
@@ -2515,7 +2534,7 @@ test("outline accepts an absolute path inside the session directory", skipNoCtag
   assert.match(res.output, /abs-inside\.js:1: export const A = 1/)
 })
 
-test("the config hook disables outline for designer, documenter, gitter, grounder and orchestrator", async () => {
+test("the config hook disables outline for designer, documenter, gitter, grounder, checker, verifier, releaser and orchestrator", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   const config = {}
@@ -2524,12 +2543,17 @@ test("the config hook disables outline for designer, documenter, gitter, grounde
   assert.equal(config.agent.documenter.permission.outline, "deny")
   assert.equal(config.agent.gitter.permission.outline, "deny")
   assert.equal(config.agent.grounder.permission.outline, "deny")
+  assert.equal(config.agent.checker.permission.outline, "deny")
+  assert.equal(config.agent.verifier.permission.outline, "deny")
+  assert.equal(config.agent.releaser.permission.outline, "deny")
   assert.equal(config.agent.orchestrator.permission.outline, "deny")
   // a regular subagent leaves outline enabled (no entry in the permission map)
   assert.equal(config.agent.planner.permission?.outline, undefined)
   // the researcher is one of those: it reads the project it researches for, so
   // it gets the tool the reading discipline it is injected tells it to call.
   assert.equal(config.agent.researcher.permission?.outline, undefined)
+  // so is the refuter: it reads the code its claims are about.
+  assert.equal(config.agent.refuter.permission?.outline, undefined)
 })
 
 // rewritePendingTools — see hooks.js for the full rationale (root cause of

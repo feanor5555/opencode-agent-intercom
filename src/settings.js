@@ -138,7 +138,10 @@ export const DEFAULT_AGENT_CONTEXT = {
   designer: 100000,
   gitter: 100000,
   scout: 100000,
+  refuter: 100000,
   checker: 100000,
+  verifier: 100000,
+  releaser: 100000,
 }
 // Threshold (in tokens) at which the orchestrator primary session triggers a
 // context-refresh handoff. Independent of maxContext (which gates subagents).

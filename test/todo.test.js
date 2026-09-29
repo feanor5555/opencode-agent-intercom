@@ -777,16 +777,16 @@ test("orchestrator is DENIED from calling any TODO tool (subagent-only now)", as
   }
 })
 
-test("planner/coder/debugger/reviewer/designer can use TODO tools; researcher/documenter/gitter/scout/checker are DENIED (even reads)", async () => {
+test("planner/coder/debugger/reviewer/designer can use TODO tools; researcher/documenter/gitter/scout/refuter/checker/verifier/releaser are DENIED (even reads)", async () => {
   // Raise the concurrent-subagent cap so we can spawn one of each agent in
   // the same test run without hitting the default cap of 1.
-  writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 12 }))
+  writeFileSync(settingsFile, JSON.stringify({ maxSubagents: 16 }))
   resetSettings()
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
 
-  // researcher, documenter, gitter, scout, checker: ALL four TODO tools (including todos_open) denied.
-  for (const agent of ["researcher", "documenter", "gitter", "scout", "checker"]) {
+  // researcher, documenter, gitter, scout, refuter, checker, verifier, releaser: ALL four TODO tools (including todos_open) denied.
+  for (const agent of ["researcher", "documenter", "gitter", "scout", "refuter", "checker", "verifier", "releaser"]) {
     const before = created.length
     await hooks.tool.spawn.execute({ agent, prompt: `task for ${agent}` }, primaryCtx)
     assert.equal(created.length, before + 1)

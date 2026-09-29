@@ -5,19 +5,15 @@
 // wall-clock ceiling on one subagent RUN. Its number does not stand on its own
 // — the ceiling is the outermost of three windows, and the two inside it decide
 // whether it leaves any room to act before it fires — so the row owes a line in
-// three states:
+// two states:
 //
-//   the silence window is 0        → "the inactivity watchdog is off — no run
-//                                     ceiling either"
 //   ceiling <= the in-tool window  → "shorter than the in-tool window — one
 //                                     long call is cut off"
 //   less than one in-tool window
 //   left after the wrap-up band    → "no room left for a handover"
 //
-// The first is the plugin's own ordering made visible: the run check lives
-// inside the running branch behind the silence window (src/watchdog.js), so a
-// user who switched that watchdog off has no run ceiling either, whatever this
-// row shows.
+// The silence window at 0 switches the in-tool window off with it and leaves
+// the run ceiling standing (src/watchdog.js), so neither line arises there.
 //
 // The parity of the value itself — that the plugin and the panel resolve the
 // same ceiling — is pinned in test/settings-defaults-parity.test.js; what is
@@ -38,7 +34,6 @@ import {
   RUN_CEILING_NOTE_INDENT,
   RUN_WRAP_UP,
   SHORTER_THAN_IN_TOOL_CAUSE,
-  WATCHDOG_OFF_CAUSE,
   runCeilingRowCause,
   runCeilingRowNote,
 } from "../tui/src/run-ceiling-row.ts"
@@ -118,26 +113,27 @@ test("a ceiling inside the in-tool window is named as that, not as the room", ()
   assert.equal(cause(), SHORTER_THAN_IN_TOOL_CAUSE)
 })
 
-// The row is inert while the inactivity watchdog is off, because the run check
-// sits inside the running branch behind it. That outranks both other lines: it
-// is the difference between a tight ceiling and none at all.
-test("the silence window at 0 takes the whole row out and says so", () => {
+// The silence window at 0 takes the in-tool window with it and leaves the run
+// ceiling standing, so a ceiling that would sit inside the in-tool window is
+// not cut short by anything there, and the row owes no line.
+test("the silence window at 0 leaves the run ceiling standing with no line", () => {
   write({ maxSubagentAgeMs: 0 })
-  assert.equal(cause(), WATCHDOG_OFF_CAUSE)
+  assert.equal(cause(), "")
 
   write({ maxSubagentAgeMs: 0, maxSubagentRunMs: 300000, maxSubagentToolCallMs: 600000 })
-  assert.equal(cause(), WATCHDOG_OFF_CAUSE)
+  assert.equal(cause(), "")
 
-  write({ maxSubagentAgeMs: 0, maxSubagentRunMs: 0 })
-  assert.equal(cause(), WATCHDOG_OFF_CAUSE)
+  write({ maxSubagentAgeMs: 0, maxSubagentRunMs: 1200000, maxSubagentToolCallMs: 660000 })
+  assert.equal(cause(), "")
 })
 
 test("the note sits at the one indent every settings-row note uses", () => {
   assert.equal(RUN_CEILING_NOTE_INDENT, ROW_NOTE_INDENT)
 
-  write({ maxSubagentAgeMs: 0 })
-  const note = runCeilingRowNote(readSettings(), 60)
-  assert.equal(note, ROW_NOTE_INDENT + WATCHDOG_OFF_CAUSE)
+  write({ maxSubagentRunMs: 300000, maxSubagentToolCallMs: 600000 })
+  // The indent (4) plus the note (58) plus the 2-column margin every row note keeps.
+  const note = runCeilingRowNote(readSettings(), 64)
+  assert.equal(note, ROW_NOTE_INDENT + SHORTER_THAN_IN_TOOL_CAUSE)
 
   // A panel too narrow for the indent renders no line rather than a stub.
   assert.equal(runCeilingRowNote(readSettings(), 4), "")

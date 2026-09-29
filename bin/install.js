@@ -306,7 +306,7 @@ async function installChromium() {
   } catch (err) {
     console.error(
       `! chromium install failed: ${err.message}. The plugin still works, ` +
-        `but the \`pw\` tool will install chromium on first use instead.`,
+        `but \`pw start\` reports the browser as not installed until this installer runs again.`,
     );
     process.exitCode = 1;
   }

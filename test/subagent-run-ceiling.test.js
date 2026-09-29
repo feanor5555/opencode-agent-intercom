@@ -113,7 +113,18 @@ async function spawned(agent = "researcher") {
   const hooks = await plugin(ctx)
   await hooks.tool.spawn.execute({ agent, prompt: "x" }, toolCtx)
   const sessionID = created[created.length - 1]
-  return { hooks, sessionID, entry: entryForSession(sessionID), created }
+  return { hooks, sessionID, entry: entryForSession(sessionID), created, client: ctx.client }
+}
+
+// Records every prompt the plugin posts from here on, so the wake notice a reap
+// sends to the primary can be read.
+function recordPosts(client) {
+  const posted = []
+  client.session.promptAsync = async (req) => {
+    posted.push(req)
+    return { data: undefined }
+  }
+  return posted
 }
 
 // ---- the setting ------------------------------------------------------------
@@ -298,14 +309,73 @@ test("the sweep reaps a poller whose last activity is NOW and whose call is fres
   assert.equal(entryForSession(sessionID), undefined, "the run clock is what nothing renews")
 })
 
-test("the run ceiling is off while the inactivity watchdog is off", async () => {
-  withSettings({ maxSubagents: 4, maxSubagentAgeMs: 0, maxSubagentRunMs: 200_000 })
-  const { sessionID, entry } = await spawned()
-  entry.runStartedAt = Date.now() - 900_000
+// The three windows are independent settings: the silence window switched off
+// takes the tool-call window with it and leaves the run ceiling standing.
+test("with both older windows off the run ceiling still reaps", async () => {
+  withSettings({
+    maxSubagents: 4,
+    maxSubagentAgeMs: 0,
+    maxSubagentToolCallMs: 0,
+    agentRunMs: { coder: 1000 },
+  })
+  const { sessionID, entry, client } = await spawned("coder")
+  const posted = recordPosts(client)
+  entry.runStartedAt = Date.now() - 2000
+
+  const limit = watchdogLimit(entry, getSettings())
+  assert.equal(limit.kind, "run")
+  assert.equal(limit.setting, "maxSubagentRunMs")
 
   await sweepWatchdog()
 
-  assert.ok(entryForSession(sessionID), "the dead-man's switch off means no clock cuts a run off")
+  assert.equal(entryForSession(sessionID), undefined, "the run ceiling has its own switch")
+  assert.match(
+    JSON.stringify(posted),
+    /maxSubagentRunMs/,
+    "the wake notice names the run ceiling as the window that fired",
+  )
+})
+
+test("a type's run ceiling of 0 keeps its run unbounded with the older windows off", async () => {
+  withSettings({
+    maxSubagents: 4,
+    maxSubagentAgeMs: 0,
+    maxSubagentToolCallMs: 0,
+    agentRunMs: { coder: 0 },
+  })
+  const { sessionID, entry } = await spawned("coder")
+  entry.runStartedAt = Date.now() - 2000
+
+  await sweepWatchdog()
+
+  assert.ok(entryForSession(sessionID), "0 is the run ceiling's own off")
+})
+
+test("a silent entry with no run ceiling is not reaped while the silence window is off", async () => {
+  withSettings({ maxSubagents: 4, maxSubagentAgeMs: 0, maxSubagentRunMs: 0 })
+  const { sessionID, entry } = await spawned()
+  entry.lastActivityAt = Date.now() - 3_600_000
+  entry.runStartedAt = Date.now() - 3_600_000
+
+  await sweepWatchdog()
+
+  assert.ok(entryForSession(sessionID), "no window is armed for it")
+})
+
+test("a call in flight is not reaped on its own window while the silence window is off", async () => {
+  withSettings({
+    maxSubagents: 4,
+    maxSubagentAgeMs: 0,
+    maxSubagentToolCallMs: 60_000,
+    maxSubagentRunMs: 3_600_000,
+  })
+  const { hooks, sessionID, entry } = await spawned()
+  await hooks["tool.execute.before"]({ tool: "bash", sessionID, callID: "c1" })
+  entry.toolCalls.get("c1").startedAt = Date.now() - 120_000
+
+  await sweepWatchdog()
+
+  assert.ok(entryForSession(sessionID), "the tool-call window goes off with the silence window")
 })
 
 test("a compaction in flight holds the reap off until its own window is up", async () => {

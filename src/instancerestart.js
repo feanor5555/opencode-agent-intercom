@@ -8,8 +8,9 @@
 // event stream still stands: a run whose abort lands after it is gone is never
 // reported at all, and its entry would stay "running" for the life of the
 // process — holding a concurrency slot, never waking its primary, and keeping
-// an endless cycle's quiesce open. With `maxSubagentAgeMs: 0` neither the
-// watchdog nor the orphan sweep would ever collect it.
+// an endless cycle's quiesce open. With `maxSubagentAgeMs: 0` the orphan sweep
+// never collects it and the watchdog only at its run ceiling, never where its
+// type has none.
 //
 // Two signals mark the restart, and both are used:
 //

@@ -3,9 +3,9 @@
 // blocking behaviour that makes the child's ending the caller's tool result, and
 // the two pieces of session bookkeeping a nested child needs.
 //
-// `spawn` is granted to six of the eleven roles (planner, coder, debugger,
-// reviewer, designer, researcher); grounder, documenter, gitter, scout and
-// checker keep `spawn: "deny"`. What each grantee may NAME comes from
+// `spawn` is granted to six of the subagent roles (planner, coder, debugger,
+// reviewer, designer, researcher); grounder, documenter, gitter, releaser,
+// scout, refuter and checker keep `spawn: "deny"`. What each grantee may NAME comes from
 // NESTED_SPAWN_TARGETS (agents.js): the five non-web roles reach the
 // researcher, the researcher reaches the grounder.
 // The tests that drive the ADMITTED path still open it through a config
@@ -57,7 +57,7 @@ const DELEGATING_ROLES = [
   "designer",
   "researcher",
 ]
-const NON_DELEGATING_ROLES = ["grounder", "documenter", "gitter", "scout", "checker"]
+const NON_DELEGATING_ROLES = ["grounder", "documenter", "gitter", "releaser", "scout", "refuter", "checker", "verifier"]
 
 const PRIMARY = "ses_primary"
 const primaryCtx = { sessionID: PRIMARY, agent: "orchestrator", messageID: "m1" }
@@ -183,17 +183,18 @@ function subagentCaller(sessionID, agent) {
 
 // ---- the gate: which caller may nest at all -------------------------------
 
-test("the caller gate splits the eleven roles exactly as the grant does", async () => {
+test("the caller gate splits the spawnable roles exactly as the grant does", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
-  const roles = Object.entries(AGENTS)
-    .filter(([, def]) => def.mode === "subagent")
-    .map(([name]) => name)
-  assert.equal(roles.length, 11, "expected 11 subagent roles")
   assert.deepEqual(
-    roles.slice().sort(),
+    [...SPAWNABLE_ROLES].sort(),
     [...DELEGATING_ROLES, ...NON_DELEGATING_ROLES].sort(),
     "a new subagent role must be placed on one side of the grant here",
+  )
+  assert.equal(
+    new Set([...DELEGATING_ROLES, ...NON_DELEGATING_ROLES]).size,
+    DELEGATING_ROLES.length + NON_DELEGATING_ROLES.length,
+    "no role stands on both sides",
   )
 
   // The one that may not delegate: the caller gate is the first check, so
@@ -307,7 +308,7 @@ test("a researcher may spawn a grounder and nothing else", async () => {
   const hooks = await plugin(ctx)
   const callerCtx = subagentCaller("ses_researcher", "researcher")
 
-  for (const agent of ["researcher", "coder", "planner", "designer", "gitter", "scout", "checker"]) {
+  for (const agent of ["researcher", "coder", "planner", "designer", "gitter", "scout", "refuter", "checker", "verifier", "releaser"]) {
     const res = await hooks.tool.spawn.execute({ agent, prompt: "do it" }, callerCtx)
     assert.match(res.output, /a "researcher" may spawn "grounder" and nothing else/)
     assert.match(res.output, new RegExp(`you\\s+asked for a "${agent}"`))

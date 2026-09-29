@@ -33,27 +33,29 @@ export const SHORTER_THAN_IN_TOOL_CAUSE =
 // the whole of its handover room and never get to write a reply.
 export const NO_HANDOVER_ROOM_CAUSE = "no room left for a handover";
 
-// The inactivity watchdog is off, and the run check lives inside the running
-// branch behind it (src/watchdog.js): a user who took out the dead-man's switch
-// gets no run ceiling either, whatever this row shows.
-export const WATCHDOG_OFF_CAUSE = "the inactivity watchdog is off — no run ceiling either";
-
 // The note line sits under the row at the indent every settings-row note uses.
 export const RUN_CEILING_NOTE_INDENT = ROW_NOTE_INDENT;
 
+// The in-tool window the sweep actually applies (src/watchdog.js): the
+// inactivity watchdog switched off takes the in-tool window with it and leaves
+// the run ceiling standing, so a single call is then bounded by nothing but the
+// run ceiling and neither relation below can arise.
+function effectiveInToolMs(settings: Settings): number {
+  return settings.maxSubagentAgeMs === 0 ? 0 : settings.maxSubagentToolCallMs;
+}
+
 // What the line under the row says, or "" where the row needs no explaining.
 //
-// Order: the watchdog being off outranks both, because it makes the whole row
-// inert rather than merely tight. A ceiling inside the in-tool window is named
-// before the handover case, because it is the sharper statement of the same
-// relation — the handover line would only repeat it.
+// A ceiling inside the in-tool window is named before the handover case,
+// because it is the sharper statement of the same relation — the handover line
+// would only repeat it.
 export function runCeilingRowCause(settings: Settings): string {
-  if (settings.maxSubagentAgeMs === 0) return WATCHDOG_OFF_CAUSE;
   if (settings.maxSubagentRunMs === 0) return "";
-  if (settings.maxSubagentRunMs <= settings.maxSubagentToolCallMs) {
+  const inToolMs = effectiveInToolMs(settings);
+  if (settings.maxSubagentRunMs <= inToolMs) {
     return SHORTER_THAN_IN_TOOL_CAUSE;
   }
-  if (settings.maxSubagentRunMs * (1 - RUN_WRAP_UP) < settings.maxSubagentToolCallMs) {
+  if (settings.maxSubagentRunMs * (1 - RUN_WRAP_UP) < inToolMs) {
     return NO_HANDOVER_ROOM_CAUSE;
   }
   return "";

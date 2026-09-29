@@ -188,10 +188,9 @@ test("a type with no ceiling is told of none", async () => {
   assert.equal(entry.runWarnings, 0)
 })
 
-// With the inactivity watchdog off the sweep's whole running branch is skipped,
-// the run ceiling included, so a band here would announce a cut that is not
-// coming.
-test("the watchdog switched off takes the band with it", async () => {
+// The inactivity watchdog switched off leaves the run ceiling standing, so the
+// band still announces the cut that is coming.
+test("the band fires at 0.75 with the silence window off", async () => {
   const { hooks, sessionID, entry } = await runningFor(BAND_AT + 60_000, {
     maxSubagentAgeMs: 0,
     maxSubagentRunMs: CEILING,
@@ -199,8 +198,8 @@ test("the watchdog switched off takes the band with it", async () => {
   const messages = subagentHistory(sessionID)
   await run(hooks, messages)
 
-  assert.doesNotMatch(syntheticText(messages), /RUN CEILING/)
-  assert.equal(entry.runWarnings, 0)
+  assert.match(syntheticText(messages), /RUN CEILING/)
+  assert.equal(entry.runWarnings, 1)
 })
 
 test("a per-type ceiling is what the band counts against", async () => {

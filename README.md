@@ -151,7 +151,8 @@ from one that has hung.
   injects 1–2 KB of tool descriptions into *every* LLM call. For a 200K
   frontier model: fine. For your 32K local model: **5 % of your window, every
   turn, forever**. We ship custom thin tools instead — `web_search` at ~300 B,
-  plus `outline`, `pw`, `gen`. Same capabilities, a fraction of the cost.
+  plus `outline`, `pw`, `gen`, and the `codegraph` CLI where one is installed.
+  Same capabilities, a fraction of the cost.
 
 - **`outline` over `read`.** Which file defines `processInvoice`? Outline six
   candidates (one line of signatures each) instead of `read`ing all six and
@@ -468,14 +469,14 @@ Nine roles injected by the `config` hook — no per-project
 | Agent | Role | Notes |
 |---|---|---|
 | `orchestrator` | Primary. Coordinates only. | Restricted to `spawn`/`abort`/`list`. |
-| `planner` | Concept/design docs in `plans/`. | No `bash`, no web — version facts come from a `researcher`. May spawn a `researcher` for web lookups. |
+| `planner` | Concept/design docs in `plans/`. | Bash, no web tools — version facts come from a `researcher`. May spawn a `researcher` for web lookups. |
 | `coder` | Implements code in thin vertical slices. | Bash, edit, build/test. No web. Catch-all. May spawn a `researcher` for web lookups. |
 | `debugger` | Diagnoses build/test/runtime errors. | Bash for repro, no `edit`/`write`, no web — fix goes back to `coder`. May spawn a `researcher` for web lookups. |
-| `reviewer` | Reviews staged work into `reviews/`, iterates on it. | No `bash`, no web. Convention: no source-code edits. May spawn a `researcher` for web lookups. |
-| `documenter` | Writes/iterates user docs in place (README, `docs/`, changelog). | No `bash`, no web. Convention: no source-code edits. May spawn a `researcher` for web lookups. |
+| `reviewer` | Reviews staged work into `reviews/`, iterates on it. | Bash, no web tools. Convention: no source-code edits. May spawn a `researcher` for web lookups. |
+| `documenter` | Writes/iterates user docs in place (README, `docs/`, changelog). | Bash, no web tools. Convention: no source-code edits. May spawn a `researcher` for web lookups. |
 
 Each delegating role maps to exactly one target: the five above reach `researcher` (the call blocks and the reply is the tool result); `researcher` reaches `grounder` for a grounded search only when its briefing asks for one; every other role may spawn nothing. The refusal text names the caller's own allowed set — e.g. `a "researcher" may spawn "grounder" and nothing else — you asked for a "coder"`, or `a "gitter" may spawn nothing at all` — so the model has somewhere to go instead of retrying.
-| `researcher` | Web research via `web_search` + `forum_search` + `webfetch`. | The only role with Exa/searxng search and full-page fetches. No `edit`/`write`/`bash`. May spawn a `grounder` for a grounded search, but only where the orchestrator's briefing asks for one; without it, searches as before and spawns nothing. |
+| `researcher` | Web research via `web_search` + `forum_search` + `webfetch`. | The only role with Exa/searxng search and full-page fetches. Reads the project, writes its own result file and has bash; no `edit`. Convention: no source-code edits. May spawn a `grounder` for a grounded search, but only where the orchestrator's briefing asks for one; without it, searches as before and spawns nothing. |
 | `grounder` | Web research through Google Search grounding via `grounded_search`. | The only role that uses Search grounding. Pick over `researcher` for a plain factual question; pick `researcher` when the work needs forum threads, a named page fetched in full, or a choice between sources. No `edit`/`write`/`bash`. `spawn` denied — may spawn nothing at all. |
 | `designer` | Generates images via [`gen`](#gen--image-generation-no-api-key). | No `outline`, no web. Convention: no source-code edits. `spawn` denied — requests visual references in the final reply instead. |
 | `gitter` | Repo operations matching project's git style. | No `edit`/`write`/`webfetch`/`web_search`/`forum_search`/`grounded_search`. `spawn` denied. |
@@ -893,6 +894,41 @@ knows Playwright already knows `pw`. The escape hatch is
 (multi-statement). First `pw start` fetches Chromium (~170 MB, one time).
 Internally: detached daemon on a Unix socket under `$TMPDIR`.
 
+### `codegraph` — code search, where installed
+
+The code-reading roles — `planner`, `coder`, `debugger`, `reviewer`,
+`documenter`, `researcher`, and in solo mode the primary — run the
+[CodeGraph](https://github.com/colbymchenry/codegraph) CLI from their shell
+when this plugin finds one. It is optional: with no binary found, no role is
+told about it and nothing else changes. Where one is found, each of those roles
+whose `bash` is allowed in the resolved opencode config gets a short usage card
+in its system prompt, so it knows the commands without looking them up —
+`explore` to find code, `outline` and `read` for a file it already knows:
+
+```sh
+codegraph explore "how is a user saved" -p <project root>   # source of the matching symbols + call paths
+codegraph node saveUser -p <project root>                   # one symbol's source with callers and callees
+codegraph callers saveUser -p <project root>                # what calls it (callees: what it calls)
+codegraph impact saveUser -p <project root>                 # the code a change to it affects
+codegraph query saveUser -p <project root>                  # where a name is defined, as file:line
+```
+
+The binary is found in this order: the file key `"codegraphBin"` in
+`~/.config/opencode/agent-intercom.json`, then the environment variable
+`OPENCODE_AGENT_INTERCOM_CODEGRAPH_BIN` — each an absolute path to the
+executable — then `codegraph` on `PATH`. A configured path that is not an
+executable file is logged and falls to the next level. With a configured path the card names
+that path, so the binary need not be on the subagents' `PATH`:
+
+```json
+{ "codegraphBin": "/absolute/path/to/node_modules/.bin/codegraph" }
+```
+
+A project without a `.codegraph/` index makes every query exit 1; the card
+tells the role to go on with its usual tools then. Indexing a project
+(`codegraph init`) is the user's step. The binary is resolved once per opencode
+process: after installing codegraph or changing `codegraphBin`, restart opencode.
+
 ### `gen` — image generation, no API key
 
 The `designer` gets a `gen` CLI that turns a written brief into an image.
@@ -923,7 +959,7 @@ also takes `"maxRetainedSubagents"`, `"retainedSubagentTtlMs"`,
 `"maxMessageTokens"` for the mid-run channel, `"maxResultTokens"` and the per-agent-type
 `"resultTokens"` map for the reply ceiling, `"compaction"` and the
 per-agent-type `"agentCompaction"` map for automatic compaction,
-`"searxngUrl"` and `"exaApiKey"`
+`"searxngUrl"`, `"exaApiKey"` and `"codegraphBin"`
 (each overriding its environment variable), and `"forumBangs"` (no env var —
 the array REPLACES the built-in set rather than extending it). Everything else
 is environment-variable-driven:
@@ -952,6 +988,7 @@ is environment-variable-driven:
 | `OPENCODE_AGENT_INTERCOM_DISABLE_WEBSEARCH` / `_DISABLE_OUTLINE` / `_DISABLE_FORUM_SEARCH` / `_DISABLE_GROUNDED_SEARCH` | off | `"1"` skips that tool |
 | `OPENCODE_AGENT_INTERCOM_SKIP_CTAGS` / `_SKIP_CHROMIUM` | off | Installer-only: skip ctags build / Chromium download |
 | `OPENCODE_AGENT_INTERCOM_GROUNDING_TIMEOUT_MS` | `90000` | Per-request ceiling (ms) for `grounded_search`. |
+| `OPENCODE_AGENT_INTERCOM_CODEGRAPH_BIN` | — | Absolute path to the [`codegraph`](#codegraph--code-search-where-installed) binary the code-reading roles are told to run. Unset or unusable: `codegraph` on `PATH`; neither found: no role is told about it. A usable file key `"codegraphBin"` overrides. Read once per opencode process. |
 | `EXA_API_KEY` | — | If set, `web_search` uses Exa's paid tier. A non-empty file key `exaApiKey` overrides it, so a key rotated in the environment alone never reaches the plugin while the file carries one: a rotation updates both, or removes `exaApiKey` from the file. |
 | `OPENCODE_AGENT_INTERCOM_GOOGLE_API_KEY` / `GEMINI_API_KEY` / `GOOGLE_API_KEY` | — | API key for `grounded_search` (consulted in that order). Falls back to the `google.key` field of `${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json`, where `opencode auth login` writes a Gemini key. |
 | `POLLINATIONS_TOKEN` | — | If set, the `gen` Pollinations fallback uses your account |

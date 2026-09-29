@@ -108,6 +108,7 @@ import {
   SOLO_ROLE_HEADER_NAME,
 } from "./agents.js"
 import { resolveSpawnPermission } from "./config.js"
+import { codegraphCommand, codegraphCommandFor } from "./codegraph.js"
 import { overrideBlock, overrideToastText } from "./overrides.js"
 import { removeTask, TodoFileMissingError } from "./todofile.js"
 import { projectMdBlock, projectContext } from "./project.js"
@@ -661,6 +662,9 @@ export function createTransformSystem(client) {
         // resolved the tool map. Ignored on the subagent path — a subagent is
         // never told about retention (its own run is one-shot either way).
         retention: retentionOffered(),
+        // The command this role may run, asked of the same resolved `bash`
+        // permission the runtime re-check applies when the role calls it.
+        codegraph: await codegraphCommandFor(client, agentName),
       })
 
       // Detector B (overrides.js): the prompt files this project has on disk,
@@ -1666,11 +1670,14 @@ function fixedOverheadFor(agent, { projectMd, agentsMd, snapshot, delegatingRole
   // depends on the nesting setting and on the resolved config's
   // `permission.spawn` for that type, and the two blocks differ by ~250 tokens,
   // which is a real share of a 100k budget. `delegatingRoles` carries both
-  // conditions, already resolved by delegatingRolesAmong.
+  // conditions, already resolved by delegatingRolesAmong. The codegraph card is
+  // counted wherever a binary resolves, also for a role whose `bash` a project
+  // denies; that role is sized about 200 tokens high.
   let text =
     guideBlocks({
       agent,
       delegates: delegatingRoles?.has(agent) === true,
+      codegraph: codegraphCommand(),
     }) +
     projectMd +
     snapshot

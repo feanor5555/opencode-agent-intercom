@@ -153,18 +153,7 @@ export function createPermissionGuard(client) {
   // `task: "deny"` here would over-deny: that string is the signal we use to
   // HIDE opencode's blocking native `task` tool, NOT to disable `spawn`.
   async function checkToolPermission(callerAgent, tool) {
-    if (!callerAgent || !tool || tool === "task") return null
-    try {
-      const config = await loadConfig(client)
-      const decision = config?.agent?.[callerAgent]?.permission?.[tool]
-      if (decision === "deny") {
-        return `agent "${callerAgent}" is not permitted to call "${tool}" (permission.${tool})`
-      }
-      return null
-    } catch (err) {
-      log("checkToolPermission failed", errMsg(err))
-      return null
-    }
+    return resolveToolPermission(client, callerAgent, tool)
   }
 
   // The nested-spawn decision, bound to this guard's client. The function it
@@ -174,6 +163,26 @@ export function createPermissionGuard(client) {
   }
 
   return { checkTaskPermission, checkToolPermission, checkSpawnPermission }
+}
+
+// The body of the guard's checkToolPermission, exported for the prompt side:
+// a role is told about a tool through the same answer the runtime re-check
+// gives when the role calls it (codegraph.js `codegraphCommandFor` asks it for
+// `bash`). The resolved config is cached at module scope, so a second caller
+// costs no second request.
+export async function resolveToolPermission(client, callerAgent, tool) {
+  if (!callerAgent || !tool || tool === "task") return null
+  try {
+    const config = await loadConfig(client)
+    const decision = config?.agent?.[callerAgent]?.permission?.[tool]
+    if (decision === "deny") {
+      return `agent "${callerAgent}" is not permitted to call "${tool}" (permission.${tool})`
+    }
+    return null
+  } catch (err) {
+    log("checkToolPermission failed", errMsg(err))
+    return null
+  }
 }
 
 // Whether `callerAgent` may make a NESTED spawn — one whose caller is itself

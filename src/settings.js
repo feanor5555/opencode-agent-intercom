@@ -28,6 +28,12 @@
 // EXA_API_KEY > unset). Unset is not an error: web_search then uses Exa's
 // anonymous tier. The value is a secret — it is never written to the debug log.
 //
+// The codegraph binary is configured by file key `codegraphBin` and env
+// OPENCODE_AGENT_INTERCOM_CODEGRAPH_BIN, each an absolute path. Both values are
+// kept, file first, because the usability test is a filesystem check made in
+// src/codegraph.js: an unusable file value falls to the env value there, and
+// an unusable env value to `codegraph` on PATH.
+//
 // Endless mode resolves the same way: `endlessMode`, `endlessContext`,
 // `endlessQuiesceTimeoutMs` and `endlessMaxCycles`.
 // While `endlessMode` is on and the mode has not paused itself for the session
@@ -86,6 +92,7 @@
 //       "maxContext": N, "maxPrimaryContext": N,
 //       "maxSubagentAgeMs": N, "searxngUrl": "http://host:port",
 //       "exaApiKey": "<key>", "forumBangs": ["!hn", "!lo"],
+//       "codegraphBin": "/abs/path/to/codegraph",
 //       "postNoticeRetries": N, "postNoticeRetryBackoffMs": N,
 //       "endlessMode": true|false, "endlessContext": N,
 //       "endlessQuiesceTimeoutMs": N, "endlessMaxCycles": N,
@@ -469,13 +476,15 @@ function envStr(name, def) {
 // Current settings: { maxSubagents, maxContext, maxContextSource, agentContext,
 // maxPrimaryContext,
 // maxSubagentAgeMs, maxSubagentToolCallMs, searxngUrl, exaApiKey, forumBangs,
-// postNoticeRetries,
+// codegraphBins, postNoticeRetries,
 // postNoticeRetryBackoffMs, endlessMode, endlessContext,
 // endlessQuiesceTimeoutMs, endlessMaxCycles,
 // maxNestedSpawns, showAgentcom }.
 // Cached for TTL_MS so the hot paths (spawn, every subagent transform) don't
 // stat the file constantly. searxngUrl is "" when unset (searxng disabled).
 // exaApiKey is "" when unset (web_search falls back to Exa's anonymous tier).
+// codegraphBins is the ordered list of configured codegraph binaries, file
+// value first, then env value; empty where neither is set.
 // maxSubagentAgeMs is the watchdog window for a subagent with nothing in
 // flight; 0 disables the watchdog. maxSubagentToolCallMs is the same
 // watchdog's window for one that is inside a tool call; 0 means no ceiling
@@ -560,6 +569,7 @@ export function getSettings() {
     resultTokens: {},
     searxngUrl: envStr("OPENCODE_AGENT_INTERCOM_SEARXNG_URL", ""),
     exaApiKey: envStr("EXA_API_KEY", ""),
+    codegraphBins: [envStr("OPENCODE_AGENT_INTERCOM_CODEGRAPH_BIN", "")].filter(Boolean),
     forumBangs: [...DEFAULT_FORUM_BANGS],
     postNoticeRetries: envNum("OPENCODE_AGENT_INTERCOM_POST_NOTICE_RETRIES", DEFAULT_POST_NOTICE_RETRIES),
     postNoticeRetryBackoffMs: envNum("OPENCODE_AGENT_INTERCOM_POST_NOTICE_RETRY_BACKOFF_MS", DEFAULT_POST_NOTICE_RETRY_BACKOFF_MS),
@@ -671,6 +681,9 @@ export function getSettings() {
     }
     if (typeof raw?.searxngUrl === "string" && raw.searxngUrl.trim() !== "") {
       resolved.searxngUrl = raw.searxngUrl.trim()
+    }
+    if (typeof raw?.codegraphBin === "string" && raw.codegraphBin.trim() !== "") {
+      resolved.codegraphBins = [raw.codegraphBin.trim(), ...resolved.codegraphBins]
     }
     if (typeof raw?.exaApiKey === "string" && raw.exaApiKey.trim() !== "") {
       resolved.exaApiKey = raw.exaApiKey.trim()
@@ -1042,6 +1055,12 @@ export function getSearxngUrl() {
 // configured — web_search then uses Exa's anonymous tier, which is not an error.
 export function getExaApiKey() {
   return getSettings().exaApiKey
+}
+
+// The configured codegraph binaries in resolution order: file value, then env
+// value (src/codegraph.js tries each, then PATH).
+export function getCodegraphBins() {
+  return getSettings().codegraphBins
 }
 
 // The searxng bang set `forum_search` chains (file `forumBangs` > built-in).

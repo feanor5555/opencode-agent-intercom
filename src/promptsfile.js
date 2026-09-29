@@ -51,6 +51,7 @@ import {
   delegationGuideNameFor,
 } from "./prompts.js"
 import { retentionOffered, soloModeActive } from "./settings.js"
+import { codegraphCommand } from "./codegraph.js"
 import {
   classifyPromptFile,
   claimPromptFileScan,
@@ -72,11 +73,11 @@ export const OPENCODE_DEFAULTS_SUBDIR = "_opencode-defaults"
 // drift out of the template set.
 export const AGENT_NAMES = Object.keys(AGENTS)
 
-// Which subagents the plugin gives the outline-discipline block to: derived
-// from prompts.js OUTLINE_DISABLED_AGENTS rather than listed, so a role added
-// there cannot drift out of this set. The orchestrator is excluded because it is
-// not a subagent and gets ORCHESTRATION_GUIDE alone (prompts.js guideBlocks).
-// The active template gets the block through `{{guide}}`; this set is what the
+// Which subagents the plugin gives the outline-discipline block and the
+// codegraph card to: derived from prompts.js OUTLINE_DISABLED_AGENTS rather
+// than listed, so a role added there cannot drift out of this set. The
+// orchestrator is excluded because it is not a subagent (prompts.js
+// guideBlocks). The active template gets both through `{{guide}}`; this set is what the
 // read-only opencode-defaults reference file names in its what-the-plugin-adds
 // note.
 const HAS_OUTLINE = new Set(
@@ -435,7 +436,8 @@ export function renderOpencodeDefaultFile(agent) {
   // the orchestrator gets ORCHESTRATION_GUIDE, plus ORCHESTRATION_REUSE_GUIDE
   // where this process offers retention; every subagent gets the core plus
   // exactly one of the two spawn blocks plus, unless its outline tool is gated
-  // off, the reading discipline.
+  // off, the reading discipline and, where a codegraph binary resolves in this
+  // process, the codegraph card. The solo primary gets the card alone.
   //
   // The retention answer is the LATCHED one, exactly as the injection path
   // takes it (hooks.js, `retention: retentionOffered()`): whether the reuse
@@ -443,10 +445,12 @@ export function renderOpencodeDefaultFile(agent) {
   // reference file written mid-process names the block the role really gets
   // rather than what the settings file happens to say this second. The agent
   // mode is latched the same way and answers the same question for the primary:
-  // in solo mode guideBlocks gives it NO block at all, so there is no name to
-  // print and the note says what is added instead — nothing.
+  // in solo mode guideBlocks gives it no orchestration guide, so without a
+  // codegraph binary there is no name to print and the note says what is added
+  // instead — nothing.
+  const codegraphName = codegraphCommand() ? "codegraphGuide(<command>)" : ""
   const primaryGuideNames = soloModeActive()
-    ? ""
+    ? codegraphName
     : ["ORCHESTRATION_GUIDE", ...(retentionOffered() ? ["ORCHESTRATION_REUSE_GUIDE"] : [])].join(
         " + ",
       )
@@ -457,6 +461,7 @@ export function renderOpencodeDefaultFile(agent) {
           "SUBAGENT_GUIDE_CORE",
           mayDelegate(agent) ? delegationGuideNameFor(agent) : "SUBAGENT_NO_SPAWN_GUIDE",
           ...(HAS_OUTLINE.has(agent) ? ["SUBAGENT_OUTLINE_GUIDE"] : []),
+          ...(HAS_OUTLINE.has(agent) && codegraphName ? [codegraphName] : []),
         ].join(" + ")
   const addNotes = [
     guideNames
@@ -469,6 +474,12 @@ export function renderOpencodeDefaultFile(agent) {
       `  - SUBAGENT_NO_SPAWN_GUIDE stands in for ${delegationGuideNameFor(agent)}` +
         " wherever this role does not actually delegate: with nested spawning" +
         " switched off (maxNestedSpawns = 0), or with `spawn` denied for this" +
+        " role in the resolved opencode config",
+    )
+  }
+  if (codegraphName && guideNames.includes(codegraphName)) {
+    addNotes.push(
+      `  - ${codegraphName} is left out wherever \`bash\` is denied for this` +
         " role in the resolved opencode config",
     )
   }

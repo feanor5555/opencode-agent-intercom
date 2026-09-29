@@ -95,7 +95,7 @@ const TODO_TOOLS_BLOCK =
 
 const PLANNER_PROMPT = `# Role: Planner (Subagent)
 
-You write concept and design documents — you implement nothing, no edits in src/, no shell commands.
+You write concept and design documents — you implement nothing, no edits in src/.
 The rough project description lives only in PROJECT.md. When asked for it, return what is in PROJECT.md; if PROJECT.md is empty or only the default stub, say so explicitly instead of guessing from the code.
 Plan features as thin vertical slices: each slice runs and is testable on its own, cutting through every layer; one slice per task, no large multi-slice tasks.
 Before any library or framework choice, the current stable versions and their compatibility come from a \`researcher\` — you have no web tools and do not search yourself; use only URLs a researcher returned; spawn one where the lookup is worth a run of its own, otherwise name the missing lookup in your final reply so the orchestrator can order it — opened with \`Blocked:\` where the choice cannot be made without it.
@@ -227,7 +227,7 @@ const NO_SPAWN = {
 // delegating roles' limits block (hooks.js) sizes against it.
 //
 // The seven non-web roles reach the `researcher`: web search and fetching
-// is the one thing they have no tool for. The `researcher` reaches the
+// is the one thing they have no web tool for. The `researcher` reaches the
 // `grounder` and nothing else: that is the second, independent search path
 // (Google Search grounding), which its own tools do not give it.
 //
@@ -287,8 +287,9 @@ export function mayDelegate(agent) {
 // Every web tool this plugin gates, each denied: opencode's built-in
 // `webfetch`/`websearch` and the plugin's own `web_search`/`forum_search`/
 // `grounded_search` (see websearch.js, forumsearch.js, groundedsearch.js). A
-// role that spreads this map has no web access at all — the schema strip hides
-// all five and the runtime guard re-denies them. Such a role names the web
+// role that spreads this map has no web tool — the schema strip hides all five
+// and the runtime guard re-denies them; a role that holds `bash` keeps a shell,
+// and its prompt keeps it off the web. Such a role names the web
 // material it needs in its final reply; the orchestrator spawns a web role for
 // it.
 //
@@ -377,7 +378,7 @@ export const AGENTS = {
       "Writes concept/design documents. Plans but does not implement. Version and compatibility facts come from a researcher.",
     mode: "subagent",
     hidden: true,
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS },
     prompt: PLANNER_PROMPT,
   },
   coder: {
@@ -401,7 +402,7 @@ export const AGENTS = {
       "Critical developer. Reviews code against best practices, clean code, performance. Writes a review document in reviews/, changes no source code.",
     mode: "subagent",
     hidden: true,
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS },
     prompt: REVIEWER_PROMPT,
   },
   documenter: {
@@ -409,7 +410,7 @@ export const AGENTS = {
       "Writes user/API documentation (README, usage, changelog). Reads the actual code, invents nothing.",
     mode: "subagent",
     hidden: true,
-    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS, bash: "deny" },
+    permission: { ...SUBAGENT_NO_DELEGATION, ...NO_WEB_ACCESS },
     prompt: DOCUMENTER_PROMPT,
   },
   researcher: {
@@ -422,14 +423,14 @@ export const AGENTS = {
       // that grant to the `grounder` alone.
       ...SUBAGENT_NO_DELEGATION,
       ...webAccessExcept("webfetch", "websearch", "web_search", "forum_search"),
-      // `read`, `glob`, `grep`, `outline` and `write` are absent, and the
-      // absence is the grant: the researcher reads the project it researches
-      // for — outline first, then the range, the discipline
-      // SUBAGENT_OUTLINE_GUIDE teaches it — and writes its own result file.
-      // `edit` stays denied — it changes no existing code — and so does
-      // `bash`, which would be a second, ungated path to both fetching and
-      // editing.
-      edit: "deny", bash: "deny",
+      // `read`, `glob`, `grep`, `outline`, `write` and `bash` are absent, and
+      // the absence is the grant: the researcher reads the project it
+      // researches for — outline first, then the range, the discipline
+      // SUBAGENT_OUTLINE_GUIDE teaches it, and the codegraph CLI where one
+      // resolves — and writes its own result file. `edit` is denied; with
+      // `bash` granted, leaving existing code unchanged is the role prompt's
+      // rule.
+      edit: "deny",
       todos_open: "deny", todo_done: "deny", todo_add: "deny", todo_edit: "deny",
     },
     prompt: RESEARCHER_PROMPT,

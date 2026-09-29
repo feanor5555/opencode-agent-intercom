@@ -202,7 +202,7 @@ Recommended. Three shapes were weighed:
 |---|---|---|---|
 | **separate `forum_search` tool** (recommended) | two tool descriptions (~460 B) in every subagent system prompt | nothing | a second small tool module; the name must be in the two `deny` lists |
 | a `forums: boolean` on `web_search` | no extra tool, but `web_search`'s description must grow to explain when to set it — past the saving | one tool with two query shapes, two `numResults` ceilings and two backend call shapes inside one `execute` | a branchy `execute`, and the model must remember an optional flag it can silently omit |
-| prompt rule only, no tool change | free | **impossible**: the envelope, the bang chain and the keyword reduction are provider-call changes, and the researcher has `bash: "deny"` (`src/agents.js:432`) so it cannot make them itself | — |
+| prompt rule only, no tool change | free | **impossible**: the envelope, the bang chain and the keyword reduction are provider-call changes inside the tool, which no prompt rule reaches | — |
 
 The deciding argument is the one the source already makes for itself: this plugin buys short
 tool descriptions. A tool *name* is the strongest route signal a small model has; an optional

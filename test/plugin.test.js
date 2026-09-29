@@ -516,9 +516,9 @@ test("tool.execute.before lets a tracked subagent run work tools (but not delega
 // observable behaviors of that re-check.
 
 test("tool.execute.before hard-denies a subagent calling a tool in its deny map", async () => {
-  // planner has `bash: "deny"` — even though the schema strip is what hides
-  // `bash` from the planner's LLM, the runtime guard must still hard-deny
-  // if the tool is somehow invoked.
+  // The mocked config gives planner `bash: "deny"` — even though the schema
+  // strip is what hides a denied tool from the LLM, the runtime guard must
+  // still hard-deny if the tool is somehow invoked.
   const { ctx, created } = makeCtx({
     agentPerm: { planner: { permission: { bash: "deny" } } },
   })
@@ -536,8 +536,8 @@ test("tool.execute.before hard-denies a subagent calling a tool in its deny map"
 })
 
 test("tool.execute.before allows a subagent calling a tool NOT in its deny map", async () => {
-  // coder has `bash: "deny"` (matches agents.js config) but no entry for
-  // `edit` — the runtime re-check must not over-deny other tools.
+  // The mocked config gives coder `bash: "deny"` but no entry for `edit` —
+  // the runtime re-check must not over-deny other tools.
   const { ctx, created } = makeCtx({
     agentPerm: { coder: { permission: { bash: "deny" } } },
   })
@@ -670,7 +670,7 @@ test("only the two web roles keep web tools, each exactly its own search path", 
 
 // --- the researcher's file tools -------------------------------------------
 
-test("the researcher reads and writes files but changes no existing code", () => {
+test("the researcher reads and writes files and holds no edit tool", () => {
   const { permission } = AGENTS.researcher
   // Absence, not `"allow"`: an absent key leaves the tool in the LLM schema
   // (config.js strips only the bare-string denies) and lets the runtime guard
@@ -685,10 +685,9 @@ test("the researcher reads and writes files but changes no existing code", () =>
       `researcher must carry no ${tool} key — the absence is the grant`,
     )
   }
-  // The two that stay shut, and the reason each is shut: `edit` would change
-  // existing code, `bash` is a second path to both fetching and editing.
-  assert.equal(permission?.edit, "deny", "the researcher must not change existing code")
-  assert.equal(permission?.bash, "deny", "the researcher gets no shell")
+  // The one file tool that stays shut. Its `bash` is pinned with the other
+  // code readers' in test/codegraph-cli.test.js.
+  assert.equal(permission?.edit, "deny", "the researcher holds no edit tool")
   // The grounder is the other web role and is unchanged: it answers from one
   // tool and touches no file at all — `outline` included, which is why it is
   // in OUTLINE_DISABLED_AGENTS and the researcher is not.

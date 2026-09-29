@@ -202,6 +202,32 @@ export const SUBAGENT_OUTLINE_GUIDE =
   "Config, data, and short doc files (package.json, pyproject.toml, Cargo.toml, *.yaml, *.toml, " +
   "*.json, .env, README.md, AGENTS.md, CLAUDE.md): full `read` is fine. Skip outline.\n---\n"
 
+// A command word as bash reads it: the bare name or a plain path stays as it
+// is, anything else is single-quoted so a space or `$` in a configured path
+// reaches the binary unchanged.
+function shellWord(word) {
+  return /^[A-Za-z0-9_./+-]+$/.test(word) ? word : `'${word.replace(/'/g, "'\\''")}'`
+}
+
+// The codegraph usage card, written for `command` — the bare `codegraph` where
+// it is on PATH, the configured absolute path otherwise (src/codegraph.js).
+export function codegraphGuide(command) {
+  const cg = shellWord(command)
+  return (
+    "\n\n---\n🔎 agent-intercom: code search.\n" +
+    "To find code, run codegraph in bash and add `-p <project root>` to every command. " +
+    "To read a file you already know, use `outline` and `read`.\n" +
+    `- \`${cg} explore "how is a user saved"\` — the source of the matching symbols and the ` +
+    "call paths between them. A question or symbol names both work.\n" +
+    `- \`${cg} node saveUser\` — one symbol's source with its callers and callees.\n` +
+    `- \`${cg} callers saveUser\` / \`${cg} callees saveUser\` — what calls it / what it calls.\n` +
+    `- \`${cg} impact saveUser\` — the code a change to it affects.\n` +
+    `- \`${cg} query saveUser\` — where a name is defined, as file:line.\n` +
+    "An answer \"not initialized\" or \"no .codegraph/ index\" means the project has no index: " +
+    "go on with your usual tools and leave `init` to the user.\n---\n"
+  )
+}
+
 // The prompt contract: the elements a system prompt has to carry for the
 // mechanics around it to work. `CONTRACT_ELEMENTS` below is the definition of
 // which text those elements are; this integer is bumped BY HAND whenever one of
@@ -331,7 +357,8 @@ export function contractElementText(id) {
 
 // Subagents whose tool gating disables `outline` — they neither read source
 // code nor have the outline tool to call. Skip the outline-discipline block for
-// them so the system prompt doesn't push a tool they can't use. The grounder is
+// them so the system prompt doesn't push a tool they can't use; the codegraph
+// card rides on the same gate, since it is for the same code readers. The grounder is
 // in here for the strongest form of that reason: it holds no file tool at all
 // (`read`, `edit`, `write`, `bash`, `glob`, `grep` and `outline` are every one
 // of them denied in its permission map), so the block would name nothing it can
@@ -492,7 +519,13 @@ export function runWrapUpBlock({ elapsedMs, ceilingMs }) {
 // process offers the `reuse` tool, and it defaults to false so that every
 // caller that does not resolve it gets the guide as it ships.
 //
-// In solo mode the primary is given NO guide at all. The orchestration
+// `codegraph` is the codegraph command this agent may run, or null — resolved
+// by the caller (codegraph.js `codegraphCommandFor`) from the binary and the
+// role's resolved `bash` permission. A subagent gets the card after the
+// reading discipline and under the same outline gate; the solo primary gets it
+// as its only block.
+//
+// In solo mode the primary is given no orchestration guide. The orchestration
 // protocol describes tools it does not have and a delegation pattern it does
 // not run, and nothing takes its place: the blocks around it are each
 // self-delimited, so the assembled prompt is well formed without it, and the
@@ -506,9 +539,11 @@ export function guideBlocks({
   agent = "",
   delegates = false,
   retention = false,
+  codegraph = null,
 } = {}) {
+  const codegraphCard = codegraph ? codegraphGuide(codegraph) : ""
   if (primary) {
-    if (soloModeActive()) return ""
+    if (soloModeActive()) return codegraphCard
     return ORCHESTRATION_GUIDE + (retention ? ORCHESTRATION_REUSE_GUIDE : "")
   }
   return (
@@ -517,7 +552,7 @@ export function guideBlocks({
     // differs per role, so leaving both out would leave a subagent with nothing
     // said about spawning at all.
     (delegates ? delegationGuideFor(agent) : SUBAGENT_NO_SPAWN_GUIDE) +
-    (OUTLINE_DISABLED_AGENTS.has(agent) ? "" : SUBAGENT_OUTLINE_GUIDE) +
+    (OUTLINE_DISABLED_AGENTS.has(agent) ? "" : SUBAGENT_OUTLINE_GUIDE + codegraphCard) +
     // Last, because it is about the last thing the subagent does. Per type and
     // read from the settings at call time, like the limits block: it moves when
     // the settings file moves and not from one turn to the next, which is what

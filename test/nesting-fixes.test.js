@@ -458,7 +458,7 @@ test("rootPrimaryFor terminates on a parentID cycle", () => {
   assert.ok(["ses_a", "ses_b"].includes(rootPrimaryFor("ses_a")), "returns rather than spinning")
 })
 
-test("the endless wind-down restriction reaches a subagent through its root primary", () => {
+test("the wind-down claim is keyed on the root primary, not on a subagent", () => {
   upsertSession("ses_child", { agent: "planner", prompt: "p", parentID: PRIMARY })
   upsertSession("ses_grandchild", { agent: "researcher", prompt: "r", parentID: "ses_child" })
   markEndlessPending(PRIMARY)
@@ -467,23 +467,19 @@ test("the endless wind-down restriction reaches a subagent through its root prim
 
   assert.equal(isEndlessWindingDown(PRIMARY), true)
   assert.equal(isEndlessWindingDown("ses_child"), false, "the sets hold primary ids only")
-  assert.equal(
-    isEndlessWindingDown(rootPrimaryFor("ses_child")),
-    true,
-    "which is why the gate asks about the root, not the caller",
-  )
+  assert.equal(isEndlessWindingDown(rootPrimaryFor("ses_child")), true)
   assert.equal(isEndlessWindingDown(rootPrimaryFor("ses_grandchild")), true)
 })
 
-test("the spawn tool throws the wind-down refusal for a winding-down primary", async () => {
+test("the spawn tool admits a winding-down primary's spawn", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   markEndlessPending(PRIMARY)
   claimPendingEndless(PRIMARY)
   endlessWindingDown.add(PRIMARY)
   const res = await hooks.tool.spawn.execute({ agent: "coder", prompt: "x" }, toolCtx)
-  assert.match(res.output ?? "", /no further subagent starts in this session/)
-  assert.equal(created.length, 0)
+  assert.doesNotMatch(res.output ?? "", /^spawn failed|Endless mode|no further subagent/)
+  assert.equal(created.length, 1)
 })
 
 test("a session that has a registry entry is never tracked as a primary", () => {

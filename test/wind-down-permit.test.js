@@ -1,9 +1,10 @@
-// The endless cycle's wind-down permit: the one spawn a winding-down cycle admits.
+// The endless cycle's wind-down permit: the one spawn a winding-down cycle recognises as its own.
 //
 // Two halves. The permit state in src/registry.js — armed, consumed atomically,
 // restored at most once, disarmed — and the admission branch in `spawnHandler`
-// that reads it: a wrong token, a wrong agent, a nested caller and a second
-// call are all refused, and the admitted call blocks on its child.
+// that reads it: the conforming call is recognised once and blocks on its child;
+// a wrong token, a wrong agent, a nested caller and a second call are ordinary
+// spawns that leave the permit alone. Spawn is open through the whole cycle.
 //
 // Run: node --test test/wind-down-permit.test.js
 
@@ -34,6 +35,7 @@ import {
   markEndlessPending,
   claimPendingEndless,
   upsertSession,
+  entryForSession,
   forgetPrimary,
   retentionDecision,
 } from "../src/registry.js"
@@ -219,7 +221,7 @@ function armCycle() {
 const windDownPrompt = (token = TOKEN, payload = "what is open: the migration script.") =>
   `${WIND_DOWN_TOKEN_PREFIX} ${token}\n${payload}`
 
-test("a winding-down cycle without a permit refuses every spawn", async () => {
+test("a winding-down cycle without a permit spawns as usual", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   windDownCycle()
@@ -227,13 +229,16 @@ test("a winding-down cycle without a permit refuses every spawn", async () => {
     { agent: "planner", prompt: windDownPrompt() },
     primaryCtx,
   )
-  assert.match(res.output, /spawn failed: .*no further subagent starts in this session/s)
+  assert.doesNotMatch(res.output, /spawn failed|Endless mode|no further subagent/)
+  assert.notEqual(res.metadata?.windDown, true)
+  assert.equal(entryForSession("ses_sub1")?.windDown, undefined, "an ordinary entry, not the wind-down child")
 })
 
-test("an armed permit refuses a wrong call by naming the one that is allowed", async () => {
+test("an armed permit leaves a wrong call an ordinary spawn and is not consumed by it", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   armCycle()
+  let n = 0
   for (const args of [
     { agent: "planner", prompt: "no token line at all" },
     { agent: "planner", prompt: windDownPrompt("deadbeefdeadbeef") },
@@ -241,13 +246,14 @@ test("an armed permit refuses a wrong call by naming the one that is allowed", a
     { agent: "planner", prompt: `prose first\n${WIND_DOWN_TOKEN_PREFIX} ${TOKEN}\n` },
   ]) {
     const res = await hooks.tool.spawn.execute(args, primaryCtx)
-    assert.match(res.output, /Exactly ONE spawn is allowed/)
-    assert.ok(res.output.includes(`${WIND_DOWN_TOKEN_PREFIX} ${TOKEN}`))
+    n += 1
+    assert.doesNotMatch(res.output, /spawn failed|Endless mode|ONE spawn/)
+    assert.equal(entryForSession(`ses_sub${n}`)?.windDown, undefined)
   }
-  assert.equal(endlessWindDownPermit(PRIMARY).consumed, false, "no refusal consumed the permit")
+  assert.equal(endlessWindDownPermit(PRIMARY).consumed, false, "no ordinary spawn consumed the permit")
 })
 
-test("the conforming spawn is admitted once; the second one is refused", async () => {
+test("the conforming spawn is recognised once; the second one is an ordinary spawn", async () => {
   const { ctx, prompts } = makeCtx()
   const hooks = await plugin(ctx)
   armCycle()
@@ -263,15 +269,13 @@ test("the conforming spawn is admitted once; the second one is refused", async (
   assert.equal(permit.childSessionID, "ses_sub1")
   assert.equal(hasChildWaiter("ses_sub1"), true, "a waiter is registered although the parent is a primary")
 
-  const refused = await hooks.tool.spawn.execute(
+  const second = await hooks.tool.spawn.execute(
     { agent: "planner", prompt: windDownPrompt() },
     primaryCtx,
   )
-  assert.match(
-    refused.output,
-    /spawn failed: .*no further subagent starts in this session/s,
-    "a second call finds the permit consumed and takes the ordinary refusal",
-  )
+  assert.doesNotMatch(second.output, /spawn failed|Endless mode|no further subagent/)
+  assert.equal(entryForSession("ses_sub2")?.windDown, undefined, "a second call finds the permit consumed")
+  assert.equal(endlessWindDownPermit(PRIMARY).childSessionID, "ses_sub1", "the child stays the first one")
 
   settleChildWaiter("ses_sub1", { status: "completed", agent: "planner", result: "8 open" })
   const res = await call
@@ -350,10 +354,17 @@ test("a nested caller never reaches the permit", async () => {
   // A subagent of that primary: a session with a registry entry is a nested
   // caller, and the permit branch is closed to it.
   upsertSession("ses_sub_caller", { agent: "planner", parentID: PRIMARY, directory: projectDir })
-  const res = await hooks.tool.spawn.execute(
+  // A nested spawn blocks on its child, so the call is left running and the
+  // child settled once the permit has been read.
+  const call = hooks.tool.spawn.execute(
     { agent: "researcher", prompt: windDownPrompt() },
     { sessionID: "ses_sub_caller", agent: "planner", messageID: "m2" },
   )
-  assert.match(res.output, /Spawn refused: endless mode is handing the primary orchestrator.s work to a fresh session/)
+  await new Promise((r) => setTimeout(r, 30))
+  assert.equal(endlessWindDownPermit(PRIMARY).consumed, false)
+  assert.equal(entryForSession("ses_sub1")?.windDown, undefined)
+  settleChildWaiter("ses_sub1", { status: "completed", agent: "researcher", result: "found" })
+  const res = await call
+  assert.doesNotMatch(res.output, /endless mode is handing/i)
   assert.equal(endlessWindDownPermit(PRIMARY).consumed, false)
 })

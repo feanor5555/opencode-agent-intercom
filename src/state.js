@@ -179,8 +179,8 @@ export const endlessInProgress = new Set()
 // sessionIDs whose executing endless cycle has CLAIMED its wind-down: the
 // quiesce predicate held — no subagent of the primary running and the primary
 // idle — and the cycle took it in the same synchronous step. From here until
-// the cycle ends, `spawn` admits the wind-down permit alone and `reuse`
-// refuses. A subset of endlessInProgress, released with it.
+// the cycle ends the primary's delivery drain stands open; `spawn` and `reuse`
+// stay open. A subset of endlessInProgress, released with it.
 export const endlessWindingDown = new Set()
 
 // sessionIDs of primaries holding an endless cycle (pending or executing) that
@@ -262,7 +262,7 @@ export const endlessProgress = { lastOpenIds: null, stalledCycles: 0 }
 //
 //   { token, agent, consumed, restores, childSessionID, settlement }
 //
-// The one spawn a winding-down cycle admits. Armed between the wind-down
+// The one spawn a winding-down cycle recognises as its own writer. Armed between the wind-down
 // claim and the wind-down turn, consumed synchronously at
 // admission, given back at most once when the child never started, and
 // disarmed on every exit of the cycle — see armEndlessWindDown and its five

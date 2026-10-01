@@ -78,9 +78,9 @@ export function trackPrimary(sessionID) {
 // unconditionally.
 //
 // This is what makes a primary-keyed decision reach a nested caller. The
-// endless-mode wind-down restriction is the case in hand: its sets are keyed on
-// primary session ids only, so `isEndlessWindingDown(subagentSessionID)` is
-// always false and a subagent would spawn straight through the restriction.
+// endless-mode wind-down permit is the case in hand: its map is keyed on
+// primary session ids only, so `endlessWindDownPermit(subagentSessionID)` is
+// always undefined and only the root primary can be the cycle's wind-down caller.
 //
 // The walk is bounded twice: by a `seen` set, so a parentID cycle (which the
 // spawn path cannot produce, but a reparent race could) returns instead of
@@ -137,6 +137,9 @@ export function forgetPrimary(sessionID) {
   // could never be claimed again (no further idle events) but would leak.
   pendingHandoffs.delete(sessionID)
   handoffInProgress.delete(sessionID)
+  // A drain the wind-down claim opened and no handoff closed belongs to a
+  // session that is gone; its buffer has nowhere to go.
+  if (endlessWindingDown.has(sessionID)) abortHandoffDrain(sessionID)
   // Same for the endless latch, the wind-down claim, the busy mark and the
   // cooldown: the cycle that just replaced this primary is over and its id is
   // never scheduled again. The cross-cycle progress record (endlessProgress)
@@ -1804,13 +1807,17 @@ export function claimPendingEndless(sessionID) {
   return true
 }
 
-// Abandon-path release: clears the in-progress latch and the wind-down claim,
-// which lifts the wind-down restriction on `spawn`. The consumed pending flag
+// Abandon-path release: clears the in-progress latch and the wind-down claim
+// with its delivery drain. The consumed pending flag
 // is NOT restored — a retry has to go through a fresh schedule, and the
 // cooldown holds that back for five minutes. The success path releases via
 // forgetPrimary instead.
 export function releaseEndless(sessionID) {
   if (!sessionID) return
+  // The claim's delivery drain ends with the claim. Its buffer is taken first by
+  // the caller that delivers it (releaseEndlessCycle, handoffwiring.js); a drain
+  // still standing here is dropped so none outlives the cycle.
+  if (endlessWindingDown.has(sessionID)) abortHandoffDrain(sessionID)
   endlessInProgress.delete(sessionID)
   endlessWindingDown.delete(sessionID)
   endlessPrimaryBusy.delete(sessionID)
@@ -1841,9 +1848,10 @@ export function hasEndlessCycle(sessionID) {
   return pendingEndless.has(sessionID) || endlessInProgress.has(sessionID)
 }
 
-// The wind-down restriction: true from the wind-down claim until the cycle
-// ends. Read at the top of the `spawn` and `reuse` handlers; while it holds,
-// `spawn` admits the wind-down permit alone.
+// True from the wind-down claim until the cycle ends. It restricts nothing:
+// `spawn` and `reuse` stay open through the claim. It says that the cycle's
+// delivery drain for this primary is open (claimEndlessWindDown), which the
+// cycle's release closes.
 export function isEndlessWindingDown(sessionID) {
   return endlessWindingDown.has(sessionID)
 }
@@ -1869,14 +1877,33 @@ export function isEndlessPrimaryBusy(sessionID) {
 // the claim inside the SAME registryMutex section, so no spawn, delivery or
 // primary turn can be admitted between the reading and the claim. Only an
 // executing cycle can claim; answers whether the claim stands.
+//
+// The claim opens the primary's delivery drain in that same section: spawn and
+// reuse stay open after it, and the notice of a subagent the primary starts
+// from here on is buffered, not posted into the session the cycle is about to
+// replace. The handoff's own begin finds the drain standing, and the flush
+// delivers the buffer to the successor after its kickoff; a cycle that ends
+// without a handoff hands the buffer back to this primary
+// (closeEndlessWindDownDrain).
 export function claimEndlessWindDown(sessionID) {
   return registryMutex.runExclusive(() => {
     if (!sessionID || !endlessInProgress.has(sessionID)) return false
     if (endlessWindingDown.has(sessionID)) return true
     if (!quiescedNow(sessionID)) return false
     endlessWindingDown.add(sessionID)
+    beginHandoffDrain(sessionID)
     return true
   })
+}
+
+// The release side of the claim's drain: closes it WITHOUT a redirect and
+// returns the notices it buffered, for delivery back to the primary that stays
+// live; null where this primary holds no claim or no drain. Synchronous, so the
+// router sees either the drain or the live session. A drain the handoff has
+// already flushed or aborted is gone and answers null.
+export function closeEndlessWindDownDrain(sessionID) {
+  if (!sessionID || !endlessWindingDown.has(sessionID)) return null
+  return abortHandoffDrain(sessionID)
 }
 
 // The step a running cycle has reached, mirrored into the published file the
@@ -1901,13 +1928,13 @@ export function forgetEndlessStep(sessionID) {
 }
 
 // ----------------------------------------------------------------------------
-// The wind-down permit: the ONE spawn a winding-down cycle admits.
+// The wind-down permit: the ONE spawn a winding-down cycle recognises as its own.
 //
-// The wind-down claim above refuses every spawn from the moment it is taken.
-// The cycle's wind-down step needs exactly one exception — the orchestrator
-// starts a `planner` that rewrites the todo file — and the permit is what makes
-// that exception single-use, typed and unforgeable rather than a hole in the
-// restriction.
+// The wind-down claim leaves spawn open. The cycle's wind-down step needs
+// exactly one spawn of its own — the orchestrator starts a `planner` that
+// rewrites the todo file, with a prompt the plugin composes — and the permit is
+// what makes that spawn single-use, typed and unforgeable: every other spawn is
+// an ordinary one.
 //
 // Armed at exactly one call site (between the wind-down claim and the
 // wind-down turn, never before the claim), consumed SYNCHRONOUSLY at

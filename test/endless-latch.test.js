@@ -37,6 +37,7 @@ import {
   isEndlessInProgress,
   hasEndlessCycle,
   isEndlessWindingDown,
+  hasHandoffDrain,
   claimEndlessWindDown,
   noteEndlessPrimaryBusy,
   noteEndlessPrimaryIdle,
@@ -182,16 +183,18 @@ test("hasEndlessCycle: true from the mark, through the claim, until the release"
   assert.equal(hasEndlessCycle(SID), false, "the release ends it")
 })
 
-test("isEndlessWindingDown: false through the latch and the quiesce wait, true from the claim until the release", async () => {
+test("isEndlessWindingDown: false through the latch and the quiesce wait, true from the claim until the release, and the claim's drain with it", async () => {
   markEndlessPending(SID)
-  assert.equal(isEndlessWindingDown(SID), false, "the latch restricts nothing")
+  assert.equal(isEndlessWindingDown(SID), false, "the latch")
   claimPendingEndless(SID)
-  assert.equal(isEndlessWindingDown(SID), false, "the quiesce wait restricts nothing")
+  assert.equal(isEndlessWindingDown(SID), false, "the quiesce wait")
   noteEndlessPrimaryIdle(SID)
   assert.equal(await claimEndlessWindDown(SID), true)
-  assert.equal(isEndlessWindingDown(SID), true, "the claim restricts")
+  assert.equal(isEndlessWindingDown(SID), true, "the claim")
+  assert.equal(hasHandoffDrain(SID), true, "the claim opens the delivery drain")
   releaseEndless(SID)
-  assert.equal(isEndlessWindingDown(SID), false, "the release lifts it")
+  assert.equal(isEndlessWindingDown(SID), false, "the release ends it")
+  assert.equal(hasHandoffDrain(SID), false, "and drops the drain with it")
 })
 
 test("the mark leaves the primary busy: the transform that marks runs inside its turn", () => {
@@ -227,7 +230,7 @@ test("claimEndlessWindDown: a primary inside a turn is not quiesced even with no
   assert.equal(await claimEndlessWindDown(SID), true, "no subagent and the primary idle: claimed")
   assert.equal(isEndlessWindingDown(SID), true)
   releaseEndless(SID)
-  assert.equal(isEndlessWindingDown(SID), false, "the release lifts the restriction")
+  assert.equal(isEndlessWindingDown(SID), false, "the release ends the claim")
 })
 
 // ---------------------------------------------------------------------------

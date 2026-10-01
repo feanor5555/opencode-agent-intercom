@@ -543,7 +543,7 @@ export function windDownPayloadOf(prompt) {
 // The prompt an endless cycle sends to the primary that is about to be
 // replaced. The orchestrator cannot write files — it holds spawn / abort /
 // list / reuse and nothing else — so the file is written by a `planner` the
-// orchestrator itself starts, through the single-use permit the wind-down admits.
+// orchestrator itself starts, recognised by the single-use permit and its token.
 // What comes back here is only the shaped closing line: the three forms below
 // are what the cycle's V3, V7 and its explicit-empty stop read.
 //
@@ -559,8 +559,8 @@ export function WIND_DOWN_PROMPT(token, fileName, driftCount = 0) {
       : ""
   return (
     "You are about to be replaced by a fresh orchestrator session that will continue this work " +
-    `from ${file}. Every subagent has finished and no further work will be delegated.\n\n` +
-    "You may make exactly ONE more tool call: `spawn(\"planner\", …)` whose prompt's FIRST line " +
+    `from ${file}.\n\n` +
+    "Make this tool call now: `spawn(\"planner\", …)` whose prompt's FIRST line " +
     `is\n\n    ${WIND_DOWN_TOKEN_PREFIX} ${token}\n\n` +
     "Everything after that line is handed to the subagent as your hand-over: what is finished, " +
     "what is open, what was decided and not yet carried out, what a subagent reported back as " +

@@ -3,12 +3,10 @@
 // through the quiesce wait, `spawn` and `abort` run as usual; a subagent it
 // starts then is one more the quiesce waits for; the wind-down is claimed only
 // once none of the primary's subagents runs and the primary is idle; and from
-// that claim on `spawn` is refused to everything but the wind-down permit.
+// that claim on `spawn` and `reuse` stay open: a result that comes in after the
+// claim is buffered by the delivery drain the claim opens.
 // Drives the real plugin factory with a mock client, the way
 // test/plugin.test.js does.
-//
-// A primary's refusal is a THROW inside the spawn handler; `guard` in tools.js
-// turns it into `spawn failed: <the refusal text>`, which is what is asserted.
 //
 // Run: node --test --test-timeout=5000 test/endless-spawn-after-latch.test.js
 
@@ -27,12 +25,18 @@ import {
   claimEndlessWindDown,
   noteEndlessPrimaryIdle,
   isEndlessWindingDown,
+  hasHandoffDrain,
+  beginHandoffDrain,
+  bindHandoffDrainTarget,
+  flushHandoffDrain,
+  closeEndlessWindDownDrain,
   isEndlessPrimaryBusy,
   countActiveSubagents,
   countActiveSubagentsFor,
   entryForSession,
   upsertSession,
 } from "../src/registry.js"
+import { releaseEndlessCycle } from "../src/handoffwiring.js"
 import { resetProjectContext } from "../src/project.js"
 import { setSettingsPath, resetSettings } from "../src/settings.js"
 import { resetPermissionGuardCache } from "../src/config.js"
@@ -185,7 +189,8 @@ test("a session.status busy event marks the primary busy, an idle status clears 
 })
 
 // ---------------------------------------------------------------------------
-// From the wind-down claim: the permit alone
+// From the wind-down claim: spawn and reuse stay open, and a result that comes
+// in is buffered for the primary that ends up running
 // ---------------------------------------------------------------------------
 
 async function windingDown() {
@@ -196,22 +201,20 @@ async function windingDown() {
   assert.equal(await claimEndlessWindDown(PRIMARY), true)
 }
 
-test("after the wind-down claim, a spawn without the permit is refused and takes no slot", async () => {
+test("after the wind-down claim, a spawn is accepted and takes its slot", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   await windingDown()
 
   const res = await hooks.tool.spawn.execute({ agent: "researcher", prompt: "do x" }, toolCtx)
 
-  assert.match(res.output, /^spawn failed: /)
-  assert.match(res.output, /handing this session over to a fresh orchestrator right now/)
-  assert.match(res.output, /no further subagent starts in this session/)
-  assert.doesNotMatch(res.output, /End your turn now|No new subagent will start/)
-  assert.equal(countActiveSubagents(), 0)
-  assert.deepEqual(created, [])
+  assert.doesNotMatch(res.output, /^spawn failed: /)
+  assert.doesNotMatch(res.output, /Endless mode|handing this session over|no further subagent/)
+  assert.deepEqual(created, ["ses_sub1"])
+  assert.equal(countActiveSubagentsFor(PRIMARY), 1)
 })
 
-test("after the wind-down claim, a nested caller gets an actionable refusal", async () => {
+test("after the wind-down claim, a nested caller's spawn is not refused for endless mode", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   upsertSession("ses_planner", { agent: "planner", parentID: PRIMARY })
@@ -219,29 +222,91 @@ test("after the wind-down claim, a nested caller gets an actionable refusal", as
   claimPendingEndless(PRIMARY)
   endlessWindingDown.add(PRIMARY)
 
-  const res = await hooks.tool.spawn.execute(
+  const call = hooks.tool.spawn.execute(
     { agent: "researcher", prompt: "do x" },
     { sessionID: "ses_planner", agent: "planner", messageID: "m2" },
   )
-
-  assert.match(res.output, /^Spawn refused: endless mode is handing the primary orchestrator's work/)
-  assert.match(res.output, /Do what you can yourself/)
-  assert.match(res.output, /Open that reply with "Blocked:"/)
-  assert.doesNotMatch(res.output, /^spawn failed:/)
-  assert.deepEqual(created, [])
+  await new Promise((r) => setTimeout(r, 30))
+  assert.deepEqual(created, ["ses_sub1"], "the nested spawn started a child")
+  await hooks.event(idle("ses_sub1"))
+  const res = await call
+  assert.doesNotMatch(res.output, /endless mode is handing|^spawn failed:/i)
 })
 
-test("after the wind-down claim, reuse is refused", async () => {
+test("after the wind-down claim, reuse is not refused for endless mode", async () => {
   const { ctx } = makeCtx()
   const hooks = await plugin(ctx)
   await windingDown()
 
   const res = await hooks.tool.reuse.execute({ subagent: "researcher#1", prompt: "follow up" }, toolCtx)
 
-  assert.match(res.output, /handing this session over to a fresh orchestrator right now/)
+  assert.doesNotMatch(res.output ?? "", /handing this session over|no follow-up will run/)
 })
 
-test("the release lifts the restriction and spawn proceeds", async () => {
+test("the claim opens the delivery drain: a subagent started after it ends into the buffer, not the session", async () => {
+  const { ctx, created, noticesTo } = makeCtx()
+  const hooks = await plugin(ctx)
+  await windingDown()
+  assert.equal(hasHandoffDrain(PRIMARY), true, "the claim opened the drain")
+
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "do x" }, toolCtx)
+  await hooks.event(idle(created[0]))
+
+  assert.deepEqual(noticesTo, [], "nothing was posted into the session being replaced")
+  assert.equal(countActiveSubagentsFor(PRIMARY), 0)
+  assert.equal(bufferedCount(), 1, "the result is held in the drain")
+})
+
+function bufferedCount() {
+  // Closes the drain and counts what it held; nothing is delivered.
+  const drained = closeEndlessWindDownDrain(PRIMARY)
+  return drained ? drained.notices.length : 0
+}
+
+test("a handoff that completes delivers the buffered result to the successor", async () => {
+  const { ctx, created } = makeCtx()
+  const hooks = await plugin(ctx)
+  await windingDown()
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "do x" }, toolCtx)
+  await hooks.event(idle(created[0]))
+
+  // The handoff's own begin finds the drain standing, then binds the successor.
+  beginHandoffDrain(PRIMARY)
+  bindHandoffDrainTarget(PRIMARY, "ses_successor")
+  const flushed = flushHandoffDrain(PRIMARY)
+
+  assert.equal(flushed.newID, "ses_successor")
+  assert.equal(flushed.notices.length, 1, "the result reaches the successor")
+})
+
+test("a cycle that ends without a handoff hands the buffered result back to the primary", async () => {
+  const { ctx, created, noticesTo } = makeCtx()
+  const hooks = await plugin(ctx)
+  await windingDown()
+  await hooks.tool.spawn.execute({ agent: "researcher", prompt: "do x" }, toolCtx)
+  await hooks.event(idle(created[0]))
+  assert.deepEqual(noticesTo, [])
+
+  const delivered = await releaseEndlessCycle(ctx.client, PRIMARY)
+
+  assert.equal(delivered, 1)
+  assert.deepEqual(noticesTo, [PRIMARY], "the primary, which stays live, receives the result")
+  assert.equal(isEndlessWindingDown(PRIMARY), false)
+  assert.equal(hasHandoffDrain(PRIMARY), false, "no drain is left behind")
+})
+
+test("the release of a cycle that holds no claim touches no drain", async () => {
+  const { ctx } = makeCtx()
+  await plugin(ctx)
+  markEndlessPending(PRIMARY)
+  claimPendingEndless(PRIMARY)
+  beginHandoffDrain(PRIMARY) // a drain that is not this cycle's claim
+
+  assert.equal(await releaseEndlessCycle(ctx.client, PRIMARY), 0)
+  assert.equal(hasHandoffDrain(PRIMARY), true)
+})
+
+test("the release lifts the claim and spawn proceeds", async () => {
   const { ctx, created } = makeCtx()
   const hooks = await plugin(ctx)
   await windingDown()

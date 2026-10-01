@@ -128,19 +128,14 @@ throw is what small models retry into a loop. Each names what IS available and t
 caller to do the rest itself and to open its final reply with `Blocked:` where the
 missing material stops the task.
 
-The endless wind-down gate is worth naming separately, because its answer differs by
-caller. The latch and the quiesce wait restrict nothing; from the moment the cycle claims
-its wind-down — none of the primary's subagents running and the primary idle
-(`claimEndlessWindDown`, `src/registry.js`) — until the cycle ends, no new subagent starts
-except the cycle's own permitted wind-down spawn, because a subagent started now would be
-reparented onto a session that has no memory of asking for it. The question is asked of
-the caller's ROOT primary (`isEndlessWindingDown(rootPrimaryFor(...))`, `src/tools.js`),
-because the wind-down set holds primary session ids only and a nested caller asking about
-its own id would be told "not winding down" and spawn straight through. A primary gets the
-throw the endless-mode contract names — the hand-over has begun, put the work into the
-hand-over. A nested caller gets a returned refusal instead: it takes no part in the
-hand-over, so it is told that this delegation will not start, to do what it can itself,
-and to open its final reply with `Blocked:` where the missing material stops the task.
+Endless mode refuses no nested spawn. The latch, the quiesce wait and the wind-down claim
+(`claimEndlessWindDown`, `src/registry.js`) leave `spawn` open for a primary and for a nested
+caller alike. The cycle's own wind-down spawn is recognised by its single-use permit, which is
+looked up for the caller's ROOT primary only (`rootPrimaryFor`, `src/tools.js`), because the
+permit map holds primary session ids only and a nested caller can never be the wind-down
+caller. A subagent started after the claim is an ordinary one: the handoff reparents it onto
+the successor while it runs, and its result is buffered by the delivery drain the claim opens
+and flushed to the successor (specs/endless-mode.md §3.3).
 
 **(ii) A rendered ending.** The child's outcome, as text the caller can act on. Every
 ending renders — `completed`, `error`, `aborted`, `timeout`, `expired`, `ended`,

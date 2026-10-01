@@ -27,6 +27,7 @@ import {
   bindHandoffDrainTarget,
   flushHandoffDrain,
   abortHandoffDrain,
+  closeEndlessWindDownDrain,
   handoffGeneration,
   sessionAgentName,
   hasEndlessPending,
@@ -325,6 +326,35 @@ export async function buildPrimaryHandoffDeps(client, sessionID, sessionDir, res
   }
 }
 
+// The cycle ended without replacing the primary: the notices its wind-down
+// claim buffered go back to this primary, which stays the live orchestrator, in
+// arrival order. The drain closes synchronously, so the router sees either the
+// drain or the live session; the delivery follows detached, best-effort per
+// notice like the handoff's own abort path. A release after a completed handoff
+// finds no drain and delivers nothing. Returns the delivery, for a caller that
+// wants to wait for it.
+export function releaseEndlessCycle(client, sessionID) {
+  const drained = closeEndlessWindDownDrain(sessionID)
+  releaseEndless(sessionID)
+  if (!drained?.notices.length) return Promise.resolve(0)
+  return (async () => {
+    for (const notice of drained.notices) {
+      try {
+        await deliverParentNotice(client, sessionID, notice, {
+          kind: "handoff-drain-abort",
+          requestedFor: sessionID,
+        })
+      } catch (err) {
+        log("endless release: buffered notice delivery failed", {
+          target: sessionID,
+          err: errMsg(err),
+        })
+      }
+    }
+    return drained.notices.length
+  })()
+}
+
 // Asks the primary that is about to be replaced for ONE more shaped turn, and
 // waits for it. Both final turns the plugin takes out of a dying primary go
 // through here, differing only in the prompt and the shape check:
@@ -592,7 +622,7 @@ export async function maybeRunPendingEndless(client, sessionID) {
   return runEndlessCycle({
     primarySessionID: sessionID,
     claim: () => claimPendingEndless(sessionID),
-    release: () => releaseEndless(sessionID),
+    release: () => releaseEndlessCycle(client, sessionID),
     setCooldown: () => setEndlessCooldown(sessionID),
     // Cycle step 3: the quiesce reading and the wind-down claim in one mutex
     // section (claimEndlessWindDown), so no spawn, delivery or primary turn is

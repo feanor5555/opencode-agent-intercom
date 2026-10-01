@@ -29,7 +29,6 @@ import {
   reservePendingTaskId,
   releasePendingTaskId,
   isTaskIdPending,
-  isEndlessWindingDown,
   endlessWindDownPermit,
   consumeEndlessWindDown,
   restoreEndlessWindDown,
@@ -61,7 +60,6 @@ import {
 } from "./teardown.js"
 import { projectContext } from "./project.js"
 import {
-  WIND_DOWN_TOKEN_PREFIX,
   windDownTokenOf,
   windDownPayloadOf,
   DOC_SUMMARIES_POLL_MS,
@@ -431,81 +429,42 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
       )
       if (refusal) return { output: refusal }
     }
-    // The endless-mode wind-down restriction. The latch and the quiesce wait
-    // restrict nothing: the orchestrator keeps delegating until the cycle
-    // claims its wind-down, which it does only while none of this primary's
-    // subagents runs and the primary is idle (claimEndlessWindDown). From that
-    // claim until the cycle ends, no new subagent starts — the session is about
-    // to be replaced, and a subagent started now would be reparented onto a
-    // session that has no memory of asking for it.
+    // Endless mode restricts no spawn at any step of the cycle: the latch, the
+    // quiesce wait, the wind-down claim and the hand-over all leave `spawn`
+    // open. A subagent started after the claim is an ordinary one — while it
+    // runs the handoff reparents it onto the successor, and a notice it
+    // finishes with is buffered by the delivery drain the claim opens and
+    // flushed to the successor (claimEndlessWindDown, registry.js).
     //
-    // A primary caller gets a throw, which `guard` turns into
-    // `spawn failed: <this text>`. A nested caller instead receives a returned
-    // refusal: it has to get a result it can act on.
+    // The one special case is the cycle's own wind-down spawn, recognised and
+    // not admitted: the orchestrator cannot write files, so the todo file is
+    // rewritten by a `planner` it starts itself, and the plugin composes that
+    // child's prompt. It is recognised by a single-use permit and takes all
+    // four terms — a permit is armed and unconsumed, the caller IS the root
+    // primary, the agent is the permitted one, and the prompt's first line
+    // carries the per-cycle token. The consume happens in the SAME synchronous
+    // block as the test, before any await, for the reason reservePendingTaskId
+    // states below: two spawns in one turn carrying the same token would
+    // otherwise both be taken for the wind-down child. Any other call, a
+    // token-bearing repeat included, is an ordinary spawn.
     //
-    // Asked of the caller's ROOT primary, not of the caller: the endless sets
-    // hold primary session ids only, so a nested caller asking about its own
-    // id would always be told "not winding down". For a primary caller
-    // rootPrimaryFor is the identity.
-    //
-    // The ONE exception is the cycle's own wind-down spawn, and only while its
-    // permit is armed: the orchestrator cannot write files, so the todo file is
-    // rewritten by a `planner` it starts itself. Admission takes all five terms
-    // — the cycle is winding down, the caller IS the root primary, the agent is
-    // the permitted one, the prompt's first line carries the per-cycle token,
-    // and the permit is unconsumed — and the consume happens in the SAME
-    // synchronous block as the test, before any await, for the reason
-    // reservePendingTaskId states below: two spawns in one turn carrying the
-    // same token would otherwise both pass.
+    // Asked of the caller's ROOT primary: the permit map holds primary session
+    // ids only. For a primary caller rootPrimaryFor is the identity.
     const rootPrimary = rootPrimaryFor(toolCtx.sessionID)
     let windDown = false
-    if (isEndlessWindingDown(rootPrimary)) {
-      const permit = endlessWindDownPermit(rootPrimary)
-      const eligible = !nested && Boolean(permit) && toolCtx.sessionID === rootPrimary
-      const admission = eligible
-        ? consumeEndlessWindDown(rootPrimary, {
-            token: windDownTokenOf(args.prompt),
-            agent: args.agent,
-          })
-        : { ok: false, reason: "none" }
+    const windDownPermit =
+      !nested && toolCtx.sessionID === rootPrimary ? endlessWindDownPermit(rootPrimary) : undefined
+    if (windDownPermit && !windDownPermit.consumed) {
+      const admission = consumeEndlessWindDown(rootPrimary, {
+        token: windDownTokenOf(args.prompt),
+        agent: args.agent,
+      })
       if (admission.ok) {
         windDown = true
         log("spawn admitted: endless wind-down permit consumed", {
           sessionID: toolCtx.sessionID,
           agent: args.agent,
         })
-      } else {
-        log("spawn refused: endless wind-down in progress", {
-          sessionID: toolCtx.sessionID,
-          permit: permit ? admission.reason : "unarmed",
-        })
-        if (nested) {
-          return {
-            output:
-              "Spawn refused: endless mode is handing the primary orchestrator's work to a fresh " +
-              "session, so this nested delegation will not start. Do what you can yourself and " +
-              "name in your final reply what you still need; the orchestrator decides. Open that " +
-              "reply with \"Blocked:\" where the missing material stops the task.",
-          }
-        }
-        // While a permit is armed the refusal SPELLS OUT the one spawn that is
-        // allowed, so a wrong attempt self-corrects inside the window instead
-        // of exhausting it. A refusal never consumes the permit.
-        if (permit && !permit.consumed) {
-          throw new Error(
-            `Endless mode is winding this session down. Exactly ONE spawn is allowed: ` +
-              `spawn("${permit.agent}", …) whose prompt's FIRST line is exactly ` +
-              `"${WIND_DOWN_TOKEN_PREFIX} ${permit.token}". This call was not it, so nothing ` +
-              `started and the one call is still open. Make it now, with your whole hand-over ` +
-              `after that first line.`,
-          )
-        }
-        throw new Error(
-          "Endless mode is handing this session over to a fresh orchestrator right now: none of " +
-            "your subagents is running, so the hand-over has begun and no further subagent " +
-            "starts in this session. Put the work you meant to delegate into the hand-over you " +
-            "are asked for.",
-        )
       }
     }
     trackPrimary(toolCtx.sessionID)
@@ -1100,20 +1059,6 @@ export function createTools({ client, directory: factoryDirectory, permissionGua
           `can yourself and name in your final reply what you still need; the orchestrator ` +
           `decides. Open that reply with "Blocked:" where the missing material stops the task.`,
       }
-    }
-    // The endless-mode wind-down restriction, on the same grounds as the
-    // spawn one and in the same shape (a throw, so the refusal is a failed tool
-    // call): once the cycle has claimed its wind-down it drops every retained
-    // subagent as it replaces this primary, so a run started now would be torn
-    // down mid-flight. Before the claim a reuse is ordinary work, and the run
-    // it starts is one more subagent the quiesce waits for.
-    if (isEndlessWindingDown(rootPrimaryFor(toolCtx.sessionID))) {
-      log("reuse refused: endless wind-down in progress", { sessionID: toolCtx.sessionID })
-      throw new Error(
-        "Endless mode is handing this session over to a fresh orchestrator right now, and every " +
-          "retained subagent is dropped with it, so no follow-up will run. Put what you would " +
-          "ask into the hand-over you are asked for.",
-      )
     }
     trackPrimary(toolCtx.sessionID)
     const entry = resolve(args.subagent)

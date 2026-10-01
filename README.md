@@ -450,7 +450,10 @@ milestone. A deliverable-role subagent is spawned with a stable task id
 a one-line marker (`DONE: T5`), and the wake-hook removes that task from
 `TODO.md` for you — **deterministic, no LLM step**. A task in the file is open;
 "done" means the line is gone. Mismatched ids (`spawn for T5` but `DONE: T3` in
-the reply) are ignored as hallucinations. The format is fixed:
+the reply) are ignored as hallucinations. The todo file may be named `todo.md`
+or `todos.md` in any casing; where several of them exist in a directory, the
+ones holding at least one task row compete and the one modified last is used
+(with no task row anywhere, a regular `TODO.md` is kept). The format is fixed:
 
 ```
 - T5: <task title>

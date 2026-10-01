@@ -114,9 +114,11 @@ keeps that and says why.
   edit, remove); debugger, reviewer and designer read it and add to it
   (`TODO_TOOLS_BLOCK` / `TODO_READ_ADD_BLOCK`, `src/agents.js`). The orchestrator is in
   neither set.
-- The plugin's own todo-file layer is `src/todofile.js`: `findTodoFile` (`src/todofile.js:192`)
-  accepts `todo.md` / `todos.md` in any casing, gives a regular canonical `TODO.md`
-  precedence, and otherwise treats several matches as a hard error
+- The plugin's own todo-file layer is `src/todofile.js`: `findTodoFile` (`src/todofile.js`)
+  accepts `todo.md` / `todos.md` in any casing and, where several exist, picks among the
+  ones holding at least one task row (as `parseTasks` counts them) the one modified last
+  (equal mtimes: canonical `TODO.md`, then sorted order); where none holds a task row a
+  regular canonical `TODO.md` is kept and otherwise the several matches are a hard error
   (`TodoFileMissingError`, kinds `missing` / `multiple` / `not-a-file`,
   `src/todofile.js:86-102`); `addTask` (`src/todofile.js:518`) appends `- T<n>: <title>`
   with an optional `  accept:` line and creates the canonical `TODO.md` when the directory
@@ -454,8 +456,8 @@ The save runs in five sub-steps — prepare, arm, wind-down, settle, confirm —
 trusts either the orchestrator's words or the subagent's; the proof is the file on disk.
 
 **Prepare, and the section anchor.** Before any turn is spent, the plugin resolves the todo
-file (`findTodoFile`, `src/todofile.js:192`, creating the canonical `TODO.md` where the
-directory has none), inserts its machine-owned section where the markers are absent, **writes
+file (`findTodoFile`, `src/todofile.js`, the filled one modified last where several exist,
+creating the canonical `TODO.md` where the directory has none), inserts its machine-owned section where the markers are absent, **writes
 the file**, and snapshots: the resolved name, the raw content, its SHA-256, the section split,
 and `parseTasks` over it. The section is `## Intercom tasks`, delimited by two HTML-comment
 markers the plugin owns:
@@ -518,7 +520,7 @@ re-reads, and **all** of these must hold or the cycle abandons without replacing
 
 | # | predicate | on failure |
 |---|---|---|
-| V1 | `findTodoFile` resolves to exactly one regular file, same name as the snapshot | abandon (`multiple` / `not-a-file` / renamed) — no file to restore to |
+| V1 | `findTodoFile` resolves to one regular file, same name as the snapshot | abandon (`multiple` / `not-a-file` / renamed) — no file to restore to |
 | V2 | the child's outcome is `completed` | accepted anyway when V3–V5 all hold |
 | V3 | the content hash differs from the snapshot, **or** the reply carries `## WIND-DOWN DONE — no change` | the bounded re-ask below, or restore, abandon |
 | V4 | exactly one `begin` and one `end` marker in order, and `outsideLines(new)` equals `expectedOutside` | restore, abandon |

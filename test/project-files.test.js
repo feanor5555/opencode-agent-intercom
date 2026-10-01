@@ -212,7 +212,7 @@ test("ensureProjectFiles returns the name of the todo file in use", () => {
 })
 
 test("several todo files: nothing is created, the other documents still are", () => {
-  const dir = makeDir({ "todo.md": "- T1: a\n", "todos.md": "- T1: b\n" })
+  const dir = makeDir({ "todo.md": "# a\n", "todos.md": "# b\n" })
 
   const name = ensureProjectFiles(dir)
 
@@ -222,8 +222,8 @@ test("several todo files: nothing is created, the other documents still are", ()
     false,
     "an ambiguous directory is not created over",
   )
-  assert.equal(readFileSync(join(dir, "todo.md"), "utf8"), "- T1: a\n")
-  assert.equal(readFileSync(join(dir, "todos.md"), "utf8"), "- T1: b\n")
+  assert.equal(readFileSync(join(dir, "todo.md"), "utf8"), "# a\n")
+  assert.equal(readFileSync(join(dir, "todos.md"), "utf8"), "# b\n")
   assert.equal(existsSync(join(dir, "ARCHITECTURE.md")), true)
 })
 
@@ -317,7 +317,7 @@ test("readPlannedSteps reads an uppercase TODOS.md and honours `## Offen`", () =
 })
 
 test("readPlannedSteps returns [] when several todo files match", () => {
-  const dir = makeDir({ "todo.md": "- T1: a\n", "todos.md": "- T1: b\n" })
+  const dir = makeDir({ "todo.md": "# a\n", "todos.md": "# b\n" })
 
   assert.deepEqual(readPlannedSteps(dir), [], "an ambiguous directory yields no planned steps")
 })

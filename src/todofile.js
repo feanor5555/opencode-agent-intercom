@@ -1,9 +1,10 @@
 // Todo-file parser/writer. The todo file lives directly in `<directory>` and
 // is named `todo.md` or `todos.md` in any casing — `TODO.md`, `todos.md`,
-// `Todo.md`, `TODOS.md` all count. Exactly one such file may exist; several
-// are a hard error rather than a pick that would depend on the order the
-// directory happens to list its entries. When none exists, `ensureTodoFile`
-// and `addTask` create the canonical `TODO.md`.
+// `Todo.md`, `TODOS.md` all count. Where several exist, the ones holding at
+// least one task row compete and the one modified last is the todo file
+// (`findTodoFile`); where none holds a task row, a regular canonical `TODO.md`
+// is kept and otherwise the directory is a hard error. When none exists,
+// `ensureTodoFile` and `addTask` create the canonical `TODO.md`.
 //
 // THE MACHINE SECTION. The plugin owns one fenced region of the file and
 // nothing outside it:
@@ -106,7 +107,8 @@ function todoFileMissingMessage(directory, kind, names) {
     case "multiple":
       return (
         `several todo files in ${directory}: ${names.join(", ")} — ` +
-        `exactly one of todo.md / todos.md (any casing) may exist`
+        `none holds a task row and there is no TODO.md to keep; ` +
+        `leave exactly one of todo.md / todos.md (any casing)`
       )
     case "not-a-file":
       return `${join(directory, names[0] ?? CANONICAL_TODO_NAME)} is not a regular file`
@@ -180,26 +182,66 @@ function listTodoNames(directory) {
   return entries.filter((name) => TODO_NAME_RE.test(name)).sort()
 }
 
-// Resolves the one todo file in `directory` to `{ name, path }`, or throws
+// `{ filled, mtimeMs }` of one candidate: whether it holds at least one task row
+// as `parseTasks` counts them, and when it was last modified. Read through an
+// `O_NOFOLLOW` descriptor confirmed to be a regular file, so a symlink, a
+// directory or a device node never counts as filled; any failure to open or
+// read it reads as not filled.
+function inspectCandidate(path) {
+  let fd
+  try {
+    fd = openSync(path, constants.O_RDONLY | O_NOFOLLOW)
+  } catch {
+    return { filled: false, mtimeMs: 0 }
+  }
+  try {
+    const stat = fstatSync(fd)
+    if (!stat.isFile()) return { filled: false, mtimeMs: 0 }
+    return { filled: parseTasks(readFileSync(fd, "utf8")).length > 0, mtimeMs: stat.mtimeMs }
+  } catch {
+    return { filled: false, mtimeMs: 0 }
+  } finally {
+    closeSync(fd)
+  }
+}
+
+// Resolves the todo file in `directory` to `{ name, path }`, or throws
 // TodoFileMissingError with kind "missing" / "multiple".
 //
-// The `statSync` fast path keeps the common case off a synchronous walk of the
-// whole project directory: when the canonical TODO.md is there as a regular
-// file it is the file, no listing needed. That gives TODO.md precedence over a
-// differently-cased sibling; the "multiple" error covers the variants among
-// which no such precedence exists. A failing stat says nothing on its own and
-// simply falls through to the listing, which classifies the directory itself.
+//   - one matching name: that file.
+//   - several matching names: the candidates that hold at least one task row
+//     (as `parseTasks` counts them) compete, and the one modified last wins;
+//     equal mtimes go to the canonical TODO.md, then to the first name in
+//     sorted order. Where none holds a task row, a regular canonical TODO.md
+//     is the file and otherwise the directory is ambiguous ("multiple").
+//
+// Every caller — the endless snapshot, restore and V1/V5 read-back, the todo
+// tools, the wake-hook — resolves through here, so they all act on one file.
 export function findTodoFile(directory) {
+  const names = listTodoNames(directory)
+  if (names.length === 0) throw new TodoFileMissingError({ directory, kind: "missing" })
+  if (names.length === 1) return { name: names[0], path: join(directory, names[0]) }
+  let best = null
+  for (const name of names) {
+    const path = join(directory, name)
+    const { filled, mtimeMs } = inspectCandidate(path)
+    if (!filled) continue
+    if (
+      best === null ||
+      mtimeMs > best.mtimeMs ||
+      (mtimeMs === best.mtimeMs && name === CANONICAL_TODO_NAME)
+    ) {
+      best = { name, path, mtimeMs }
+    }
+  }
+  if (best) return { name: best.name, path: best.path }
   const canonical = todoFilePath(directory)
   try {
     if (statSync(canonical).isFile()) return { name: CANONICAL_TODO_NAME, path: canonical }
   } catch {
-    // Not a regular canonical TODO.md — the listing below decides.
+    // No regular canonical TODO.md — the directory is ambiguous.
   }
-  const names = listTodoNames(directory)
-  if (names.length === 0) throw new TodoFileMissingError({ directory, kind: "missing" })
-  if (names.length > 1) throw new TodoFileMissingError({ directory, kind: "multiple", names })
-  return { name: names[0], path: join(directory, names[0]) }
+  throw new TodoFileMissingError({ directory, kind: "multiple", names })
 }
 
 // Opens `target.path` once with O_NOFOLLOW, confirms through the handle that

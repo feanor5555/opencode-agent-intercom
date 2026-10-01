@@ -21,6 +21,7 @@ import {
   existsSync,
   symlinkSync,
   chmodSync,
+  utimesSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -255,10 +256,10 @@ test("writes go back to the variant that was found, not to TODO.md", () => {
   })
 })
 
-test("lookup: several matching files are a typed error, never a pick", () => {
+test("lookup: several matching files without a task row and without TODO.md are a typed error", () => {
   withTempDir((dir) => {
-    writeFileSync(join(dir, "todos.md"), "- T1: from todos.md\n")
-    writeFileSync(join(dir, "Todo.md"), "- T5: from Todo.md\n")
+    writeFileSync(join(dir, "todos.md"), "# notes from todos.md\n")
+    writeFileSync(join(dir, "Todo.md"), "# notes from Todo.md\n")
     const isMultiple = (err) =>
       err instanceof TodoFileMissingError &&
       err.kind === "multiple" &&
@@ -271,21 +272,67 @@ test("lookup: several matching files are a typed error, never a pick", () => {
     assert.throws(() => addTask(dir, { title: "x" }), isMultiple)
     assert.throws(() => removeTask(dir, "T1"), isMultiple)
     // neither file was touched and no third one was created
-    assert.equal(readFileSync(join(dir, "todos.md"), "utf8"), "- T1: from todos.md\n")
-    assert.equal(readFileSync(join(dir, "Todo.md"), "utf8"), "- T5: from Todo.md\n")
+    assert.equal(readFileSync(join(dir, "todos.md"), "utf8"), "# notes from todos.md\n")
+    assert.equal(readFileSync(join(dir, "Todo.md"), "utf8"), "# notes from Todo.md\n")
     assert.ok(!existsSync(join(dir, CANONICAL_TODO_NAME)))
   })
 })
 
-// Pins the precedence the statSync fast path establishes: a regular canonical
-// TODO.md is the todo file without listing the directory at all, so it wins
-// over a differently-cased sibling instead of raising "multiple".
-test("lookup: canonical TODO.md takes precedence over a differently-cased sibling", () => {
+// Several todo files: the ones holding a task row compete, the newest mtime
+// wins; with no task row anywhere a regular canonical TODO.md is kept.
+function stamp(dir, name, content, seconds) {
+  const path = join(dir, name)
+  writeFileSync(path, content)
+  utimesSync(path, seconds, seconds)
+}
+
+test("lookup: empty canonical TODO.md loses to a filled differently-named file", () => {
   withTempDir((dir) => {
-    writeFileSync(join(dir, CANONICAL_TODO_NAME), "- T1: canonical\n")
-    writeFileSync(join(dir, "todos.md"), "- T9: sibling\n")
+    stamp(dir, CANONICAL_TODO_NAME, "# TODO\n\nno task rows here\n", 2000)
+    stamp(dir, "todos.md", "- T9: the real task\n", 1000)
+    assert.equal(findTodoFile(dir).name, "todos.md")
+    assert.deepEqual(listOpen(dir).map((t) => t.id), ["T9"])
+    assert.equal(nextFreeId(dir), "T10")
+    assert.equal(addTask(dir, { title: "next" }).id, "T10")
+    assert.equal(readFileSync(join(dir, CANONICAL_TODO_NAME), "utf8"), "# TODO\n\nno task rows here\n")
+    assert.match(readFileSync(join(dir, "todos.md"), "utf8"), /- T10: next/)
+  })
+})
+
+test("lookup: of two filled files the one modified last wins, in both directions", () => {
+  withTempDir((dir) => {
+    stamp(dir, CANONICAL_TODO_NAME, "- T1: canonical\n", 1000)
+    stamp(dir, "Todos.md", "- T2: other\n", 2000)
+    assert.equal(findTodoFile(dir).name, "Todos.md")
+    utimesSync(join(dir, CANONICAL_TODO_NAME), 3000, 3000)
     assert.equal(findTodoFile(dir).name, CANONICAL_TODO_NAME)
     assert.deepEqual(listOpen(dir).map((t) => t.id), ["T1"])
+  })
+})
+
+test("lookup: a task row in the legacy shapes counts as filled", () => {
+  withTempDir((dir) => {
+    stamp(dir, CANONICAL_TODO_NAME, "nothing\n", 2000)
+    stamp(dir, "todo.md", "* T3 — dash task\n", 1000)
+    assert.equal(findTodoFile(dir).name, "todo.md")
+  })
+})
+
+test("lookup: with no filled file a regular canonical TODO.md stays the choice", () => {
+  withTempDir((dir) => {
+    stamp(dir, CANONICAL_TODO_NAME, "# TODO\n", 1000)
+    stamp(dir, "todos.md", "# todos\n", 2000)
+    stamp(dir, "TODOS.md", "- not a task row\n", 3000)
+    assert.equal(findTodoFile(dir).name, CANONICAL_TODO_NAME)
+  })
+})
+
+test("lookup: a filled file that is a symlink does not compete", () => {
+  withTempDir((dir) => {
+    stamp(dir, "real.txt", "- T1: behind a link\n", 1000)
+    symlinkSync(join(dir, "real.txt"), join(dir, "todos.md"))
+    stamp(dir, CANONICAL_TODO_NAME, "- T2: canonical\n", 500)
+    assert.equal(findTodoFile(dir).name, CANONICAL_TODO_NAME)
   })
 })
 
@@ -551,15 +598,15 @@ test("wake-hook reports an error when several todo files exist", async () => {
   const subID = spawned.metadata.sessionID
   setReply(subID, "DONE: T1\nimplemented the endpoint.")
   removeTodo()
-  writeFileSync(join(projectDir, "todos.md"), TODO_SEED)
-  writeFileSync(join(projectDir, "Todo.md"), TODO_SEED)
+  writeFileSync(join(projectDir, "todos.md"), "# notes\n")
+  writeFileSync(join(projectDir, "Todo.md"), "# notes\n")
   try {
     await fireIdle(hooks, subID)
     const wake = notices.find((n) => n.sessionID === primaryCtx.sessionID)
     assert.match(wake.text, /auto-remove failed/)
     assert.match(wake.text, /several todo files/)
     assert.doesNotMatch(wake.text, /not present/)
-    assert.equal(readFileSync(join(projectDir, "todos.md"), "utf8"), TODO_SEED, "nothing removed")
+    assert.equal(readFileSync(join(projectDir, "todos.md"), "utf8"), "# notes\n", "nothing removed")
   } finally {
     rmSync(join(projectDir, "todos.md"), { force: true })
     rmSync(join(projectDir, "Todo.md"), { force: true })
@@ -697,8 +744,8 @@ test("todos_open errors clearly when TODO.md does not exist", async () => {
 
 test("todos_open reports several todo files instead of picking one", async () => {
   removeTodo()
-  writeFileSync(join(projectDir, "todos.md"), "- T1: from todos.md\n")
-  writeFileSync(join(projectDir, "Todo.md"), "- T2: from Todo.md\n")
+  writeFileSync(join(projectDir, "todos.md"), "# notes from todos.md\n")
+  writeFileSync(join(projectDir, "Todo.md"), "# notes from Todo.md\n")
   try {
     const { ctx } = makeCtx()
     const hooks = await plugin(ctx)
